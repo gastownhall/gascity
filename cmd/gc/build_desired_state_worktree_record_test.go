@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worktree"
 )
 
 func TestPoolTriggerWorkDirNonPackUsesConfiguredBase(t *testing.T) {
@@ -296,5 +298,99 @@ func TestWakeKnownIdentityRequestCarriesWorkBeadTitle(t *testing.T) {
 	}
 	if got, want := request.WorkBeadTitle, "Implement owned work"; got != want {
 		t.Errorf("wake-known-identity WorkBeadTitle = %q, want %q", got, want)
+	}
+}
+
+// wakeKnownEvidenceBead provisions a real managed worktree for beadID the way
+// `gc worktree ensure` does, publishes its complete ownership evidence on an
+// in_progress bead routed to template and assigned to assignee, and returns
+// the bead and its verified path. With incomplete evidence (one of the nine
+// ownership keys missing) the published evidence is the shape
+// worktreeSpecForBead fails closed on.
+func wakeKnownEvidenceBead(t *testing.T, beadID, template, assignee string, incomplete bool) (beads.Bead, string) {
+	t.Helper()
+	repo, base := worktreeTestRepo(t)
+	root := t.TempDir()
+	path := filepath.Join(root, beadID)
+	spec := worktree.Spec{
+		RepoDir: repo, Root: root, Path: path, Branch: "wt/task/" + beadID, Base: base,
+		BeadID: beadID, StoreRef: "rig:r1", Creator: "gc-sling", Owner: "gc-sling",
+		Generation: "1", Lifecycle: worktree.LifecycleActive,
+	}
+	report, err := worktree.Ensure(spec)
+	if err != nil {
+		t.Fatalf("worktree.Ensure: %v", err)
+	}
+	b := workBead(beadID, template, assignee, "in_progress", 1)
+	meta := map[string]string{
+		beadmeta.RootStoreRefMetadataKey:       "rig:r1",
+		beadmeta.WorkDirMetadataKey:            path,
+		beadmeta.WorktreeRepoMetadataKey:       repo,
+		beadmeta.WorktreeRootMetadataKey:       root,
+		beadmeta.WorkBranchMetadataKey:         spec.Branch,
+		beadmeta.WorktreeBaseRefMetadataKey:    base,
+		beadmeta.WorktreeBaseSHAMetadataKey:    report.Provenance.BaseSHA,
+		beadmeta.WorktreeCreatorMetadataKey:    spec.Creator,
+		beadmeta.WorktreeOwnerMetadataKey:      spec.Owner,
+		beadmeta.WorktreeGenerationMetadataKey: spec.Generation,
+	}
+	if !incomplete {
+		meta[beadmeta.WorktreeLifecycleMetadataKey] = spec.Lifecycle
+	}
+	for k, v := range meta {
+		b.Metadata[k] = v
+	}
+	return b, path
+}
+
+// TestWakeKnownCleanCreateStartsInVerifiedWorktree pins the realize half of
+// gastownhall/gascity#5753 for the wake-known-identity tier: the clean create
+// planned for a bead that names a verified managed worktree starts there, not
+// in the pool's own directory, and a bead whose evidence is incomplete is
+// skipped rather than bound to a fallback directory.
+func TestWakeKnownCleanCreateStartsInVerifiedWorktree(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{{
+		Name: "worker", StartCommand: "true",
+		MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3),
+	}}}
+	bead, path := wakeKnownEvidenceBead(t, "gc-b", "worker", "worker", false)
+
+	states := ComputePoolDesiredStates(cfg, []beads.Bead{bead}, nil, nil)
+	if len(states) != 1 || len(states[0].Requests) != 1 {
+		t.Fatalf("desired states = %#v, want one wake-known-identity request", states)
+	}
+	request := states[0].Requests[0]
+	if request.Tier != "wake-known-identity" || request.SessionBeadID != "" {
+		t.Fatalf("request = %#v, want a clean create (wake-known-identity, no session)", request)
+	}
+	rows, _, stderr := realizeFreshRequest(t, request)
+	if len(rows) != 1 {
+		t.Fatalf("realization created %d sessions; stderr=%s", len(rows), stderr)
+	}
+	if got := rows[0].TriggerBeadID; got != "gc-b" {
+		t.Fatalf("created session trigger = %q, want gc-b", got)
+	}
+	if got := preparedStartSessionWorkDir(rows[0]); got != path {
+		t.Fatalf("created session work dir = %q, want the verified worktree %q, not the pool directory", got, path)
+	}
+
+	// Incomplete evidence: the request is still emitted (with the failure
+	// carried, not resolved), and realization skips the item rather than
+	// creating a seat in the pool's own directory.
+	broken, _ := wakeKnownEvidenceBead(t, "gc-c", "worker", "worker", true)
+	states = ComputePoolDesiredStates(cfg, []beads.Bead{broken}, nil, nil)
+	if len(states) != 1 || len(states[0].Requests) != 1 {
+		t.Fatalf("desired states = %#v, want the request still emitted", states)
+	}
+	request = states[0].Requests[0]
+	if request.WorktreeError == "" || request.WorktreeSpec != nil {
+		t.Fatalf("request = %#v, want a nil spec and a non-empty WorktreeError", request)
+	}
+	rows, _, stderr = realizeFreshRequest(t, request)
+	if len(rows) != 0 {
+		t.Fatalf("incomplete evidence created %d sessions; want the item skipped", len(rows))
+	}
+	if !strings.Contains(stderr, "(skipping)") {
+		t.Fatalf("stderr = %q, want the (skipping) diagnostic", stderr)
 	}
 }

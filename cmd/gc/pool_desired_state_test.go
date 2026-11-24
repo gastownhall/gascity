@@ -3369,3 +3369,54 @@ func TestComputePoolDesiredStatesResumeTierCarriesWorktreeEvidence(t *testing.T)
 		})
 	}
 }
+
+// TestComputePoolDesiredStatesWakeKnownTiersCarryWorktreeEvidence pins the
+// wake-known-identity half of gastownhall/gascity#5753 at the compute layer:
+// both shapes that plan a clean session for known work — a bead whose assignee
+// is the template identity (session closed or never created) and a fresh-wake
+// agent's asleep assignee with proven readiness — carry the bead's
+// managed-worktree evidence, so the clean create starts in the verified
+// worktree instead of the pool's own directory.
+func TestComputePoolDesiredStatesWakeKnownTiersCarryWorktreeEvidence(t *testing.T) {
+	t.Run("closed or unknown assignee", func(t *testing.T) {
+		cfg := &config.City{Agents: []config.Agent{poolAgent("claude", "rig", intPtr(4), 0)}}
+		work := []beads.Bead{poolEvidenceWorkBead("w-wake", "rig/claude", "rig/claude", "rig:r1")}
+
+		states := computePoolDesiredStatesParkedAt(cfg, work, nil, []string{"r1"},
+			nil, nil, nil, time.Time{}, nil, nil)
+		request := singleRequest(t, states)
+		if request.Tier != "wake-known-identity" || request.SessionBeadID != "" || request.WorkBeadID != "w-wake" {
+			t.Fatalf("request = %#v, want a clean create (wake-known-identity, no session) for w-wake", request)
+		}
+		if request.WorktreeSpec == nil || request.WorktreeSpec.Path != "/tmp/wt/w-wake" || request.WorktreeSpec.StoreRef != "rig:r1" {
+			t.Errorf("wake-known WorktreeSpec = %+v, want the bead's managed-worktree evidence", request.WorktreeSpec)
+		}
+		if request.WorkStoreRef != "rig:r1" || request.WorkBindingResident {
+			t.Errorf("wake-known provenance = store %q resident %v, want rig:r1 non-resident", request.WorkStoreRef, request.WorkBindingResident)
+		}
+		if request.WorktreeError != "" {
+			t.Errorf("wake-known WorktreeError = %q, want empty", request.WorktreeError)
+		}
+	})
+	t.Run("asleep fresh-mode assignee with proven readiness", func(t *testing.T) {
+		agent := poolAgent("claude", "", intPtr(4), 0)
+		agent.WakeMode = "fresh"
+		cfg := &config.City{Agents: []config.Agent{agent}}
+		wb := poolEvidenceWorkBead("w-fresh", "claude", "sess-1", "rig:r1")
+		wb.Status = "open"
+		sessions := []beads.Bead{poolSessionBeadWithState("sess-1", "asleep", "")}
+
+		states := computePoolDesiredStatesParkedAt(cfg, []beads.Bead{wb}, []bool{true}, []string{"r1"},
+			sessionInfosFromBeads(sessions), nil, nil, time.Time{}, nil, nil)
+		request := singleRequest(t, states)
+		if request.Tier != "wake-known-identity" || request.SessionBeadID != "" || request.WorkBeadID != "w-fresh" {
+			t.Fatalf("request = %#v, want a clean create (wake-known-identity, no session) for w-fresh", request)
+		}
+		if request.WorktreeSpec == nil || request.WorktreeSpec.Path != "/tmp/wt/w-fresh" || request.WorktreeSpec.StoreRef != "rig:r1" {
+			t.Errorf("wake-known WorktreeSpec = %+v, want the bead's managed-worktree evidence", request.WorktreeSpec)
+		}
+		if request.WorkStoreRef != "rig:r1" || request.WorktreeError != "" {
+			t.Errorf("wake-known provenance = store %q error %q, want rig:r1 and no error", request.WorkStoreRef, request.WorktreeError)
+		}
+	})
+}
