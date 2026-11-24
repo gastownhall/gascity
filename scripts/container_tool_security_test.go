@@ -1022,17 +1022,19 @@ func staleKubectlWaiverStatements(pin string, doc trivyIgnoreDoc) []string {
 	return found
 }
 
-// kubectlPinFloor is the oldest kubectl release whose build info records
-// golang.org/x/net >= 0.57.0, the release that fixes CVE-2026-39821 (HIGH,
-// golang.org/x/net/idna). kubectl is an upstream-signed prebuilt, so the module
-// versions inside it cannot be changed here: only the pin can move. v1.36.6
-// records x/net v0.56.0 and is flagged; v1.37.2 records v0.57.0 and is not.
+// kubectlPinFloor is the minimum kubectl pin, chosen deliberately: a release
+// whose build info records golang.org/x/net >= 0.57.0 (the fix for
+// CVE-2026-39821, HIGH, golang.org/x/net/idna) and Go 1.26.10. Earlier 1.37
+// patches also carry x/net 0.57.0, but this floor stays at v1.37.2 on purpose.
+// kubectl is an upstream-signed prebuilt, so the module versions inside it
+// cannot be changed here: only the pin can move. v1.36.6 records x/net v0.56.0
+// and is flagged; v1.37.2 records v0.57.0 and is not.
 const kubectlPinFloor = "v1.37.2"
 
-// TestKubectlPinClearsCVE202639821 holds the kubectl pin at or above the first
-// release built with x/net >= 0.57.0, and keeps CVE-2026-39821 out of the kubectl
-// waivers: the finding has a fix, so the way to clear it is the pin, never a
-// waiver.
+// TestKubectlPinClearsCVE202639821 holds the kubectl pin at or above the
+// selected minimum release, built with x/net >= 0.57.0, and keeps
+// CVE-2026-39821 out of the kubectl waivers: the finding has a fix, so the way
+// to clear it is the pin, never a waiver.
 func TestKubectlPinClearsCVE202639821(t *testing.T) {
 	root := repoRoot(t)
 
@@ -1046,7 +1048,7 @@ func TestKubectlPinClearsCVE202639821(t *testing.T) {
 		t.Fatal("contrib/k8s/Dockerfile.controller has no ARG KUBECTL_VERSION=; the kubectl pin moved and this guard must follow it")
 	}
 	if !semverAtLeast(parseModuleSemver(t, pin), parseModuleSemver(t, kubectlPinFloor)) {
-		t.Errorf("contrib/k8s/Dockerfile.controller pins kubectl %s, below %s, the first release built with golang.org/x/net >= 0.57.0; older releases carry CVE-2026-39821 (HIGH) and the container scan fails gc-controller on it", pin, kubectlPinFloor)
+		t.Errorf("contrib/k8s/Dockerfile.controller pins kubectl %s, below %s, the selected minimum release (built with golang.org/x/net >= 0.57.0 and Go 1.26.10); older releases carry CVE-2026-39821 (HIGH) and the container scan fails gc-controller on it", pin, kubectlPinFloor)
 	}
 
 	var doc trivyIgnoreDoc
