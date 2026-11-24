@@ -32,6 +32,8 @@ go_library(
         "pagination.go",
         "pi_reader.go",
         "reader.go",
+        "root_owner_other.go",
+        "root_owner_unix.go",
         "tail.go",
         "tail_usage.go",
         "turns.go",

@@ -49,6 +49,10 @@ func ExtractTailMeta(path string) (*TailMeta, error) {
 		return extractACPCaptureTailMeta(f)
 	}
 
+	return extractTailMetaFromFile(f)
+}
+
+func extractTailMetaFromFile(f *os.File) (*TailMeta, error) {
 	data, startsMidLine, err := readTail(f)
 	if err != nil {
 		return nil, err
@@ -64,21 +68,26 @@ func ExtractTailMeta(path string) (*TailMeta, error) {
 // ExtractTailMetaFromSearchPaths reads tail metadata only after verifying
 // path resolves under one of the configured session-log search roots.
 func ExtractTailMetaFromSearchPaths(searchPaths []string, path string) (*TailMeta, error) {
-	safePath, err := validateSearchPathFile(searchPaths, path)
+	f, err := openSearchPathFile(searchPaths, path)
 	if err != nil {
 		return nil, err
 	}
-	return ExtractTailMeta(safePath)
+	defer func() { _ = f.Close() }()
+	if IsACPCapturePath(path) {
+		return extractACPCaptureTailMeta(f)
+	}
+	return extractTailMetaFromFile(f)
 }
 
-func validateSearchPathFile(searchPaths []string, path string) (string, error) {
+func openSearchPathFile(searchPaths []string, path string) (*os.File, error) {
 	if strings.TrimSpace(path) == "" {
-		return "", fmt.Errorf("empty session log path")
+		return nil, fmt.Errorf("empty session log path")
 	}
 	cleanPath, err := filepath.Abs(filepath.Clean(path))
 	if err != nil {
-		return "", fmt.Errorf("resolving session log path: %w", err)
+		return nil, fmt.Errorf("resolving session log path: %w", err)
 	}
+	var openErr error
 	for _, root := range searchPaths {
 		if strings.TrimSpace(root) == "" {
 			continue
@@ -91,9 +100,86 @@ func validateSearchPathFile(searchPaths []string, path string) (string, error) {
 		if err != nil || rel == "." || filepath.IsAbs(rel) || pathutil.IsOutsideDir(rel) {
 			continue
 		}
-		return cleanPath, nil
+		f, err := openFileWithinSearchRoot(cleanRoot, rel)
+		if err == nil {
+			return f, nil
+		}
+		openErr = err
 	}
-	return "", fmt.Errorf("session log path is outside configured search paths")
+	resolvedPath, err := filepath.EvalSymlinks(cleanPath)
+	if err == nil && resolvedPath != cleanPath {
+		for _, root := range searchPaths {
+			if strings.TrimSpace(root) == "" {
+				continue
+			}
+			cleanRoot, err := filepath.Abs(filepath.Clean(root))
+			if err != nil {
+				continue
+			}
+			openedRoot, err := os.OpenRoot(cleanRoot)
+			if err != nil {
+				openErr = err
+				continue
+			}
+			resolvedRoot, err := filepath.EvalSymlinks(cleanRoot)
+			if err != nil {
+				_ = openedRoot.Close()
+				continue
+			}
+			openedInfo, openedErr := openedRoot.Stat(".")
+			resolvedInfo, resolvedErr := os.Stat(resolvedRoot)
+			if openedErr != nil || resolvedErr != nil || !os.SameFile(openedInfo, resolvedInfo) {
+				_ = openedRoot.Close()
+				continue
+			}
+			rel, err := filepath.Rel(resolvedRoot, resolvedPath)
+			if err != nil || rel == "." || filepath.IsAbs(rel) || pathutil.IsOutsideDir(rel) {
+				_ = openedRoot.Close()
+				continue
+			}
+			f, err := openedRoot.Open(rel)
+			_ = openedRoot.Close()
+			if err == nil {
+				return f, nil
+			}
+			openErr = err
+		}
+	}
+	if openErr != nil {
+		return nil, openErr
+	}
+	return nil, fmt.Errorf("session log path is outside configured search paths")
+}
+
+func openFileWithinSearchRoot(rootPath, relativePath string) (*os.File, error) {
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+	f, openErr := root.Open(relativePath)
+	if openErr == nil {
+		return f, nil
+	}
+	rootInfo, err := root.Stat(".")
+	if err != nil {
+		return nil, err
+	}
+	parts := strings.SplitN(relativePath, string(filepath.Separator), 2)
+	if len(parts) != 2 || rootInfo.Mode().Perm()&0o022 != 0 || !searchRootOwnedByProcess(rootInfo) {
+		return nil, openErr
+	}
+	linkTarget, err := root.Readlink(parts[0])
+	if err != nil || !filepath.IsAbs(linkTarget) {
+		return nil, openErr
+	}
+	aliasRoot, err := os.OpenRoot(linkTarget)
+	if err != nil {
+		return nil, err
+	}
+	f, err = aliasRoot.Open(parts[1])
+	_ = aliasRoot.Close()
+	return f, err
 }
 
 // readTail reads the last tailChunkSize bytes of r (or the whole thing if smaller).

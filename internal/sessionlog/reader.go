@@ -1082,10 +1082,11 @@ func FindCodexSessionFileByIDNoWindow(searchPaths []string, workDir, sessionID s
 // roots) like findCodexSessionFileIn, guarding against symlink cycles via seen.
 func findCodexRolloutBySuffixIn(sessDir, workDir, suffix string, seen map[string]bool) string {
 	cleaned := filepath.Clean(sessDir)
-	if seen[cleaned] {
+	resolved, err := filepath.EvalSymlinks(cleaned)
+	if err != nil || seen[resolved] {
 		return ""
 	}
-	seen[cleaned] = true
+	seen[resolved] = true
 	yearDirs, extraRoots := splitCodexSessionRoots(cleaned)
 	sort.Sort(sort.Reverse(sort.StringSlice(yearDirs)))
 	for _, year := range yearDirs {
@@ -1100,11 +1101,7 @@ func findCodexRolloutBySuffixIn(sessDir, workDir, suffix string, seen map[string
 		}
 	}
 	for _, root := range extraRoots {
-		resolved, err := filepath.EvalSymlinks(filepath.Join(cleaned, root))
-		if err != nil {
-			continue
-		}
-		if path := findCodexRolloutBySuffixIn(resolved, workDir, suffix, seen); path != "" {
+		if path := findCodexRolloutBySuffixIn(filepath.Join(cleaned, root), workDir, suffix, seen); path != "" {
 			return path
 		}
 	}
@@ -1268,6 +1265,15 @@ func splitCodexSessionRoots(dir string) (yearDirs, extraRoots []string) {
 // chronological order for efficiency. Also recurses into symlinked
 // subdirectories that aren't date components (e.g., aimux session roots).
 func findCodexSessionFileIn(sessDir, workDir string) string {
+	return findCodexSessionFileInWithSeen(sessDir, workDir, make(map[string]bool))
+}
+
+func findCodexSessionFileInWithSeen(sessDir, workDir string, seen map[string]bool) string {
+	resolved, err := filepath.EvalSymlinks(sessDir)
+	if err != nil || seen[resolved] {
+		return ""
+	}
+	seen[resolved] = true
 	yearDirs, extraRoots := splitCodexSessionRoots(sessDir)
 
 	// Scan year dirs in reverse chronological order.
@@ -1278,11 +1284,7 @@ func findCodexSessionFileIn(sessDir, workDir string) string {
 
 	// Scan symlinked session roots (aimux-managed accounts).
 	for _, root := range extraRoots {
-		resolved, err := filepath.EvalSymlinks(filepath.Join(sessDir, root))
-		if err != nil {
-			continue
-		}
-		if path := findCodexSessionFileIn(resolved, workDir); path != "" {
+		if path := findCodexSessionFileInWithSeen(filepath.Join(sessDir, root), workDir, seen); path != "" {
 			return path
 		}
 	}
