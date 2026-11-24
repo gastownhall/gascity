@@ -105,7 +105,9 @@ type liveSeatReuseResult struct {
 	// retired is the pool seats realization retired to free a slot
 	// (agentBuildParams.retiredPoolSeats).
 	retired map[string]bool
-	stderr  string
+	// probe counts what realization did (poolRealizeProbe).
+	probe  *poolRealizeProbe
+	stderr string
 }
 
 func (r liveSeatReuse) run(t *testing.T) liveSeatReuseResult {
@@ -212,6 +214,8 @@ func (res *liveSeatReuseResult) realize(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 	bp := newAgentBuildParams("test-city", res.cityPath, res.cfg, res.sp, time.Now().UTC(), res.store, &stderr)
+	bp.realizeProbe = &poolRealizeProbe{}
+	res.probe = bp.realizeProbe
 	bp.sessionBeads = snapshot
 	bp.assignedWorkBeads = res.assigned
 	if res.partial {
@@ -346,6 +350,88 @@ func (res liveSeatReuseResult) claimFrom(t *testing.T, id string, candidates ...
 
 func newDemand(request SessionRequest) func(string) SessionRequest {
 	return func(string) SessionRequest { return request }
+}
+
+// workBeadWithManagedSpec publishes spec's ownership evidence on an
+// in_progress work bead assigned to the seat, the way a provisioner stamps it.
+func workBeadWithManagedSpec(spec worktree.Spec, seatID string) beads.Bead {
+	wb := workBead(spec.BeadID, "worker", seatID, "in_progress", 1)
+	for k, v := range map[string]string{
+		beadmeta.RootStoreRefMetadataKey:       spec.StoreRef,
+		beadmeta.WorkDirMetadataKey:            spec.Path,
+		beadmeta.WorktreeRepoMetadataKey:       spec.RepoDir,
+		beadmeta.WorktreeRootMetadataKey:       spec.Root,
+		beadmeta.WorkBranchMetadataKey:         spec.Branch,
+		beadmeta.WorktreeBaseRefMetadataKey:    spec.Base,
+		beadmeta.WorktreeBaseSHAMetadataKey:    spec.BaseSHA,
+		beadmeta.WorktreeCreatorMetadataKey:    spec.Creator,
+		beadmeta.WorktreeOwnerMetadataKey:      spec.Owner,
+		beadmeta.WorktreeGenerationMetadataKey: spec.Generation,
+		beadmeta.WorktreeLifecycleMetadataKey:  spec.Lifecycle,
+	} {
+		wb.Metadata[k] = v
+	}
+	return wb
+}
+
+// resumeRequestFromAssignedWork plans the request the demand pass builds for
+// assigned work that names a managed worktree: the parked planner over the
+// evidence bead, read through a leg whose census ref is the bare rig name,
+// returning its resume request for the seat.
+func resumeRequestFromAssignedWork(spec worktree.Spec, seatID string) SessionRequest {
+	cfg := &config.City{Agents: []config.Agent{{
+		Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(3),
+	}}}
+	states := computePoolDesiredStatesParkedAt(cfg, []beads.Bead{workBeadWithManagedSpec(spec, seatID)}, nil, []string{"r1"},
+		sessionInfosFromBeads([]beads.Bead{sessionBead(seatID, "open")}), nil, nil, time.Time{}, nil, nil)
+	for _, ds := range states {
+		for _, r := range ds.Requests {
+			if r.Tier == "resume" && r.SessionBeadID == seatID {
+				return r
+			}
+		}
+	}
+	return SessionRequest{}
+}
+
+// TestLegacyResumeRequestFromAssignedWorkBindsVerifiedWorktree pins the
+// realize half of gastownhall/gascity#5753 for the resume tier: a stopped seat
+// re-pointed to assigned work that names a managed worktree — a request the
+// demand planner builds from the bead's own evidence — is bound to that
+// verified worktree after exactly one worktree.Verify, never to the pool's own
+// directory.
+func TestLegacyResumeRequestFromAssignedWorkBindsVerifiedWorktree(t *testing.T) {
+	spec, path := liveSeatManagedSpec(t, "gc-b")
+	res := liveSeatReuse{
+		running:  false,
+		assigned: func(id string) []beads.Bead { return []beads.Bead{workBeadWithManagedSpec(spec, id)} },
+		request:  func(id string) SessionRequest { return resumeRequestFromAssignedWork(spec, id) },
+	}.reused(t)
+	if res.request.Tier != "resume" || res.request.SessionBeadID != res.id || res.request.WorkBeadID != "gc-b" {
+		t.Fatalf("request = %#v, want the planner's resume of gc-b for the seat", res.request)
+	}
+	if res.request.WorktreeSpec == nil || res.request.WorktreeSpec.Path != path || res.request.WorktreeSpec.StoreRef != "rig:r1" {
+		t.Fatalf("request evidence = %#v, want the bead's managed worktree at %s (rig:r1)", res.request.WorktreeSpec, path)
+	}
+	if res.request.WorkStoreRef != "rig:r1" || res.request.WorktreeError != "" {
+		t.Fatalf("request provenance = store %q error %q, want rig:r1 and no error", res.request.WorkStoreRef, res.request.WorktreeError)
+	}
+	row := res.row(t)
+	if got := row.Metadata[beadmeta.TriggerBeadIDMetadataKey]; got != "gc-b" {
+		t.Fatalf("trigger = %q, want the seat re-pointed to gc-b", got)
+	}
+	if got := row.Metadata[beadmeta.WorkDirMetadataKey]; got != path {
+		t.Fatalf("gc.work_dir = %q, want the verified worktree %q, not the pool directory", got, path)
+	}
+	if got := row.Metadata[beadmeta.LegacyWorkDirMetadataKey]; got != path {
+		t.Fatalf("work_dir = %q, want %q", got, path)
+	}
+	if verifies := res.probe.worktreeVerifies.Load(); verifies != 1 {
+		t.Fatalf("worktree.Verify calls = %d, want exactly one", verifies)
+	}
+	if rows := res.otherRows(t); len(rows) != 0 {
+		t.Fatalf("started %d other sessions; want the stopped seat reused", len(rows))
+	}
 }
 
 // A running seat is not handed work bound to another verified worktree: its

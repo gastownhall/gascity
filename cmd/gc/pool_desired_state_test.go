@@ -3229,3 +3229,143 @@ func TestMergeCollectedDemandKeepsBindingResident(t *testing.T) {
 		t.Errorf("merged BindingResident = %v, want %v", got.BindingResident, want)
 	}
 }
+
+// managedWorktreeWorkBead returns a work bead carrying the complete
+// managed-worktree evidence worktreeSpecForBead reconstructs a Spec from.
+func managedWorktreeWorkBead(id, routedTo, assignee string) beads.Bead {
+	wb := workBead(id, routedTo, assignee, "in_progress", 5)
+	for key, value := range map[string]string{
+		beadmeta.WorkDirMetadataKey:            "/tmp/wt/" + id,
+		beadmeta.WorktreeRepoMetadataKey:       "/tmp/repo",
+		beadmeta.WorktreeRootMetadataKey:       "/tmp/wt",
+		beadmeta.WorkBranchMetadataKey:         "work/" + id,
+		beadmeta.WorktreeBaseRefMetadataKey:    "main",
+		beadmeta.WorktreeBaseSHAMetadataKey:    "0123456789abcdef0123456789abcdef01234567",
+		beadmeta.WorktreeCreatorMetadataKey:    "gc-sling",
+		beadmeta.WorktreeOwnerMetadataKey:      "gc-sling",
+		beadmeta.WorktreeGenerationMetadataKey: "1",
+		beadmeta.WorktreeLifecycleMetadataKey:  "active",
+		beadmeta.RootStoreRefMetadataKey:       "rig:gascity",
+	} {
+		wb.Metadata[key] = value
+	}
+	return wb
+}
+
+// TestComputePoolDesiredStates_ResumeAndWakeKnownCarryWorktreeEvidence pins
+// gastownhall/gascity#5753: resume and wake-known-identity requests for a
+// bead naming a managed worktree must carry its WorktreeSpec, so
+// verifiedPoolTriggerWorkDir takes the verified path instead of the
+// unmanaged poolTriggerWorkDir fallback.
+func TestComputePoolDesiredStates_ResumeAndWakeKnownCarryWorktreeEvidence(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "rig", intPtr(4), 0)},
+	}
+	work := []beads.Bead{
+		managedWorktreeWorkBead("w-resume", "rig/claude", "sess-1"),
+		managedWorktreeWorkBead("w-wake", "rig/claude", "rig/claude"),
+	}
+	sessions := []beads.Bead{sessionBead("sess-1", "open")}
+
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	byTier := map[string]SessionRequest{}
+	for _, req := range result[0].Requests {
+		byTier[req.Tier] = req
+	}
+	for tier, beadID := range map[string]string{"resume": "w-resume", "wake-known-identity": "w-wake"} {
+		req, ok := byTier[tier]
+		if !ok {
+			t.Fatalf("no %s request in %+v", tier, result[0].Requests)
+		}
+		if req.WorkBeadID != beadID {
+			t.Fatalf("%s request WorkBeadID = %q, want %q", tier, req.WorkBeadID, beadID)
+		}
+		if req.WorktreeSpec == nil || req.WorktreeSpec.BeadID != beadID || req.WorktreeSpec.Path != "/tmp/wt/"+beadID {
+			t.Errorf("%s request WorktreeSpec = %+v, want managed-worktree evidence for %s (nil spec makes verifiedPoolTriggerWorkDir fall back to the unmanaged work dir)", tier, req.WorktreeSpec, beadID)
+		}
+	}
+}
+
+// poolEvidenceWorkBead returns an in_progress work bead carrying the complete
+// managed-worktree evidence worktreeSpecForBead reconstructs a Spec from,
+// with gc.root_store_ref=rootStoreRef as the canonical owner spelling.
+func poolEvidenceWorkBead(id, routedTo, assignee, rootStoreRef string) beads.Bead {
+	wb := workBead(id, routedTo, assignee, "in_progress", 5)
+	for key, value := range map[string]string{
+		beadmeta.WorkDirMetadataKey:            "/tmp/wt/" + id,
+		beadmeta.WorktreeRepoMetadataKey:       "/tmp/repo",
+		beadmeta.WorktreeRootMetadataKey:       "/tmp/wt",
+		beadmeta.WorkBranchMetadataKey:         "work/" + id,
+		beadmeta.WorktreeBaseRefMetadataKey:    "main",
+		beadmeta.WorktreeBaseSHAMetadataKey:    "0123456789abcdef0123456789abcdef01234567",
+		beadmeta.WorktreeCreatorMetadataKey:    "gc-sling",
+		beadmeta.WorktreeOwnerMetadataKey:      "gc-sling",
+		beadmeta.WorktreeGenerationMetadataKey: "1",
+		beadmeta.WorktreeLifecycleMetadataKey:  "active",
+		beadmeta.RootStoreRefMetadataKey:       rootStoreRef,
+	} {
+		wb.Metadata[key] = value
+	}
+	return wb
+}
+
+// singleRequest returns the only request of the only desired state.
+func singleRequest(t *testing.T, states []PoolDesiredState) SessionRequest {
+	t.Helper()
+	if len(states) != 1 || len(states[0].Requests) != 1 {
+		t.Fatalf("desired states = %#v, want one state with one request", states)
+	}
+	return states[0].Requests[0]
+}
+
+// TestComputePoolDesiredStatesResumeTierCarriesWorktreeEvidence pins the
+// resume half of gastownhall/gascity#5753 and its census-ref translation: a
+// resume request for a bead naming a managed worktree carries that worktree's
+// Spec (with the bead's own gc.root_store_ref as the store spelling), and its
+// WorkStoreRef is the canonical form of the census ref of the leg the bead was
+// read from — the city work store's empty ref, a bare rig name, and a class
+// binding ref translate to city/rig:r1/city-resident respectively.
+func TestComputePoolDesiredStatesResumeTierCarriesWorktreeEvidence(t *testing.T) {
+	cases := []struct {
+		name         string
+		censusRef    string
+		wantStoreRef string
+		wantResident bool
+	}{
+		{name: "city work store", censusRef: "", wantStoreRef: "city", wantResident: false},
+		{name: "bare rig name", censusRef: "r1", wantStoreRef: "rig:r1", wantResident: false},
+		{name: "class binding ref", censusRef: "class:graph", wantStoreRef: "city", wantResident: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.City{Agents: []config.Agent{poolAgent("claude", "rig", intPtr(4), 0)}}
+			work := []beads.Bead{poolEvidenceWorkBead("w-resume", "rig/claude", "sess-1", "rig:r1")}
+			sessions := []beads.Bead{sessionBead("sess-1", "open")}
+
+			states := computePoolDesiredStatesParkedAt(cfg, work, nil, []string{tc.censusRef},
+				sessionInfosFromBeads(sessions), nil, nil, time.Time{}, nil, nil)
+			request := singleRequest(t, states)
+			if request.Tier != "resume" || request.SessionBeadID != "sess-1" || request.WorkBeadID != "w-resume" {
+				t.Fatalf("request = %#v, want a resume of w-resume for sess-1", request)
+			}
+			if request.WorktreeSpec == nil ||
+				request.WorktreeSpec.BeadID != "w-resume" ||
+				request.WorktreeSpec.Path != "/tmp/wt/w-resume" ||
+				request.WorktreeSpec.StoreRef != "rig:r1" {
+				t.Errorf("resume WorktreeSpec = %+v, want the bead's managed-worktree evidence (path /tmp/wt/w-resume, store rig:r1)", request.WorktreeSpec)
+			}
+			if got := request.WorkStoreRef; got != tc.wantStoreRef {
+				t.Errorf("resume WorkStoreRef = %q, want the translated census ref %q", got, tc.wantStoreRef)
+			}
+			if got := request.WorkBindingResident; got != tc.wantResident {
+				t.Errorf("resume WorkBindingResident = %v, want %v", got, tc.wantResident)
+			}
+			if got := request.WorktreeError; got != "" {
+				t.Errorf("resume WorktreeError = %q, want empty", got)
+			}
+		})
+	}
+}

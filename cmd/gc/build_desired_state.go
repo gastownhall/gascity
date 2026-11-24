@@ -812,6 +812,7 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 			cfg,
 			poolWorkBeads,
 			readyAssignedFlagsForBeads(readyAssigned, poolWorkBeads, poolWorkRefs),
+			poolWorkRefs,
 			sessionBeads.OpenInfos(),
 			scaleCheckCounts,
 			scaleCheckDemandByTemplate,
@@ -2351,6 +2352,32 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 	return counts, partialTemplates, errs
 }
 
+// legacyWorkDirNoticeSeen deduplicates the unmanaged-workspace notice keyed
+// by work bead ID. The demand probe runs worktreeSpecForBead for every ready
+// bead on every scale-check tick and nothing backfills ownership metadata
+// onto beads that never published it, so an unguarded log line would repeat
+// for the life of the process.
+var legacyWorkDirNoticeSeen sync.Map // work bead ID -> struct{}
+
+// noticeUnmanagedWorkBead reports once per bead why worktreeSpecForBead
+// returned no spec and no error for it: a work_dir with none of the nine
+// worktree ownership keys (recipe drain items) or with only gc.work_branch
+// (hook claims) never claimed a worktree, so the seat spawns where it always
+// did instead of erroring into permanent starvation. worktreeSpecForBead is
+// pure — the v2 decide pass reaches it — so the notice lives here.
+func noticeUnmanagedWorkBead(b beads.Bead) {
+	if _, dup := legacyWorkDirNoticeSeen.LoadOrStore(b.ID, struct{}{}); dup {
+		return
+	}
+	if strings.TrimSpace(b.Metadata[beadmeta.WorkBranchMetadataKey]) != "" {
+		log.Printf("worktreeSpecForBead: work bead %s has a work_dir with only %s published; treating as unmanaged",
+			b.ID, beadmeta.WorkBranchMetadataKey)
+		return
+	}
+	log.Printf("worktreeSpecForBead: work bead %s has a work_dir with no worktree ownership metadata; treating as unmanaged",
+		b.ID)
+}
+
 func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCheckTarget, caches ...*readyDemandCache) (map[string]int, map[string]scaleCheckDemand, map[string]bool, []error) {
 	cache := optionalReadyDemandCache(caches)
 	counts := make(map[string]int, len(targets))
@@ -2486,6 +2513,9 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 		for rank, b := range rows {
 			storeKey := rowStoreKeys[b.ID]
 			spec, specErr := worktreeSpecForBead(b, storeKey)
+			if spec == nil && specErr == nil {
+				noticeUnmanagedWorkBead(b)
+			}
 			// A seat for a row bound to a managed worktree starts in that
 			// worktree and takes only that row, so it is useful only while
 			// the row is inside the claim window the seat reads. Behind the

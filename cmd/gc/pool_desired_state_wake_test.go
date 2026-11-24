@@ -298,7 +298,7 @@ func poolWakeRequests(t *testing.T, wakeMode, sessionState string, minSessions i
 	agent.WakeMode = wakeMode
 	cfg := &config.City{Agents: []config.Agent{agent}}
 	sessions := []beads.Bead{poolSessionBeadWithState("sess-1", sessionState, "")}
-	states := computePoolDesiredStatesParkedAt(cfg, work, ready, sessionInfosFromBeads(sessions), nil, nil, time.Time{}, nil, nil)
+	states := computePoolDesiredStatesParkedAt(cfg, work, ready, nil, sessionInfosFromBeads(sessions), nil, nil, time.Time{}, nil, nil)
 	var reqs []SessionRequest
 	for _, ds := range states {
 		reqs = append(reqs, ds.Requests...)
