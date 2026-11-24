@@ -228,6 +228,7 @@ go_test(
         "runtime_lease_identity_windows_test.go",
         "runtime_lease_test.go",
         "runtime_lease_unix_test.go",
+        "runtime_owner_linux_test.go",
         "runtime_owner_test.go",
         "session_mutation_lock_test.go",
         "sleep_reason_test.go",

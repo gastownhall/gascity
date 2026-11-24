@@ -8,7 +8,6 @@ package pidutil
 // case cannot be staged this way there.
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -75,11 +74,9 @@ func TestPSStartTimeIsBounded(t *testing.T) {
 // inventing a death. A caller deciding whether a recorded runtime still
 // lives must never be told a process it cannot read is gone.
 func TestAliveWithStartTimeKeepsHiddenProcessAlive(t *testing.T) {
-	cmd := exec.Command("true")
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("running a child to reap: %v", err)
-	}
-	gone := cmd.ProcessState.Pid() // reaped: no /proc entry, free for reuse
+	// Above any pid_max, so no process holds it: its /proc entry is absent,
+	// as a hidden one reads, and its start time is unreadable.
+	const gone = 1 << 30
 	prev := probeSignal
 	probeSignal = func(_ int, _ syscall.Signal) error { return syscall.EPERM }
 	t.Cleanup(func() { probeSignal = prev })

@@ -686,6 +686,16 @@ func (cr *CityRuntime) crashTrack() crashTracker {
 	return cr.ct
 }
 
+// recordAdoptedRuntimeOwners records, on a controller that runs the legacy
+// reconciler, the runtime owner of each session its startup adoption found
+// running whose record names no live root (recordAdoptedRuntimeOwners).
+func (cr *CityRuntime) recordAdoptedRuntimeOwners(sessFront *sessionpkg.Store) {
+	if cr.runsV2() {
+		return
+	}
+	recordAdoptedRuntimeOwners(sessFront, cr.sp, cr.cityPath, cr.stdout, cr.stderr)
+}
+
 // run executes the reconciliation loop until ctx is canceled. This is
 // the per-city main loop — it watches config, reconciles agents, runs
 // wisp GC, and dispatches orders.
@@ -845,7 +855,8 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			cr.onStatus("adopting_sessions")
 		}
 		if cr.cityBeadStore() != nil {
-			result, passed := runAdoptionBarrier(cr.cityPath, sessionFrontDoor(cr.sessionsBeadStore().Store), cr.sp, cr.cfg, cr.cityName, clock.Real{}, cr.stderr, false)
+			sessFront := sessionFrontDoor(cr.sessionsBeadStore().Store)
+			result, passed := runAdoptionBarrier(cr.cityPath, sessFront, cr.sp, cr.cfg, cr.cityName, clock.Real{}, cr.stderr, false)
 			if result.Adopted > 0 {
 				fmt.Fprintf(cr.stdout, "Adopted %d running session(s) into bead store.\n", result.Adopted) //nolint:errcheck
 			}
@@ -857,6 +868,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 				// on the next tick.
 				fmt.Fprintf(cr.stderr, "%s: adoption barrier: %d session(s) failed bead creation\n", cr.logPrefix, result.Skipped) //nolint:errcheck
 			}
+			cr.recordAdoptedRuntimeOwners(sessFront)
 		}
 		adoptionComplete = true
 	}) {

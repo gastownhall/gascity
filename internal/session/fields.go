@@ -568,9 +568,11 @@ var registry = slices.Concat([]Field{
 		RuntimeLeaseHolderKey, RuntimeLeaseExpiresKey, RuntimeLeaseTTLKey, RuntimeLeaseFlockKey),
 	same(ClassLease, false, sites(leaseAcquire), RuntimeLeaseEpochKey),
 	// The runtime-owner fence (SESSION-START-029): which uid launched the
-	// runtime, recorded after a Manager start and read by its pre-start gate.
+	// runtime, recorded after a Manager start, a legacy warm relaunch and a
+	// legacy controller's adoption of a running session, and read by the
+	// Manager's pre-start gate.
 	[]Field{{
-		Key: runtimeOwnerKey, Class: ClassLease, Writers: sites(op("internal/session/runtime_owner.go", "Manager.recordRuntimeOwner")),
+		Key: runtimeOwnerKey, Class: ClassLease, Writers: sites(op("internal/session/runtime_owner.go", "writeRuntimeOwner")),
 		Readers: sites(op("internal/session/runtime_owner.go", "Manager.checkRuntimeOwner")),
 	}},
 )

@@ -450,6 +450,8 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	// launch, whose death its Start reported or a cached read took for gone:
 	// the start converges on it, as on one it finds up before its mint
 	// (ensureRunningOn), and like that converge reads no token (ga-9yerfq).
+	// That launch is this start's runtime, so the start records it as its
+	// own (SESSION-START-029).
 	if inc != nil {
 		upAndAlive, err := m.leasedLiveness(id, sessName, cfg.ProcessNames)
 		if err != nil {
@@ -459,6 +461,7 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 			return false, fmt.Errorf("fresh start after stale key: %w", err)
 		}
 		if upAndAlive {
+			m.recordRuntimeOwner(id)
 			return true, nil
 		}
 	}
