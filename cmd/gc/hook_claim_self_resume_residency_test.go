@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"testing"
 	"time"
@@ -134,7 +135,7 @@ func TestHookClaimSelfResumeBeforeFreshClaimAcrossStores(t *testing.T) {
 	}
 	// The primary leg runs the city-wide reader, so it serves BOTH rows; the
 	// extra leg stays on its single-store answer.
-	run := func(_ string, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _ string, dir string, _ []string) (string, error) {
 		if dir == "/rig-a" {
 			return `[` + selfResumeFreshDemand + `,` + selfResumeOwnClaim + `]`, nil
 		}
@@ -173,7 +174,7 @@ func TestHookClaimFreshClaimWhenNothingHeldAcrossStores(t *testing.T) {
 		{dir: "/rig-a", env: []string{"BEADS_DIR=/rig-a"}},
 		{dir: "/rig-b", env: []string{"BEADS_DIR=/rig-b"}},
 	}
-	run := func(_ string, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _ string, dir string, _ []string) (string, error) {
 		if dir == "/rig-a" {
 			return `[` + selfResumeFreshDemand + `]`, nil
 		}

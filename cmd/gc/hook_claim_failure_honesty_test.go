@@ -44,7 +44,7 @@ func (h *failureHookHarness) script(dir string, answers ...hookRunnerAnswer) {
 	h.answers[dir] = answers
 }
 
-func (h *failureHookHarness) run(_, dir string, _ []string) (string, error) {
+func (h *failureHookHarness) run(_ context.Context, _, dir string, _ []string) (string, error) {
 	n := h.calls[dir]
 	h.calls[dir]++
 	scripted := h.answers[dir]

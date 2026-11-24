@@ -624,7 +624,7 @@ func claimWithClock(t *testing.T, city *hookClaimEventsCity, window, casAge time
 			RouteTargets:       []string{"worker"},
 			Env:                env,
 			JSON:               true,
-		}, ops, shellWorkQueryWithEnv, func(string, error) {}, &stdout, &stderr)
+		}, ops, shellWorkQueryWithEnvContext, func(string, error) {}, &stdout, &stderr)
 	return ops, code, stdout.String(), stderr.String()
 }
 

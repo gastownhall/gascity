@@ -1073,7 +1073,7 @@ func TestClaimHookWorkRetriesLaterStoreWhenSelectedStoreLosesClaimRace(t *testin
 	// Both stores report ready routed work on every query, so the selected
 	// store's claim-time re-validation succeeds; the only reason the city claim
 	// fails is the lost race below, not an emptied store.
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		switch dir {
 		case "city":
 			return `[{"id":"hw-city","status":"open","metadata":{"gc.routed_to":"worker"}}]`, nil
@@ -1142,7 +1142,7 @@ func TestClaimHookWorkReportsFederatedStoreErrorAfterPrimaryLosesRace(t *testing
 	}
 	// The primary store always reports ready work, so discovery and claim-time
 	// re-validation both select it; the federated store errors whenever queried.
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		switch dir {
 		case "city":
 			return `[{"id":"hw-city","status":"open","metadata":{"gc.routed_to":"worker"}}]`, nil
@@ -1199,7 +1199,7 @@ func TestClaimHookWorkUsesFallbackStoreDirEnvAndOutput(t *testing.T) {
 		{dir: "riga", env: []string{"GC_STORE=riga"}},
 	}
 	cityCalls := 0
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		switch dir {
 		case "city":
 			cityCalls++
@@ -3199,7 +3199,7 @@ func TestClaimHookWorkDrainsClaimsErroredWhenEveryCandidateErrors(t *testing.T) 
 	stores := []hookStore{
 		{dir: "city", env: []string{"GC_STORE=city"}},
 	}
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		if dir != "city" {
 			t.Fatalf("unexpected store dir %q", dir)
 		}

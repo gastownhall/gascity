@@ -223,7 +223,7 @@ func (h *handoffFixture) runHook(t *testing.T, run func() (string, error)) hookC
 
 	var stdout, stderr bytes.Buffer
 	claimHookWorkWithRunner("work-query", h.dir, env, stores, opts, ops,
-		func(string, string, []string) (string, error) { return run() },
+		func(context.Context, string, string, []string) (string, error) { return run() },
 		func(string, error) {}, &stdout, &stderr)
 
 	var result hookClaimJSONResult

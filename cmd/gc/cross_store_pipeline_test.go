@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"path/filepath"
 	"strings"
@@ -31,14 +32,14 @@ func TestCrossStorePipeline_ReadThenClaim(t *testing.T) {
 		{dir: cityPath, env: nil},
 		{dir: rigPath, env: nil},
 	}
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		if filepath.Clean(dir) == filepath.Clean(rigPath) {
 			return `[{"id":"va-1","status":"open","issue_type":"task"}]`, nil
 		}
 		return `[]`, nil
 	}
 
-	out, gotStore, err := bestStoreWithWork("fake-query", stores, stores[0], run)
+	out, gotStore, err := bestStoreWithWork(context.Background(), "fake-query", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("bestStoreWithWork: %v", err)
 	}
