@@ -9,7 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
 )
 
-// TestFakeProgramStatusContract proves RUNTIME-CONTRACT-017 (PS-001…PS-015)
+// TestFakeProgramStatusContract proves RUNTIME-CONTRACT-017 (PS-001…PS-016)
 // in the unit lane: the FullFake judges scripted pane rows whose records the
 // emitter's bytes produce through the real capture pipeline.
 func TestFakeProgramStatusContract(t *testing.T) {

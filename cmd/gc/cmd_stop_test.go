@@ -3201,7 +3201,7 @@ func TestCmdStopBodyGrowsTheDefaultCapForSweptSessions(t *testing.T) {
 
 			var extensions []time.Duration
 			var stdout, stderr lockedBuffer
-			code := cmdStopBodyWithoutSuccessExtendingCap(cityDir, cfg, false, &stdout, &stderr, func(d time.Duration) { extensions = append(extensions, d) })
+			code := cmdStopBodyWithoutSuccessExtendingCap(cityDir, cfg, false, &stdout, &stderr, func(d time.Duration) { extensions = append(extensions, d) }, false)
 			if !tc.grows {
 				if len(extensions) != 0 {
 					t.Errorf("cap extensions = %v, want none", extensions)

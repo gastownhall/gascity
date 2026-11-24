@@ -8,12 +8,22 @@
 # a partial seed. The seed is load-bearing twice: ensure_beads_role's read
 # short-circuits so the code under test never needs the global write path,
 # and the identity fields keep ensure_dolt_identity on its no-fallback path.
+# It also turns off auto maintenance: git 2.47 and later follow a fetch,
+# commit or merge with `git maintenance run --auto --detach`, a background
+# process that writes into .git after the command exits and races a test's
+# temp-dir cleanup. internal/testenv's git template, the only guard in Bazel
+# runs, covers the repos tests create; in a go-native run this seed also
+# covers every git process that keeps the test env's GIT_CONFIG_GLOBAL. A
+# script that drops both, as .github/actions/rbe-worker/fetch.sh does, turns
+# it off on its own git calls (TESTING.md "Git auto-maintenance in test
+# repos"). A seed is created once and never rewritten, so its name carries a
+# version: bump it whenever the seed's content changes.
 set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 repo_hash=$(printf '%s' "$repo_root" | cksum | awk '{print $1}')
 temp_root=${TMPDIR:-/var/tmp}
-path="$temp_root/gc-test-gitconfig-$(id -u)-${repo_hash}"
+path="$temp_root/gc-test-gitconfig-v2-$(id -u)-${repo_hash}"
 
 if [ ! -f "$path" ]; then
   # Bazel's sandbox can make /var/tmp look writable to access(2) while denying
@@ -21,7 +31,7 @@ if [ ! -f "$path" ]; then
   # Bazel's already-declared writable short test root.
   if ! tmp=$(mktemp "${path}.XXXXXX" 2>/dev/null); then
     temp_root=/tmp/bt
-    path="$temp_root/gc-test-gitconfig-$(id -u)-${repo_hash}"
+    path="$temp_root/gc-test-gitconfig-v2-$(id -u)-${repo_hash}"
     if [ -f "$path" ]; then
       printf '%s\n' "$path"
       exit 0
@@ -36,6 +46,10 @@ if [ ! -f "$path" ]; then
 	role = maintainer
 [safe]
 	directory = *
+[maintenance]
+	auto = false
+[gc]
+	auto = 0
 EOF
   mv -f "$tmp" "$path"
 fi

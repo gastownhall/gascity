@@ -504,7 +504,7 @@ func ResolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 		cache[stepID] = binding
 		return binding, nil
 	}
-	sn := lookupSessionName(store, cityName, agentCfg.QualifiedName(), cfg.Workspace.SessionTemplate)
+	sn := agentutil.LookupSessionName(store, cityName, agentCfg.QualifiedName(), cfg.Workspace.SessionTemplate)
 	if sn == "" {
 		return GraphRouteBinding{}, fmt.Errorf("step %s: could not resolve session name for %q", stepID, agentCfg.QualifiedName())
 	}
@@ -740,7 +740,7 @@ func ApplyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string,
 	// spelling that agentutil intentionally keeps stable on the wire.
 	defaultRoute.QualifiedName = routedTo
 	if !defaultRoute.MetadataOnly {
-		defaultRoute.SessionName = lookupSessionName(store, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
+		defaultRoute.SessionName = agentutil.LookupSessionName(store, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
 		if defaultRoute.SessionName == "" {
 			return fmt.Errorf("could not resolve session name for %q", a.QualifiedName())
 		}
@@ -782,13 +782,4 @@ func stampLegacyRecipeRouting(recipe *formula.Recipe, routedTo string) {
 		}
 		step.Metadata[beadmeta.RoutedToMetadataKey] = target
 	}
-}
-
-// lookupSessionName is agentutil.LookupSessionName over the sessions store,
-// which reads no store for the zero handle, as it read none for a nil store.
-func lookupSessionName(store beads.SessionStore, cityName, qualifiedName, sessionTemplate string) string {
-	if store == (beads.SessionStore{}) {
-		return agentutil.LookupSessionName(nil, cityName, qualifiedName, sessionTemplate)
-	}
-	return agentutil.LookupSessionName(store, cityName, qualifiedName, sessionTemplate)
 }

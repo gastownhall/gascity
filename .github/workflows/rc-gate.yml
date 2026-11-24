@@ -74,7 +74,8 @@ jobs:
 
   # Release-time pin guard: the bundled core/bd/dolt pin must name an
   # ancestor commit with the content this ref embeds, and DOLT_VERSION must be
-  # the Dolt the pinned beads release qualifies (scripts/check-embedded-pins).
+  # at least the Dolt the pinned beads release qualifies
+  # (scripts/check-embedded-pins).
   ubuntu_embedded_pins:
     name: ubuntu / embedded pins are the latest releases
     runs-on: blacksmith-2vcpu-ubuntu-2404

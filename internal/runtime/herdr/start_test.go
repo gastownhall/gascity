@@ -32,14 +32,15 @@ type fakeHerdr struct {
 
 func newFakeHerdr(t *testing.T, probe string) *fakeHerdr {
 	t.Helper()
-	if goruntime.GOOS == "windows" {
-		t.Skip("fake herdr CLI is a POSIX shell script")
-	}
 	dir := t.TempDir()
 	f := &fakeHerdr{
 		bin:   filepath.Join(dir, "herdr"),
 		log:   filepath.Join(dir, "invocations.log"),
 		probe: probe,
+	}
+	if goruntime.GOOS == "windows" {
+		f.bin = newGoFakeHerdr(t, fakeHerdrSpec{Mode: "start", Log: f.log, Probe: probe})
+		return f
 	}
 	script := `#!/bin/sh
 shift 2 # drop --session <name>
@@ -123,8 +124,8 @@ func TestStartRunsPreStartBeforeAgentLaunch(t *testing.T) {
 		WorkDir: work,
 		Command: "claude", // kind launch (herdr >=0.7.5) so agent start fires
 		PreStart: []string{
-			"mkdir -p " + sq(work), // the worktree-setup role
-			"touch " + sq(marker),
+			fixtureMkdirAll(work), // the worktree-setup role
+			fixtureTouch(marker),
 		},
 	}
 	if err := p.start(context.Background(), "gastown__worker", cfg); err != nil {
@@ -164,7 +165,7 @@ func TestStartFailsWhenPreStartFails(t *testing.T) {
 
 	cfg := runtime.Config{
 		WorkDir:  work,
-		PreStart: []string{"printf 'worktree add exploded' >&2; exit 7"},
+		PreStart: []string{fixturePrintToStderrExit("worktree add exploded", 7)},
 	}
 	err := p.start(context.Background(), "gastown__worker", cfg)
 	if err == nil {
@@ -198,7 +199,7 @@ func TestStartStagesWorkDirBeforePreStart(t *testing.T) {
 		WorkDir:   work,
 		Command:   "claude", // kind launch (herdr >=0.7.5) so agent start fires
 		CopyFiles: []runtime.CopyEntry{{Src: src}},
-		PreStart:  []string{"test -f " + sq(staged)},
+		PreStart:  []string{fixtureRequireFile(staged)},
 	}
 	if err := p.start(context.Background(), "gastown__worker", cfg); err != nil {
 		t.Fatalf("start: %v (staging must run before pre_start)", err)
@@ -253,10 +254,10 @@ func TestStartRunsSessionSetupAfterLaunch(t *testing.T) {
 		WorkDir: work,
 		Command: "claude", // kind launch (herdr >=0.7.5) so agent start fires
 		SessionSetup: []string{
-			`printf 'session_setup-ran\n' >> ` + sq(f.log) + `; printf '%s' "$GC_SESSION" > ` + sq(sessionEnvOut),
+			fixtureAppendLine(f.log, "session_setup-ran") + "; " + fixtureWriteEnvToPath("GC_SESSION", sessionEnvOut),
 			"exit 1", // non-fatal: Start must still succeed
 		},
-		SessionSetupScript: `printf 'session_setup_script-ran\n' >> ` + sq(f.log),
+		SessionSetupScript: fixtureAppendLine(f.log, "session_setup_script-ran"),
 	}
 	if err := p.start(context.Background(), "gastown__worker", cfg); err != nil {
 		t.Fatalf("start: %v (session_setup failures must be non-fatal)", err)
