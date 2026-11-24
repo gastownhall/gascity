@@ -439,13 +439,14 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 			[]string{
 				"wake_request", "explicit", "wake_requested_at", ago(time.Minute), "detached_at", ago(time.Hour), "sleep_intent", "idle-stop-pending",
 				"started_config_hash", "v6:core", "started_live_hash", "v6:live", "live_hash", "v6:live", "resume_failures", "2", "resume_launch", "true",
+				"restart_requested", "true",
 			},
-			patchSite(func(session.Info) session.MetadataPatch { // a fresh wake, which clears the baseline too
-				return session.PreWakePatch(session.PreWakePatchInput{Generation: 4, InstanceToken: "tok-4", Now: now, FreshWake: true})
+			patchSite(func(session.Info) session.MetadataPatch { // a fresh wake, which clears the baseline and the request it answers
+				return session.PreWakePatch(session.PreWakePatchInput{Generation: 4, InstanceToken: "tok-4", Now: now, FreshWake: true, ConsumeRestartRequest: true})
 			}),
 		},
 		"cmd/gc/reconcile_effect_launch.go:preWakeStep": { // the row as the launch's Start sees it: the PreWake landed, the commit not yet
-			[]string{"wake_request", "explicit", "wake_requested_at", ago(time.Minute), "continuation_reset_pending", "true"},
+			[]string{"wake_request", "explicit", "wake_requested_at", ago(time.Minute), "continuation_reset_pending", "true", "restart_requested", "true"},
 			func(t *testing.T, meta []string) map[string]string {
 				k, leaf := launchKit(t, "asleep", meta...)
 				var atStart map[string]string

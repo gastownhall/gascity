@@ -231,6 +231,12 @@ type PreWakePatchInput struct {
 	// pending-create episode this wake continues, or empty when the wake opens
 	// a new episode. See PreWakePatch.
 	EpisodePendingCreateStartedAt string
+	// ConsumeRestartRequest clears restart_requested in the same write, for a
+	// wake that answers the row's recorded restart request. The caller decides
+	// the rule on its own read (cmd/gc's preWakePatch); the patch only lands
+	// the clear beside the continuation reset it already consumes, so the
+	// request pair never survives half-consumed.
+	ConsumeRestartRequest bool
 }
 
 // PreWakePatch records the metadata transition for a concrete runtime wake
@@ -270,6 +276,9 @@ func PreWakePatch(input PreWakePatchInput) MetadataPatch {
 	if input.FreshWake {
 		patch["session_key"] = ""
 		applyFreshWakeConversationReset(patch)
+	}
+	if input.ConsumeRestartRequest {
+		patch["restart_requested"] = ""
 	}
 	return patch
 }
