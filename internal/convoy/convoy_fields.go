@@ -87,3 +87,12 @@ func GetConvoyFields(b beads.Bead) ConvoyFields {
 func IsSynthetic(convoy beads.Bead) bool {
 	return strings.TrimSpace(convoy.Metadata[beadmeta.SyntheticMetadataKey]) == "true"
 }
+
+// IsAutomaticInputConvoy reports whether b is an input convoy a launch minted
+// for its target rather than a convoy someone created or a drain's unit
+// convoy: a synthetic convoy with no drain-unit synthetic kind. It is the
+// single-item convoy graph.v2 wraps a non-convoy launch target in.
+func IsAutomaticInputConvoy(b beads.Bead) bool {
+	return b.Type == "convoy" && IsSynthetic(b) &&
+		strings.TrimSpace(b.Metadata[beadmeta.SyntheticKindMetadataKey]) != beadmeta.SyntheticKindDrainUnitConvoy
+}

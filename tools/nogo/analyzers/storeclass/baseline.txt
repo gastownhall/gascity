@@ -503,7 +503,6 @@ cmd/gc/cmd_convoy_dispatch.go	findBeadScopeAcrossStores	raw-result	1
 cmd/gc/cmd_convoy_dispatch.go	findBeadScopeAcrossStores	read-marker	2
 cmd/gc/cmd_convoy_dispatch.go	findUniqueBeadAcrossStoresView	raw-result	1
 cmd/gc/cmd_convoy_dispatch.go	findWorkflowBeads	raw-param	1
-cmd/gc/cmd_convoy_dispatch.go	findWorkflowBeadsFromRoot	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	graphBindingResidentScope	cap-assert	1
 cmd/gc/cmd_convoy_dispatch.go	graphBindingResidentScope	raw-result	1
 cmd/gc/cmd_convoy_dispatch.go	graphFallbackBindingForBead	mint	1

@@ -297,22 +297,30 @@ func workflowMatchesSource(root beads.Bead, sourceBeadID, sourceStoreRef, rootSt
 // indexes on gc.source_bead_id and filters via IsWorkflowRoot so both
 // legacy gc.kind=workflow roots and graph.v2-only roots are visible.
 func ListLiveRoots(store beads.MoleculeTarget, sourceBeadID, sourceStoreRef, rootStoreRef string) ([]beads.Bead, error) {
-	return listLiveRoots(store, sourceBeadID, sourceStoreRef, rootStoreRef, exactStoreRefs)
+	return listSourceRoots(store, sourceBeadID, sourceStoreRef, rootStoreRef, exactStoreRefs, false)
 }
 
 // ListLiveRootsInCity is ListLiveRoots with store refs compared by
 // SameSourceStoreRef inside the city named cityName (see
 // WorkflowMatchesSourceInCity).
 func ListLiveRootsInCity(store beads.MoleculeTarget, sourceBeadID, sourceStoreRef, rootStoreRef, cityName string) ([]beads.Bead, error) {
-	return listLiveRoots(store, sourceBeadID, sourceStoreRef, rootStoreRef, cityStoreRefs(cityName))
+	return listSourceRoots(store, sourceBeadID, sourceStoreRef, rootStoreRef, cityStoreRefs(cityName), false)
 }
 
-func listLiveRoots(store beads.MoleculeTarget, sourceBeadID, sourceStoreRef, rootStoreRef string, sameStoreRef func(a, b string) bool) ([]beads.Bead, error) {
+// ListSourceRootsInCity is ListLiveRootsInCity with closed roots included: every
+// workflow root ever launched on sourceBeadID in store, for a sweep that must
+// reach work still open under a root that is already closed.
+func ListSourceRootsInCity(store beads.MoleculeTarget, sourceBeadID, sourceStoreRef, rootStoreRef, cityName string) ([]beads.Bead, error) {
+	return listSourceRoots(store, sourceBeadID, sourceStoreRef, rootStoreRef, cityStoreRefs(cityName), true)
+}
+
+func listSourceRoots(store beads.MoleculeTarget, sourceBeadID, sourceStoreRef, rootStoreRef string, sameStoreRef func(a, b string) bool, includeClosed bool) ([]beads.Bead, error) {
 	sourceBeadID = NormalizeSourceBeadID(sourceBeadID)
 	if store.Absent() || sourceBeadID == "" {
 		return nil, nil
 	}
 	roots, err := beads.LiveFor(store).List(beads.ListQuery{
+		IncludeClosed: includeClosed,
 		Metadata: map[string]string{
 			beadmeta.SourceBeadIDMetadataKey: sourceBeadID,
 		},
@@ -619,6 +627,50 @@ func WorkflowTree(store beads.MoleculeTarget, rootID string) ([]WorkflowTreeNode
 	}
 	if err := walk(rootID, 0); err != nil {
 		return nil, err
+	}
+	return out, nil
+}
+
+// ListInputConvoyRoots returns the workflow roots in store launched on the
+// input convoy convoyID (gc.input_convoy_id), closed ones included, sorted by
+// ID. A drain item root also names its unit convoy there, but it is a nested
+// run reached through its parent's WorkflowTree, so a root carrying
+// gc.drain_control_id is left out.
+func ListInputConvoyRoots(store beads.MoleculeTarget, convoyID string) ([]beads.Bead, error) {
+	convoyID = strings.TrimSpace(convoyID)
+	if store.Absent() || convoyID == "" {
+		return nil, nil
+	}
+	roots, err := beads.LiveFor(store).List(beads.ListQuery{
+		IncludeClosed: true,
+		Metadata:      map[string]string{beadmeta.InputConvoyIDMetadataKey: convoyID},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing workflow roots on input convoy %s: %w", convoyID, err)
+	}
+	roots = slices.DeleteFunc(roots, func(root beads.Bead) bool {
+		return !IsWorkflowRoot(root) || strings.TrimSpace(root.Metadata[beadmeta.DrainControlIDMetadataKey]) != ""
+	})
+	slices.SortFunc(roots, func(a, b beads.Bead) int { return strings.Compare(a.ID, b.ID) })
+	return roots, nil
+}
+
+// OpenWorkflowTreeMembers returns the members of every still-open workflow in
+// the WorkflowTree rooted at rootID, in the tree's deepest-first order: an open
+// drain item workflow is included even when its parent is closed, while the
+// members of a closed workflow (its finished steps, or a teardown tail a cancel
+// spared) are not. An empty result means nothing of the run is still open.
+func OpenWorkflowTreeMembers(store beads.MoleculeTarget, rootID string) ([]beads.Bead, error) {
+	tree, err := WorkflowTree(store, rootID)
+	if err != nil {
+		return nil, err
+	}
+	var out []beads.Bead
+	for _, node := range tree {
+		if node.Root.ID == "" || node.Root.Status == "closed" {
+			continue
+		}
+		out = append(out, node.Members...)
 	}
 	return out, nil
 }

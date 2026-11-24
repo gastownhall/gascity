@@ -242,6 +242,46 @@ func TrackingConvoysOn(leg beads.FederatedReader, itemID string) ([]beads.Bead, 
 	return trackingConvoys(leg, itemID)
 }
 
+// AutomaticInputConvoy is an automatic input convoy tracking an item, and
+// whether that item is the only bead it tracks.
+type AutomaticInputConvoy struct {
+	Convoy beads.Bead
+	// Owned is true when the item is the convoy's only tracked member, so a
+	// run launched on the convoy was launched on the item alone.
+	Owned bool
+}
+
+// AutomaticInputConvoysFor returns the automatic input convoys
+// (IsAutomaticInputConvoy) tracking itemID in store, closed ones included,
+// each classified by whether itemID is its only member. Members are counted
+// with closed and unresolved ones included, so a convoy whose other member is
+// finished or missing is still shared. A non-synthetic convoy or a drain's unit
+// convoy is never returned: it was not minted for a launch on itemID.
+//
+// It spans one store, the convoy's own: the tracking edges, the convoy beads
+// and their membership edges all live there.
+func AutomaticInputConvoysFor(store beads.StoreReader, itemID string) ([]AutomaticInputConvoy, error) {
+	tracking, err := trackingConvoys(store, itemID)
+	if err != nil {
+		return nil, err
+	}
+	var out []AutomaticInputConvoy
+	for _, c := range tracking {
+		if !IsAutomaticInputConvoy(c) {
+			continue
+		}
+		members, err := membersFrom(store, c.ID, true, store.Get)
+		if err != nil {
+			return nil, fmt.Errorf("classifying input convoy %s: %w", c.ID, err)
+		}
+		out = append(out, AutomaticInputConvoy{
+			Convoy: c,
+			Owned:  len(members) == 1 && members[0].ID == itemID,
+		})
+	}
+	return out, nil
+}
+
 // trackingConvoys is TrackingConvoysForItem's walk over store.
 func trackingConvoys(store convoyReads, itemID string) ([]beads.Bead, error) {
 	deps, err := store.DepList(itemID, "up")

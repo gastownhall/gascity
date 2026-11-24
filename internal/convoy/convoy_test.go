@@ -1,9 +1,11 @@
 package convoy
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
@@ -337,4 +339,88 @@ func (s metadataParseErrorStore) Get(id string) (beads.Bead, error) {
 		return beads.Bead{}, fmt.Errorf("parsing metadata for bead %q: %w", id, beads.ErrMetadataParse)
 	}
 	return s.Store.Get(id)
+}
+
+func TestAutomaticInputConvoysForClassifiesOwnedAndSharedConvoys(t *testing.T) {
+	store := beads.NewMemStore()
+	mustCreate := func(b beads.Bead) beads.Bead {
+		t.Helper()
+		created, err := store.Create(b)
+		if err != nil {
+			t.Fatalf("Create(%s): %v", b.Title, err)
+		}
+		return created
+	}
+	mustTrack := func(convoyID, itemID string) {
+		t.Helper()
+		if err := store.DepAdd(convoyID, itemID, "tracks"); err != nil {
+			t.Fatalf("DepAdd(%s tracks %s): %v", convoyID, itemID, err)
+		}
+	}
+	synthetic := map[string]string{beadmeta.SyntheticMetadataKey: "true"}
+	item := mustCreate(beads.Bead{Title: "item"})
+	other := mustCreate(beads.Bead{Title: "other item"})
+	if err := store.Close(other.ID); err != nil {
+		t.Fatalf("Close(other): %v", err)
+	}
+
+	owned := mustCreate(beads.Bead{Title: "owned", Type: "convoy", Metadata: synthetic})
+	mustTrack(owned.ID, item.ID)
+	shared := mustCreate(beads.Bead{Title: "shared", Type: "convoy", Metadata: synthetic})
+	mustTrack(shared.ID, item.ID)
+	mustTrack(shared.ID, other.ID)
+	dangling := mustCreate(beads.Bead{Title: "dangling", Type: "convoy", Metadata: synthetic})
+	mustTrack(dangling.ID, item.ID)
+	mustTrack(dangling.ID, "gc-missing")
+	userConvoy := mustCreate(beads.Bead{Title: "user", Type: "convoy"})
+	mustTrack(userConvoy.ID, item.ID)
+	unit := mustCreate(beads.Bead{Title: "unit", Type: "convoy", Metadata: map[string]string{
+		beadmeta.SyntheticMetadataKey:     "true",
+		beadmeta.SyntheticKindMetadataKey: beadmeta.SyntheticKindDrainUnitConvoy,
+	}})
+	mustTrack(unit.ID, item.ID)
+
+	got, err := AutomaticInputConvoysFor(store, item.ID)
+	if err != nil {
+		t.Fatalf("AutomaticInputConvoysFor: %v", err)
+	}
+	want := map[string]bool{owned.ID: true, shared.ID: false, dangling.ID: false}
+	if len(got) != len(want) {
+		t.Fatalf("AutomaticInputConvoysFor = %+v, want exactly %v (no user or drain unit convoy)", got, want)
+	}
+	for _, c := range got {
+		wantOwned, ok := want[c.Convoy.ID]
+		if !ok {
+			t.Fatalf("AutomaticInputConvoysFor returned unexpected convoy %s (%s)", c.Convoy.ID, c.Convoy.Title)
+		}
+		if c.Owned != wantOwned {
+			t.Errorf("convoy %s (%s) Owned = %v, want %v", c.Convoy.ID, c.Convoy.Title, c.Owned, wantOwned)
+		}
+	}
+}
+
+type membershipReadFailStore struct {
+	*beads.MemStore
+	err error
+}
+
+func (s membershipReadFailStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.ParentID != "" {
+		return nil, s.err
+	}
+	return s.MemStore.List(query)
+}
+
+func TestAutomaticInputConvoysForReturnsMembershipReadError(t *testing.T) {
+	mem := beads.NewMemStore()
+	item, _ := mem.Create(beads.Bead{Title: "item"})
+	c, _ := mem.Create(beads.Bead{Title: "auto", Type: "convoy", Metadata: map[string]string{beadmeta.SyntheticMetadataKey: "true"}})
+	if err := mem.DepAdd(c.ID, item.ID, "tracks"); err != nil {
+		t.Fatal(err)
+	}
+	boom := fmt.Errorf("members unreadable")
+	_, err := AutomaticInputConvoysFor(membershipReadFailStore{MemStore: mem, err: boom}, item.ID)
+	if err == nil || !errors.Is(err, boom) {
+		t.Fatalf("AutomaticInputConvoysFor error = %v, want it to wrap %v", err, boom)
+	}
 }
