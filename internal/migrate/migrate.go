@@ -56,57 +56,58 @@ type packRigDefaults struct {
 }
 
 type agentFile struct {
-	Description            string                  `toml:"description,omitempty"`
-	Dir                    string                  `toml:"dir,omitempty"`
-	WorkDir                string                  `toml:"work_dir,omitempty"`
-	TmuxAlias              string                  `toml:"tmux_alias,omitempty"`
-	Scope                  string                  `toml:"scope,omitempty"`
-	Suspended              bool                    `toml:"suspended,omitempty"`
-	PreStart               []string                `toml:"pre_start,omitempty"`
-	Nudge                  string                  `toml:"nudge,omitempty"`
-	Session                string                  `toml:"session,omitempty"`
-	Provider               string                  `toml:"provider,omitempty"`
-	ContextAdvisory        *config.ContextAdvisory `toml:"context_advisory,omitempty"`
-	Upstream               string                  `toml:"upstream,omitempty"`
-	StartCommand           string                  `toml:"start_command,omitempty"`
-	Lifecycle              string                  `toml:"lifecycle,omitempty"`
-	Args                   []string                `toml:"args,omitempty"`
-	PromptMode             string                  `toml:"prompt_mode,omitempty"`
-	PromptFlag             string                  `toml:"prompt_flag,omitempty"`
-	ReadyDelayMs           *int                    `toml:"ready_delay_ms,omitempty"`
-	ReadyPromptPrefix      string                  `toml:"ready_prompt_prefix,omitempty"`
-	ProcessNames           []string                `toml:"process_names,omitempty"`
-	EmitsPermissionWarning *bool                   `toml:"emits_permission_warning,omitempty"`
-	Env                    map[string]string       `toml:"env,omitempty"`
-	OptionDefaults         map[string]string       `toml:"option_defaults,omitempty"`
-	MaxActiveSessions      *int                    `toml:"max_active_sessions,omitempty"`
-	MinActiveSessions      *int                    `toml:"min_active_sessions,omitempty"`
-	ScaleCheck             string                  `toml:"scale_check,omitempty"`
-	DrainTimeout           string                  `toml:"drain_timeout,omitempty"`
-	OnBoot                 string                  `toml:"on_boot,omitempty"`
-	OnDeath                string                  `toml:"on_death,omitempty"`
-	WorkQuery              string                  `toml:"work_query,omitempty"`
-	SlingQuery             string                  `toml:"sling_query,omitempty"`
-	IdleTimeout            string                  `toml:"idle_timeout,omitempty"`
-	MaxSessionAge          string                  `toml:"max_session_age,omitempty"`
-	MaxSessionAgeJitter    string                  `toml:"max_session_age_jitter,omitempty"`
-	SleepAfterIdle         string                  `toml:"sleep_after_idle,omitempty"`
-	AutoReclaimStaleClaims bool                    `toml:"auto_reclaim_stale_claims,omitempty"`
-	AssignedWorkDeferLimit *int                    `toml:"assigned_work_defer_limit,omitempty"`
-	InstallAgentHooks      []string                `toml:"install_agent_hooks,omitempty"`
-	HooksInstalled         *bool                   `toml:"hooks_installed,omitempty"`
-	InjectAssignedSkills   *bool                   `toml:"inject_assigned_skills,omitempty"`
-	SessionSetup           []string                `toml:"session_setup,omitempty"`
-	SessionSetupScript     string                  `toml:"session_setup_script,omitempty"`
-	SessionLive            []string                `toml:"session_live,omitempty"`
-	DefaultSlingFormula    *string                 `toml:"default_sling_formula,omitempty"`
-	InjectFragments        []string                `toml:"inject_fragments,omitempty"`
-	AppendFragments        []string                `toml:"append_fragments,omitempty"`
-	Attach                 *bool                   `toml:"attach,omitempty"`
-	DependsOn              []string                `toml:"depends_on,omitempty"`
-	ResumeCommand          string                  `toml:"resume_command,omitempty"`
-	WakeMode               string                  `toml:"wake_mode,omitempty"`
-	MouseMode              string                  `toml:"mouse_mode,omitempty"`
+	Description             string                  `toml:"description,omitempty"`
+	Dir                     string                  `toml:"dir,omitempty"`
+	WorkDir                 string                  `toml:"work_dir,omitempty"`
+	TmuxAlias               string                  `toml:"tmux_alias,omitempty"`
+	Scope                   string                  `toml:"scope,omitempty"`
+	Suspended               bool                    `toml:"suspended,omitempty"`
+	PreStart                []string                `toml:"pre_start,omitempty"`
+	Nudge                   string                  `toml:"nudge,omitempty"`
+	Session                 string                  `toml:"session,omitempty"`
+	Provider                string                  `toml:"provider,omitempty"`
+	ContextAdvisory         *config.ContextAdvisory `toml:"context_advisory,omitempty"`
+	Upstream                string                  `toml:"upstream,omitempty"`
+	StartCommand            string                  `toml:"start_command,omitempty"`
+	Lifecycle               string                  `toml:"lifecycle,omitempty"`
+	Args                    []string                `toml:"args,omitempty"`
+	PromptMode              string                  `toml:"prompt_mode,omitempty"`
+	PromptFlag              string                  `toml:"prompt_flag,omitempty"`
+	ReadyDelayMs            *int                    `toml:"ready_delay_ms,omitempty"`
+	ReadyPromptPrefix       string                  `toml:"ready_prompt_prefix,omitempty"`
+	ProcessNames            []string                `toml:"process_names,omitempty"`
+	EmitsPermissionWarning  *bool                   `toml:"emits_permission_warning,omitempty"`
+	Env                     map[string]string       `toml:"env,omitempty"`
+	OptionDefaults          map[string]string       `toml:"option_defaults,omitempty"`
+	MaxActiveSessions       *int                    `toml:"max_active_sessions,omitempty"`
+	MinActiveSessions       *int                    `toml:"min_active_sessions,omitempty"`
+	ScaleCheck              string                  `toml:"scale_check,omitempty"`
+	ScaleCheckAuthoritative bool                    `toml:"scale_check_authoritative,omitempty"`
+	DrainTimeout            string                  `toml:"drain_timeout,omitempty"`
+	OnBoot                  string                  `toml:"on_boot,omitempty"`
+	OnDeath                 string                  `toml:"on_death,omitempty"`
+	WorkQuery               string                  `toml:"work_query,omitempty"`
+	SlingQuery              string                  `toml:"sling_query,omitempty"`
+	IdleTimeout             string                  `toml:"idle_timeout,omitempty"`
+	MaxSessionAge           string                  `toml:"max_session_age,omitempty"`
+	MaxSessionAgeJitter     string                  `toml:"max_session_age_jitter,omitempty"`
+	SleepAfterIdle          string                  `toml:"sleep_after_idle,omitempty"`
+	AutoReclaimStaleClaims  bool                    `toml:"auto_reclaim_stale_claims,omitempty"`
+	AssignedWorkDeferLimit  *int                    `toml:"assigned_work_defer_limit,omitempty"`
+	InstallAgentHooks       []string                `toml:"install_agent_hooks,omitempty"`
+	HooksInstalled          *bool                   `toml:"hooks_installed,omitempty"`
+	InjectAssignedSkills    *bool                   `toml:"inject_assigned_skills,omitempty"`
+	SessionSetup            []string                `toml:"session_setup,omitempty"`
+	SessionSetupScript      string                  `toml:"session_setup_script,omitempty"`
+	SessionLive             []string                `toml:"session_live,omitempty"`
+	DefaultSlingFormula     *string                 `toml:"default_sling_formula,omitempty"`
+	InjectFragments         []string                `toml:"inject_fragments,omitempty"`
+	AppendFragments         []string                `toml:"append_fragments,omitempty"`
+	Attach                  *bool                   `toml:"attach,omitempty"`
+	DependsOn               []string                `toml:"depends_on,omitempty"`
+	ResumeCommand           string                  `toml:"resume_command,omitempty"`
+	WakeMode                string                  `toml:"wake_mode,omitempty"`
+	MouseMode               string                  `toml:"mouse_mode,omitempty"`
 }
 
 type usageCounts struct {
@@ -914,57 +915,58 @@ func encodeTOML(v any) ([]byte, error) {
 
 func agentConfigFromAgent(agent config.Agent) agentFile {
 	return agentFile{
-		Description:            agent.Description,
-		Dir:                    agent.Dir,
-		WorkDir:                agent.WorkDir,
-		TmuxAlias:              agent.TmuxAlias,
-		Scope:                  agent.Scope,
-		Suspended:              agent.Suspended,
-		PreStart:               agent.PreStart,
-		Nudge:                  agent.Nudge,
-		Session:                agent.Session,
-		Provider:               agent.Provider,
-		ContextAdvisory:        agent.ContextAdvisory,
-		Upstream:               agent.Upstream,
-		StartCommand:           agent.StartCommand,
-		Lifecycle:              agent.Lifecycle,
-		Args:                   agent.Args,
-		PromptMode:             agent.PromptMode,
-		PromptFlag:             agent.PromptFlag,
-		ReadyDelayMs:           agent.ReadyDelayMs,
-		ReadyPromptPrefix:      agent.ReadyPromptPrefix,
-		ProcessNames:           agent.ProcessNames,
-		EmitsPermissionWarning: agent.EmitsPermissionWarning,
-		Env:                    agent.Env,
-		OptionDefaults:         agent.OptionDefaults,
-		MaxActiveSessions:      agent.MaxActiveSessions,
-		MinActiveSessions:      agent.MinActiveSessions,
-		ScaleCheck:             agent.ScaleCheck,
-		DrainTimeout:           agent.DrainTimeout,
-		OnBoot:                 agent.OnBoot,
-		OnDeath:                agent.OnDeath,
-		WorkQuery:              agent.WorkQuery,
-		SlingQuery:             agent.SlingQuery,
-		IdleTimeout:            agent.IdleTimeout,
-		MaxSessionAge:          agent.MaxSessionAge,
-		MaxSessionAgeJitter:    agent.MaxSessionAgeJitter,
-		SleepAfterIdle:         agent.SleepAfterIdle,
-		AutoReclaimStaleClaims: agent.AutoReclaimStaleClaims,
-		AssignedWorkDeferLimit: agent.AssignedWorkDeferLimit,
-		InstallAgentHooks:      agent.InstallAgentHooks,
-		HooksInstalled:         agent.HooksInstalled,
-		InjectAssignedSkills:   agent.InjectAssignedSkills,
-		SessionSetup:           agent.SessionSetup,
-		SessionSetupScript:     agent.SessionSetupScript,
-		SessionLive:            agent.SessionLive,
-		DefaultSlingFormula:    agent.DefaultSlingFormula,
-		InjectFragments:        agent.InjectFragments,
-		AppendFragments:        agent.AppendFragments,
-		Attach:                 agent.Attach,
-		DependsOn:              agent.DependsOn,
-		ResumeCommand:          agent.ResumeCommand,
-		WakeMode:               agent.WakeMode,
-		MouseMode:              agent.MouseMode,
+		Description:             agent.Description,
+		Dir:                     agent.Dir,
+		WorkDir:                 agent.WorkDir,
+		TmuxAlias:               agent.TmuxAlias,
+		Scope:                   agent.Scope,
+		Suspended:               agent.Suspended,
+		PreStart:                agent.PreStart,
+		Nudge:                   agent.Nudge,
+		Session:                 agent.Session,
+		Provider:                agent.Provider,
+		ContextAdvisory:         agent.ContextAdvisory,
+		Upstream:                agent.Upstream,
+		StartCommand:            agent.StartCommand,
+		Lifecycle:               agent.Lifecycle,
+		Args:                    agent.Args,
+		PromptMode:              agent.PromptMode,
+		PromptFlag:              agent.PromptFlag,
+		ReadyDelayMs:            agent.ReadyDelayMs,
+		ReadyPromptPrefix:       agent.ReadyPromptPrefix,
+		ProcessNames:            agent.ProcessNames,
+		EmitsPermissionWarning:  agent.EmitsPermissionWarning,
+		Env:                     agent.Env,
+		OptionDefaults:          agent.OptionDefaults,
+		MaxActiveSessions:       agent.MaxActiveSessions,
+		MinActiveSessions:       agent.MinActiveSessions,
+		ScaleCheck:              agent.ScaleCheck,
+		ScaleCheckAuthoritative: agent.ScaleCheckAuthoritative,
+		DrainTimeout:            agent.DrainTimeout,
+		OnBoot:                  agent.OnBoot,
+		OnDeath:                 agent.OnDeath,
+		WorkQuery:               agent.WorkQuery,
+		SlingQuery:              agent.SlingQuery,
+		IdleTimeout:             agent.IdleTimeout,
+		MaxSessionAge:           agent.MaxSessionAge,
+		MaxSessionAgeJitter:     agent.MaxSessionAgeJitter,
+		SleepAfterIdle:          agent.SleepAfterIdle,
+		AutoReclaimStaleClaims:  agent.AutoReclaimStaleClaims,
+		AssignedWorkDeferLimit:  agent.AssignedWorkDeferLimit,
+		InstallAgentHooks:       agent.InstallAgentHooks,
+		HooksInstalled:          agent.HooksInstalled,
+		InjectAssignedSkills:    agent.InjectAssignedSkills,
+		SessionSetup:            agent.SessionSetup,
+		SessionSetupScript:      agent.SessionSetupScript,
+		SessionLive:             agent.SessionLive,
+		DefaultSlingFormula:     agent.DefaultSlingFormula,
+		InjectFragments:         agent.InjectFragments,
+		AppendFragments:         agent.AppendFragments,
+		Attach:                  agent.Attach,
+		DependsOn:               agent.DependsOn,
+		ResumeCommand:           agent.ResumeCommand,
+		WakeMode:                agent.WakeMode,
+		MouseMode:               agent.MouseMode,
 	}
 }
 
@@ -995,6 +997,7 @@ func isZeroAgentConfig(cfg agentFile) bool {
 		cfg.MaxActiveSessions == nil &&
 		cfg.MinActiveSessions == nil &&
 		cfg.ScaleCheck == "" &&
+		!cfg.ScaleCheckAuthoritative &&
 		cfg.DrainTimeout == "" &&
 		cfg.OnBoot == "" &&
 		cfg.OnDeath == "" &&

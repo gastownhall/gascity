@@ -15,7 +15,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -35,6 +34,7 @@ import (
 	"github.com/gastownhall/gascity/internal/orderdiscovery"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/processgroup"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
@@ -89,7 +89,7 @@ const (
 	// the index and pays one LIMIT-1 LastRun fallback (itself limit-pushed
 	// now), after which cachedLastRun remembers it across ticks and rebuilds.
 	orderTrackingHistoryIndexLimit   = 256
-	defaultMaxOrderDispatchesPerTick = 4
+	defaultMaxOrderDispatchesPerTick = config.DefaultMaxOrderDispatchesPerTick
 	orderTrackingSweepCloseBudget    = 4
 
 	// orderTrackingSweepWatchdogNotClosedInterval is how often the stale
@@ -165,13 +165,21 @@ func tailForOrderFailureEvent(output string) string {
 	return "[output truncated] " + tail
 }
 
-// shellExecRunner is the production ExecRunner using os/exec.
+// shellExecRunner is the production ExecRunner using os/exec. command runs
+// through the platform's interpreter (runtime.ShellCommandContext), and one
+// the platform refuses (runtime.ShellCommandUnavailable) starts nothing.
 func shellExecRunner(ctx context.Context, command, dir string, env []string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if reason := runtime.ShellCommandUnavailable(command); reason != "" {
+		return nil, fmt.Errorf("order command refused: %s", reason)
+	}
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd, err := runtime.ShellCommandContext(ctx, command)
+	if err != nil {
+		return nil, err
+	}
 	cmd.Dir = dir
 	cmd.Env = mergeOrderExecEnv(cmd.Environ(), env)
 	processgroup.StartCommandInNewGroup(cmd)
@@ -222,17 +230,16 @@ func shellExecRunner(ctx context.Context, command, dir string, env []string) ([]
 	}
 	cmd.WaitDelay = shellExecPostCancelWaitDelay
 
-	if err := cmd.Start(); err != nil {
+	pgid, err := startOrderCommand(cmd)
+	if err != nil {
 		return output.Bytes(), err
 	}
+	defer releaseOrderCommand(cmd)
 	cleanupMu.Lock()
-	startedPGID = cmd.Process.Pid
-	if pgid, err := syscall.Getpgid(cmd.Process.Pid); err == nil {
-		startedPGID = pgid
-	}
+	startedPGID = pgid
 	cleanupMu.Unlock()
 
-	err := cmd.Wait()
+	err = cmd.Wait()
 	cleanupMu.Lock()
 	wasCanceled := canceled
 	cleanupMu.Unlock()
@@ -510,11 +517,20 @@ func buildOrderDispatcherFromOrderSet(routes *storageRoutes, cityPath string, cf
 
 	// Filter out manual- and webhook-trigger orders — they are never
 	// auto-dispatched (webhook orders fire only via the supervisor receiver).
+	// An exec order this platform refuses to run is left out too, named once
+	// per build, rather than failing on every tick.
 	var auto []orders.Order
 	for _, a := range allAA {
-		if a.Trigger != "manual" && a.Trigger != "webhook" {
-			auto = append(auto, a)
+		if a.Trigger == "manual" || a.Trigger == "webhook" {
+			continue
 		}
+		if a.IsExec() {
+			if reason := runtime.ShellCommandUnavailable(a.Exec); reason != "" {
+				logDispatchError(stderr, "order %s is not scheduled: %s", a.ScopedName(), reason)
+				continue
+			}
+		}
+		auto = append(auto, a)
 	}
 	if len(auto) == 0 {
 		return nil
@@ -541,10 +557,7 @@ func newMemoryOrderDispatcher(routes *storageRoutes, aa []orders.Order, cityPath
 		ep = p
 	}
 
-	maxDispatchesPerTick := defaultMaxOrderDispatchesPerTick
-	if cfg.Orders.MaxDispatchesPerTick != nil && *cfg.Orders.MaxDispatchesPerTick > 0 {
-		maxDispatchesPerTick = *cfg.Orders.MaxDispatchesPerTick
-	}
+	maxDispatchesPerTick := cfg.Orders.EffectiveMaxDispatchesPerTick()
 
 	dispatchCtx, dispatchCancel := context.WithCancel(context.Background())
 	m := &memoryOrderDispatcher{
@@ -2370,7 +2383,7 @@ func orderSourceBinding(cfg *config.City, a orders.Order) (string, bool) {
 // the resolved invocation vars alongside it. The caller must thread those vars
 // into molecule.Instantiate; without them every {{var}} referencing a
 // caller-supplied value renders empty on the instantiated beads (#4668).
-func prepareOrderWispRecipe(ctx context.Context, store beads.Store, a orders.Order, searchPaths []string, vars map[string]string) (*formula.Recipe, map[string]string, error) {
+func prepareOrderWispRecipe(ctx context.Context, store beads.WorkStore, a orders.Order, searchPaths []string, vars map[string]string) (*formula.Recipe, map[string]string, error) {
 	inv, err := graphv2.PrepareInvocation(ctx, store, a.Formula, searchPaths, "", vars)
 	if err != nil {
 		return nil, nil, err
@@ -2467,6 +2480,7 @@ func applyOrderRecipeRouting(recipe *formula.Recipe, pool string, vars map[strin
 			return fmt.Errorf("formulas v2 order step %q has no routing target; set order pool or gc.run_target", step.ID)
 		}
 	}
+	// store is the caller's graph/scope store, not the sessions class: graphroute resolves session targets through it, as it always has (typed-store T9(b)).
 	return graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(
 		recipe,
 		routeVars,
@@ -2475,7 +2489,7 @@ func applyOrderRecipeRouting(recipe *formula.Recipe, pool string, vars map[strin
 		scopeRef,
 		storeRef,
 		graphroute.GraphRouteBinding{},
-		store,
+		beads.SessionStore{Store: store},
 		cityName,
 		cfg,
 		cliGraphrouteDeps(cityPath),
@@ -2766,7 +2780,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 
 	vars = orderFormulaVars(m.cfg, a, vars)
 	searchPaths := orderFormulaSearchPaths(m.cfg, a)
-	recipe, effectiveVars, err := prepareOrderWispRecipe(ctx, store, a, searchPaths, vars)
+	recipe, effectiveVars, err := prepareOrderWispRecipe(ctx, beads.WorkStore{Store: store}, a, searchPaths, vars)
 	if err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
@@ -2848,7 +2862,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 
 	moleculeStore := moleculeClassStore(recipe, store, graphStore)
 	m.rememberOrderPoursWork(scoped, recipeCoordClass(recipe) == coordclass.ClassWork)
-	cookResult, err := molecule.Instantiate(ctx, moleculeStore, recipe, molecule.Options{Vars: effectiveVars})
+	cookResult, err := molecule.Instantiate(ctx, moleculeClassTarget(recipe, moleculeStore, moleculeStore), recipe, molecule.Options{Vars: effectiveVars})
 	if err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
@@ -3797,7 +3811,7 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 	byOrder := bucketClosedRetentionRuns(runs, onlyOrders)
 
 	cutoff := now.Add(-policy.deleteAfterClose)
-	deleted := 0
+	var cleared []string
 	var retained []string
 	var deleteErr error
 	for _, runs := range byOrder {
@@ -3816,11 +3830,7 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 			if !orderTrackingClosedReferenceTime(run).Before(cutoff) {
 				continue
 			}
-			// deleteWorkflowBead is the graph-aware delete (dep unwind) the
-			// retention prune uses; it stays raw graph residual. A closed
-			// tracking root can still own OPEN steps — the delete refuses
-			// those rather than stranding them (ga-ejwo1q).
-			if err := deleteWorkflowBead(store, run.ID); err != nil {
+			if err := assertWorkflowDeleteLeavesNothingStranded(store, run.ID, nil); err != nil {
 				if errors.Is(err, errWorkflowDeleteLiveDescendants) {
 					retained = append(retained, run.ID)
 					continue
@@ -3828,11 +3838,14 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 				deleteErr = errors.Join(deleteErr, fmt.Errorf("deleting closed order-tracking bead %q: %w", run.ID, err))
 				continue
 			}
-			deleted++
+			cleared = append(cleared, run.ID)
 		}
 	}
 	logRetainedForLiveDescendants(retained)
-	return deleted, deleteErr
+	if err := deleteWorkflowBeadsBatch(store, cleared); err != nil {
+		return 0, errors.Join(deleteErr, fmt.Errorf("deleting %d closed order-tracking beads: %w", len(cleared), err))
+	}
+	return len(cleared), deleteErr
 }
 
 // logRetainedForLiveDescendants reports the candidates the retention prune
@@ -3876,11 +3889,11 @@ func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, 
 	byOrder := bucketClosedRetentionRuns(runs, onlyOrders)
 
 	cutoff := now.Add(-policy.deleteAfterClose)
-	deleted := 0
+	var cleared []string
 	var retained []string
 	var deleteErr error
 	for _, runs := range byOrder {
-		if deleted >= limit {
+		if len(cleared) >= limit {
 			break
 		}
 		sort.Slice(runs, func(i, j int) bool {
@@ -3895,13 +3908,13 @@ func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, 
 			continue
 		}
 		for _, run := range runs[policy.retainLast:] {
-			if deleted >= limit {
+			if len(cleared) >= limit {
 				break
 			}
 			if !orderTrackingClosedReferenceTime(run).Before(cutoff) {
 				continue
 			}
-			if err := deleteWorkflowBead(store, run.ID); err != nil {
+			if err := assertWorkflowDeleteLeavesNothingStranded(store, run.ID, nil); err != nil {
 				if errors.Is(err, errWorkflowDeleteLiveDescendants) {
 					retained = append(retained, run.ID)
 					continue
@@ -3909,11 +3922,14 @@ func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, 
 				deleteErr = errors.Join(deleteErr, fmt.Errorf("deleting closed order-tracking bead %q: %w", run.ID, err))
 				continue
 			}
-			deleted++
+			cleared = append(cleared, run.ID)
 		}
 	}
 	logRetainedForLiveDescendants(retained)
-	return deleted, deleteErr
+	if err := deleteWorkflowBeadsBatch(store, cleared); err != nil {
+		return 0, errors.Join(deleteErr, fmt.Errorf("deleting %d closed order-tracking beads: %w", len(cleared), err))
+	}
+	return len(cleared), deleteErr
 }
 
 // countClosedOrderTrackingRetentionEligible returns the number of closed

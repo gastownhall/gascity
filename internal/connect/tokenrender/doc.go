@@ -1,3 +1,5 @@
+//go:build unix
+
 // Package tokenrender is the I/O half of the connect token-file renderer
 // (DES-CN D5 to D7, D15): the one engine that renders a bd serve
 // --auth-token-file for a connect-enabled city, whichever host runs it. The

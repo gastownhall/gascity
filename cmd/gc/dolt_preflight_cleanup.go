@@ -10,8 +10,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/processgroup"
 )
 
 var managedDoltPreflightCleanupFn = preflightManagedDoltCleanup
@@ -102,15 +103,15 @@ func fileOpenedByAnyProcess(path string) (bool, error) {
 	defer lsofCancel()
 	cmd := exec.CommandContext(lsofCtx, "lsof", path)
 	cmd.WaitDelay = 100 * time.Millisecond
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	processgroup.StartCommandInNewGroup(cmd)
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
 			return nil
 		}
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
-			return err
-		}
-		return nil
+		// Force-kill the whole group, matching the immediate SIGKILL this
+		// cancel has always sent: the deadline has passed and a probe holding
+		// the output pipes open would otherwise outlive it.
+		return processgroup.KillCommandGroup(cmd, 0, processgroup.Options{})
 	}
 	out, err := cmd.CombinedOutput()
 	if lsofCtx.Err() != nil {

@@ -27,6 +27,24 @@ start_command = "true"
 [defaults.rig.imports.lifecycle]
 source = "packs/lifecycle"
 
+# Storage classes (docs/runbooks/split-storage-classes.md): work stays in the
+# work ledger, and the five infrastructure classes live in one local SQLite
+# store under .gc/store, created on first start. This is the split gc init
+# writes for a new city. `gc init --from` copies it, except where gc init
+# would start a new city single-store (a bd a split city's gc bd refuses):
+# there the copy leaves it out and says why.
+[storage.classes]
+work = "work"
+graph = "infra"
+sessions = "infra"
+messaging = "infra"
+orders = "infra"
+nudges = "infra"
+
+[storage.bindings.infra]
+provider = "sqlite-beads"
+path = ".gc/store"
+
 [daemon]
 patrol_interval = "10s"
 max_restarts = 3

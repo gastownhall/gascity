@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // writeRigFrame writes one typed SSE envelope frame (seq/type/payload) and
@@ -65,7 +66,7 @@ func fastRigParams() rigWaitParams {
 func TestRigCreate_AcceptedThenSuccess(t *testing.T) {
 	var posts int32
 	var afterSeq string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-GC-Request") == "" {
 			t.Error("missing X-GC-Request on " + r.URL.Path)
 		}
@@ -82,7 +83,7 @@ func TestRigCreate_AcceptedThenSuccess(t *testing.T) {
 		default:
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
-	}))
+	})))
 	defer srv.Close()
 
 	c, err := NewRemoteCityScopedClient(srv.URL, "c", RemoteOptions{})
@@ -115,7 +116,7 @@ func TestRigCreate_AcceptedThenSuccess(t *testing.T) {
 func TestRigCreate_ReconnectResumesAfterSeq(t *testing.T) {
 	var connects int32
 	var secondAfterSeq string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := atomic.AddInt32(&connects, 1)
 		if n == 1 {
 			writeRigFrame(t, w, 8, events.RigProvisionProgress, RigProvisionProgressPayload{RequestID: "r1", Rig: "web", Step: "clone"})
@@ -123,7 +124,7 @@ func TestRigCreate_ReconnectResumesAfterSeq(t *testing.T) {
 		}
 		secondAfterSeq = r.URL.Query().Get("after_seq")
 		writeRigFrame(t, w, 9, events.RequestResultRigCreate, RigCreateSucceededPayload{RequestID: "r1", Rig: "web", Prefix: "web", DefaultBranch: "main"})
-	}))
+	})))
 	defer srv.Close()
 
 	c, err := NewRemoteCityScopedClient(srv.URL, "c", RemoteOptions{})
@@ -155,7 +156,7 @@ func TestRigCreate_ReconnectResumesAfterSeq(t *testing.T) {
 func TestRigCreate_HeartbeatDoesNotRegressCursor(t *testing.T) {
 	var connects int32
 	var secondAfterSeq string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := atomic.AddInt32(&connects, 1)
 		if n == 1 {
 			writeRigFrame(t, w, 5, events.RigProvisionProgress, RigProvisionProgressPayload{RequestID: "r1", Rig: "web", Step: "clone"})
@@ -164,7 +165,7 @@ func TestRigCreate_HeartbeatDoesNotRegressCursor(t *testing.T) {
 		}
 		secondAfterSeq = r.URL.Query().Get("after_seq")
 		writeRigFrame(t, w, 6, events.RequestResultRigCreate, RigCreateSucceededPayload{RequestID: "r1", Rig: "web"})
-	}))
+	})))
 	defer srv.Close()
 
 	c, _ := NewRemoteCityScopedClient(srv.URL, "c", RemoteOptions{})
@@ -187,7 +188,7 @@ func TestRigCreate_StreamReauthPerAttempt(t *testing.T) {
 	}
 	var connects int32
 	var secondBearer string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := atomic.AddInt32(&connects, 1)
 		if n == 1 {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -195,7 +196,7 @@ func TestRigCreate_StreamReauthPerAttempt(t *testing.T) {
 		}
 		secondBearer = r.Header.Get("Authorization")
 		writeRigFrame(t, w, 2, events.RequestResultRigCreate, RigCreateSucceededPayload{RequestID: "r1", Rig: "web"})
-	}))
+	})))
 	defer srv.Close()
 
 	c, err := NewRemoteCityScopedClient(srv.URL, "c", RemoteOptions{Token: tokenSrc})
@@ -215,10 +216,10 @@ func TestRigCreate_StreamReauthPerAttempt(t *testing.T) {
 // blip cannot trip the two-strike cap on a still-valid credential.
 func TestRigCreate_StreamReauthAntiSpin(t *testing.T) {
 	var connects int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		atomic.AddInt32(&connects, 1)
 		w.WriteHeader(http.StatusUnauthorized)
-	}))
+	})))
 	defer srv.Close()
 
 	c, _ := NewRemoteCityScopedClient(srv.URL, "c", RemoteOptions{Token: func() (string, error) { return "tok", nil }})
@@ -242,13 +243,13 @@ func TestRigCreate_StreamReauthAntiSpin(t *testing.T) {
 // A 404 on the stream is permanent — the wait returns immediately, and RigCreate
 // wraps it as *RigCreateWaitError carrying the request_id.
 func TestRigCreate_PermanentStreamStatusWraps(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			writeAccepted(t, w, "3")
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
-	}))
+	})))
 	defer srv.Close()
 
 	c, _ := NewRemoteCityScopedClient(srv.URL, "c", RemoteOptions{})
@@ -264,10 +265,10 @@ func TestRigCreate_PermanentStreamStatusWraps(t *testing.T) {
 
 // The absolute watchdog (ctx deadline) fires while the stream is silent.
 func TestRigCreate_WatchdogViaContextDeadline(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeRigHeartbeat(t, w)
 		<-r.Context().Done() // hold the connection open, delivering no terminal
-	}))
+	})))
 	defer srv.Close()
 
 	c, _ := NewRemoteCityScopedClient(srv.URL, "c", RemoteOptions{})
@@ -282,10 +283,10 @@ func TestRigCreate_WatchdogViaContextDeadline(t *testing.T) {
 // The silent-attempt budget trips when connects deliver zero frames.
 func TestRigCreate_SilentAttemptBudget(t *testing.T) {
 	var connects int32
-	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		atomic.AddInt32(&connects, 1)
 		// return immediately => zero frames, clean EOF
-	}))
+	})))
 	defer srv.Close()
 
 	c, _ := NewRemoteCityScopedClient(srv.URL, "c", RemoteOptions{})
@@ -301,7 +302,7 @@ func TestRigCreate_SilentAttemptBudget(t *testing.T) {
 // 429/503 honor Retry-After then reconnect; a delivered frame resets the budget.
 func TestRigCreate_TransientRetriesThenSucceeds(t *testing.T) {
 	var connects int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		n := atomic.AddInt32(&connects, 1)
 		switch n {
 		case 1:
@@ -312,7 +313,7 @@ func TestRigCreate_TransientRetriesThenSucceeds(t *testing.T) {
 		default:
 			writeRigFrame(t, w, 4, events.RequestResultRigCreate, RigCreateSucceededPayload{RequestID: "r1", Rig: "web"})
 		}
-	}))
+	})))
 	defer srv.Close()
 
 	c, _ := NewRemoteCityScopedClient(srv.URL, "c", RemoteOptions{})
@@ -349,7 +350,7 @@ func TestClassifyRigStreamStatus(t *testing.T) {
 // Terminal request.failed => *RigCreateFailedError; a DIFFERENT request_id on
 // both the success- and failed-type frames is ignored (concurrent isolation).
 func TestRigCreate_TerminalFailedAndConcurrentIsolation(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			writeAccepted(t, w, "1")
 			return
@@ -359,7 +360,7 @@ func TestRigCreate_TerminalFailedAndConcurrentIsolation(t *testing.T) {
 		writeRigFrame(t, w, 3, events.RequestFailed, RequestFailedPayload{RequestID: "r2", Operation: RequestOperationRigCreate, ErrorCode: "clone_failed", ErrorMessage: "nope"})
 		// Our terminal failure.
 		writeRigFrame(t, w, 4, events.RequestFailed, RequestFailedPayload{RequestID: "r1", Operation: RequestOperationRigCreate, ErrorCode: "blocked_host", ErrorMessage: "SSRF"})
-	}))
+	})))
 	defer srv.Close()
 
 	c, _ := NewRemoteCityScopedClient(srv.URL, "c", RemoteOptions{})
@@ -386,14 +387,14 @@ func TestRigCreate_NoWaitShapes(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/v0/city/c/events/stream" {
 					t.Error("must not dial the stream for a no-wait shape")
 				}
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(tc.status)
 				_ = json.NewEncoder(w).Encode(tc.body)
-			}))
+			})))
 			defer srv.Close()
 			c, _ := NewRemoteCityScopedClient(srv.URL, "c", RemoteOptions{})
 			res, err := c.RigCreate(RigCreateRequest{Name: "web", GitURL: "https://h/o/web.git", RequestID: "r1"}, nil)
@@ -419,7 +420,7 @@ func TestRigCreate_GrantOnPostNeverOnStream(t *testing.T) {
 		mintedBodies = append(mintedBodies, b.Method+" "+b.Path)
 		return "grant-token", nil
 	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			postGrant = r.Header.Get("X-GC-City-Write")
 			writeAccepted(t, w, "1")
@@ -427,7 +428,7 @@ func TestRigCreate_GrantOnPostNeverOnStream(t *testing.T) {
 		}
 		streamGrant = r.Header.Get("X-GC-City-Write")
 		writeRigFrame(t, w, 2, events.RequestResultRigCreate, RigCreateSucceededPayload{RequestID: "r1", Rig: "web"})
-	}))
+	})))
 	defer srv.Close()
 
 	c, _ := NewRemoteCityScopedClient(srv.URL, "c", RemoteOptions{Grant: grant})
@@ -449,9 +450,9 @@ func TestRigCreate_GrantOnPostNeverOnStream(t *testing.T) {
 
 // A git_url add with no request_id is a hard client-side error (never minted).
 func TestRigCreate_RequiresRequestIDWithGitURL(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		t.Error("must not contact the server without a request_id")
-	}))
+	})))
 	defer srv.Close()
 	c, _ := NewRemoteCityScopedClient(srv.URL, "c", RemoteOptions{})
 	if _, err := c.RigCreate(RigCreateRequest{Name: "web", GitURL: "https://h/o/web.git"}, nil); err == nil {
@@ -461,7 +462,7 @@ func TestRigCreate_RequiresRequestIDWithGitURL(t *testing.T) {
 
 // A structured 409 decodes to *RigCreateConflictError carrying the in-flight id.
 func TestRigCreate_StructuredConflict(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusConflict)
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -475,7 +476,7 @@ func TestRigCreate_StructuredConflict(t *testing.T) {
 				{"location": "body.event_cursor", "value": "42"},
 			},
 		})
-	}))
+	})))
 	defer srv.Close()
 	c, _ := NewRemoteCityScopedClient(srv.URL, "c", RemoteOptions{})
 	_, err := c.RigCreate(RigCreateRequest{Name: "web", GitURL: "https://h/o/web.git", RequestID: "r1"}, nil)
@@ -494,14 +495,14 @@ func TestRigCreate_StructuredConflict(t *testing.T) {
 func TestRigCreate_PoisonTerminalPayloadPermanent(t *testing.T) {
 	var connects int32
 	var secondAfterSeq string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := atomic.AddInt32(&connects, 1)
 		if n == 2 {
 			secondAfterSeq = r.URL.Query().Get("after_seq")
 		}
 		// A JSON string where an object is expected ⇒ payloadContainsRequestID fails.
 		writeRigFrame(t, w, 5, events.RequestResultRigCreate, "not-an-object")
-	}))
+	})))
 	defer srv.Close()
 
 	c, _ := NewRemoteCityScopedClient(srv.URL, "c", RemoteOptions{})
@@ -525,7 +526,7 @@ func TestRigCreate_PoisonTerminalPayloadPermanent(t *testing.T) {
 func TestRigCreate_PoisonTerminalPayloadTransientRecovers(t *testing.T) {
 	var connects int32
 	var secondAfterSeq string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := atomic.AddInt32(&connects, 1)
 		if n == 1 {
 			writeRigFrame(t, w, 5, events.RequestResultRigCreate, "truncated") // undecodable
@@ -533,7 +534,7 @@ func TestRigCreate_PoisonTerminalPayloadTransientRecovers(t *testing.T) {
 		}
 		secondAfterSeq = r.URL.Query().Get("after_seq")
 		writeRigFrame(t, w, 5, events.RequestResultRigCreate, RigCreateSucceededPayload{RequestID: "r1", Rig: "web"})
-	}))
+	})))
 	defer srv.Close()
 
 	c, _ := NewRemoteCityScopedClient(srv.URL, "c", RemoteOptions{})
