@@ -827,3 +827,125 @@ func TestDivergenceUnplaceableTriggerStoreClassifiesUnknownWithoutReading(t *tes
 		})
 	}
 }
+
+// AC-4 for gastownhall/gascity#5858: the blockedness settlement must never be
+// able to invent a divergence. Three readings that carry no verdict each stay
+// unknown — a counting read that fails (even though the seat's own leg would
+// happily serve the open row), a dependency settlement that errors, and a row
+// the invocation's own residency frame has proved lives in a relocated class
+// binding: ConfirmBlocked reads the work ledger, which does not hold
+// binding-served rows, and its dependency list answers not-found with an empty
+// list, so settling would manufacture divergence out of an artifact of the
+// store split.
+func TestDivergenceSettlementNeverInventsAVerdict(t *testing.T) {
+	bait := beads.Bead{
+		ID: "wb-1", Status: "open", Type: "task",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"},
+	}
+
+	run := func(t *testing.T, ops hookClaimOps) events.SessionDemandClaimDivergencePayload {
+		t.Helper()
+		rec := events.NewFake()
+		prev := demandDivergenceRecorder
+		demandDivergenceRecorder = func(io.Writer) events.Recorder { return rec }
+		t.Cleanup(func() { demandDivergenceRecorder = prev })
+		var stderr bytes.Buffer
+		recordDemandClaimDivergence(hookClaimReasonNoWork, demandDivergenceTestRigDir, divergenceOptions(demandSpawnEnv()...), ops, &stderr)
+		if len(rec.Events) != 1 {
+			t.Fatalf("events = %+v, want exactly 1", rec.Events)
+		}
+		var payload events.SessionDemandClaimDivergencePayload
+		if err := json.Unmarshal(rec.Events[0].Payload, &payload); err != nil {
+			t.Fatalf("decoding payload: %v", err)
+		}
+		return payload
+	}
+
+	t.Run("a failed counting read classifies unknown, unreadable", func(t *testing.T) {
+		confirms := 0
+		ops := hookClaimOps{
+			ReadSessionTrigger: func(string) (demandTrigger, error) {
+				return demandTrigger{ID: "wb-1", StoreRef: demandDivergenceTestCityRef}, nil
+			},
+			DemandTriggerStore: demandDivergenceTestTriggerStore,
+			ReadWorkMeta: func(_ context.Context, dir string, _ []string, beadID, _ string) (beads.Bead, error) {
+				if beadID != bait.ID {
+					return beads.Bead{}, fmt.Errorf("read %s: not the trigger", beadID)
+				}
+				if dir == demandDivergenceTestCityDir {
+					return beads.Bead{}, errors.New("counting store read failed")
+				}
+				// The seat's own leg would happily serve the open row: divergence
+				// bait, if any fallback read the wrong store.
+				return bait, nil
+			},
+			ConfirmBlocked: func(context.Context, string, []string, string, string) (bool, error) {
+				confirms++
+				return false, nil
+			},
+		}
+		payload := run(t, ops)
+		if payload.Classification != events.DemandClaimUnknown {
+			t.Fatalf("classification = %q, want unknown: a failed counting read is never evidence", payload.Classification)
+		}
+		if payload.TriggerStatusAtDrain != demandTriggerUnreadable {
+			t.Fatalf("trigger_status_at_drain = %q, want %q", payload.TriggerStatusAtDrain, demandTriggerUnreadable)
+		}
+		if confirms != 0 {
+			t.Fatalf("blockedness was settled %d times after a failed read", confirms)
+		}
+	})
+
+	t.Run("a failed blockedness settlement classifies unknown over the open status", func(t *testing.T) {
+		ops := hookClaimOps{
+			ReadSessionTrigger: func(string) (demandTrigger, error) {
+				return demandTrigger{ID: "wb-1", StoreRef: demandDivergenceTestCityRef}, nil
+			},
+			DemandTriggerStore: demandDivergenceTestTriggerStore,
+			ReadWorkMeta: func(context.Context, string, []string, string, string) (beads.Bead, error) {
+				return bait, nil // open with no blockedness projection: the settlement arm
+			},
+			ConfirmBlocked: func(context.Context, string, []string, string, string) (bool, error) {
+				return false, errors.New("dependency read failed")
+			},
+		}
+		payload := run(t, ops)
+		if payload.Classification != events.DemandClaimUnknown {
+			t.Fatalf("classification = %q, want unknown: a failed settlement is never evidence", payload.Classification)
+		}
+		if payload.TriggerStatusAtDrain != "open" {
+			t.Fatalf("trigger_status_at_drain = %q, want the counting store's open", payload.TriggerStatusAtDrain)
+		}
+	})
+
+	t.Run("a binding-resident row never settles blockedness", func(t *testing.T) {
+		confirms := 0
+		ops := hookClaimOps{
+			ReadSessionTrigger: func(string) (demandTrigger, error) {
+				return demandTrigger{ID: "wb-1", StoreRef: demandDivergenceTestCityRef}, nil
+			},
+			DemandTriggerStore: demandDivergenceTestTriggerStore,
+			ReadWorkMeta: func(context.Context, string, []string, string, string) (beads.Bead, error) {
+				return bait, nil
+			},
+			ConfirmBlocked: func(context.Context, string, []string, string, string) (bool, error) {
+				confirms++
+				return false, nil // not blocked: the answer that would say divergence
+			},
+			// The invocation's own residency frame has already proved the binding
+			// holds wb-1, so the work ledger this settlement reads does not carry
+			// the row and the empty dependency answer would be an artifact.
+			ClassRoute: &hookClaimClassRoute{resident: map[string]bool{"wb-1": true}},
+		}
+		payload := run(t, ops)
+		if payload.Classification != events.DemandClaimUnknown {
+			t.Fatalf("classification = %q, want unknown: a binding-served row's blockedness cannot be settled through the work ledger", payload.Classification)
+		}
+		if payload.TriggerStatusAtDrain != "open" {
+			t.Fatalf("trigger_status_at_drain = %q, want the counting store's open", payload.TriggerStatusAtDrain)
+		}
+		if confirms != 0 {
+			t.Fatalf("blockedness was settled %d times for a binding-resident row; the settlement must not run", confirms)
+		}
+	})
+}

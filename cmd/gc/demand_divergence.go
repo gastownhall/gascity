@@ -230,11 +230,19 @@ func demandTriggerLeg(storeRef string, ops hookClaimOps) (hookStore, error) {
 // MET is claimable, so it counts as divergence exactly as if the projection had
 // said so — a stale-true flag must not bury a real divergence.
 //
-// Every failure — no confirm seam wired, or a dep read that errors — reports
-// unknown, never divergence and never blocked. Same discipline as the read
-// above: a flaky store must not be able to manufacture the metric this counter
-// exists to keep trustworthy.
+// Every failure — no confirm seam wired, a dep read that errors, or a row the
+// invocation's own residency frame has already proved lives in a relocated
+// class binding — reports unknown, never divergence and never blocked. The
+// residency answer matters here because this settlement reads the work ledger:
+// a binding-served row is not in it, and the dependency list answers not-found
+// with an empty list, so settling would manufacture divergence out of an
+// artifact of the store split. Same discipline as the read above: a flaky
+// store must not be able to manufacture the metric this counter exists to
+// keep trustworthy.
 func classifyDemandTriggerBlockedness(triggerID string, leg hookStore, opts hookClaimOptions, ops hookClaimOps) string {
+	if ops.ClassRoute.knownResident(triggerID) {
+		return events.DemandClaimUnknown
+	}
 	if ops.ConfirmBlocked == nil {
 		return events.DemandClaimUnknown
 	}
