@@ -223,3 +223,91 @@ func TestSessionResumeLaunchCommandFallbackWarningOmitsPrivateData(t *testing.T)
 		}
 	}
 }
+
+func TestSessionResumeResolvedLaunchCommandDoesNotWarn(t *testing.T) {
+	declaredOption := resumeFallbackProviderSpec()
+	declaredOption.Args = nil
+	cases := []struct {
+		name          string
+		provider      config.ProviderSpec
+		storedCommand string
+		overrides     string
+		wantCommand   string
+	}{
+		{
+			name:          "valid declared option is applied",
+			provider:      declaredOption,
+			storedCommand: "/bin/echo",
+			overrides:     `{"effort":"high"}`,
+			wantCommand:   "/bin/echo --effort high",
+		},
+		{
+			name:          "configured command without overrides",
+			provider:      resumeFallbackProviderSpec(),
+			storedCommand: "/bin/echo --configured",
+			overrides:     "",
+			wantCommand:   "/bin/echo --configured",
+		},
+	}
+	for _, resolver := range []resumeResolver{buildSessionResumeResolver, workerSessionRuntimeResolver} {
+		for _, tc := range cases {
+			t.Run(resolver.name+"/"+tc.name, func(t *testing.T) {
+				srv, info := newResumeFallbackSession(t, tc.provider, tc.storedCommand, tc.overrides)
+				var (
+					command string
+					err     error
+				)
+				out := captureResumeLog(t, func() { command, _, err = resolver.resolve(srv, info) })
+				if err != nil {
+					t.Fatalf("%s: %v", resolver.name, err)
+				}
+				if command != tc.wantCommand {
+					t.Fatalf("command = %q, want %q", command, tc.wantCommand)
+				}
+				if out != "" {
+					t.Fatalf("log output = %q, want no warning", out)
+				}
+			})
+		}
+	}
+}
+
+// The ACP transport probe compares candidate commands without selecting one,
+// so its resolution fallbacks, and the shared low-level resolver, stay quiet.
+func TestSessionRuntimeTransportProbeDoesNotWarnOnFallback(t *testing.T) {
+	srv := New(newSessionFakeState(t))
+	resolved := &config.ResolvedProvider{
+		Name:       resumeFallbackProvider,
+		Command:    "/bin/echo",
+		ACPCommand: "/bin/echo-acp",
+	}
+	metadata := map[string]string{
+		"started_config_hash": "started-hash",
+		"template_overrides":  `{`,
+	}
+	info := session.Info{
+		ID:       "gc-probe",
+		Template: resumeFallbackProvider,
+		Command:  "/bin/echo --stored",
+		Provider: resumeFallbackProvider,
+		WorkDir:  t.TempDir(),
+	}
+
+	out := captureResumeLog(t, func() {
+		srv.startedConfigHashProvesACPTransport(info, metadata, resolved, info.WorkDir, "acp", "")
+	})
+	if out != "" {
+		t.Fatalf("transport probe log output = %q, want no warning", out)
+	}
+
+	var err error
+	out = captureResumeLog(t, func() {
+		_, err = srv.resolvedSessionRuntimeCommand(resolved, "", info.Command, metadata)
+	})
+	if err == nil {
+		t.Fatal("resolvedSessionRuntimeCommand with malformed overrides succeeded, want error")
+	}
+	if out != "" {
+		t.Fatalf("resolvedSessionRuntimeCommand log output = %q, want no warning", out)
+	}
+}
