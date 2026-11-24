@@ -235,6 +235,9 @@ type CityRuntime struct {
 	// pass set before that read, zero after a pass that completed.
 	orderSweepWatchdogNotClosedDue     time.Time
 	orderSweepWatchdogNotClosedBackoff time.Duration
+	// orderTrackingRetentionFSPressure is the retention lane's FS-pressure
+	// episode. Only the retention lane's goroutine touches it.
+	orderTrackingRetentionFSPressure orderTrackingRetentionFSPressureEpisode
 	// orderTrackingRetentionWatchdogLast is the retention sweep's interval
 	// stamp. Only the retention lane's goroutine touches it, so it needs no
 	// lock.

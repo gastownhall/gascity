@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -42,7 +43,8 @@ func (cr *CityRuntime) startOrderTrackingRetentionLane(ctx context.Context) func
 //
 // A suspended city gets no pass, by the predicate the order pass applies: the
 // sweep reads every scope's store, which would restart the proxies suspension
-// retired.
+// retired. Under high FS pressure the pass sheds the sweep by the orders lane's
+// policy (orderTrackingRetentionShouldSkipForFSPressure).
 func (cr *CityRuntime) runOrderTrackingRetentionLanePass(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
@@ -54,5 +56,47 @@ func (cr *CityRuntime) runOrderTrackingRetentionLanePass(ctx context.Context) {
 	if effectiveCitySuspended(cfg, loadSuspensionStateBestEffort(cr.cityPath)) {
 		return
 	}
+	if cr.orderTrackingRetentionShouldSkipForFSPressure() {
+		return
+	}
 	cr.runOrderTrackingRetentionWatchdog(cfg, time.Now())
+}
+
+// orderTrackingRetentionFSPressureEpisode tracks one run of FS-pressure-skipped
+// retention passes: how many passes in a row skipped, and whether the episode
+// has logged its skip line.
+type orderTrackingRetentionFSPressureEpisode struct {
+	skips  int
+	logged bool
+}
+
+// orderTrackingRetentionShouldSkipForFSPressure reports whether this retention
+// pass sheds its sweep for FS pressure, by the orders lane's policy: while
+// pressure is high, up to maxConsecutiveFSPressureSkips passes in a row skip,
+// with one log line per episode, and the pass after them is forced through so
+// retention cannot starve. A pass without high pressure ends the episode.
+// Skipped passes leave the sweep's interval stamp alone, so the next pass that
+// runs sweeps.
+func (cr *CityRuntime) orderTrackingRetentionShouldSkipForFSPressure() bool {
+	episode := &cr.orderTrackingRetentionFSPressure
+	status, ok := currentFSPressureStatus(cr.stderr)
+	if !ok || !status.High {
+		*episode = orderTrackingRetentionFSPressureEpisode{}
+		return false
+	}
+	if episode.skips >= maxConsecutiveFSPressureSkips {
+		if cr.stderr != nil {
+			fmt.Fprintf(cr.stderr, "supervisor: FS pressure high (some avg60=%.2f > threshold=%.1f), forcing the order-tracking retention sweep after %d skipped passes\n", //nolint:errcheck // best-effort stderr
+				status.Avg60, status.Threshold, episode.skips)
+		}
+		*episode = orderTrackingRetentionFSPressureEpisode{}
+		return false
+	}
+	episode.skips++
+	if !episode.logged && cr.stderr != nil {
+		fmt.Fprintf(cr.stderr, "supervisor: FS pressure high (some avg60=%.2f > threshold=%.1f), skipping the order-tracking retention sweep\n", //nolint:errcheck // best-effort stderr
+			status.Avg60, status.Threshold)
+	}
+	episode.logged = true
+	return true
 }
