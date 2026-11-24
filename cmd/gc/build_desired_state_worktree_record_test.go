@@ -298,3 +298,27 @@ func TestWakeKnownIdentityRequestCarriesWorkBeadTitle(t *testing.T) {
 		t.Errorf("wake-known-identity WorkBeadTitle = %q, want %q", got, want)
 	}
 }
+
+// TestWakeKnownCleanCreateStartsInVerifiedWorktree pins
+// gastownhall/gascity#5753 end to end for the wake-known-identity tier: the
+// clean session legacy realization creates for assigned work naming a
+// verified managed worktree records that worktree, not the pool's own
+// directory.
+func TestWakeKnownCleanCreateStartsInVerifiedWorktree(t *testing.T) {
+	for _, tc := range wakeKnownCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			spec, path := liveSeatManagedSpec(t, "gc-b")
+			request := assignedWorkRequest(t, tc.cfg, managedAssignedWork(spec, tc.assignee), tc.ready, []string{"r1"}, tc.sessions)
+			if request.Tier != "wake-known-identity" {
+				t.Fatalf("request = %+v, want wake-known-identity", request)
+			}
+			rows, _, stderr := realizeFreshRequest(t, request)
+			if len(rows) != 1 {
+				t.Fatalf("created %d sessions, want one clean create; stderr=%s", len(rows), stderr)
+			}
+			if got := preparedStartSessionWorkDir(rows[0]); got != path {
+				t.Fatalf("created session work dir = %q; want the verified worktree %q, not the pool directory; stderr=%s", got, path, stderr)
+			}
+		})
+	}
+}
