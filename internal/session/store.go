@@ -626,7 +626,17 @@ func (s *Store) DropCurrentClaim(id string) error {
 	if strings.TrimSpace(b.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey]) == "" {
 		return nil
 	}
-	return s.setMetadataValue(b.ID, beadmeta.CurrentClaimBeadIDMetadataKey, "")
+	return s.writeCurrentClaimPointer(b.ID, "")
+}
+
+// writeCurrentClaimPointer is the one unconditional write of the current-claim
+// pointer: one single-key SetMetadata of value on the session bead id, a
+// canonical id the caller's validatedBead read returned. Its two callers are
+// DropCurrentClaim's cascade clear and swapCurrentClaim's compare-then-write
+// on a store without metadata CAS; every other pointer write is the fenced
+// beads.ApplyMetadataCAS.
+func (s *Store) writeCurrentClaimPointer(id, value string) error {
+	return s.setMetadataValue(id, beadmeta.CurrentClaimBeadIDMetadataKey, value)
 }
 
 // CurrentClaimOutcome classifies one fenced write of a session's current-claim
@@ -713,7 +723,7 @@ func (s *Store) swapCurrentClaim(id, expected, next string) (CurrentClaimOutcome
 		if b.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey] != expected {
 			return CurrentClaimConflict, nil
 		}
-		if err := s.setMetadataValue(b.ID, beadmeta.CurrentClaimBeadIDMetadataKey, next); err != nil {
+		if err := s.writeCurrentClaimPointer(b.ID, next); err != nil {
 			return "", err
 		}
 		return CurrentClaimLegacy, nil

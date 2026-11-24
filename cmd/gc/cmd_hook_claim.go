@@ -65,6 +65,12 @@ const (
 // It is not a hookClaimReason* constant: those are the drain reasons.
 const hookClaimWorkReasonStartedClaimHeld = "started_claim_held"
 
+// hookClaimWorkReasonReadyAssignment is the work-action reason for an open
+// bead already assigned to this session that the claim promoted
+// (claimFirstReadyHookAssignment): minted by this run's claim, but the
+// session's assignment before it.
+const hookClaimWorkReasonReadyAssignment = "ready_assignment"
+
 // Reasons carried on a bead.claim_released event: which unwind gave the claim
 // back. Each describes a claim this process WON and could not hand to a live
 // consumer.
@@ -188,6 +194,12 @@ type hookClaimReleaseRecord struct {
 type hookClaimExpected struct {
 	Value string
 	Known bool
+}
+
+// namesOther reports whether the read is known and named something other than
+// beadID, a trimmed bead id: the pointer the read saw was not beadID's.
+func (e hookClaimExpected) namesOther(beadID string) bool {
+	return e.Known && strings.TrimSpace(e.Value) != beadID
 }
 
 type hookClaimOptions struct {
@@ -1097,7 +1109,7 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 			OK:            true,
 			Command:       hookClaimCommandName,
 			Action:        "work",
-			Reason:        "ready_assignment",
+			Reason:        hookClaimWorkReasonReadyAssignment,
 			BeadID:        claimed.ID,
 			Assignee:      claimed.Assignee,
 			Route:         hookClaimRoute(claimed),
@@ -1720,16 +1732,10 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 		return writeHookClaimDrain(hookClaimLabel, hookClaimReasonStaleSession, opts.JSON, opts.DrainAck, tolerateDrainAckRefusal(ops.DrainAck), stdout, stderr)
 	}
 	// The current-claim reserve: before the step-started event and the
-	// result line, so a claim that lost the session's pointer to another run
-	// emits neither. A minted one is given back; an adopted one is this
-	// session's assignment, kept for the next claim to serve again.
-	if !reserveHookSessionCurrentClaim(bead, opts, ops, stderr) {
-		cause := fmt.Sprintf("another claim of session %s took its current claim while %s was being claimed", hookClaimSessionID(opts.Env), bead.ID)
-		if minted {
-			return unwindUndeliveredHookClaim(hookClaimReleaseReasonCurrentClaimLost, cause+"; giving it back", bead, opts, ops, dir, started, stderr)
-		}
-		fmt.Fprintf(stderr, "gc hook --claim: %s; leaving it assigned\n", cause) //nolint:errcheck
-		return 1
+	// result line, so a claim another run of the session holds the pointer
+	// against emits neither (refuseUnreservedHookClaim).
+	if reserve := reserveHookSessionCurrentClaim(bead, opts, ops, stderr); reserve != hookCurrentClaimReserved {
+		return refuseUnreservedHookClaim(reserve, result.Reason, bead, opts, ops, dir, started, minted, stderr)
 	}
 	if stamped && hookClaimLifecycleCandidate(durable, opts) {
 		ops.EmitExecutionStepStarted(durable, dir, opts.Env, opts.Assignee)
@@ -1860,6 +1866,37 @@ func refuseHookClaimBeingReleased(bead beads.Bead, opts hookClaimOptions, ops ho
 		}
 	}
 	return 0
+}
+
+// refuseUnreservedHookClaim answers a claim whose current-claim reserve did not
+// let it be delivered (reserveHookSessionCurrentClaim): no result line, no
+// step_started, --drain-ack not consumed, exit 1. reason is the result reason
+// the claim would have been delivered with.
+//
+//   - hookCurrentClaimLost: another claim of the session holds the pointer. A
+//     bead this run minted from routed work is given back
+//     (current_claim_lost). A bead that was already this session's
+//     assignment stays assigned for the next claim to serve again: an adopted
+//     one, and a ready assignment this run promoted (a pinned continuation
+//     sibling, or work slung to the session), whose release would clear the
+//     assignee the session was pinned by.
+//   - hookCurrentClaimHeldBySibling: another claim run of the session reserved
+//     this same bead after this run's pre-query read, so that run delivers it.
+//     This run neither delivers it nor gives it back, and leaves the pointer
+//     and the bead's work_started entry, both of which name the claim that run
+//     serves.
+func refuseUnreservedHookClaim(reserve hookCurrentClaimVerdict, reason string, bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, started hookStartedKey, minted bool, stderr io.Writer) int {
+	sessionID := hookClaimSessionID(opts.Env)
+	if reserve == hookCurrentClaimHeldBySibling {
+		fmt.Fprintf(stderr, "gc hook --claim: another claim of session %s reserved %s as its current claim after this one read the pointer; leaving %s to that claim\n", sessionID, bead.ID, bead.ID) //nolint:errcheck
+		return 1
+	}
+	cause := fmt.Sprintf("another claim of session %s took its current claim while %s was being claimed", sessionID, bead.ID)
+	if minted && reason != hookClaimWorkReasonReadyAssignment {
+		return unwindUndeliveredHookClaim(hookClaimReleaseReasonCurrentClaimLost, cause+"; giving it back", bead, opts, ops, dir, started, stderr)
+	}
+	fmt.Fprintf(stderr, "gc hook --claim: %s; leaving it assigned\n", cause) //nolint:errcheck
+	return 1
 }
 
 // writeHookClaimResultLine writes the one line that carries a claim result to
@@ -3496,31 +3533,62 @@ func emitExecutionStepStarted(rec events.Recorder, step beads.Bead, dir string, 
 //
 // The write is fenced on opts.CurrentClaimExpected, the pointer as this run
 // read it before its work query (session.Store.ReserveCurrentClaim), and it
-// reports whether the claim may be delivered. False means another claim run of
-// the same session moved the pointer off that value: that run's bead is the
-// session's current claim, so this one must not be handed to the turn.
+// reports whether the claim may be delivered (hookCurrentClaimVerdict).
+//
+// A pointer that already names the bead writes nothing and reads back
+// unchanged. On the run's own pre-query read naming that bead, that is the
+// adoption re-serve, and the claim is delivered. On a first attempt whose
+// pre-query read named something else, no write of this run can have put it
+// there, and only another claim run of the session reserves a bead id: that
+// run reserved this bead after this run's read and delivers it, so this run
+// must not (hookCurrentClaimHeldBySibling). An unknown pre-query read cannot
+// tell the two apart, and the claim is delivered.
 //
 // An error is retried with the same expected value, which is safe because an
-// attempt that committed reads back as unchanged. One that never answers is
-// reported on stderr and the claim delivered: the loud refusal for a step that
-// cannot name its bead belongs at the point of use, not here.
-func reserveHookSessionCurrentClaim(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, stderr io.Writer) bool {
+// attempt that committed reads back as unchanged, so an unchanged after an
+// error is delivered. A reserve that never answers is reported on stderr and
+// the claim delivered: the loud refusal for a step that cannot name its bead
+// belongs at the point of use, not here.
+func reserveHookSessionCurrentClaim(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, stderr io.Writer) hookCurrentClaimVerdict {
 	sessionID := hookClaimSessionID(opts.Env)
 	beadID := strings.TrimSpace(bead.ID)
 	if sessionID == "" || beadID == "" {
-		return true
+		return hookCurrentClaimReserved
 	}
 	var err error
 	for attempt := 0; attempt < hookCurrentClaimReserveAttempts; attempt++ {
 		var outcome session.CurrentClaimOutcome
 		outcome, err = ops.ReserveSessionClaim(sessionID, opts.CurrentClaimExpected, beadID)
-		if err == nil {
-			return outcome != session.CurrentClaimConflict
+		if err != nil {
+			continue
 		}
+		switch {
+		case outcome == session.CurrentClaimConflict:
+			return hookCurrentClaimLost
+		case outcome == session.CurrentClaimUnchanged && attempt == 0 && opts.CurrentClaimExpected.namesOther(beadID):
+			return hookCurrentClaimHeldBySibling
+		}
+		return hookCurrentClaimReserved
 	}
 	fmt.Fprintf(stderr, "gc hook --claim: recording current claim %s on session %s: %v\n", beadID, sessionID, err) //nolint:errcheck
-	return true
+	return hookCurrentClaimReserved
 }
+
+// hookCurrentClaimVerdict is what a claim's current-claim reserve decided
+// (reserveHookSessionCurrentClaim).
+type hookCurrentClaimVerdict int
+
+const (
+	// hookCurrentClaimReserved: the pointer names this claim, or the reserve
+	// could not decide; the claim is delivered.
+	hookCurrentClaimReserved hookCurrentClaimVerdict = iota
+	// hookCurrentClaimLost: another claim of the session moved the pointer off
+	// the value this run read before its work query, to another bead.
+	hookCurrentClaimLost
+	// hookCurrentClaimHeldBySibling: another claim run of the session reserved
+	// this same bead after this run's pre-query read; that run delivers it.
+	hookCurrentClaimHeldBySibling
+)
 
 // hookCurrentClaimReserveAttempts bounds the reserve's retries of a store
 // error before the claim is delivered without it.

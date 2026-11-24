@@ -48,7 +48,9 @@ multi-month detour no incident history justifies.
 
 Both fences below are already load-bearing in production and fixed real
 races. New session-owned writers use one of them; which one depends on
-whether the contended decision spans processes or only writers.
+whether the contended decision spans processes or only writers. A writer
+that a store's optional conditional write fences instead names that write
+and its justification, as the current-claim pointer's value-CAS below does.
 
 ### Fence 1 — city identifier flock
 
@@ -159,19 +161,28 @@ writer under the "own bead and justification" clause below (issue #6110).
   back its own bead clears the pointer only while it still names that bead.
   `DropCurrentClaim` stays unfenced for the close, retire and reassign
   cascades, where the session loses all its work at once.
-- **Why a lost race converges.** The loser delivers nothing: a minted claim
-  is given back (`current_claim_lost`), and an adopted bead stays assigned
-  to the session, which the next claim serves again. A pointer already
-  naming the bead is left unwritten, so an adoption re-run makes no write.
+- **Why a lost race converges.** The loser delivers nothing: a claim it
+  minted from routed work is given back (`current_claim_lost`), and a bead
+  that was the session's assignment before the claim (adopted, or a ready
+  assignment it promoted) stays assigned, and the next claim serves it again.
+  A pointer already naming the bead is left unwritten, so an adoption re-run
+  makes no write. When the run's own pre-query read named another value, an
+  unchanged pointer on its first attempt means another claim run of the
+  session reserved this same bead after that read: that run delivers it, and
+  this one neither delivers it nor gives it back, so its rollback cannot
+  clear that run's pointer or release the bead that run is working.
 - **Residuals.** A store without metadata CAS falls back to compare, then
   write (`CurrentClaimLegacy`), with the old interleaving window. A failed
   pre-read leaves the expected value unknown, and the reserve reads it at
   stamp time. A reserve whose store errors three times is reported and the
-  claim delivered without it.
+  claim delivered without it, and an unchanged pointer after an error is
+  taken as the run's own committed write.
 - **Contended-path tests.** `TestReserveCurrentClaimConcurrentSingleWinner`,
   `TestReserveCurrentClaimInterleavedClaimersExactlyOneWins`,
   `TestClearCurrentClaimLeavesLaterStamp`,
-  `TestHookClaimConcurrentMintsDeliverExactlyOnce` and
+  `TestHookClaimConcurrentMintsDeliverExactlyOnce`,
+  `TestHookClaimSiblingAdoptionOfAMintedBeadIsLeftToIt`,
+  `TestHookClaimAdoptionOfASiblingsReservedBead` and
   `TestHookClaimReserveUsesPreQueryRead`.
 
 ## What a mutating slice must state

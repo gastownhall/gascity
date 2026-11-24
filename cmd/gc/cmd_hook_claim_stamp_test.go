@@ -756,6 +756,24 @@ func currentClaimRoutedWork(id string) string {
 	return `[{"id":"` + id + `","status":"open","metadata":{"gc.routed_to":"worker"}}]`
 }
 
+// currentClaimAssignedWork is one in_progress candidate id already assigned to
+// the claiming session (currentClaimHookOptions' assignee): the claim adopts it.
+func currentClaimAssignedWork(id string) string {
+	return `[{"id":"` + id + `","status":"in_progress","assignee":"worker-1","metadata":{"gc.routed_to":"worker"}}]`
+}
+
+// currentClaimLifecycleReadback is a ReadWorkMeta seam whose readback makes the
+// claimed bead a session-owned graph step of hookCurrentSessionID
+// (hookClaimLifecycleCandidate), so a claim handed to the turn emits
+// execution.step_started for it.
+func currentClaimLifecycleReadback(_ context.Context, _ string, _ []string, id, assignee string) (beads.Bead, error) {
+	return beads.Bead{ID: id, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{
+		beadmeta.SessionIDMetadataKey:  hookCurrentSessionID,
+		beadmeta.RootBeadIDMetadataKey: "wf-root",
+		beadmeta.StepIDMetadataKey:     "step-" + id,
+	}}, nil
+}
+
 // currentClaimHookOps is rec's claim ops with the session seams a real
 // invocation wires (hookCity.claimOps) over front, so the claim reads and
 // writes the current-claim pointer exactly as production does. Only the work
@@ -824,19 +842,26 @@ func TestHookClaimRollbackKeepsLaterWinnersPointer(t *testing.T) {
 // session both read the pointer as "X" before their work queries and both mint.
 // The first run's reserve swaps the pointer and it delivers; the second run's
 // reserve conflicts, so it gives its bead back as current_claim_lost, prints no
-// result, leaves the drain-ack alone and exits 1.
+// result, emits no step_started, leaves the drain-ack alone and exits 1. Both
+// beads read back as session-owned graph steps, so the first run's
+// step_started is the control that the second run's absence is the reserve's
+// doing.
 func TestHookClaimConcurrentMintsDeliverExactlyOnce(t *testing.T) {
 	front, mem := currentClaimSession(t, "X")
 	opts := currentClaimHookOptions()
 	opts.CurrentClaimExpected = hookClaimExpected{Value: "X", Known: true}
 
 	first := &turnBoundClaimRecorder{}
+	firstOps := currentClaimHookOps(t, first, currentClaimRoutedWork("hw-a"), front)
+	firstOps.ReadWorkMeta = currentClaimLifecycleReadback
 	var firstOut, firstErr bytes.Buffer
-	firstCode := doHookClaim("query", "/rig", opts, currentClaimHookOps(t, first, currentClaimRoutedWork("hw-a"), front), &firstOut, &firstErr)
+	firstCode := doHookClaim("query", "/rig", opts, firstOps, &firstOut, &firstErr)
 
 	second := &turnBoundClaimRecorder{}
+	secondOps := currentClaimHookOps(t, second, currentClaimRoutedWork("hw-b"), front)
+	secondOps.ReadWorkMeta = currentClaimLifecycleReadback
 	var secondOut, secondErr bytes.Buffer
-	secondCode := doHookClaim("query", "/rig", opts, currentClaimHookOps(t, second, currentClaimRoutedWork("hw-b"), front), &secondOut, &secondErr)
+	secondCode := doHookClaim("query", "/rig", opts, secondOps, &secondOut, &secondErr)
 
 	if firstCode != 0 {
 		t.Fatalf("first run code = %d, want 0; stderr=%s", firstCode, firstErr.String())
@@ -846,6 +871,12 @@ func TestHookClaimConcurrentMintsDeliverExactlyOnce(t *testing.T) {
 	}
 	if len(first.releases) != 0 {
 		t.Fatalf("first run releases = %v, want none", first.releases)
+	}
+	if !reflect.DeepEqual(first.stepsStarted, []string{"hw-a"}) {
+		t.Fatalf("first run step_started = %v, want [hw-a]", first.stepsStarted)
+	}
+	if len(second.stepsStarted) != 0 {
+		t.Fatalf("second run step_started = %v, want none: its reserve conflicted", second.stepsStarted)
 	}
 	if secondCode != 1 {
 		t.Fatalf("second run code = %d, want 1; stdout=%q stderr=%s", secondCode, secondOut.String(), secondErr.String())
@@ -903,10 +934,12 @@ func TestHookClaimReserveRetriesThenDelivers(t *testing.T) {
 // bead already assigned to it (adopted, not minted) whose reserve finds another
 // claim holding the session's pointer hands the turn nothing — no result line,
 // no step_started, no drain-ack — and keeps the bead, which this run did not
-// take and so must not give back.
+// take and so must not give back. The bead reads back as a session-owned graph
+// step, so a step_started emitted ahead of the reserve would show here.
 func TestHookClaimAdoptedReserveConflictDeliversNothing(t *testing.T) {
 	rec := &turnBoundClaimRecorder{}
-	ops := rec.ops(t, `[{"id":"hw-adopt","status":"in_progress","assignee":"worker-1","metadata":{"gc.routed_to":"worker"}}]`)
+	ops := rec.ops(t, currentClaimAssignedWork("hw-adopt"))
+	ops.ReadWorkMeta = currentClaimLifecycleReadback
 	sessSpy := &sessionClaimSpy{outcomes: []session.CurrentClaimOutcome{session.CurrentClaimConflict}}
 	ops.ReserveSessionClaim = sessSpy.reserve
 	opts := currentClaimHookOptions()
@@ -1016,5 +1049,160 @@ func TestHookClaimReserveUsesPreQueryRead(t *testing.T) {
 				t.Fatalf("pointer = %q, want Y", got)
 			}
 		})
+	}
+}
+
+// TestHookClaimSiblingAdoptionOfAMintedBeadIsLeftToIt pins the same-bead
+// interleaving of two claim runs of one session that both read the pointer as
+// "X" before their work queries. Run A mints hw-a. Run B's work query lands
+// after A's claim, so B adopts hw-a, reserves it and delivers it. A's reserve
+// then finds the pointer already naming hw-a, which A's own read did not: B
+// holds it. A delivers nothing and gives nothing back, so A's dead result pipe
+// (the F-C unwind's trigger) can neither clear B's pointer nor release the
+// bead B is working.
+func TestHookClaimSiblingAdoptionOfAMintedBeadIsLeftToIt(t *testing.T) {
+	front, mem := currentClaimSession(t, "X")
+	opts := currentClaimHookOptions()
+	opts.CurrentClaimExpected = hookClaimExpected{Value: "X", Known: true}
+
+	sibling := &turnBoundClaimRecorder{}
+	var siblingOut, siblingErr bytes.Buffer
+	siblingCode := -1
+	minter := &turnBoundClaimRecorder{}
+	ops := currentClaimHookOps(t, minter, currentClaimRoutedWork("hw-a"), front)
+	claim := ops.Claim
+	ops.Claim = func(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
+		claimed, ok, err := claim(ctx, dir, env, beadID, assignee)
+		siblingCode = doHookClaim("query", "/rig", opts, currentClaimHookOps(t, sibling, currentClaimAssignedWork(beadID), front), &siblingOut, &siblingErr)
+		return claimed, ok, err
+	}
+
+	var stderr bytes.Buffer
+	code := doHookClaim("query", "/rig", opts, ops, brokenPipeWriter{}, &stderr)
+
+	if siblingCode != 0 {
+		t.Fatalf("sibling run code = %d, want 0; stderr=%s", siblingCode, siblingErr.String())
+	}
+	if got := decodeTurnBoundResult(t, siblingOut.String()); got.BeadID != "hw-a" || got.Reason != "existing_assignment" {
+		t.Fatalf("sibling run result = %+v, want hw-a adopted and delivered", got)
+	}
+	if code != 1 {
+		t.Fatalf("minting run code = %d, want 1; stderr=%s", code, stderr.String())
+	}
+	if !reflect.DeepEqual(minter.claims, []string{"hw-a"}) {
+		t.Fatalf("minting run claims = %v, want [hw-a]", minter.claims)
+	}
+	if len(minter.releases) != 0 || len(minter.claimReleased) != 0 {
+		t.Fatalf("minting run releases = %v claim_released = %+v, want none: the sibling is working hw-a", minter.releases, minter.claimReleased)
+	}
+	if minter.drainAcked {
+		t.Fatal("minting run consumed --drain-ack")
+	}
+	if got := currentClaimPointerOf(t, mem); got != "hw-a" {
+		t.Fatalf("pointer = %q, want hw-a: the minting run cleared the sibling's reserve", got)
+	}
+	if !strings.Contains(stderr.String(), "leaving hw-a to that claim") {
+		t.Fatalf("stderr = %q, want the cause naming hw-a", stderr.String())
+	}
+}
+
+// TestHookClaimAdoptionOfASiblingsReservedBead pins what a reserve that finds
+// the pointer already naming its bead means, by what the run read before its
+// work query. Run A mints hw-a from an empty pointer, reserves it and delivers
+// it; run B then adopts hw-a.
+//
+//   - B read the pointer before A's reserve (""): A holds hw-a, so B delivers
+//     nothing and gives nothing back, and hw-a is delivered once, not twice.
+//   - B read hw-a: the session re-serves its own claim, as every turn does.
+//   - B's read failed: the reserve reads the pointer itself and cannot tell
+//     the two apart, so B delivers.
+func TestHookClaimAdoptionOfASiblingsReservedBead(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		read          hookClaimExpected
+		wantDelivered bool
+	}{
+		{name: "read before the sibling reserved", read: hookClaimExpected{Value: "", Known: true}},
+		{name: "read the sibling's reserve", read: hookClaimExpected{Value: "hw-a", Known: true}, wantDelivered: true},
+		{name: "read failed", read: hookClaimExpected{}, wantDelivered: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			front, mem := currentClaimSession(t, "")
+			minterOpts := currentClaimHookOptions()
+			minterOpts.CurrentClaimExpected = hookClaimExpected{Value: "", Known: true}
+			var minterOut, minterErr bytes.Buffer
+			if code := doHookClaim("query", "/rig", minterOpts, currentClaimHookOps(t, &turnBoundClaimRecorder{}, currentClaimRoutedWork("hw-a"), front), &minterOut, &minterErr); code != 0 {
+				t.Fatalf("minting run code = %d, want 0; stderr=%s", code, minterErr.String())
+			}
+
+			opts := currentClaimHookOptions()
+			opts.CurrentClaimExpected = tc.read
+			rec := &turnBoundClaimRecorder{}
+			var stdout, stderr bytes.Buffer
+			code := doHookClaim("query", "/rig", opts, currentClaimHookOps(t, rec, currentClaimAssignedWork("hw-a"), front), &stdout, &stderr)
+
+			if len(rec.releases) != 0 || len(rec.claimReleased) != 0 {
+				t.Fatalf("releases = %v claim_released = %+v, want none", rec.releases, rec.claimReleased)
+			}
+			if got := currentClaimPointerOf(t, mem); got != "hw-a" {
+				t.Fatalf("pointer = %q, want hw-a", got)
+			}
+			if tc.wantDelivered {
+				if code != 0 {
+					t.Fatalf("code = %d, want 0; stderr=%s", code, stderr.String())
+				}
+				if got := decodeTurnBoundResult(t, stdout.String()); got.BeadID != "hw-a" {
+					t.Fatalf("result = %+v, want hw-a delivered", got)
+				}
+				return
+			}
+			if code != 1 || stdout.Len() != 0 {
+				t.Fatalf("code = %d stdout = %q, want 1 and no result line; stderr=%s", code, stdout.String(), stderr.String())
+			}
+			if rec.drainAcked {
+				t.Fatal("consumed --drain-ack")
+			}
+		})
+	}
+}
+
+// TestHookClaimReadyAssignmentReserveConflictKeepsTheAssignment: a run that
+// promotes an open bead already assigned to the session (a pinned continuation
+// sibling, or work slung to it), and then finds another claim of the session
+// holding the pointer, delivers nothing and keeps the bead assigned, as it
+// keeps an adopted one. Giving it back would clear the assignee the session
+// was pinned by; kept, the next claim serves it again.
+func TestHookClaimReadyAssignmentReserveConflictKeepsTheAssignment(t *testing.T) {
+	front, mem := currentClaimSession(t, "X")
+	rec := &turnBoundClaimRecorder{}
+	ops := currentClaimHookOps(t, rec, `[{"id":"hw-pin","status":"open","assignee":"worker-1","metadata":{"gc.routed_to":"worker"}}]`, front)
+	query := ops.Runner
+	ops.Runner = func(cmd, dir string) (string, error) {
+		moveCurrentClaim(t, mem, "Y")
+		return query(cmd, dir)
+	}
+	opts := currentClaimHookOptions()
+	opts.CurrentClaimExpected = hookClaimExpected{Value: "X", Known: true}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("query", "/rig", opts, ops, &stdout, &stderr)
+
+	if code != 1 || stdout.Len() != 0 {
+		t.Fatalf("code = %d stdout = %q, want 1 and no result line; stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !reflect.DeepEqual(rec.claims, []string{"hw-pin"}) {
+		t.Fatalf("claims = %v, want [hw-pin] promoted by the ready-assignment tier", rec.claims)
+	}
+	if len(rec.releases) != 0 || len(rec.claimReleased) != 0 {
+		t.Fatalf("releases = %v claim_released = %+v, want the session's assignment kept", rec.releases, rec.claimReleased)
+	}
+	if rec.drainAcked {
+		t.Fatal("consumed --drain-ack")
+	}
+	if got := currentClaimPointerOf(t, mem); got != "Y" {
+		t.Fatalf("pointer = %q, want Y", got)
+	}
+	if !strings.Contains(stderr.String(), "hw-pin was being claimed; leaving it assigned") {
+		t.Fatalf("stderr = %q, want the cause naming hw-pin", stderr.String())
 	}
 }
