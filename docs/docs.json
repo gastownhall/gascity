@@ -11,8 +11,8 @@
   "navbar": {
     "links": [
       {
-        "label": "Gas City Hall",
-        "href": "https://gascityhall.com"
+        "label": "Gas City",
+        "href": "https://gascity.com"
       },
       {
         "label": "Discord",
@@ -149,13 +149,13 @@
         "pages": [
           "index",
           "getting-started/installation",
-          "getting-started/upgrading",
           "getting-started/quickstart",
           "getting-started/dashboard",
           "getting-started/how-gas-city-works",
           "getting-started/coming-from-gastown",
           "getting-started/faq",
-          "getting-started/troubleshooting"
+          "getting-started/troubleshooting",
+          "getting-started/upgrading"
         ]
       },
       {

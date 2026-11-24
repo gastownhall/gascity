@@ -75,6 +75,36 @@ func managedDoltLockHolderPIDs(lockPath, procLocksPath string) ([]int, error) {
 // Under-inclusion is impossible, since an flock holder necessarily has the
 // file open.
 func managedDoltLockHolderPIDsWithProcRoot(lockPath, procLocksPath, procRoot string) ([]int, error) {
+	// /proc/locks is a seq_file read in several read(2) calls, and a lock
+	// another process takes or drops between them shifts the rows the next
+	// call starts from, so one scan can miss a row that was there the whole
+	// time (seen 3 to 49 times in 3000 scans under flock churn on a busy
+	// host). An empty holder set is therefore scanned again, up to
+	// managedDoltProcLocksScans times, about a millisecond each, before it
+	// is believed. Every caller shares this: the managed Dolt SIGKILL gate
+	// and the guided split's co-tenant liveness.
+	var pids []int
+	var err error
+	for scan := 0; scan < managedDoltProcLocksScans; scan++ {
+		pids, err = managedDoltScanProcLocksOnce(lockPath, procLocksPath, procRoot)
+		if err != nil || len(pids) > 0 {
+			return pids, err
+		}
+	}
+	return pids, nil
+}
+
+// managedDoltProcLocksScans is how many times an empty holder set is scanned
+// before it is believed.
+const managedDoltProcLocksScans = 3
+
+// managedDoltScanProcLocksOnce is one scan; a test seam, so a scan that
+// misses can be made to happen on demand.
+var managedDoltScanProcLocksOnce = managedDoltScanProcLocks
+
+// managedDoltScanProcLocks is one scan of procLocksPath for lockPath's
+// holders (managedDoltLockHolderPIDsWithProcRoot).
+func managedDoltScanProcLocks(lockPath, procLocksPath, procRoot string) ([]int, error) {
 	info, err := os.Stat(lockPath)
 	if err != nil {
 		return nil, fmt.Errorf("stat lock file %s: %w", lockPath, err)

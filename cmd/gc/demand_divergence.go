@@ -157,6 +157,12 @@ func classifyDemandTrigger(triggerID, dir string, opts hookClaimOptions, ops hoo
 		// be. Settle it instead, against the same live deps the drain-ack open arm
 		// settles on.
 		return status, classifyDemandTriggerBlockedness(triggerID, dir, opts, ops)
+	case demandRowStatusBlocked:
+		// bd's own blocked status is a fresh bead-local field and the ready query
+		// excludes the row whatever its dependencies, so it is proof, not a
+		// projection to settle: no live-dep read, and no way for a flaky dep read
+		// to turn it into unknown or a met-deps one into divergence.
+		return status, events.DemandClaimBlocked
 	default:
 		// Deferred: gated by a future defer_until or bd's deferred status, fresh
 		// bead-local fields, so draining past it is correct pull. Held rows are

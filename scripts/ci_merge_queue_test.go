@@ -245,10 +245,13 @@ var mergeQueueEventExprs = map[string]string{
 	"bazel.yml jobs.rrc-verify.if":                                                         "false",                      // nightly and dispatch only
 	"bazel.yml jobs.split-strict-alert.if":                                                 "false",                      // nightly only
 	"bazel.yml jobs.rbe.steps[base].if":                                                    "false",                      // the queue ref is already the merge
-	"bazel.yml jobs.rbe.steps[splitpaths].if":                                              "false",                      // a merge group has no PR file list; the lane never runs there
-	"bazel.yml jobs.rbe.steps[splitpaths].env.PR_NUMBER":                                   "",                           // (step skipped)
-	"bazel.yml jobs.lane.steps[Split-strict downward ratchet].if":                          "false",                      // nightly and dispatch only; the lane never runs in a merge group
-	"bazel.yml jobs.rbe.steps[base].env.BASE_REF":                                          "",                           // (step skipped)
+	"bazel.yml jobs.rbe.steps[splitpaths].if":                                              "true",                       // the stopgap: judges the entry's own diff instead of a PR's files
+	"bazel.yml jobs.rbe.steps[splitpaths].env.EVENT":                                       "merge_group",
+	"bazel.yml jobs.rbe.steps[splitpaths].env.PR_NUMBER":                                   "", // the compare-API arm is used instead
+	"bazel.yml jobs.rbe.steps[splitpaths].env.BASE_SHA":                                    mergeQueueBaseSHA,
+	"bazel.yml jobs.rbe.steps[splitpaths].env.HEAD_SHA":                                    mergeQueueHeadSHA,
+	"bazel.yml jobs.lane.steps[Split-strict downward ratchet].if":                          "false", // nightly and dispatch only
+	"bazel.yml jobs.rbe.steps[base].env.BASE_REF":                                          "",      // (step skipped)
 	"bazel.yml jobs.rbe.steps[Pre-warm the OSS worker pool (rbe-west)].env.DEFAULT_BRANCH": "main",
 	"bazel.yml jobs.lane.steps[worker-env].env.DEFAULT_BRANCH":                             "main",
 	"bazel.yml jobs.lane.steps[bazel].env.RBE_FORK_PR":                                     "", // fork modes only

@@ -41,7 +41,7 @@ func inheritStampStore(t *testing.T) (store *beads.MemStore, workID string) {
 // the stores cmdSlingWithJSON also opens as the claim stores.
 func inheritStampDeps(cfg *config.City, store beads.Store) (slingDeps, *bytes.Buffer, *bytes.Buffer) {
 	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
-	deps.Store = store
+	deps = slingDepsWithStore(deps, store)
 	deps.SourceWorkflowStores = func() ([]sling.SourceWorkflowStore, error) {
 		return []sling.SourceWorkflowStore{{Store: store, StoreRef: deps.StoreRef, Strict: true}}, nil
 	}

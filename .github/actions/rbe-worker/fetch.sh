@@ -25,6 +25,13 @@
 # every real invocation, so a real run can never reach a file:// URL this
 # way).
 #
+# Every git call also runs with maintenance.auto=false and gc.auto=0: git
+# 2.47 and later follow a fetch with a detached `git maintenance run --auto`
+# that keeps writing into $dir/.git after this script exits, and with no
+# global config and no GIT_TEMPLATE_DIR, nothing else turns it off. In
+# scripts/rbe_worker_shim_test.go that process races t.TempDir's cleanup
+# ("unlinkat .../rbe-worker-pin/.git: directory not empty" on macOS).
+#
 # bash-3.2-safe: no mapfile, no timeout. gascity's script tests run this on
 # macOS's /bin/bash (bash 3.2), per scripts/rbe_worker_shim_test.go.
 set -euo pipefail
@@ -40,7 +47,7 @@ for v in $(env | grep -oE '^GIT_[A-Z0-9_]+' || true); do
 done
 git_protocol_allow=(-c protocol.allow=never -c protocol.https.allow=always)
 [ "${RBE_WORKER_TEST_ALLOW_FILE:-}" != 1 ] || git_protocol_allow+=(-c protocol.file.allow=always)
-git() { command git -c core.hooksPath=/dev/null "${git_protocol_allow[@]}" "$@"; }
+git() { command git -c maintenance.auto=false -c gc.auto=0 -c core.hooksPath=/dev/null "${git_protocol_allow[@]}" "$@"; }
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 url=https://github.com/gastownhall/rbe-worker.git

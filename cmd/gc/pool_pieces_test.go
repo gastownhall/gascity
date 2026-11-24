@@ -226,6 +226,8 @@ func randAwakeInput(r *rand.Rand, uniqueNames bool) AwakeInput {
 			CurrentlyProcessingBeadID: pick("", "w0", "w1"),
 			PostCreateProtected:       coin(),
 		}
+		// The bridge judges the agent only for a row with an explicit wake.
+		b.ExplicitWakeStartable = b.ExplicitWake && coin()
 		in.SessionBeads = append(in.SessionBeads, b)
 		in.RunningSessions = setRand(r, in.RunningSessions, name)
 		in.AttachedSessions = setRand(r, in.AttachedSessions, name)
@@ -334,7 +336,7 @@ func TestComputeAwakeSetMinActiveCountsAsleepRowWithAnotherWake(t *testing.T) {
 	in := AwakeInput{
 		Agents: []AwakeAgent{{QualifiedName: "worker", MinActiveSessions: 1}},
 		SessionBeads: []AwakeSessionBead{
-			{ID: "gc-a", SessionName: "s-a", Template: "worker", State: "asleep", ExplicitWake: true},
+			{ID: "gc-a", SessionName: "s-a", Template: "worker", State: "asleep", ExplicitWake: true, ExplicitWakeStartable: true},
 			{ID: "gc-b", SessionName: "s-b", Template: "worker", State: "asleep", SleepReason: "city-stop"},
 		},
 		Now: now,

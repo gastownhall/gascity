@@ -148,6 +148,9 @@ type storageVerbScope struct {
 	// Splits is true for a verb that moves the city onto its split: the
 	// remote-runtime refusal applies.
 	Splits bool
+	// CityRestore is the city restore itself, which an unfinished city
+	// restore does not refuse: it is what finishes it.
+	CityRestore bool
 }
 
 // acquireStorageVerbExclusion takes the controller lock and runs the liveness
@@ -163,6 +166,11 @@ func acquireStorageVerbExclusion(request storageOperatorRequest, scope storageVe
 	cityPath := request.CityPath
 	if err := storageVerbRemoteStageRefusal(cityPath); err != nil {
 		return nil, err
+	}
+	if !scope.CityRestore {
+		if err := storageCityRestoreRefusal(cityPath); err != nil {
+			return nil, err
+		}
 	}
 	registered, err := storageVerbCityRegistered(cityPath)
 	if err != nil {
@@ -408,21 +416,49 @@ func recordStorageAttestation(cityPath, logPrefix string, hazards []string, stde
 	if len(hazards) == 0 {
 		return
 	}
-	operator := "unknown"
-	if u, err := user.Current(); err == nil {
-		operator = u.Username
-	}
-	at := time.Now().UTC().Format(time.RFC3339)
+	operator, at := storageAttestationOperator(), time.Now().UTC().Format(time.RFC3339)
 	for _, h := range hazards {
 		fmt.Fprintf(stderr, "%s: attested --%s=%s (%s, %s)\n", logPrefix, storageForceFlag, h, operator, at) //nolint:errcheck // best-effort stderr
 	}
+	appendStorageAttestationLog(cityPath, logPrefix, hazards, operator, at, stderr)
+}
+
+// storageAttestationOperator is who an attestation records: the user running
+// the command.
+func storageAttestationOperator() string {
+	if u, err := user.Current(); err == nil {
+		return u.Username
+	}
+	return "unknown"
+}
+
+// appendStorageAttestationLog appends a line per hazard, attested by operator
+// at at, to .gc/storage-attestations.log, which gc doctor reads. A failed
+// append is said on stderr.
+func appendStorageAttestationLog(cityPath, logPrefix string, hazards []string, operator, at string, stderr io.Writer) {
+	lines := make([]string, 0, len(hazards))
+	for _, h := range hazards {
+		lines = append(lines, storageAttestationLine(h, operator, at, logPrefix))
+	}
+	appendStorageAttestationLines(cityPath, logPrefix, lines, stderr)
+}
+
+// storageAttestationLine is the attestation log's line for hazard, attested
+// by operator at at in the run logPrefix names.
+func storageAttestationLine(hazard, operator, at, logPrefix string) string {
+	return fmt.Sprintf("#gc:attested %s %s %s %s", hazard, operator, at, logPrefix)
+}
+
+// appendStorageAttestationLines appends lines to
+// .gc/storage-attestations.log. A failed append is said on stderr.
+func appendStorageAttestationLines(cityPath, logPrefix string, lines []string, stderr io.Writer) {
 	f, err := os.OpenFile(filepath.Join(cityPath, ".gc", storageAttestationLog), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: recording the attestation: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return
 	}
 	defer f.Close() //nolint:errcheck // best-effort
-	for _, h := range hazards {
-		fmt.Fprintf(f, "#gc:attested %s %s %s %s\n", h, operator, at, logPrefix) //nolint:errcheck // best-effort
+	for _, line := range lines {
+		fmt.Fprintln(f, line) //nolint:errcheck // best-effort
 	}
 }
