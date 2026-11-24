@@ -705,6 +705,7 @@ func RunNudgeFrontDoorTests(r Runner, suite NudgesSuite) {
 	runNudgeLegBTests(r, suite)
 	runNudgeBatchTests(r, suite)
 	runNudgeWholeQueueReadTests(r, suite)
+	runNudgeStartupTests(r, suite)
 
 	r.Run("ShadowsProjectTheQueuedNudge", func(r Runner) {
 		fronts := mustFrontDoors(r, suite)

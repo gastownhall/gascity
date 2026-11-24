@@ -227,7 +227,7 @@ func TestHandleStatusServesStaleAndRefreshesInBackground(t *testing.T) {
 	// observation is staleSnapshotAgeS old. That is the lagging-reconciler
 	// case: the response entry below is milliseconds old, the snapshot it was
 	// built from is minutes old, and X-GC-Cache-Age-S must report the worse
-	// of the two so `gc status`'s staleness banner still fires.
+	// of the two so `gc status`'s cache-age footer still fires.
 	const staleSnapshotAgeS = 300.0
 	now := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
 	t.Cleanup(SetLivenessClockForTest(&clock.Fake{Time: now}))
@@ -299,16 +299,15 @@ func TestHandleStatusServesStaleAndRefreshesInBackground(t *testing.T) {
 		t.Fatalf("stale-served X-GC-Index = %d, want the primed build index %d: the stale body predates every later event", got, primedIndex)
 	}
 
-	// The stale-served response still carries the existing X-GC-Cache-Age-S
-	// staleness marker (ra-4u2eqc's "if the API shape allows" — it already
-	// does, so no new field was added), letting the CLI's existing >30s
-	// staleness banner logic (which reads this same header via the CLI's
-	// api.Client) apply to an SWR-served body the same way it does to any
-	// other cache hit. Its VALUE matters, not just its presence: the header
-	// must report the greater of the response-entry age (milliseconds here)
-	// and the city store's snapshot age (staleSnapshotAgeS). Reporting only
-	// the entry age would silently suppress the CLI banner on exactly the
-	// lagging-reconciler city this endpoint exists to survive.
+	// The stale-served response still carries the X-GC-Cache-Age-S staleness
+	// marker, letting the CLI's cache-age footer (which reads this same header
+	// via the CLI's api.Client) apply to an SWR-served body the same way it
+	// does to any other cache hit. Its VALUE matters, not just its presence:
+	// the header must report the greater of the response-entry age
+	// (milliseconds here) and the city store's snapshot age
+	// (staleSnapshotAgeS). Reporting only the entry age would silently
+	// suppress the CLI footer on exactly the lagging-reconciler city this
+	// endpoint exists to survive.
 	raw := rec2.Header().Get("X-GC-Cache-Age-S")
 	if raw == "" {
 		t.Fatal("stale-served response missing X-GC-Cache-Age-S header")
@@ -322,6 +321,11 @@ func TestHandleStatusServesStaleAndRefreshesInBackground(t *testing.T) {
 	}
 	if age != staleSnapshotAgeS {
 		t.Fatalf("X-GC-Cache-Age-S = %v, want %v (the greater of the response-entry age and the lagging store snapshot age)", age, staleSnapshotAgeS)
+	}
+	// The store's age dominates, so the age is the cache's: its re-scans,
+	// not the saved body's rebuild, bound it.
+	if got := rec2.Header().Get("X-GC-Cache-Refresh"); got != "scheduled" {
+		t.Fatalf("X-GC-Cache-Refresh = %q, want scheduled when the store's age dominates", got)
 	}
 
 	// Concurrent duplicate misses must coalesce onto a single background
@@ -378,8 +382,8 @@ func TestHandleStatusServesStaleAndRefreshesInBackground(t *testing.T) {
 
 	// The in-flight guard must clear after completion; a leaked guard would
 	// wedge every future refresh for this key.
-	if srv.responseRefreshing["status"] {
-		t.Fatal("responseRefreshing[\"status\"] still true after background refresh completed (leaked guard)")
+	if srv.statusBuilds["status"] != nil {
+		t.Fatal("statusBuilds[\"status\"] still set after background refresh completed (leaked guard)")
 	}
 }
 
@@ -480,8 +484,8 @@ func TestHandleStatusBackgroundRefreshPanicDoesNotCrashServer(t *testing.T) {
 	// line never runs; reaching it at all is half the assertion.
 	srv.waitForBackground()
 
-	if srv.responseRefreshing["status"] {
-		t.Fatal("responseRefreshing[\"status\"] still true after a panicking background refresh (leaked guard wedges every future refresh)")
+	if srv.statusBuilds["status"] != nil {
+		t.Fatal("statusBuilds[\"status\"] still set after a panicking background refresh (leaked guard wedges every future refresh)")
 	}
 }
 

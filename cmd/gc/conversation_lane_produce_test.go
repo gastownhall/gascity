@@ -706,9 +706,9 @@ func TestDoSlingNudgeUnderLaneProposesTheBeadsNotice(t *testing.T) {
 			runner := newFakeRunner()
 			deps, stdout, stderr := testDeps(c.cfg, c.sp, runner.run)
 			deps.CityPath = c.dir
-			deps.Store = c.store
+			deps = slingDepsWithStore(deps, c.store)
 			if refused {
-				deps.Store = noBatchStore{c.store}
+				deps = slingDepsWithStore(deps, noBatchStore{c.store})
 			}
 			opts := testOpts(config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}, "gc-work-1")
 			opts.Nudge = true
@@ -782,7 +782,7 @@ func TestDoSlingNudgeUnderLaneResolvesARigBeadsSessionInTheCityStore(t *testing.
 			runner := newFakeRunner()
 			deps, stdout, stderr := testDeps(c.cfg, c.sp, runner.run)
 			deps.CityPath = c.dir
-			deps.Store = rig
+			deps = slingDepsWithStore(deps, rig)
 			opts := testOpts(config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}, "rg-work-1")
 			opts.Nudge = true
 			calls := len(c.nudges())

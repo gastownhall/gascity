@@ -6,6 +6,13 @@ Bound maintenance and watchdog deletion passes, and guard every candidate
 against stranding live workflow descendants before deleting it. Live-descendant
 refusals do not consume the deletion budget.
 
+Delete the guarded set through `deleteWorkflowBeadsBatch` in chunks of at most
+32 ids, so each chunk is rechecked at the set level right before its delete.
+A failed chunk stops that store's pass and counts none of its cleared runs;
+the per-bead fallback stops at its first failure. The cross-store bounded
+sweep therefore does not charge a failing store's deletes against its budget,
+and its worst case is stores times limit per pass.
+
 Order dispatch must progress independently of tracking and retention sweeps.
 Each maintenance lane owns its cadence, suspension gate, pressure episode, and
 shutdown cancellation; stop and join the lanes when the runtime exits.
