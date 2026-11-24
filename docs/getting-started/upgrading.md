@@ -155,6 +155,62 @@ On a city that splits its storage the line gives the pinned `bd` itself, run
 in the rig's directory with `BEADS_DIR` set to it. Run that from a shell with
 no `BEADS_DOLT_*` variables set, or `bd` may reach another server.
 
+### Migrate both lanes
+
+Beads records a database's schema in two migration lanes, shown as
+`main/ignored` (`v53/11` above). A migration is finished only when both lanes
+reach the schema the line names. A `bd` whose migration moves only the main
+lane can leave the example database at `v66/11`, which `gc` still reports as
+behind and which a `bd` may refuse to open. Migrate with a `bd` you know moves
+both lanes, then confirm it. The check reads both lanes and reports the
+database as current only when both match:
+
+```bash
+gc doctor --check bd-schema
+```
+
+### Name the migrator you trust
+
+The command a `bd schema:` line gives runs the city's pinned `bd`. If that is
+not the binary you migrate with, set `migrate_command` under `[beads]`. Every
+line and the `bd-schema` check then give your command, filled in for each
+database. Gas City never runs it.
+
+Pick a migrator whose schema is the one the city's pinned `bd` runs at, never
+a newer one. A database migrated past the pinned `bd`'s schema is one that
+`bd` refuses, so change the migrator only together with the pinned `bd`.
+
+```toml
+[beads]
+# One shell line, rendered per database as a Go template.
+migrate_command = "cd {{shq .ScopeDir}} && BEADS_DIR={{shq .BeadsDir}} BEADS_DOLT_SERVER_HOST={{shq .Host}} BEADS_DOLT_SERVER_PORT={{shq .Port}} BEADS_DOLT_SERVER_DATABASE={{shq .Database}} /opt/beads/migrator/bd migrate schema"
+```
+
+| Field | Value |
+|---|---|
+| `{{.City}}` | the city directory |
+| `{{.Rig}}` | the rig's name; empty for the city's own database |
+| `{{.ScopeDir}}` | the directory of the city or rig the database belongs to |
+| `{{.BeadsDir}}` | that directory's `.beads` |
+| `{{.Database}}` | the database's name on its Dolt server |
+| `{{.Host}}`, `{{.Port}}` | the Dolt server's TCP address; empty on a Unix socket |
+| `{{.Socket}}` | the Dolt server's Unix socket; empty over TCP |
+| `{{.Bd}}` | the `bd` the city pins for that scope, or `bd` if `gc` cannot resolve it |
+
+Values are raw; `shq` quotes one for a POSIX shell. On a server reached over
+TCP, setting the address and database in the command keeps `bd` on the
+database the line names; for a Unix socket, set `BEADS_DOLT_SERVER_SOCKET` from
+`{{.Socket}}` instead. Run it from a shell with no other `BEADS_DOLT_*`
+variables set, as the line says; `bd` then reads a server password from its
+credentials file. `gc`
+refuses to load a config whose template does not parse or does not render a
+single line for a sample city and rig database, and names
+`beads.migrate_command`. If the template fails for a real database, the line
+gives the default command and the reason. Remove the setting to go back to the
+default command.
+
+### When gc and bd disagree
+
 `gc` compares each database with the Beads library it is built with, and the
 `bd` you run can differ from that library. A `bd` newer than the library can
 still refuse a database `gc` reports as current, and its own message names the

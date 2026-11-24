@@ -319,6 +319,7 @@ go_test(
         "update_reporting_test.go",
         "updated_at_store_test.go",
         "verbatim_import_test.go",
+        "zz_lost_dolt_port_integration_test.go",
     ],
     data = glob(
         ["**"],
@@ -366,6 +367,7 @@ go_test(
         "//internal/runproj",
         "//internal/testenv",
         "//internal/testutil",
+        "//test/dolttest",
         "//test/toolhome",
         "@com_github_go_sql_driver_mysql//:mysql",
         "@com_github_steveyegge_beads//:beads",

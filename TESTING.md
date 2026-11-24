@@ -41,7 +41,7 @@ are run; Bazel is the runner that enforces it.
 | Acceptance Tier A | `acceptance` (sharded) | `bazel test --config=acceptance //test/acceptance:acceptance_test` | `make test-acceptance` |
 | Integration-tagged packages outside `test/integration` | `integration-packages` (gating) | `bazel test --config=integration //test:integration_packages` | part of `make test-integration` |
 | `test/integration` | `integration` (evidence-only) | `bazel test --config=integration //test/integration:integration_test` | part of `make test-integration` |
-| Split-strict projection gate: violation-key ratchet (fixture rows bound to the tests that reach them) and known-failures check (every entry with a reason, a regenerated one `UNTRIAGED:` until someone classifies it; flakes only in `split_strict_known_flaky.list` with an owner bead, never retried; a failed TestMain guard fails it too), reported apart; nightly downward ratchet fails on unreached rows and now-passing known failures (`GC_TEST_SPLIT_STRICT=1`; `internal/beads/splittest/projection.go`, `gate.go`) | `split-strict` (gating; mode remote: nightly, dispatch, PRs touching the store layer or routing code: cmd/gc, api, session, sling, molecule, orders, dispatch, readywork, executionevent, mail, nudgequeue, sourceworkflow; every file a baseline row names) | `bazel test //cmd/gc:gc_split_strict_test //internal/api:api_split_strict_test`; regenerate inputs from two or more full runs with `scripts/split-strict-baseline` (refuses inconsistent tests); check with `scripts/split-strict-baseline --check` | none |
+| Split-strict projection gate: violation-key ratchet (fixture rows bound to the tests that reach them) and known-failures check (every entry with a reason, a regenerated one `UNTRIAGED:` until someone classifies it; flakes only in `split_strict_known_flaky.list` with an owner bead, never retried; a failed TestMain guard fails it too), reported apart; nightly downward ratchet fails on unreached rows and now-passing known failures (`GC_TEST_SPLIT_STRICT=1`; `internal/beads/splittest/projection.go`, `gate.go`) | `split-strict` (gating; mode remote: nightly, dispatch, PRs and merge-queue entries touching the store layer or routing code: cmd/gc, api, session, sling, molecule, orders, dispatch, readywork, executionevent, mail, nudgequeue, sourceworkflow; every file a baseline row names) | `bazel test //cmd/gc:gc_split_strict_test //internal/api:api_split_strict_test`; regenerate inputs from two or more full runs with `scripts/split-strict-baseline` (refuses inconsistent tests); check with `scripts/split-strict-baseline --check` | none |
 | Docs sync | `unit` | `bazel test //test/docsync:docsync_test` | `make check-docs` |
 | Coverage (push to main) | `coverage` | `bazel coverage //... --combined_report=lcov` | none |
 
@@ -63,18 +63,23 @@ row to the wrong side's row passes the gate.
 Split-strict lane gating: the lane is a leg of the matrix the required
 `bazel test (side-by-side)` check needs, so a red split-strict (a NEW ratchet
 key, a NEW FAILING test, a hung shard) fails that check, and on a pull request
-that runs it the required check reports when it ends (about 5 minutes on a
-warm farm; 19 were seen cold). It starts only in mode remote, for same-repo
-pull requests touching the storage paths, the nightly and dispatches (RC Gate
-included); fork, Dependabot and cache-mode PRs, merge groups and pushes do not
-run it. A regression landed that way turns the next storage PR red on files
-it never touched: check the open `split-strict-nightly` issue (a red nightly
-run opens or comments on it; bazel.yml's split-strict-alert job) before
-debugging your own change. Fix a red lane with `scripts/split-strict-baseline`:
-a new failure is classified as a product bug (fix the code), a fixture that
-does not model split stores (fix the fixture), or a gate artifact (list it
-with the reason). The downward ratchet (now-passing or unreached entries)
-gates the nightly only.
+or merge group that runs it the required check reports when it ends (about 5
+minutes on a warm farm; 19 were seen cold). It starts only in mode remote, for
+same-repo pull requests touching the storage paths, merge-queue entries whose
+change touches them (`merge_group.base_sha` diffed against the entry's head
+with the same path list; a stopgap for fork PRs merging storage changes
+without the lane ever running — it starts only in mode remote and never on a
+merge group otherwise, and fork PRs run in mode fork-ro/fork-rw, not remote —
+until T7j gates the lane by role in the queue instead), the nightly and
+dispatches (RC Gate included); fork, Dependabot and cache-mode PRs, and pushes
+do not run it. A regression landed that way turns the next run that reaches
+the lane red on files it never touched: check the open `split-strict-nightly`
+issue (a red nightly run opens or comments on it; bazel.yml's
+split-strict-alert job) before debugging your own change. Fix a red lane with
+`scripts/split-strict-baseline`: a new failure is classified as a product bug
+(fix the code), a fixture that does not model split stores (fix the fixture),
+or a gate artifact (list it with the reason). The downward ratchet
+(now-passing or unreached entries) gates the nightly only.
 
 Narrow while iterating: `bazel test //internal/config:config_test`, or
 `bazel test //internal/beads/...` for a subtree;
@@ -439,9 +444,14 @@ this:
   is what still proves each pull request was analyzed, so it stays.
 - **The lanes match a PR's.** Unit, acceptance, integration-packages and
   integration-smoke run, and a queue run reuses cached test results like
-  any other run. A storage PR's own run also has split-strict, which its
-  merge group does not (ga-ylpbsy.94.7). The `integration` lane can later be gated on `merge_group`
-  only (G3).
+  any other run. split-strict also runs when the entry touches the storage
+  paths, by the same diff the PR step uses (`merge_group.base_sha` against
+  the entry's head); this is a stopgap
+  (`ga-splitstrict-mergegroup-stopgap`) for fork PRs that merged storage
+  changes with the lane never run — it starts in mode `remote` only, and a
+  fork PR's own run is mode `fork-ro`/`fork-rw`, never `remote`, so it never
+  ran there either — until T7j gates the lane by role in the queue instead.
+  The `integration` lane can later be gated on `merge_group` only (G3).
 
 **Queue settings** (for 60-70 merges a day, with a peak of 7 an hour from
 2026-10-05 to 10-07). A queue run costs about what a push run
@@ -451,7 +461,7 @@ does, 6-10 minutes, so 4 parallel builds clear about 24 entries an hour:
 |---|---|---|
 | Merge method | `SQUASH` | The ruleset allows merge and squash; `main` history is squash-shaped |
 | Grouping strategy | `ALLGREEN` | Every group's checks must pass; a red entry is ejected, not merged with the rest |
-| Build concurrency (`max_entries_to_build`) | 4 | About 3x the hourly peak. Each entry runs 4 remote lanes, so going higher mostly adds rbe-west load |
+| Build concurrency (`max_entries_to_build`) | 4 | About 3x the hourly peak. Each entry runs 4 remote lanes, 5 when the entry touches the split-strict paths, so going higher mostly adds rbe-west load |
 | Group size (`max_entries_to_merge`) | 5 | Bursts merge together |
 | `min_entries_to_merge` / wait | 1 / 5 min | Never wait for a batch (the wait is inert at 1) |
 | Status check timeout (`check_response_timeout_minutes`) | 60 | A cold rbe-west scale-up plus a queued Windows job can pass 30 minutes; a timeout ejects the entry and rebuilds everything behind it |

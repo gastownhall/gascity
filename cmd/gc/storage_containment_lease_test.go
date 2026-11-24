@@ -924,11 +924,16 @@ func TestStorageBootGateChecksCheckedAtBeforeTheCheckRuns(t *testing.T) {
 	}
 }
 
-// TestStrandRecheckTickFreshMSEqualsTheCap is round 2's SHOULD 2 (i4): a
-// definitive tick's lease gets the full strandRecheckFreshCap, not merely
-// something less than it reached by taking the uncapped branch of
-// strandRecheckFreshness's comparison.
-func TestStrandRecheckTickFreshMSEqualsTheCap(t *testing.T) {
+// TestStrandRecheckTickFreshMSMatchesTheAdaptiveFormula is slice 2's
+// successor to round 2's i4 (which pinned FreshMS at the fixed-cadence cap,
+// true only while interval was hardcoded at strandRecheckInterval). With
+// the adaptive cadence wired up (design doc §4.3, carry-over 1), a fast
+// definitive tick's lease gets
+// strandRecheckFreshness(strandRecheckNextInterval(d), d) for its own
+// measured duration d, not the 10-minute cap — a city whose
+// check is cheap gets a shorter, not longer, freshness budget, because its
+// own recheck comes back around sooner.
+func TestStrandRecheckTickFreshMSMatchesTheAdaptiveFormula(t *testing.T) {
 	cityPath, cfg, _, _ := convergedInfraCity(t)
 	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, io.Discard)
 	if err != nil {
@@ -946,8 +951,12 @@ func TestStrandRecheckTickFreshMSEqualsTheCap(t *testing.T) {
 	if lease == nil {
 		t.Fatal("a definitive tick published no lease")
 	}
-	if lease.FreshMS != strandRecheckFreshCap.Milliseconds() {
-		t.Fatalf("FreshMS = %d, want the cap %d after a definitive tick (i4)", lease.FreshMS, strandRecheckFreshCap.Milliseconds())
+	want := strandRecheckFreshness(strandRecheckNextInterval(s.lastCheckDuration), s.lastCheckDuration).Milliseconds()
+	if lease.FreshMS != want {
+		t.Fatalf("FreshMS = %d, want %d from the adaptive formula (measured duration %s)", lease.FreshMS, want, s.lastCheckDuration)
+	}
+	if lease.FreshMS >= strandRecheckFreshCap.Milliseconds() {
+		t.Fatalf("FreshMS = %d, want well under the cap %d for a fast fixture check", lease.FreshMS, strandRecheckFreshCap.Milliseconds())
 	}
 }
 
@@ -1311,5 +1320,81 @@ func TestStrandRecheckWithdrawsStaleLeaseWhenTheBasisCaptureFails(t *testing.T) 
 	}
 	if !strings.Contains(stderr.String(), "serves no containment lease") || !strings.Contains(stderr.String(), target.MarkerPath()) {
 		t.Errorf("the tick did not say why it serves no lease:\n%s", stderr.String())
+	}
+}
+
+// TestContainmentBasisStampDatabaseIgnoresOrdinaryWrites kills mutant B1:
+// the database's own basis stamp is deliberately NOT change-sensitive
+// (containmentBasisStamp(target.Database, false)) — it exists to catch a
+// RESTORE (a new file swapped in, a new inode) rather than an ordinary
+// write through the binding this process already has open, which changes
+// size and mtime on every call and would invalidate every lease if the
+// database stamp tracked them.
+func TestContainmentBasisStampDatabaseIgnoresOrdinaryWrites(t *testing.T) {
+	cityPath, _, _, target := convergedInfraCity(t)
+	capture := func() string {
+		b, err := captureContainmentBasis(cityPath, target)
+		if err != nil {
+			t.Fatalf("captureContainmentBasis: %v", err)
+		}
+		return b.Database
+	}
+	before := capture()
+
+	// An ordinary binding write: content grows, mtime moves, inode does not.
+	f, err := os.OpenFile(target.Database, os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatalf("opening %s for an ordinary write: %v", target.Database, err)
+	}
+	if _, err := f.Write([]byte("ordinary binding write\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	after := capture()
+	if before != after {
+		t.Errorf("captureContainmentBasis's Database field changed after an ordinary write that kept the same inode: before %q, after %q; the database's stamp must ignore content, size and mtime, only dev+ino", before, after)
+	}
+}
+
+// TestContainmentBasisStampClearedNoteCatchesASameInodeRewrite kills mutant
+// B3: the cleared note's basis stamp IS change-sensitive
+// (containmentBasisStamp(notePath, true)) — a same-inode, content-only
+// rewrite of the note must move the stamp, or a lease published just
+// before such a rewrite would wrongly still look like it reflects the
+// note's new content.
+func TestContainmentBasisStampClearedNoteCatchesASameInodeRewrite(t *testing.T) {
+	cityPath, _, _, target := convergedInfraCity(t)
+	notePath := infraClearedNotePath(cityPath)
+	if err := writeInfraClearedNote(cityPath, infraClearedNote{Binding: target.Binding, Database: target.Database, Complete: true}); err != nil {
+		t.Fatal(err)
+	}
+	capture := func() string {
+		b, err := captureContainmentBasis(cityPath, target)
+		if err != nil {
+			t.Fatalf("captureContainmentBasis: %v", err)
+		}
+		return b.Cleared
+	}
+	before := capture()
+
+	// A same-inode, content-only rewrite: open in place (no temp+rename),
+	// so dev and ino are unchanged but size and mtime move.
+	f, err := os.OpenFile(notePath, os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatalf("opening %s for an in-place rewrite: %v", notePath, err)
+	}
+	if _, err := f.Write([]byte("extra content, same inode\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	after := capture()
+	if before == after {
+		t.Errorf("captureContainmentBasis's Cleared field did not change after a same-inode, content-only rewrite: %q; this stamp must be change-sensitive (size/mtime/ctime), not dev+ino alone", before)
 	}
 }

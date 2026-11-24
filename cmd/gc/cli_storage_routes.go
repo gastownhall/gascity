@@ -367,6 +367,13 @@ func resolveCLIStorageRoutesFor(cityPath string, cfg *config.City) (routes *stor
 	// paragraph in every gc process; it gets exactly one warning line.
 	var diagnostics bytes.Buffer
 	if cfg == nil {
+		// The CLI funnel is the only caller that ever opts into the
+		// containment lease (design doc §4.4, §4.5 slice 2): a one-shot
+		// command, not a long-lived controller, is the process this slice
+		// exists to stop re-reading the whole work ledger.
+		// A nil cfg takes storageBootGateWith's "no [storage] section"
+		// branch before it ever reaches a lease-consuming check, so
+		// opts.lease can make no difference here; the zero value says so.
 		routes, err := storageBootGate(cityPath, nil, cliStorageLogPrefix, nil, &diagnostics)
 		if err != nil {
 			printCLIStorageDiagnostics(&diagnostics)
@@ -384,7 +391,7 @@ func resolveCLIStorageRoutesFor(cityPath string, cfg *config.City) (routes *stor
 		_, binding := storageSplitShapeOf(cfg.EffectiveStorage())
 		return refusingStorageRoutes(binding, refusal), false
 	}
-	routes, err := storageBootGate(cityPath, cfg, cliStorageLogPrefix, nil, &diagnostics)
+	routes, err := storageBootGateWith(cityPath, cfg, cliStorageLogPrefix, nil, &diagnostics, storageBootGateOpts{lease: true})
 	if err == nil {
 		warnDegradedServing(routes, cliStorageStderr, cliStorageLogPrefix)
 		// The one and only place a class store is given an emit target. A

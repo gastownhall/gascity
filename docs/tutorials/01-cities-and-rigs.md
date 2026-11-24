@@ -201,9 +201,10 @@ overrides.
 Gas City also derives a worker template for each provider declared in
 `city.toml`'s `[providers]` table — so `claude` is available as a template
 name (and, once you add a rig, `<rig>/claude`) even though it is not a
-hardcoded role. Provider-derived workers use the core pack's stock
-pool-worker prompt and get `mol-do-work` as their default sling formula —
-more on that in a moment. (The `mol-` prefix is v1 naming carried by the
+hardcoded role. Provider-derived workers carry no prompt of their own: they
+start with the core pack's stock worker prompt, chosen by `formula_v2` like
+any agent without a `prompt_template`, and get `mol-do-work` as their default
+sling formula — more on that in a moment. (The `mol-` prefix is v1 naming carried by the
 formula's name; it doesn't change what the formula is — a reusable method.)
 
 To check on the status of your city, use `gc status`:
