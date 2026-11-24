@@ -1831,6 +1831,58 @@ func TestStaleDBFormulaHungOutcomeOrCloseFailsOpen(t *testing.T) {
 	}
 }
 
+// staleDBHangingEscalateHook is an escalate.sh hook that logs its call and
+// never answers.
+const staleDBHangingEscalateHook = `#!/usr/bin/env bash
+echo "hook $*" >> "$GC_TEST_LOG"
+sleep 120
+`
+
+// TestStaleDBFormulaHungNotificationsAreBounded: an escalation or maintenance
+// notice that hangs is bounded, and the step still closes its work bead and
+// drain-acks. A hook the bound killed is not read as refusing the incident
+// flags, so the escalation is not sent to it again.
+func TestStaleDBFormulaHungNotificationsAreBounded(t *testing.T) {
+	staleDBRequireHungStoreTools(t)
+
+	for _, tc := range []struct {
+		name     string
+		scanJSON string
+		hang     string
+		hook     bool
+		env      []string
+	}{
+		{name: "escalation mail", scanJSON: staleDBOverThresholdScan, hang: "gc mail send ", env: []string{"GC_SYSTEM_PACKS_DIR=" + t.TempDir()}},
+		{name: "escalate hook", scanJSON: staleDBOverThresholdScan, hook: true},
+		{name: "maintenance nudge", scanJSON: staleDBCleanScan, hang: "gc session nudge ", env: []string{"GC_MAINTENANCE_DONE_TARGET=ops"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := append([]string{"DOG_BD_TIMEOUT=2"}, tc.env...)
+			if tc.hook {
+				hook := filepath.Join(t.TempDir(), "escalate.sh")
+				writeTestFile(t, hook, staleDBHangingEscalateHook, 0o755)
+				env = append(env, "GC_ESCALATE_SCRIPT="+hook)
+			}
+			run := runStaleDBFormulaHungStoreCase(t, staleDBHungStoreCase{scanJSON: tc.scanJSON, hang: tc.hang, env: env})
+			if run.timedOut {
+				t.Fatalf("step still blocked on the hung %s after %s\n%s", tc.name, staleDBHungStoreDeadline, run)
+			}
+			if run.err != nil {
+				t.Fatalf("step failed; a hung %s must not fail the scan\n%s", tc.name, run)
+			}
+			requireStaleDBLogInOrder(t, run, staleDBCloseWrite("bead-1"), "gc runtime drain-ack\n")
+			if tc.hook {
+				if got := strings.Count(run.log, "hook --subject "); got != 1 {
+					t.Fatalf("escalate hook called %d times, want 1: a bound kill is not a refusal of the incident flags\n%s", got, run)
+				}
+				if strings.Contains(run.out, "predates incident keys") {
+					t.Fatalf("a hook the bound killed was read as refusing the incident flags\n%s", run)
+				}
+			}
+		})
+	}
+}
+
 func runStaleDBFormulaFailureCase(t *testing.T, tc staleDBFailureCase) (string, []byte, error) {
 	t.Helper()
 	script := renderStaleDBFormulaShell(t)
