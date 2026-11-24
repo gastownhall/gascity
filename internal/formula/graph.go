@@ -247,18 +247,19 @@ func graphSinkStepIDs(steps []*Step) []string {
 			// mandatory sink so a failed loop cannot be hidden by passing
 			// downstream work, and so iteration 1 cannot remain as a stale failed
 			// blocker after a later attempt passes.
-			control := stepByID[step.Metadata[beadmeta.ControlForMetadataKey]]
-			attemptStepID := step.Metadata[beadmeta.StepIDMetadataKey]
-			if step.Metadata[beadmeta.AttemptMetadataKey] != "" && control != nil &&
-				attemptStepID != "" && attemptStepID == control.Metadata[beadmeta.StepIDMetadataKey] &&
-				(control.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindRetry ||
-					control.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindRalph) {
+			if control := attemptScopeControl(step, stepByID); control != nil {
 				// Nested attempt scopes roll up through their enclosing scope. Only
 				// an outermost attempt contributes its logical control directly;
 				// otherwise an inner control from an old outer attempt would become
-				// another stale workflow blocker.
+				// another stale workflow blocker. A nested check-with-children's
+				// iteration scope carries no gc.scope_ref of its own: its control
+				// is the member of the enclosing attempt, so that attempt's
+				// control is the sink.
 				scopeRef := step.Metadata[beadmeta.ScopeRefMetadataKey]
 				if scopeRef == "" {
+					if attemptScopeControl(stepByID[control.Metadata[beadmeta.ScopeRefMetadataKey]], stepByID) != nil {
+						continue
+					}
 					appendSink(control.ID)
 					continue
 				}
@@ -278,6 +279,30 @@ func graphSinkStepIDs(steps []*Step) []string {
 		appendSink(step.ID)
 	}
 	return sinks
+}
+
+// attemptScopeControl returns the retry/ralph control whose physical attempt
+// scope step is, or nil: step is kind=scope with gc.attempt set, and its
+// gc.control_for names a retry or ralph control carrying the same gc.step_id.
+func attemptScopeControl(step *Step, stepByID map[string]*Step) *Step {
+	if step == nil || step.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindScope ||
+		step.Metadata[beadmeta.AttemptMetadataKey] == "" {
+		return nil
+	}
+	control := stepByID[step.Metadata[beadmeta.ControlForMetadataKey]]
+	if control == nil {
+		return nil
+	}
+	attemptStepID := step.Metadata[beadmeta.StepIDMetadataKey]
+	if attemptStepID == "" || attemptStepID != control.Metadata[beadmeta.StepIDMetadataKey] {
+		return nil
+	}
+	switch control.Metadata[beadmeta.KindMetadataKey] {
+	case beadmeta.KindRetry, beadmeta.KindRalph:
+		return control
+	default:
+		return nil
+	}
 }
 
 func rewriteGraphStepRefs(steps []*Step, replacements map[string]string, controls map[string]*Step) {
