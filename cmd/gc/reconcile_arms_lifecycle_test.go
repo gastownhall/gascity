@@ -83,6 +83,60 @@ func TestSimRestartRequestedRestartsALiveRow(t *testing.T) {
 	}
 }
 
+// TestV2SessionResetVisibleWithoutRescan (#5843): gc session reset writes
+// the markers through a store handle of its own on the backing, so with the
+// ledger feed off no bead event or re-scan reaches the controller's cache.
+// Its session-sync makes the cache hold them before it acks, and the pass
+// that ack's wake runs decides A13's stop on that row alone: one stop, then
+// one fresh start of a new incarnation.
+func TestV2SessionResetVisibleWithoutRescan(t *testing.T) {
+	s := converged(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1", "session_key", "k-1", "started_config_hash", "h-1", "last_woke_at", rowAt(-time.Hour)), gc1Work())
+	cityPath := t.TempDir()
+	registerResidencyRoutes(cityPath, nil, func() beads.Store { return s.legs[0].cache })
+	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, nil) })
+	if err := s.legs[0].backing.SetMetadataBatch("gc-1", map[string]string{restartAsked[0]: restartAsked[1], restartAsked[2]: restartAsked[3]}); err != nil {
+		t.Fatalf("the CLI's reset write: %v", err)
+	}
+	events := len(s.legs[0].events)
+	kills, starts := len(s.sp.kills), len(s.admitted)
+
+	pokeCh := make(chan struct{}, 1)
+	if reply := runSessionSyncCommand(t, cityPath, "gc-1", newLegacyWake(pokeCh, make(chan struct{}, 1))); reply.Outcome != sessionSyncOK {
+		t.Fatalf("session-sync reply = %+v, want ok", reply)
+	}
+	if len(pokeCh) != 1 {
+		t.Fatal("session-sync enqueued no wake")
+	}
+	s.settle()
+	if got := len(s.sp.kills) - kills; got != 1 || s.sp.rts["s-gc-1"] != nil {
+		t.Fatalf("stops on the woken pass = %d (runtime %v), want A13's one stop; row %v", got, s.sp.rts["s-gc-1"], s.gc1())
+	}
+	if m := s.gc1(); m["restart_requested"] != "" || m["session_key"] == "k-1" || m["state"] != "asleep" {
+		t.Fatalf("after the stop: row %v, want asleep and handed off", m)
+	}
+
+	s.advance(simPatrol)
+	s.settle()
+	s.settle()
+	b, err := s.legs[0].backing.Get("gc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(s.admitted) - starts; got != 1 {
+		t.Fatalf("starts after the reset = %d, want one fresh wake", got)
+	}
+	if got := len(s.sp.kills) - kills; got != 1 {
+		t.Fatalf("stops after the reset = %d, want 1", got)
+	}
+	if m := b.Metadata; m["instance_token"] == "tok-1" || m["restart_requested"] != "" || m["continuation_reset_pending"] != "" || !s.livePane(b) {
+		t.Fatalf("after the restart: row %v, live %t; want a new live incarnation with the reset consumed", m, s.livePane(b))
+	}
+	if got := len(s.legs[0].events); got != events {
+		t.Fatalf("bead events = %d, want none past the CLI's write (%d)", got, events)
+	}
+	s.noViolations(t)
+}
+
 // TestSimRestartRequestedStopsAnAttachedRow (CONTRACT v5.10u): the restart
 // is the operator's or agent's intent, so a human attached to the live row
 // does not defer it (legacy parity): the row is stopped and handed off.
