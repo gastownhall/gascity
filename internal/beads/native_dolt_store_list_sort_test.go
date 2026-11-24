@@ -255,8 +255,8 @@ func TestNativeDoltStoreListCreatedDescMaxSeqReducerKeepsHighSeqWithoutOptIn(t *
 }
 
 // maxSeqLabelForTest extracts the highest seq:<n> label across the beads,
-// mirroring the order dispatcher's MaxSeqFromLabels reduction (which this lower
-// layer cannot import). It lets a native-store test assert the row a max(seq)
+// mirroring the order dispatcher's reduction over SeqsFromLabels stamps (which
+// this lower layer cannot import). It lets a native-store test assert the row a max(seq)
 // cursor reducer needs actually survives the read.
 func maxSeqLabelForTest(got []Bead) uint64 {
 	var maxSeq uint64
