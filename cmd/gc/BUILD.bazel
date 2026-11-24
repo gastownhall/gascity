@@ -1689,6 +1689,7 @@ go_test(
         "doctor_v2_session_migration_test.go",
         "doctor_warmup_test.go",
         "doctor_work_option_metadata_test.go",
+        "dolt_9402_narrow_test.go",
         "dolt_bind_localhost_test.go",
         "dolt_cleanup_bd_proxy_parser_test.go",
         "dolt_cleanup_bd_proxy_test.go",
