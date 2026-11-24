@@ -126,3 +126,81 @@ func TestSeqsFromLabels(t *testing.T) {
 		t.Fatalf("SeqsFromLabels(nil) = %v, want nil", got)
 	}
 }
+
+// TestCheckTriggerEventStampsAtOrBelowHeadMatchExistingBehavior (#8567, AC-3):
+// stamps at or below the event log head keep the pre-fix Due/count/Reason
+// contract exactly — the reset machinery must be invisible when no stamp is
+// stale. Equality is admissible: a stamp equal to the head has consumed
+// through the head and the order is not due.
+func TestCheckTriggerEventStampsAtOrBelowHeadMatchExistingBehavior(t *testing.T) {
+	cases := []struct {
+		name       string
+		stamps     []uint64
+		events     int
+		wantDue    bool
+		wantReason string
+	}{
+		{
+			name:       "stamp below the head fires only events after it",
+			stamps:     []uint64{3},
+			events:     5,
+			wantDue:    true,
+			wantReason: "event: 2 bead.updated event(s)",
+		},
+		{
+			name:       "stamp equal to the head consumes through the head",
+			stamps:     []uint64{5},
+			events:     5,
+			wantDue:    false,
+			wantReason: "event: no matching events",
+		},
+		{
+			name:       "mixed stamps below the head reduce to the max",
+			stamps:     []uint64{3, 2},
+			events:     5,
+			wantDue:    true,
+			wantReason: "event: 2 bead.updated event(s)",
+		},
+		{
+			name:       "zero stamps are inert",
+			stamps:     []uint64{0},
+			events:     2,
+			wantDue:    true,
+			wantReason: "event: 2 bead.updated event(s)",
+		},
+		{
+			name:       "head itself is admissible when it is the max stamp",
+			stamps:     []uint64{2, 7},
+			events:     7,
+			wantDue:    false,
+			wantReason: "event: no matching events",
+		},
+		{
+			name:       "no stamps read the whole log",
+			stamps:     nil,
+			events:     3,
+			wantDue:    true,
+			wantReason: "event: 3 bead.updated event(s)",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := CheckTrigger(updatedOrder(), time.Now(), neverRan, restartedLog(tc.events), stampsFn(tc.stamps...))
+			if res.Due != tc.wantDue {
+				t.Fatalf("Due = %v, want %v (%+v)", res.Due, tc.wantDue, res)
+			}
+			if res.Reason != tc.wantReason {
+				t.Fatalf("Reason = %q, want exactly %q (no reset clause)", res.Reason, tc.wantReason)
+			}
+			if res.CursorReset != nil {
+				t.Errorf("CursorReset = %+v, want none for stamps at or below the head", res.CursorReset)
+			}
+			if res.Err != nil {
+				t.Errorf("Err = %v, want none", res.Err)
+			}
+			if res.ReadFailed {
+				t.Errorf("ReadFailed = true, want a clean read")
+			}
+		})
+	}
+}
