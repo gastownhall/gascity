@@ -205,3 +205,22 @@ func TestReleaseOrphanedPoolAssignments_ReleasesNonOperatorBareNames(t *testing.
 
 	assertSweepReleased(t, workStore, released, dead...)
 }
+
+// The operator is skipped before the foreign-claim gate, so a pass over
+// operator-assigned work and dead local bare names reports no protected
+// foreign/unknown identities.
+func TestReleaseOrphanedPoolAssignments_OperatorClaimsSkipForeignClaimGate(t *testing.T) {
+	workStore := beads.NewMemStore()
+	handoff := seedHumanLabelSweepWork(t, workStore, "pool work handed to the operator", "human", "in_progress")
+	openHandoff := seedHumanLabelSweepWork(t, workStore, "open pool work assigned to the operator", "human", "open")
+	local := seedHumanLabelSweepWork(t, workStore, "pool work held by a dead local holder", "worker-1", "in_progress")
+
+	logBuf := captureSweepLog(t)
+	released := runOperatorSweep(t, workStore, handoff, openHandoff, local)
+
+	if logged := logBuf.String(); strings.Contains(logged, "protected") {
+		t.Fatalf("operator claims must not reach the foreign-claim gate; log:\n%s", logged)
+	}
+	assertSweepKept(t, workStore, released, handoff, openHandoff)
+	assertSweepReleased(t, workStore, released, local)
+}
