@@ -858,3 +858,59 @@ func TestStopReportsUnreachableWhenTheAPINeverAnswered(t *testing.T) {
 		}
 	})
 }
+
+// TestStartRunsOnTheCallersContextAlone guards #6055's shape: Start is not a
+// ctx-free verb. It runs on the caller's lease context, which may outlive the
+// request bound (creating a pod legitimately takes longer than a status
+// read), so Start must not acquire a verb bound: a create held past the
+// request bound under a caller ctx with a later deadline completes, and its
+// pod create runs under exactly the caller's deadline.
+func TestStartRunsOnTheCallersContextAlone(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ops := &startDeadlineOps{holdOps: newHoldOps(func(method string, n int, _ []string) time.Duration {
+			if method == "createPod" && n == 0 {
+				return 2 * testRequestBound
+			}
+			return 0
+		})}
+		p := deadlineProvider(ops)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*testRequestBound)
+		defer cancel()
+		callerDeadline, _ := ctx.Deadline()
+
+		if err := p.Start(ctx, deadlineSession, runtime.Config{Command: "claude"}); err != nil {
+			t.Fatalf("Start = %v; a create within its caller's deadline must complete", err)
+		}
+		if ops.cutCount() != 0 {
+			t.Fatalf("cut calls = %d; Start's calls must end on the caller's context, never a verb bound", ops.cutCount())
+		}
+		if _, created := ops.pods[SanitizeName(deadlineSession)]; !created {
+			t.Fatal("the pod was never created")
+		}
+		if len(ops.createDeadlines) == 0 {
+			t.Fatal("Start made no createPod call: the test is vacuous")
+		}
+		for i, d := range ops.createDeadlines {
+			if !d.ok || !d.at.Equal(callerDeadline) {
+				t.Fatalf("createPod #%d deadline = %v (set %v); want the caller's %v, never a request bound", i, d.at, d.ok, callerDeadline)
+			}
+		}
+	})
+}
+
+// startDeadlineOps records the deadline each createPod ctx carried.
+type startDeadlineOps struct {
+	*holdOps
+	createDeadlines []recordedDeadline
+}
+
+type recordedDeadline struct {
+	at time.Time
+	ok bool
+}
+
+func (s *startDeadlineOps) createPod(ctx context.Context, pod *corev1.Pod) (*corev1.Pod, error) {
+	at, ok := ctx.Deadline()
+	s.createDeadlines = append(s.createDeadlines, recordedDeadline{at: at, ok: ok})
+	return s.holdOps.createPod(ctx, pod)
+}

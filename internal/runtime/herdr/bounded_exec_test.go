@@ -108,6 +108,62 @@ func TestBoundedExecGrandchildHoldingStdoutDoesNotHold(t *testing.T) {
 	}
 }
 
+// AT-H3: the four verbs whose argv carries herdr's own --timeout
+// (agent wait, agent start, agent prompt --wait, enter-recovery's agent wait)
+// are bounded by that timeout plus the margin, not the default bound: an
+// answer that arrives at the verb's own timeout (here 250ms, past the 100ms
+// default) must land.
+func TestBoundedExecVerbTimeoutSitesAreNotCutAtDefault(t *testing.T) {
+	script := `#!/bin/sh
+shift 2
+printf '%s\n' "$*" >> "$0.log"
+case "$1 $2" in
+"agent wait"|"agent start"|"agent prompt") sleep 0.25 ;;
+esac
+case "$1 $2" in
+"agent get") printf '{"result":{"agent":{"name":"x","pane_id":"%%5","agent_status":"idle"}}}' ;;
+"agent wait") printf '{"result":{"agent":{"name":"x","pane_id":"%%5","agent_status":"idle"}}}' ;;
+"agent start") printf '{"result":{"agent":{"name":"x","pane_id":"%%5"}}}' ;;
+"pane read") printf '' ;;
+*) printf '{"result":{}}' ;;
+esac
+`
+	for _, tc := range []struct {
+		name string
+		verb string
+		call func(c *client) error
+	}{
+		{"agent wait", "agent wait", func(c *client) error {
+			p := &Provider{c: c}
+			_, _, err := p.waitForAgentStatus(context.Background(), "x", time.Minute, "idle")
+			return err
+		}},
+		{"agent start", "agent start", func(c *client) error {
+			_, err := c.startAgentKind(context.Background(), "x", "claude", "%5", nil)
+			return err
+		}},
+		{"agent prompt --wait", "agent prompt", func(c *client) error {
+			return c.deliverStartupTurn(context.Background(), "%5", "hello", bindModeAgent, nil, "")
+		}},
+		{"enter-recovery agent wait", "agent wait", func(c *client) error {
+			_, err := c.recoverStalledStartup(context.Background(), "%5", errors.New("stalled"), func() (string, error) { return "", nil })
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newBoundedClient(t, script)
+			c.cliTimeout = 100 * time.Millisecond
+			if err := tc.call(c); err != nil {
+				t.Fatalf("a %s answering after 250ms (default bound %v) failed: %v", tc.verb, testBound, err)
+			}
+			b, _ := os.ReadFile(c.bin + ".log")
+			if !strings.Contains(string(b), tc.verb) {
+				t.Fatalf("%s never ran:\n%s", tc.verb, b)
+			}
+		})
+	}
+}
+
 // AT-H4: a parent cancel returns context.Canceled promptly and is never read as
 // a deadline.
 func TestBoundedExecParentCancelIsCanceled(t *testing.T) {
