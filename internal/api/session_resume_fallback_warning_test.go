@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
@@ -169,6 +170,53 @@ func TestSessionResumeLaunchCommandFallbackWarning(t *testing.T) {
 					}
 					if want := resumeFallbackWarningLine(info.ID); out != want {
 						t.Fatalf("call %d: log output = %q, want exactly %q", call, out, want)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestSessionResumeLaunchCommandFallbackWarningOmitsPrivateData(t *testing.T) {
+	const (
+		rejectedValueMarker = "private-rejected-value-7c1e"
+		unknownKeyMarker    = "private-unknown-key-4b9d"
+		storedCommandMarker = "private-stored-settings-2a6f"
+		configuredMarker    = "private-configured-arg-9e3c"
+		envMarker           = "private-env-value-5d8a"
+	)
+	provider := resumeFallbackProviderSpec()
+	provider.Args = []string{"--token", configuredMarker}
+	provider.Env = map[string]string{"FALLBACK_PROBE_SECRET": envMarker}
+	storedCommand := "/bin/echo --settings /tmp/" + storedCommandMarker + "/settings.json"
+	cases := []struct {
+		name      string
+		overrides string
+	}{
+		{name: "rejected closed option value", overrides: `{"effort":"` + rejectedValueMarker + `"}`},
+		{name: "unknown option key", overrides: `{"` + unknownKeyMarker + `":"high"}`},
+	}
+	for _, resolver := range []resumeResolver{buildSessionResumeResolver, workerSessionRuntimeResolver} {
+		for _, tc := range cases {
+			t.Run(resolver.name+"/"+tc.name, func(t *testing.T) {
+				srv, info := newResumeFallbackSession(t, provider, storedCommand, tc.overrides)
+				var (
+					command string
+					err     error
+				)
+				out := captureResumeLog(t, func() { command, _, err = resolver.resolve(srv, info) })
+				if err != nil {
+					t.Fatalf("%s: %v", resolver.name, err)
+				}
+				if command != storedCommand {
+					t.Fatalf("command = %q, want %q", command, storedCommand)
+				}
+				if want := resumeFallbackWarningLine(info.ID); out != want {
+					t.Fatalf("log output = %q, want exactly %q", out, want)
+				}
+				for _, marker := range []string{rejectedValueMarker, unknownKeyMarker, storedCommandMarker, configuredMarker, envMarker} {
+					if strings.Contains(out, marker) {
+						t.Fatalf("warning leaks private marker %q: %q", marker, out)
 					}
 				}
 			})
