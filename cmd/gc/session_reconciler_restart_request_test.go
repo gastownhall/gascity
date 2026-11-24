@@ -1097,3 +1097,79 @@ func TestPreWakePatchConsumesTheRestartRequestItAnswers(t *testing.T) {
 		})
 	}
 }
+
+// TestRestartRequestAfterTheReplacementsPreWakeRestartsItOnce: the PreWake
+// consumes only the reset it answers. A gc session reset recorded after the
+// replacement's PreWake landed asks for a restart of that new incarnation,
+// which the reconciler stops and starts fresh exactly once.
+func TestRestartRequestAfterTheReplacementsPreWakeRestartsItOnce(t *testing.T) {
+	env := newRestartRequestTestEnv(t)
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:          "true",
+		SessionName:      sessionName,
+		TemplateName:     "worker",
+		ResolvedProvider: &config.ResolvedProvider{SessionIDFlag: "--session-id"},
+	}
+	session := env.createSessionBead(sessionName)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "always",
+		"session_key":                "original-key",
+		"started_config_hash":        "hash-before-reset",
+	})
+	for range 3 {
+		if env.sp.IsRunning(sessionName) {
+			break
+		}
+		env.reconcile([]beads.Bead{mustGetBead(t, env.store, session.ID)})
+		env.clk.Advance(time.Second)
+	}
+	replacement := mustGetBead(t, env.store, session.ID).Metadata
+	if !env.sp.IsRunning(sessionName) || replacement["last_woke_at"] == "" {
+		t.Fatalf("replacement not started under a PreWake (row %v); stdout=%s stderr=%s", replacement, env.stdout.String(), env.stderr.String())
+	}
+
+	if err := env.store.SetMetadataBatch(session.ID, map[string]string{"restart_requested": "true", "continuation_reset_pending": "true"}); err != nil {
+		t.Fatalf("writing the reset: %v", err)
+	}
+	starts := env.sp.CountCalls("Start", sessionName)
+	stops := env.sp.CountCalls("Stop", sessionName)
+	for range 2 {
+		env.clk.Advance(time.Second)
+		env.reconcile([]beads.Bead{mustGetBead(t, env.store, session.ID)})
+	}
+
+	if got := env.sp.CountCalls("Stop", sessionName) - stops; got != 1 {
+		t.Fatalf("stops after the second reset = %d, want 1; stdout=%s", got, env.stdout.String())
+	}
+	if got := env.sp.CountCalls("Start", sessionName) - starts; got != 1 {
+		t.Fatalf("starts after the second reset = %d, want 1; stdout=%s stderr=%s", got, env.stdout.String(), env.stderr.String())
+	}
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatal("the restarted incarnation is not running")
+	}
+	meta := mustGetBead(t, env.store, session.ID).Metadata
+	if meta["restart_requested"] != "" || meta["continuation_reset_pending"] != "" {
+		t.Fatalf("markers after the restart = restart_requested %q, continuation_reset_pending %q; want both consumed",
+			meta["restart_requested"], meta["continuation_reset_pending"])
+	}
+	// A later pass has no restart request left to answer. (The fake's start
+	// env drifts from the desired config, so the pass may still restart the
+	// session for config drift; only the restart request's stop counts.)
+	env.clk.Advance(time.Second)
+	env.reconcile([]beads.Bead{mustGetBead(t, env.store, session.ID)})
+	if got := strings.Count(env.stdout.String(), "Stopped restart-requested session"); got != 1 {
+		t.Fatalf("restart-request stops = %d, want 1; stdout=%s", got, env.stdout.String())
+	}
+	if meta["generation"] == replacement["generation"] || meta["session_key"] == replacement["session_key"] {
+		t.Fatalf("generation %q session_key %q, want a fresh incarnation past the replacement's %q/%q",
+			meta["generation"], meta["session_key"], replacement["generation"], replacement["session_key"])
+	}
+}
