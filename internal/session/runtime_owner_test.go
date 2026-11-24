@@ -304,3 +304,102 @@ func TestRuntimeOwnerRecordFailureDoesNotFailStart(t *testing.T) {
 		})
 	}
 }
+
+// AC-4: a record under another uid whose roots are all gone, or carry another
+// start time, or that names another boot, lets the start proceed, and the start
+// rewrites the record under its own euid.
+func TestStartUnderAnotherUIDProceedsWhenRecordedRootsAreGone(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		seed func(t *testing.T) (boot string, root map[string]any)
+	}{
+		{"root gone", func(*testing.T) (string, map[string]any) {
+			return runtimeLeaseBootID(), map[string]any{"pid": goneRootPID, "start": "1"}
+		}},
+		{"root pid reused", func(t *testing.T) (string, map[string]any) {
+			root := liveRoot(t)
+			root["start"] = root["start"].(string) + "0"
+			return runtimeLeaseBootID(), root
+		}},
+		{"other boot", func(t *testing.T) (string, map[string]any) {
+			if runtimeLeaseBootID() == "" {
+				t.Skip("no boot id is readable here")
+			}
+			return "other-boot", liveRoot(t)
+		}},
+	} {
+		for _, start := range runtimeOwnerStarts {
+			t.Run(tc.name+"/"+start.name, func(t *testing.T) {
+				mgr, sp, info := seedSuspendedResumeTarget(t)
+				boot, root := tc.seed(t)
+				seedRuntimeOwner(t, mgr, info.ID, os.Geteuid()+1, boot, root)
+
+				if err := start.start(t, mgr, info); err != nil {
+					t.Fatalf("%s: %v, want the start to proceed", start.name, err)
+				}
+				if !hasEventPrefix(sp.events, "start:") {
+					t.Fatalf("events = %v, want a start", sp.events)
+				}
+				got, ok := readRuntimeOwner(t, mgr, info.ID)
+				if !ok || got.UID != os.Geteuid() || got.Boot != runtimeLeaseBootID() {
+					t.Fatalf("runtime_owner = %+v (present %v), want it rewritten under uid %d in boot %q", got, ok, os.Geteuid(), runtimeLeaseBootID())
+				}
+			})
+		}
+	}
+}
+
+// AC-4, end to end: one Manager records the fence under one euid, a second
+// Manager over the same store, as a restart under another uid is, is refused
+// while that record's root is alive and never reaches its provider's Start,
+// and starts once the root is gone, rewriting the record under its own euid.
+// The currentEUID seam stands in for the first Manager's uid; it is a
+// package global, so this test never runs in parallel (#5870).
+func TestRuntimeOwnerRecordedUnderOneUIDFencesAnother(t *testing.T) {
+	firstUID := os.Geteuid() + 1
+	store := beads.NewMemStore()
+	city := t.TempDir()
+	spA := &orphanScanProvider{Fake: runtime.NewFake(), city: city}
+	spA.results = []runtime.LiveRuntime{{PID: os.Getpid(), IsTracked: true}}
+	setCurrentEUID(t, firstUID)
+	mgrA := newTestManager(t, store, spA, WithCityPath(city))
+
+	info, err := mgrA.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("CreateSession under uid %d: %v", firstUID, err)
+	}
+	owner, ok := readRuntimeOwner(t, mgrA, info.ID)
+	if !ok || owner.UID != firstUID || len(owner.Roots) != 1 {
+		t.Fatalf("runtime_owner after the first create = %+v (present %v), want uid %d with the one root it launched", owner, ok, firstUID)
+	}
+	if err := mgrA.Suspend(context.Background(), testActor(mgrA, ActorOperator), info.ID, false); err != nil {
+		t.Fatalf("Suspend under uid %d: %v", firstUID, err)
+	}
+	setCurrentEUID(t, os.Geteuid())
+
+	// The second Manager's scan finds nothing: exactly what the Linux
+	// process-table scan reports for a root another uid owns.
+	spB := &orphanScanProvider{Fake: runtime.NewFake(), city: city}
+	mgrB := newTestManager(t, store, spB, WithCityPath(city))
+	start := func() error {
+		return mgrB.Start(context.Background(), testActor(mgrB, ActorOperator), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
+	}
+	if err := start(); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("Start under the second uid: %v, want a refusal wrapping runtime.ErrRuntimeUnavailable while the recorded root is alive", err)
+	}
+	if hasEventPrefix(spB.events, "start:") {
+		t.Fatalf("the second uid started a runtime beside the recorded one; events = %v", spB.events)
+	}
+
+	// The recorded runtime exits: the fence opens, and the second uid's start
+	// proceeds and rewrites the record under its own euid.
+	seedRuntimeOwner(t, mgrB, info.ID, firstUID, owner.Boot, map[string]any{"pid": goneRootPID, "start": owner.Roots[0].Start})
+	spB.results = []runtime.LiveRuntime{{PID: os.Getpid(), IsTracked: true}}
+	if err := start(); err != nil {
+		t.Fatalf("Start under the second uid after the recorded root exited: %v", err)
+	}
+	got, ok := readRuntimeOwner(t, mgrB, info.ID)
+	if !ok || got.UID != os.Geteuid() || got.Boot != runtimeLeaseBootID() || len(got.Roots) != 1 || got.Roots[0].PID != os.Getpid() {
+		t.Fatalf("runtime_owner = %+v (present %v), want it rewritten under uid %d with the test process as its one root", got, ok, os.Geteuid())
+	}
+}
