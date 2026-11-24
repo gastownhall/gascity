@@ -185,6 +185,69 @@ func TestReserveDrainMemberTakesOverMissingOwner(t *testing.T) {
 	}
 }
 
+// TestReserveDrainMemberCASTakeoverContention races two open drains that both
+// see a member reserved by a closed drain. The takeover is fenced on the dead
+// owner's value, so exactly one drain owns the member and the other conflicts
+// on the winner.
+func TestReserveDrainMemberCASTakeoverContention(t *testing.T) {
+	store := newStampedDrainStore(t, gate.Auto)
+	member, err := store.Create(beads.Bead{Title: "member"})
+	if err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	dead := createExclusiveDrainControl(t, store, "closed drain")
+	if err := store.SetMetadata(member.ID, beadmeta.ExclusiveDrainReservationMetadataKey, dead.ID); err != nil {
+		t.Fatalf("stamp stale reservation: %v", err)
+	}
+	if err := store.Close(dead.ID); err != nil {
+		t.Fatalf("close stale owner: %v", err)
+	}
+	controls := []beads.Bead{
+		createExclusiveDrainControl(t, store, "drain-a"),
+		createExclusiveDrainControl(t, store, "drain-b"),
+	}
+
+	start := make(chan struct{})
+	results := make([]error, len(controls))
+	var wg sync.WaitGroup
+	for i := range controls {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			results[i] = reserveDrainMember(beadstest.Graph(store), controls[i], member, ProcessOptions{Work: beadstest.Work(store)})
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	owner := reservationOwner(t, store, member.ID)
+	if owner != controls[0].ID && owner != controls[1].ID {
+		t.Fatalf("owner = %q, want exactly one of the racing drains", owner)
+	}
+	var wins, conflicts int
+	for i, err := range results {
+		switch {
+		case err == nil && controls[i].ID == owner:
+			wins++
+		case err == nil:
+			t.Fatalf("control %s reported success but %s owns the member", controls[i].ID, owner)
+		default:
+			var re drainReservationError
+			if !errors.As(err, &re) {
+				t.Fatalf("loser error = %v, want drainReservationError", err)
+			}
+			if re.Owner != owner {
+				t.Fatalf("loser observed owner %q, want the winner %q", re.Owner, owner)
+			}
+			conflicts++
+		}
+	}
+	if wins != 1 || conflicts != 1 {
+		t.Fatalf("wins=%d conflicts=%d, want exactly one of each", wins, conflicts)
+	}
+}
+
 func TestReserveDrainMemberCASReentryIsIdempotent(t *testing.T) {
 	store := newStampedDrainStore(t, gate.Auto)
 	control, member := newDrainReservationFixtures(t, store)
@@ -243,6 +306,80 @@ func TestClaimDrainReservationCASSpuriousConflictRetriesOnce(t *testing.T) {
 	}
 	if owner := reservationOwner(t, store, member.ID); owner != "drain-a" {
 		t.Fatalf("owner = %q, want drain-a", owner)
+	}
+}
+
+// newStaleDrainReservation stamps a reservation naming a released owner and
+// returns the scripted writer a takeover claim runs through.
+func newStaleDrainReservation(t *testing.T, store *beads.MemStore, member beads.Bead, staleOwner string) *scriptedDrainWriter {
+	t.Helper()
+	if err := store.SetMetadata(member.ID, beadmeta.ExclusiveDrainReservationMetadataKey, staleOwner); err != nil {
+		t.Fatalf("stamp stale reservation: %v", err)
+	}
+	inner, ok := beads.ConditionalWriterFor(store)
+	if !ok {
+		t.Fatal("MemStore must supply a conditional writer")
+	}
+	return &scriptedDrainWriter{inner: inner}
+}
+
+func TestClaimDrainReservationCASTakeoverSpuriousConflictRetriesOnce(t *testing.T) {
+	store := newStampedDrainStore(t, gate.Auto)
+	control, member := newDrainReservationFixtures(t, store)
+	writer := newStaleDrainReservation(t, store, member, "drain-dead")
+	writer.failPreconditionOnce = true
+
+	if err := claimDrainReservationCAS(store, writer, control, member, "drain-dead"); err != nil {
+		t.Fatalf("spurious conflict on a takeover = %v, want one bounded re-issue to succeed", err)
+	}
+	if writer.casCalls != 2 {
+		t.Fatalf("cas calls = %d, want exactly 2 (one bounded re-issue)", writer.casCalls)
+	}
+	if owner := reservationOwner(t, store, member.ID); owner != control.ID {
+		t.Fatalf("owner = %q, want %s", owner, control.ID)
+	}
+}
+
+func TestClaimDrainReservationCASTakeoverOfReleasedSlotRetriesEmpty(t *testing.T) {
+	store := newStampedDrainStore(t, gate.Auto)
+	control, member := newDrainReservationFixtures(t, store)
+	writer := newStaleDrainReservation(t, store, member, "drain-dead")
+	// The slot is released after the stale value was observed and before the
+	// takeover's CAS lands.
+	if err := store.SetMetadata(member.ID, beadmeta.ExclusiveDrainReservationMetadataKey, ""); err != nil {
+		t.Fatalf("release slot: %v", err)
+	}
+
+	if err := claimDrainReservationCAS(store, writer, control, member, "drain-dead"); err != nil {
+		t.Fatalf("takeover of a concurrently released slot = %v, want the re-issue against the empty slot to win", err)
+	}
+	if writer.casCalls != 2 {
+		t.Fatalf("cas calls = %d, want exactly 2", writer.casCalls)
+	}
+	if owner := reservationOwner(t, store, member.ID); owner != control.ID {
+		t.Fatalf("owner = %q, want %s", owner, control.ID)
+	}
+}
+
+func TestClaimDrainReservationCASTakeoverOfRestampedSlotConflicts(t *testing.T) {
+	store := newStampedDrainStore(t, gate.Auto)
+	control, member := newDrainReservationFixtures(t, store)
+	writer := newStaleDrainReservation(t, store, member, "drain-dead")
+	// A third drain took the slot over after the stale value was observed.
+	if err := store.SetMetadata(member.ID, beadmeta.ExclusiveDrainReservationMetadataKey, "drain-c"); err != nil {
+		t.Fatalf("restamp slot: %v", err)
+	}
+
+	err := claimDrainReservationCAS(store, writer, control, member, "drain-dead")
+	var re drainReservationError
+	if !errors.As(err, &re) || re.Owner != "drain-c" {
+		t.Fatalf("takeover of a restamped slot = %v, want drainReservationError naming drain-c", err)
+	}
+	if writer.casCalls != 1 {
+		t.Fatalf("cas calls = %d, want 1 (no write over a value never observed)", writer.casCalls)
+	}
+	if owner := reservationOwner(t, store, member.ID); owner != "drain-c" {
+		t.Fatalf("owner = %q, want drain-c", owner)
 	}
 }
 

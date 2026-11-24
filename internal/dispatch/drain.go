@@ -2022,14 +2022,18 @@ func claimDrainReservation(memberStore beads.Store, control, member beads.Bead, 
 	return claimDrainReservationCAS(memberStore, writer, control, member, expected)
 }
 
-// claimDrainReservationCAS fences the claim. A failed CAS is an observation,
-// never a loss verdict by itself: the reservation value identifies its writer
+// claimDrainReservationCAS fences the claim on the observed value expected
+// (empty, or a released owner's id). A failed CAS is an observation, never a
+// loss verdict by itself: the reservation value identifies its writer
 // (control.ID), so the claim re-reads and re-decides — our own value means
 // self-win (idempotent re-entry, or our own committed-but-unacknowledged
-// write on an ambiguous transport error); a still-empty owner means a
-// spurious conflict (a raced release, or cross-key revision interference on
-// stores that emulate value-CAS over a whole-bead fence), re-issued once
-// before surfacing; anything else is a genuine competing reservation.
+// write on an ambiguous transport error); a value still equal to expected
+// means a spurious conflict (cross-key revision interference on stores that
+// emulate value-CAS over a whole-bead fence), re-issued once before
+// surfacing; a slot released to empty meanwhile is re-issued against the
+// empty value; anything else is a genuine competing reservation. A value that
+// changed under the claim was written by a drain that was open when it
+// reserved, so it is never taken over here; a later pass re-checks it.
 func claimDrainReservationCAS(memberStore beads.Store, writer beads.ConditionalWriter, control, member beads.Bead, expected string) error {
 	const claimAttempts = 2
 	var lastErr error
@@ -2046,23 +2050,29 @@ func claimDrainReservationCAS(memberStore beads.Store, writer beads.ConditionalW
 			}
 			return fmt.Errorf("%s: re-reading drain member %s after conditional claim: %w", control.ID, member.ID, getErr)
 		}
-		switch owner := strings.TrimSpace(current.Metadata[beadmeta.ExclusiveDrainReservationMetadataKey]); {
+		stored := current.Metadata[beadmeta.ExclusiveDrainReservationMetadataKey]
+		switch owner := strings.TrimSpace(stored); {
 		case owner == control.ID:
 			// Self-win: the value is ours — an ambiguous transport error whose
 			// write committed, or a concurrent re-entry of this same drain.
 			return nil
-		case owner != "":
+		case owner == "":
+			// Released (or never stamped): the remaining attempt claims the
+			// empty slot as observed.
+			expected = stored
+		case owner != strings.TrimSpace(expected):
 			return drainReservationError{ControlID: control.ID, MemberID: member.ID, Owner: owner}
 		}
-		// Owner still empty: spurious conflict. A non-precondition error is
-		// surfaced (transport/exhaustion — the level-triggered pass retries);
-		// a precondition/value-loss gets one bounded re-issue.
+		// The slot still holds the value the claim is fenced on: a spurious
+		// conflict. A non-precondition error is surfaced (transport/exhaustion
+		// — the level-triggered pass retries); a precondition/value-loss gets
+		// one bounded re-issue.
 		if casErr != nil && !beads.IsPreconditionFailed(casErr) {
 			return fmt.Errorf("%s: reserving drain member %s: %w", control.ID, member.ID, casErr)
 		}
 	}
 	if lastErr == nil {
-		lastErr = errors.New("conditional claim kept losing with an empty owner")
+		lastErr = fmt.Errorf("conditional claim kept losing against reservation value %q", expected)
 	}
 	return fmt.Errorf("%s: reserving drain member %s: %w", control.ID, member.ID, lastErr)
 }
