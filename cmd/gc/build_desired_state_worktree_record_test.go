@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -318,6 +319,29 @@ func TestWakeKnownCleanCreateStartsInVerifiedWorktree(t *testing.T) {
 			}
 			if got := preparedStartSessionWorkDir(rows[0]); got != path {
 				t.Fatalf("created session work dir = %q; want the verified worktree %q, not the pool directory; stderr=%s", got, path, stderr)
+			}
+		})
+	}
+}
+
+// TestWakeKnownIncompleteWorktreeEvidenceSkipsCleanCreate pins
+// gastownhall/gascity#5753 for unusable evidence on the wake-known-identity
+// tier: legacy realization refuses the clean create, reports it skipped, and
+// creates no session in the pool's own directory.
+func TestWakeKnownIncompleteWorktreeEvidenceSkipsCleanCreate(t *testing.T) {
+	for _, tc := range wakeKnownCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			spec, _ := liveSeatManagedSpec(t, "gc-b")
+			wb := managedAssignedWork(spec, tc.assignee)
+			delete(wb.Metadata, beadmeta.WorktreeLifecycleMetadataKey)
+			request := assignedWorkRequest(t, tc.cfg, wb, tc.ready, []string{"r1"}, tc.sessions)
+			rows, _, stderr := realizeFreshRequest(t, request)
+			if len(rows) != 0 {
+				t.Fatalf("created %d sessions (work dir %q), want none for unusable evidence; stderr=%s",
+					len(rows), preparedStartSessionWorkDir(rows[0]), stderr)
+			}
+			if !strings.Contains(stderr, "(skipping)") {
+				t.Fatalf("stderr = %q, want the item reported skipped", stderr)
 			}
 		})
 	}

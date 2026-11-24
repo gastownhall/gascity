@@ -1304,3 +1304,35 @@ func TestLegacySameTriggerStaleResumeSeatMovesToItsWorktree(t *testing.T) {
 		}
 	}
 }
+
+// A seat the resume tier re-points at work whose worktree evidence is
+// incomplete is skipped: realization reports it and writes no binding, so the
+// row keeps its trigger and work dir instead of being pointed at the pool's
+// own directory (gastownhall/gascity#5753).
+func TestLegacyResumeIncompleteWorktreeEvidenceSkipsSeat(t *testing.T) {
+	_, pathA := liveSeatManagedSpec(t, "gc-a")
+	specB, _ := liveSeatManagedSpec(t, "gc-b")
+	incomplete := func(id string) beads.Bead {
+		wb := managedAssignedWork(specB, id)
+		delete(wb.Metadata, beadmeta.WorktreeLifecycleMetadataKey)
+		return wb
+	}
+	res := liveSeatReuse{
+		seatDir: pathA, extra: map[string]string{"state": "asleep"},
+		request: func(id string) SessionRequest {
+			cfg := &config.City{Agents: []config.Agent{{Name: "worker", MaxActiveSessions: intPtr(3)}}}
+			return assignedWorkRequest(t, cfg, incomplete(id), nil, []string{"r1"}, []beads.Bead{sessionBead(id, "open")})
+		},
+		assigned: func(id string) []beads.Bead { return []beads.Bead{incomplete(id)} },
+	}.run(t)
+	row := res.row(t)
+	if got := row.Metadata[beadmeta.TriggerBeadIDMetadataKey]; got != "gc-a" {
+		t.Fatalf("trigger = %q, want gc-a: no binding write for unusable evidence; stderr=%s", got, res.stderr)
+	}
+	if got := row.Metadata[beadmeta.WorkDirMetadataKey]; got != pathA {
+		t.Fatalf("gc.work_dir = %q, want %q, unchanged (the pool directory is %q); stderr=%s", got, pathA, res.cfg.Agents[0].WorkDir, res.stderr)
+	}
+	if !strings.Contains(res.stderr, "(skipping)") {
+		t.Fatalf("stderr = %q, want the item reported skipped", res.stderr)
+	}
+}
