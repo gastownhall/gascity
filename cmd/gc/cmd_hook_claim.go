@@ -347,6 +347,16 @@ type hookClaimOps struct {
 	// fresh one each time the loop copies the ops.
 	InvokedAt   time.Time
 	ClaimWindow time.Duration
+	// Deadline is the invocation deadline this claim answers by (gc hook
+	// --timeout, or an inherited GC_HOOK_DEADLINE), zero for none. With one,
+	// applyDefaults fits ClaimWindow and ClaimReserve inside it, so a claim
+	// that starts inside the window lands before the deadline less the answer
+	// margin.
+	Deadline time.Time
+	// ClaimReserve is the budget a claim mutation that passed the window gets
+	// (claimMutationContext): hookClaimMutationTimeout without a deadline, a
+	// third of the time left to work with one, capped at the same.
+	ClaimReserve time.Duration
 	// ClassRoute is the relocated coordination-class binding these seams
 	// escalate to, or nil on a city that relocates nothing. It is not a seam:
 	// it is here so claimHookWorkWithRunner — the only caller that knows the
@@ -785,6 +795,21 @@ func (ops *hookClaimOps) applyDefaults() {
 	if ops.ClaimWindow <= 0 {
 		ops.ClaimWindow = resolveHookClaimWindow()
 	}
+	if ops.ClaimReserve > 0 {
+		return
+	}
+	if ops.Deadline.IsZero() {
+		ops.ClaimReserve = hookClaimMutationTimeout
+		return
+	}
+	// The window and the reserve share the time from the invocation to the
+	// deadline less the answer margin, so a claim that starts inside the
+	// window lands by the time the hook must answer. Both floor at 1ns: zero
+	// reads as unset (claimWindowOrDefault), and a spent budget must read as
+	// spent.
+	work := ops.Deadline.Add(-hookArchiveMargin(ops.Deadline, hookProcessStart)).Sub(ops.InvokedAt)
+	ops.ClaimReserve = max(min(hookClaimMutationTimeout, work/3), time.Nanosecond)
+	ops.ClaimWindow = max(min(ops.ClaimWindow, work-ops.ClaimReserve), time.Nanosecond)
 }
 
 // emitClaimFailed is ops.EmitClaimFailed for a caller that may drive a claim
