@@ -59,7 +59,7 @@ func TestOrderStoreInfosReachTheOrdersBinding(t *testing.T) {
 }
 
 // TestOrderStoreInfosStayOnTheOneStoreOnSingleStoreCity is the compatibility
-// half: with OrdersBeadStore() == CityBeadStore() — every city that relocates
+// half: with Stores().Orders() == CityBeadStore() — every city that relocates
 // nothing — the list is exactly the one it always was, so the read does not scan
 // one database twice.
 func TestOrderStoreInfosStayOnTheOneStoreOnSingleStoreCity(t *testing.T) {
@@ -302,7 +302,7 @@ func TestOrderHistoryStoreRefsAllResolveToTheSameStore(t *testing.T) {
 		if !ok {
 			t.Fatalf("workflowStoreByRef(%q) = false; an order endpoint published a ref no reader resolves", ref)
 		}
-		if info.store != binding {
+		if !beads.SameStore(info.store, binding) {
 			t.Fatalf("workflowStoreByRef(%q) resolved to a store other than the bead's own binding", ref)
 		}
 	}

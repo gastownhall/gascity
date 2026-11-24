@@ -85,6 +85,45 @@ func TestInventoryLaneHealsOnlyReadingsThatCallForIt(t *testing.T) {
 	}
 }
 
+// Kills an inventory lane that leaves a live pane's interrupt-settle
+// declaration stale: a healthy capture armed before its provider opted
+// into the settle is backfilled, one whose provider withdrew it is
+// withdrawn, each as a declaration change on the capture it keeps, and a
+// converged one is left alone.
+func TestInventoryLaneHealConvergesTheSettleDeclaration(t *testing.T) {
+	settling := runtime.ProgramStatusArm{Capture: true, App: "agent", DecideSettle: true}
+	plain := runtime.ProgramStatusArm{Capture: true, App: "agent"}
+	declared := paneRow("%2", "r2.%2", true)
+	declared.SettleDeclared = true
+	converged := paneRow("%3", "r3.%3", true)
+	converged.SettleDeclared = true
+	f, ff := healFake(t, map[string]runtime.ProgramPaneRow{
+		"backfill":  paneRow("%1", "r1.%1", true),
+		"withdraw":  declared,
+		"converged": converged,
+	})
+	programs := map[string]runtime.ProgramStatus{}
+	for _, name := range []string{"backfill", "withdraw", "converged"} {
+		row, _ := f.ProgramPane(name)
+		programs[name] = runtime.JudgeProgramStatus(row)
+	}
+	wants := map[string]runtime.ProgramStatusArm{"backfill": settling, "withdraw": plain, "converged": settling}
+	f.Calls = nil
+	tally := healProgramCaptureReadings(ff, programs, func() (map[string]runtime.ProgramStatusArm, error) { return wants, nil })
+	if got, want := healedNames(f), []string{"backfill", "withdraw"}; !slices.Equal(got, want) {
+		t.Fatalf("healed %q, want %q", got, want)
+	}
+	if tally.actions[runtime.ProgramCaptureDeclared] != 2 || len(tally.errs) != 0 {
+		t.Fatalf("tally %+v, want 2 declared", tally)
+	}
+	if row, _ := f.ProgramPane("backfill"); !row.SettleDeclared || row.Tap != "r1.%1" {
+		t.Fatalf("backfill row %+v, want the settle declared on the kept capture", row)
+	}
+	if row, _ := f.ProgramPane("withdraw"); row.SettleDeclared || row.Tap != "r2.%2" {
+		t.Fatalf("withdraw row %+v, want the settle withdrawn from the kept capture", row)
+	}
+}
+
 func TestInventoryLaneHealSkipsWhenDeclarationsUnreadable(t *testing.T) {
 	f, ff := healFake(t, map[string]runtime.ProgramPaneRow{"lost": paneRow("%1", "r1.%1", false)})
 	f.Calls = nil
@@ -155,6 +194,35 @@ func TestProgramCaptureHealNeededForAHoldDeclarationDrift(t *testing.T) {
 	}
 	if programCaptureHealNeeded(runtime.ProgramStatus{Validity: runtime.ProgramStatusExited}, holding) {
 		t.Error("an exited reading heals for its hold declaration")
+	}
+}
+
+// Kills a heal gate that never converges a live capture's interrupt-settle
+// declaration (program_status decide_settle): a capture of ours whose
+// declaration differs from the config's heals (backfill and withdrawal),
+// one that matches does not, whatever its hold, and a reading not under our
+// nonce is judged as before.
+func TestProgramCaptureHealNeededForASettleDeclarationDrift(t *testing.T) {
+	settling := runtime.ProgramStatusArm{Capture: true, DecideSettle: true}
+	plain := runtime.ProgramStatusArm{Capture: true}
+	for _, v := range []runtime.ProgramStatusValidity{runtime.ProgramStatusValid, runtime.ProgramStatusSilent, runtime.ProgramStatusCleared} {
+		for _, tc := range []struct {
+			declared bool
+			want     runtime.ProgramStatusArm
+			heal     bool
+		}{
+			{false, settling, true},
+			{true, plain, true},
+			{true, settling, false},
+			{false, plain, false},
+		} {
+			if got := programCaptureHealNeeded(runtime.ProgramStatus{Validity: v, SettleDeclared: tc.declared}, tc.want); got != tc.heal {
+				t.Errorf("%s, declared=%v, want settle=%v: heal = %v, want %v", v, tc.declared, tc.want.DecideSettle, got, tc.heal)
+			}
+		}
+	}
+	if programCaptureHealNeeded(runtime.ProgramStatus{Validity: runtime.ProgramStatusExited}, settling) {
+		t.Error("an exited reading heals for its settle declaration")
 	}
 }
 

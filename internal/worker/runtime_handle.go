@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -35,6 +36,13 @@ type RuntimeHandleConfig struct {
 	// them to Provider, so they share no read with the city's
 	// SessionHandles. Set it wherever the handle reads turns.
 	CityPath string
+	// StartupTurnHolds reports whether a nudge made under ctx would reach
+	// the session's agent ahead of a startup turn its queue still holds
+	// and the nudge does not deliver (session.Manager.StartupTurnQueued,
+	// which reads the request's delivery key from ctx). A held nudge to a
+	// running session is reported undelivered and types nothing. Nil holds
+	// nothing: a handle without a session row has no queue to wait behind.
+	StartupTurnHolds func(ctx context.Context) bool
 }
 
 // RuntimeHandle adapts a legacy runtime session name to the canonical worker
@@ -48,6 +56,8 @@ type RuntimeHandle struct {
 	processNames []string
 	recorder     events.Recorder
 	cityPath     string
+	// startupTurnHolds is RuntimeHandleConfig.StartupTurnHolds.
+	startupTurnHolds func(ctx context.Context) bool
 }
 
 var _ Handle = (*RuntimeHandle)(nil)
@@ -65,13 +75,14 @@ func NewRuntimeHandle(cfg RuntimeHandleConfig) (*RuntimeHandle, error) {
 		recorder = events.Discard
 	}
 	return &RuntimeHandle{
-		provider:     cfg.Provider,
-		sessionName:  strings.TrimSpace(cfg.SessionName),
-		providerName: strings.TrimSpace(cfg.ProviderName),
-		transport:    strings.TrimSpace(cfg.Transport),
-		processNames: append([]string(nil), cfg.ProcessNames...),
-		recorder:     recorder,
-		cityPath:     strings.TrimSpace(cfg.CityPath),
+		provider:         cfg.Provider,
+		sessionName:      strings.TrimSpace(cfg.SessionName),
+		providerName:     strings.TrimSpace(cfg.ProviderName),
+		transport:        strings.TrimSpace(cfg.Transport),
+		processNames:     append([]string(nil), cfg.ProcessNames...),
+		recorder:         recorder,
+		cityPath:         strings.TrimSpace(cfg.CityPath),
+		startupTurnHolds: cfg.StartupTurnHolds,
 	}, nil
 }
 
@@ -114,6 +125,13 @@ func (h *RuntimeHandle) StartResolved(ctx context.Context, by sessionpkg.Actor, 
 	}
 	defer release()
 	err = h.provider.Start(ctx, h.sessionName, startCfg)
+	// A runtime-only handle has no session row to queue a startup nudge
+	// for: one the runtime handed back (its program held it behind a
+	// dialog, under program_status "on", or an exec pack's un-welded
+	// launch, which hands back every first turn) is dropped, and said so.
+	if nudge, ok := runtime.TakeStartupNudgeHandback(h.provider, h.sessionName); ok && err == nil {
+		log.Printf("worker: %q: started without its startup nudge, which its runtime handed back undelivered; a runtime-only handle has no session queue to hold it (%d bytes dropped)", h.sessionName, len(nudge.Text))
+	}
 	return err
 }
 
@@ -432,6 +450,14 @@ func (h *RuntimeHandle) Nudge(ctx context.Context, _ sessionpkg.Actor, req Nudge
 		result = NudgeResult{Delivered: false}
 		return result, err
 	}
+	if h.startupTurnHolds != nil && h.startupTurnHolds(ctx) {
+		// The session's first turn is still in its queue, waiting or
+		// being delivered by the queue's own send: this nudge would reach
+		// the agent ahead of it. Undelivered, so the caller queues it
+		// behind the turn or tries again.
+		result = NudgeResult{Delivered: false}
+		return result, nil
+	}
 	switch req.Delivery {
 	case "", NudgeDeliveryDefault, NudgeDeliveryImmediate:
 		immediate := req.Delivery == NudgeDeliveryImmediate
@@ -631,13 +657,12 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 	if !ok {
 		return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredProviderUnsupported}, nil
 	}
-	// Under the program-status shadow switch, the pre-read a wait-idle
-	// delivery would take is recorded beside the record; nothing reads it.
-	runtime.ShadowWaitIdlePreread(h.provider, h.sessionName, "", h.providerName, time.Now())
 	// A pre-read first: a session that reads busy, or whose input a pending
 	// interaction owns, will not reach a boundary within the wait, so the
 	// caller queues it now instead of blocking for runtimeHandleWaitIdleTimeout.
-	if runtime.IdleBoundaryNow(h.provider, h.sessionName).OutOfReach() {
+	// Under the program-status shadow switch the pre-read is recorded beside
+	// the record read fresh with it; nothing reads that record.
+	if runtime.ShadowIdleBoundaryNow(h.provider, h.sessionName, "", h.providerName).OutOfReach() {
 		return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredNoIdleBoundary}, nil
 	}
 	if err := waiter.WaitForIdle(ctx, h.sessionName, runtimeHandleWaitIdleTimeout); err != nil {

@@ -97,27 +97,34 @@ func cmdSessionWake(args []string, key string, stdout, stderr io.Writer, asJSON 
 	cityPath, cityErr := resolveCity()
 	cfg, cfgErr := cliCityConfig(cityPath, cityErr, stderr)
 	return doSessionWake(args[0], stdout, stderr, asJSON, sessionWakeDeps{
-		opKey:                    key,
-		cfgErr:                   cfgErr,
-		sp:                       wakeVerdictProvider(),
-		store:                    store,
-		cfg:                      cfg,
-		cityPath:                 cityPath,
-		cityResolved:             cityErr == nil,
-		now:                      time.Now,
-		withdrawQueuedWaitNudges: withdrawQueuedWaitNudges,
-		cityUsesManagedReconciler: func(cityPath string) bool {
-			owned, err := sessionStartOwnedByReconciler(cityPath)
-			if err != nil {
-				fmt.Fprintf(stderr, "gc session wake: warning: %v\n", err) //nolint:errcheck
-			}
-			return owned
-		},
-		pokeController: enqueueController,
+		opKey:        key,
+		cfgErr:       cfgErr,
+		sp:           wakeVerdictProvider(),
+		store:        store,
+		cfg:          cfg,
+		cityPath:     cityPath,
+		cityResolved: cityErr == nil,
 		rigStores: func() map[string]beads.Store {
 			return buildStandaloneRigStoresWithConfig(cfg, cityPath, io.Discard)
 		},
-	})
+	}.withCLIEffects(stderr))
+}
+
+// withCLIEffects is deps with a CLI one-shot's production effects: the wall
+// clock, the city's wait-nudge withdrawal, the managed-reconciler probe,
+// whose failure warns on stderr, and the controller poke.
+func (deps sessionWakeDeps) withCLIEffects(stderr io.Writer) sessionWakeDeps {
+	deps.now = time.Now
+	deps.withdrawQueuedWaitNudges = withdrawQueuedWaitNudges
+	deps.cityUsesManagedReconciler = func(cityPath string) bool {
+		owned, err := sessionStartOwnedByReconciler(cityPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc session wake: warning: %v\n", err) //nolint:errcheck
+		}
+		return owned
+	}
+	deps.pokeController = enqueueController
+	return deps
 }
 
 func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps sessionWakeDeps) int {
@@ -374,11 +381,14 @@ func sessionWakeHasRunnableTemplateInfo(info session.Info, cfg *config.City) boo
 }
 
 // sessionWakeResolveAgentInfo resolves the config.Agent that owns this
-// session's template, the same lookup sessionWakeHasRunnableTemplateInfo
-// uses to decide runnability. Returns nil when cfg is nil or no agent
-// matches -- callers that also need "is there a runnable template"
-// should treat a nil cfg as runnable themselves, since this helper
-// can't distinguish "no cfg" from "no match" on its own.
+// session's template the way the controller built the session, the same
+// lookup sessionWakeHasRunnableTemplateInfo uses to decide runnability:
+// findSessionAgentByTemplate's exact, migration and rig-stamped matches.
+// The rig-stamped copy a generic scope="rig" agent resolves to is not an
+// element of cfg.Agents, so callers only read it. Returns nil when cfg is
+// nil or no agent matches -- callers that also need "is there a runnable
+// template" should treat a nil cfg as runnable themselves, since this
+// helper can't distinguish "no cfg" from "no match" on its own.
 func sessionWakeResolveAgentInfo(info session.Info, cfg *config.City) *config.Agent {
 	if cfg == nil {
 		return nil
@@ -387,7 +397,7 @@ func sessionWakeResolveAgentInfo(info session.Info, cfg *config.City) *config.Ag
 	if template == "" {
 		template = info.Template
 	}
-	return findAgentByTemplate(cfg, template)
+	return findSessionAgentByTemplate(cfg, template)
 }
 
 func sessionWakeRequestedCreateInfo(info session.Info) bool {

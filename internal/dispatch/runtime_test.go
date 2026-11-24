@@ -518,7 +518,7 @@ func TestProcessScopeCheckSubjectSkipsFanoutBlocker(t *testing.T) {
 			mustDepAdd(t, store, control.ID, source.ID, "blocks")
 			mustDepAdd(t, store, body.ID, control.ID, "blocks")
 
-			subjectID, err := resolveScopeCheckSubjectID(beadstest.Graph(store), control.ID)
+			subjectID, err := resolveScopeCheckSubjectID(beadstest.Graph(store), control)
 			if err != nil {
 				t.Fatalf("resolveScopeCheckSubjectID: %v", err)
 			}
@@ -547,6 +547,134 @@ func TestProcessScopeCheckSubjectSkipsFanoutBlocker(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestProcessScopeCheckSubjectSkipsCrossRootDrainGate pins that a drain item's
+// scope-check, which also blocks on the item root of a predecessor member
+// (drainWorkflowExternalDeps wires that gate onto every step of the item),
+// resolves its own step as the subject even when the gate edge is listed
+// first. Taking the predecessor's failed root as the subject aborted the
+// item's first iteration right after its prepare step passed.
+func TestProcessScopeCheckSubjectSkipsCrossRootDrainGate(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	predecessorRoot := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "predecessor item",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.kind":    "workflow",
+			"gc.outcome": "fail",
+		},
+	})
+	body := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "develop iteration 1",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": "wf-item",
+			"gc.step_ref":     "develop.iteration.1",
+		},
+	})
+	prepare := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "prepare",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": "wf-item",
+			"gc.scope_ref":    "develop.iteration.1",
+			"gc.scope_role":   "member",
+			"gc.on_fail":      "abort_scope",
+			"gc.outcome":      "pass",
+		},
+	})
+	control := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize scope for prepare",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope-check",
+			"gc.root_bead_id": "wf-item",
+			"gc.scope_ref":    "develop.iteration.1",
+			"gc.scope_role":   "control",
+		},
+	})
+	implement := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "implement",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": "wf-item",
+			"gc.scope_ref":    "develop.iteration.1",
+			"gc.scope_role":   "member",
+			"gc.on_fail":      "abort_scope",
+		},
+	})
+
+	// The drain gate goes in first so a first-blocker lookup would pick the
+	// predecessor's failed root.
+	mustDepAdd(t, store, control.ID, predecessorRoot.ID, "blocks")
+	mustDepAdd(t, store, control.ID, prepare.ID, "blocks")
+	mustDepAdd(t, store, implement.ID, predecessorRoot.ID, "blocks")
+	mustDepAdd(t, store, implement.ID, control.ID, "blocks")
+	mustDepAdd(t, store, body.ID, implement.ID, "blocks")
+
+	subjectID, err := resolveScopeCheckSubjectID(beadstest.Graph(store), control)
+	if err != nil {
+		t.Fatalf("resolveScopeCheckSubjectID: %v", err)
+	}
+	if subjectID != prepare.ID {
+		t.Fatalf("subject = %s, want prepare %s (drain gate is %s)", subjectID, prepare.ID, predecessorRoot.ID)
+	}
+
+	result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
+	if err != nil {
+		t.Fatalf("ProcessControl(scope-check): %v", err)
+	}
+	if !result.Processed || result.Action != "continue" {
+		t.Fatalf("scope result = %+v, want processed continue", result)
+	}
+	if got := mustGetBead(t, store, implement.ID); got.Status != "open" {
+		t.Fatalf("implement status = %q (outcome %q), want open: the scope must not abort", got.Status, got.Metadata["gc.outcome"])
+	}
+	if got := mustGetBead(t, store, body.ID); got.Status != "open" {
+		t.Fatalf("body status = %q (outcome %q), want open", got.Status, got.Metadata["gc.outcome"])
+	}
+}
+
+// TestResolveBlockingSubjectIDSkipsCrossRootDrainGate pins the same rule for
+// the ralph and retry controls: the subject is the first blocker in the
+// control's own root, not a predecessor drain item's root listed before it.
+func TestResolveBlockingSubjectIDSkipsCrossRootDrainGate(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	predecessorRoot := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:    "predecessor item",
+		Type:     "task",
+		Status:   "closed",
+		Metadata: map[string]string{"gc.kind": "workflow", "gc.outcome": "fail"},
+	})
+	iteration := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:    "develop iteration 1",
+		Type:     "task",
+		Metadata: map[string]string{"gc.root_bead_id": "wf-item"},
+	})
+	control := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:    "develop",
+		Type:     "task",
+		Metadata: map[string]string{"gc.kind": "ralph", "gc.root_bead_id": "wf-item"},
+	})
+	mustDepAdd(t, store, control.ID, predecessorRoot.ID, "blocks")
+	mustDepAdd(t, store, control.ID, iteration.ID, "blocks")
+
+	subjectID, err := resolveBlockingSubjectID(beadstest.Graph(store), control)
+	if err != nil {
+		t.Fatalf("resolveBlockingSubjectID: %v", err)
+	}
+	if subjectID != iteration.ID {
+		t.Fatalf("subject = %s, want iteration %s (drain gate is %s)", subjectID, iteration.ID, predecessorRoot.ID)
 	}
 }
 
@@ -6749,7 +6877,7 @@ func TestProcessRalphCheckRetriesNestedAttemptScope(t *testing.T) {
 		t.Fatalf("logical deps = %+v, want exactly one current blocker", logicalDeps)
 	}
 	check2 := mustGetBead(t, store, logicalDeps[0].DependsOnID)
-	run2ID, err := resolveBlockingSubjectID(beadstest.Graph(store), check2.ID)
+	run2ID, err := resolveBlockingSubjectID(beadstest.Graph(store), check2)
 	if err != nil {
 		t.Fatalf("resolve run2 subject: %v", err)
 	}

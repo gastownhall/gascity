@@ -115,7 +115,7 @@ func TestDoSling_ReassignFormula_DoesNotReopenCollidingBead(t *testing.T) {
 	// Seed a bead whose ID collides with the "code-review" formula name and put
 	// it in the order-claimed state (status=in_progress, assignee set) that
 	// reopenForReassign would otherwise clear.
-	deps.Store = seededStore("code-review")
+	deps = withStore(deps, seededStore("code-review"))
 	inProgress, orderActor := "in_progress", "order:mol-dog-jsonl"
 	if err := deps.Store.Update("code-review", beads.UpdateOpts{Status: &inProgress, Assignee: &orderActor}); err != nil {
 		t.Fatalf("Update colliding bead to order-claimed state: %v", err)

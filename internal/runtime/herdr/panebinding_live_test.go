@@ -29,7 +29,7 @@ func TestProviderLiveOccupantSwapKeepsLiveness(t *testing.T) {
 		WorkDir: t.TempDir(),
 		// The occupant swap: the launch shell replaces itself, mirroring the
 		// boot handoff that makes herdr ≥0.7.4 clear the agent's name.
-		Command: `exec sleep 120`,
+		Command: liveSwapCommand,
 		Env:     map[string]string{"GC_SESSION_ID": "gctest-swap-session"},
 	}
 	if err := p.Start(ctx, "swap", cfg); err != nil {

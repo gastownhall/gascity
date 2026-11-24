@@ -34,10 +34,8 @@ type managedDoltRecoveryOps struct {
 
 func defaultManagedDoltRecoveryOps() managedDoltRecoveryOps {
 	return managedDoltRecoveryOps{
-		queryProbe: managedDoltQueryProbe,
-		healthCheck: func(host, port, user string) (managedDoltSQLHealthReport, error) {
-			return managedDoltHealthCheck(host, port, user, true)
-		},
+		queryProbe:  managedDoltQueryProbe,
+		healthCheck: managedDoltHealthCheck,
 		stop: func(cityPath, port string) (managedDoltStopReport, error) {
 			return stopManagedDoltProcessWithOptions(cityPath, port, false)
 		},
@@ -316,6 +314,7 @@ func recoverManagedDoltRepairRuntimeStateForHealthyPort(cityPath, requestedPort 
 	if !ok {
 		return nil
 	}
+	repaired = keepRecordedInfraScope(layout.StateFile, repaired)
 	if err := writeDoltRuntimeStateFile(layout.StateFile, repaired); err != nil {
 		return fmt.Errorf("repair provider dolt runtime state: %w", err)
 	}

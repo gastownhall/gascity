@@ -165,3 +165,20 @@ func TestPackRuntimesDoctorCheck_MixedReportsOnlyBroken(t *testing.T) {
 		t.Errorf("details %q should not flag the healthy runtime", joined)
 	}
 }
+
+// Kills (PAR-EXEC PR-4) a pack-runtimes check that does not say which
+// runtimes v2 can run on: each usable runtime's line says v2-ready, or why
+// not, as the latch reads it.
+func TestPackRuntimesDoctorCheck_ReportsV2Readiness(t *testing.T) {
+	ready := writeRPPScript(t, `[ "$1" = protocol ] && { echo '{"version":0,"capabilities":["observe.v1","report-attachment"]}'; exit 0; }; exit 2
+`)
+	cfg := &config.City{Runtimes: map[string]config.DiscoveredRuntime{
+		"ready": {Name: "ready", Command: ready, PackName: "p"},
+		"v0":    {Name: "v0", Command: writeRPPScript(t, "exit 2\n"), PackName: "p"},
+	}}
+	res := runPackRuntimesCheck(t, cfg)
+	joined := strings.Join(res.Details, "\n")
+	if res.Status != doctor.StatusOK || !strings.Contains(joined, `runtime "ready" (pack "p"): v2-ready`) || !strings.Contains(joined, `runtime "v0" (pack "p"): not v2-ready: its handshake does not declare observe.v1 or report-attachment`) {
+		t.Fatalf("status %v, details %q; want OK with each runtime's v2 readiness", res.Status, joined)
+	}
+}
