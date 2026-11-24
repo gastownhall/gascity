@@ -310,3 +310,38 @@ func TestHerdrWaitForIdleCanceledDuringTheStatusReadIsCanceled(t *testing.T) {
 		t.Fatalf("WaitForIdle canceled during its status read = %v, want context.Canceled", err)
 	}
 }
+
+// TestHerdrStopReportsUnreachableWhenTheCloseCannotAnswer is #6055's Stop
+// arm: a pane lookup the herdr server never answered is an unreachable
+// runtime, not a stopped session. Stop wraps runtime.ErrRuntimeUnavailable
+// alongside the context error, and the sidecar binding stays in place (as
+// every close failure already keeps it) so a retried Stop still finds the
+// pane.
+func TestHerdrStopReportsUnreachableWhenTheCloseCannotAnswer(t *testing.T) {
+	p := newLiveContractProvider(t, "busy_get_blocks")
+	p.c.cliTimeout, p.c.cliWaitDelay = testBound, testWaitDlay
+	const name = "gastown__worker"
+	bindTestPane(t, p, name, bindModeShell)
+
+	start := time.Now()
+	err := p.Stop(name)
+	elapsed := time.Since(start)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Stop = %v; want the lookup's deadline as the cause", err)
+	}
+	if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("Stop = %v; want runtime.ErrRuntimeUnavailable wrapped: an unanswered lookup is not a stopped session", err)
+	}
+	if runtime.IsSessionGone(err) {
+		t.Fatalf("Stop = %v; an unanswered lookup must not read as session gone", err)
+	}
+	if elapsed > testBound+testWaitDlay+boundSlack {
+		t.Fatalf("Stop took %v; want it to return at the lookup's bound", elapsed)
+	}
+	if err := runtime.StopForCleanup(p, name); err == nil {
+		t.Fatal("StopForCleanup with an unanswered lookup = nil, want the failure propagated")
+	}
+	if pane, _ := p.GetMeta(name, metaBoundPane); pane != "%5" {
+		t.Errorf("bound pane after a failed Stop = %q, want %%5 kept for the retry", pane)
+	}
+}

@@ -13,7 +13,9 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -750,5 +752,79 @@ func TestAttachBoundsOnlyItsLookup(t *testing.T) {
 				t.Fatal("kubectl hook never ran")
 			}
 		})
+	})
+}
+
+// TestStopReportsUnreachableWhenTheAPINeverAnswered is AC-5 of #6055: a Stop
+// whose list or delete never reached the API server (cut at the verb's bound,
+// a dial failure) carries no Kubernetes status, so the session's state is
+// unknown, not gone: Stop wraps runtime.ErrRuntimeUnavailable alongside the
+// cause so callers defer rather than certify the session stopped. An answer
+// the API server did give keeps today's shape (it is an answer, wrong or
+// not), and a genuine NotFound stays the idempotent stop.
+func TestStopReportsUnreachableWhenTheAPINeverAnswered(t *testing.T) {
+	t.Run("list cut at the verb's bound", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			ops := newHoldOps(holdAll())
+			p := deadlineProvider(ops)
+
+			start := time.Now()
+			err := p.Stop(deadlineSession)
+			elapsed := time.Since(start)
+
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("Stop = %v; want the verb bound's deadline as the cause", err)
+			}
+			if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("Stop = %v; want runtime.ErrRuntimeUnavailable wrapped: an unanswered list is not a stopped session", err)
+			}
+			if runtime.IsSessionGone(err) {
+				t.Fatalf("Stop = %v; an unanswered list must not read as session gone", err)
+			}
+			if elapsed > testRequestBound+deadlineSlack {
+				t.Fatalf("Stop took %v; want one %v bound", elapsed, testRequestBound)
+			}
+		})
+	})
+	t.Run("delete cut at the verb's bound", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			ops := newHoldOps(holdMethods("deletePod"))
+			addRunningPods(ops.fakeK8sOps, 1)
+			p := deadlineProvider(ops)
+
+			err := p.Stop(deadlineSession)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("Stop = %v; want the verb bound's deadline as the cause", err)
+			}
+			if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("Stop = %v; want runtime.ErrRuntimeUnavailable wrapped: an unanswered delete is not a stopped session", err)
+			}
+		})
+	})
+	t.Run("an API answer keeps today's shape", func(t *testing.T) {
+		fake := newFakeK8sOps()
+		addRunningPods(fake, 1)
+		fake.listErr = apierrors.NewGenericServerResponse(403, "list", schema.GroupResource{Resource: "pods"}, "", "forbidden", 0, false)
+		p := deadlineProvider(fake)
+
+		err := p.Stop(deadlineSession)
+		if err == nil {
+			t.Fatal("Stop = nil; want the API's 403 to surface")
+		}
+		if errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			t.Fatalf("Stop = %v; an answer the API server gave is not an unreachable runtime", err)
+		}
+		if !strings.Contains(err.Error(), "forbidden") {
+			t.Fatalf("Stop = %v; want the API status carried in the message", err)
+		}
+	})
+	t.Run("a NotFound list stays the idempotent stop", func(t *testing.T) {
+		fake := newFakeK8sOps()
+		fake.listErr = apierrors.NewNotFound(schema.GroupResource{Resource: "pods"}, "")
+		p := deadlineProvider(fake)
+
+		if err := p.Stop(deadlineSession); err != nil {
+			t.Fatalf("Stop = %v; want nil for a session the API says is gone", err)
+		}
 	})
 }
