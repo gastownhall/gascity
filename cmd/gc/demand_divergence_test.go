@@ -7,12 +7,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/pkg/eventexport"
 )
@@ -644,5 +649,156 @@ func TestDivergenceReadsTheTriggerInTheCountingStoreNotOnlyTheWorkers(t *testing
 	}
 	if line := stderr.String(); !strings.Contains(line, "canary-8a1 is still claimable in city") {
 		t.Fatalf("stderr = %q, want the line naming canary-8a1 and the city store it was counted in", line)
+	}
+}
+
+// demandStampCity is a city with three rigs for the stamp resolver: riga is
+// served, rigb is suspended on start, and rigc's store env cannot be projected.
+// The env projection is stubbed to name the leg it was built for.
+func demandStampCity(t *testing.T) (string, *config.City) {
+	t.Helper()
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "riga", Path: filepath.Join(cityPath, "rigs", "riga")},
+			{Name: "rigb", Path: filepath.Join(cityPath, "rigs", "rigb"), SuspendedOnStart: true},
+			{Name: "rigc", Path: filepath.Join(cityPath, "rigs", "rigc")},
+		},
+	}
+	prev := hookStoreQueryEnv
+	hookStoreQueryEnv = func(_ string, _ *config.City, a *config.Agent) (map[string]string, error) {
+		if a.Dir == "rigc" {
+			return nil, errors.New("projecting rigc's store env failed")
+		}
+		return map[string]string{"GC_STORE": "leg-" + a.Dir}, nil
+	}
+	t.Cleanup(func() { hookStoreQueryEnv = prev })
+	return cityPath, cfg
+}
+
+// Kills a resolver that places a stamp the census never meant: every spelling
+// of this city's store and of a served rig's store resolves to that store's
+// leg, and every stamp the seat cannot honestly place is an error, never a
+// fallback to some other store (gastownhall/gascity#5858).
+func TestDemandTriggerStoreAtResolvesEachStampSpelling(t *testing.T) {
+	cityPath, cfg := demandStampCity(t)
+	rigaDir := filepath.Join(cityPath, "rigs", "riga")
+	for _, tt := range []struct {
+		stamp   string
+		wantDir string
+		wantEnv string
+	}{
+		{stamp: "city", wantDir: cityPath, wantEnv: "GC_STORE=leg-"},
+		{stamp: "city:test-city", wantDir: cityPath, wantEnv: "GC_STORE=leg-"},
+		{stamp: " city ", wantDir: cityPath, wantEnv: "GC_STORE=leg-"},
+		{stamp: "class:graph", wantDir: cityPath, wantEnv: "GC_STORE=leg-"},
+		{stamp: "rig:riga", wantDir: rigaDir, wantEnv: "GC_STORE=leg-riga"},
+		{stamp: "riga", wantDir: rigaDir, wantEnv: "GC_STORE=leg-riga"},
+	} {
+		t.Run("places "+tt.stamp, func(t *testing.T) {
+			leg, err := demandTriggerStoreAt(cityPath, cfg, tt.stamp)
+			if err != nil {
+				t.Fatalf("demandTriggerStoreAt(%q): %v", tt.stamp, err)
+			}
+			if filepath.Clean(leg.dir) != filepath.Clean(tt.wantDir) || !slices.Contains(leg.env, tt.wantEnv) {
+				t.Fatalf("leg = dir %q, env has %q: %v; want dir %q with %q", leg.dir, tt.wantEnv, slices.Contains(leg.env, tt.wantEnv), tt.wantDir, tt.wantEnv)
+			}
+		})
+	}
+	for _, stamp := range []string{
+		"",                 // nothing records where the row was counted
+		"city:other-city",  // another city's store
+		"rig:nope",         // a rig not in city.toml
+		"rig:rigb",         // a suspended rig: its Dolt may be stopped
+		"rigb",             // the same, in the bare spelling
+		"rig:rigc",         // a rig whose store env cannot be projected
+		"0xc000123456",     // the census's %p fallback key
+		"elsewhere:canary", // a scheme the census never writes
+	} {
+		t.Run("refuses "+stamp, func(t *testing.T) {
+			if leg, err := demandTriggerStoreAt(cityPath, cfg, stamp); err == nil {
+				t.Fatalf("demandTriggerStoreAt(%q) = leg at %q, nil; want an error: the seat cannot place that store", stamp, leg.dir)
+			}
+		})
+	}
+	t.Run("refuses a rig while the suspension state is unreadable", func(t *testing.T) {
+		statePath := citylayout.SuspensionStateFile(cityPath)
+		if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(statePath, []byte("{not json"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if leg, err := demandTriggerStoreAt(cityPath, cfg, "rig:riga"); err == nil {
+			t.Fatalf("demandTriggerStoreAt(rig:riga) = leg at %q, nil with an unreadable suspension state; want an error", leg.dir)
+		}
+	})
+}
+
+// gastownhall/gascity#5858: a stamp the seat cannot place classifies unknown
+// with status store_unresolved, and reads nothing: neither the trigger row nor
+// its dependencies, in the counting store or in the seat's own.
+func TestDivergenceUnplaceableStampIsUnknownWithoutAnyRead(t *testing.T) {
+	cityPath, cfg := demandStampCity(t)
+	resolver := func(ref string) (hookStore, error) { return demandTriggerStoreAt(cityPath, cfg, ref) }
+	openRow := beads.Bead{
+		ID: "canary-8a1", Status: "open", Type: "task",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"},
+	}
+	for _, tt := range []struct {
+		name     string
+		stamp    string
+		resolver func(string) (hookStore, error)
+	}{
+		{name: "no stamp", stamp: "", resolver: resolver},
+		{name: "another city", stamp: "city:other-city", resolver: resolver},
+		{name: "a rig not in city.toml", stamp: "rig:nope", resolver: resolver},
+		{name: "a suspended rig", stamp: "rig:rigb", resolver: resolver},
+		{name: "the census fallback key", stamp: "0xc000123456", resolver: resolver},
+		{name: "an env projection failure", stamp: "rig:rigc", resolver: resolver},
+		{name: "no resolver wired", stamp: "city", resolver: nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := events.NewFake()
+			prev := demandDivergenceRecorder
+			demandDivergenceRecorder = func(io.Writer) events.Recorder { return rec }
+			t.Cleanup(func() { demandDivergenceRecorder = prev })
+
+			ops := demandDivergenceOpsForBlockedBead(openRow, nil, false, nil)
+			ops.ReadSessionTrigger = func(string) (demandTrigger, error) {
+				return demandTrigger{ID: openRow.ID, StoreRef: tt.stamp}, nil
+			}
+			ops.DemandTriggerStore = tt.resolver
+			reads := 0
+			ops.ReadWorkMeta = func(context.Context, string, []string, string, string) (beads.Bead, error) {
+				reads++
+				return openRow, nil
+			}
+			ops.ConfirmBlocked = func(context.Context, string, []string, string, string) (bool, error) {
+				reads++
+				return false, nil
+			}
+
+			var stderr bytes.Buffer
+			recordDemandClaimDivergence(hookClaimReasonNoWork, divergenceOptions(demandSpawnEnv()...), ops, &stderr)
+
+			if len(rec.Events) != 1 {
+				t.Fatalf("events = %+v, want exactly 1", rec.Events)
+			}
+			var payload events.SessionDemandClaimDivergencePayload
+			if err := json.Unmarshal(rec.Events[0].Payload, &payload); err != nil {
+				t.Fatalf("decoding payload: %v", err)
+			}
+			if payload.Classification != events.DemandClaimUnknown || payload.TriggerStatusAtDrain != "store_unresolved" || payload.TriggerBeadID != openRow.ID {
+				t.Fatalf("payload = %+v, want unknown with status store_unresolved for %s", payload, openRow.ID)
+			}
+			if reads != 0 {
+				t.Fatalf("store reads = %d, want none for a counting store the seat cannot place", reads)
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("stderr = %q, want silence for an unknown classification", stderr.String())
+			}
+		})
 	}
 }

@@ -41,6 +41,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // demandSpawnOriginValue is the presence-only marker the controller sets on a
@@ -206,9 +207,12 @@ func classifyDemandTrigger(trigger demandTrigger, opts hookClaimOptions, ops hoo
 // same leg builders the hook fan-out uses. The stamp is folded the way the
 // census that wrote it compares it (normalizeDemandStoreRef): the city
 // spellings and class refs read the city store, "rig:<name>" and the bare rig
-// name read that rig's store. An empty stamp, a scheme the census never
-// writes, or a store no leg can be built for is an error: the seat cannot
-// place the counting store.
+// name read that rig's store. An empty stamp, "city:<name>" naming another
+// city (matched exactly, as namedTriggerRefIsSameStore does), a scheme the
+// census never writes, or a store no leg can be built for is an error: the
+// seat cannot place the counting store. So is a rig suspended in the frame
+// the hook fan-out reads (or a suspension state that cannot be read): a
+// diagnostic never reaches toward a stopped rig Dolt.
 //
 // The leg is built from a zero agent view with no identity overrides: the read
 // is by id, so there is no query identity to preserve, and the store
@@ -218,14 +222,21 @@ func demandTriggerStoreAt(cityPath string, cfg *config.City, storeRef string) (h
 	if storeRef == "" {
 		return hookStore{}, errors.New("the session row records no store its trigger was counted in")
 	}
+	if cityName, isCity := strings.CutPrefix(storeRef, "city:"); isCity {
+		if this := hookStoreCityName(cityPath, loadedCityName(cfg, cityPath)); cityName != this {
+			return hookStore{}, fmt.Errorf("trigger store ref %q names another city's store, not %q", storeRef, this)
+		}
+	}
 	var legs []hookStore
 	switch normalized := normalizeDemandStoreRef(storeRef); {
 	case normalized == "city":
 		legs = appendCityHookStore(nil, cityPath, cfg, &config.Agent{}, nil)
-	case strings.HasPrefix(normalized, "rig:"):
-		legs = appendOneRigHookStore(nil, cityPath, cfg, &config.Agent{}, strings.TrimPrefix(normalized, "rig:"), nil)
-	case !strings.Contains(normalized, ":"):
-		legs = appendOneRigHookStore(nil, cityPath, cfg, &config.Agent{}, normalized, nil)
+	case strings.HasPrefix(normalized, "rig:"), !strings.Contains(normalized, ":"):
+		rigLegs, err := demandTriggerRigStore(cityPath, cfg, strings.TrimPrefix(normalized, "rig:"))
+		if err != nil {
+			return hookStore{}, fmt.Errorf("trigger store ref %q: %w", storeRef, err)
+		}
+		legs = rigLegs
 	default:
 		return hookStore{}, fmt.Errorf("trigger store ref %q names no store this seat can read", storeRef)
 	}
@@ -233,6 +244,20 @@ func demandTriggerStoreAt(cityPath string, cfg *config.City, storeRef string) (h
 		return hookStore{}, fmt.Errorf("building the leg for trigger store ref %q: no store this seat can read", storeRef)
 	}
 	return legs[0], nil
+}
+
+// demandTriggerRigStore builds the leg for rigName's store, refusing a rig the
+// hook fan-out does not search: one suspended in the effective suspension
+// frame, or any rig while that frame cannot be read.
+func demandTriggerRigStore(cityPath string, cfg *config.City, rigName string) ([]hookStore, error) {
+	st, err := loadSuspensionState(fsys.OSFS{}, cityPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading the rig suspension state: %w", err)
+	}
+	if buildEffectiveSuspendedRigNames(cfg, st)[rigName] {
+		return nil, fmt.Errorf("rig %q is suspended", rigName)
+	}
+	return appendOneRigHookStore(nil, cityPath, cfg, &config.Agent{}, rigName, nil), nil
 }
 
 // classifyDemandTriggerBlockedness settles a trigger row whose blockedness the
