@@ -3360,3 +3360,67 @@ func TestComputePoolDesiredStatesWakeKnownTiersCarryWorktreeEvidence(t *testing.
 		})
 	}
 }
+
+// assignedWorkTierCases are the three ways computePoolDesiredStatesParkedAt
+// plans a session for assigned work of template worker: the resume of its open
+// holder, then both wake-known-identity clean creates.
+func assignedWorkTierCases() []wakeKnownCase {
+	resume := wakeKnownCase{
+		name:     "resume of an open holder",
+		cfg:      &config.City{Agents: []config.Agent{{Name: "worker", MaxActiveSessions: intPtr(3)}}},
+		assignee: "sess-1",
+		sessions: []beads.Bead{sessionBead("sess-1", "open")},
+	}
+	return append([]wakeKnownCase{resume}, wakeKnownCases()...)
+}
+
+// assignedWorkCounts is the PoolDesiredCounts computePoolDesiredStatesParkedAt
+// yields for wb alone.
+func assignedWorkCounts(tc wakeKnownCase, wb beads.Bead, refs []string) map[string]int {
+	return PoolDesiredCounts(computePoolDesiredStatesParkedAt(tc.cfg, []beads.Bead{wb}, tc.ready, refs,
+		sessionInfosFromBeads(tc.sessions), nil, nil, time.Time{}, nil, nil))
+}
+
+// TestComputePoolDesiredStatesAssignedWorkEvidenceFailsClosed pins
+// gastownhall/gascity#5753 for unusable evidence: assigned work whose work dir
+// carries incomplete or conflicting ownership evidence still plans its
+// session, with no spec and the evidence error, which
+// verifiedPoolTriggerWorkDir refuses, so the item is skipped instead of being
+// bound to the pool's own directory. Demand counts are those of the same work
+// without evidence.
+func TestComputePoolDesiredStatesAssignedWorkEvidenceFailsClosed(t *testing.T) {
+	spec := fakeManagedSpec("w-1")
+	missingKey := worktreeEvidenceMetadata(spec)
+	delete(missingKey, beadmeta.WorktreeLifecycleMetadataKey)
+	conflicting := worktreeEvidenceMetadata(spec)
+	conflicting[beadmeta.LegacyWorkDirMetadataKey] = "/tmp/elsewhere"
+	unowned := spec
+	unowned.StoreRef = ""
+	shapes := []struct {
+		name string
+		meta map[string]string
+		refs []string
+	}{
+		{name: "missing an ownership key", meta: missingKey, refs: []string{"r1"}},
+		{name: "conflicting work_dir spellings", meta: conflicting, refs: []string{"r1"}},
+		{name: "no store reference on bead or leg", meta: worktreeEvidenceMetadata(unowned)},
+	}
+	for _, tc := range assignedWorkTierCases() {
+		for _, shape := range shapes {
+			t.Run(tc.name+"/"+shape.name, func(t *testing.T) {
+				plain := workBead("w-1", "worker", tc.assignee, "in_progress", 2)
+				wb := withMetadata(plain, shape.meta)
+				req := assignedWorkRequest(t, tc.cfg, wb, tc.ready, shape.refs, tc.sessions)
+				if req.WorktreeSpec != nil || req.WorktreeError == "" {
+					t.Fatalf("(WorktreeSpec, WorktreeError) = (%+v, %q), want (nil, the evidence error)", req.WorktreeSpec, req.WorktreeError)
+				}
+				if _, err := verifiedPoolTriggerWorkDir(nil, &tc.cfg.Agents[0], "worker-1", req); !errors.Is(err, errPoolTriggerWorktreeEvidence) {
+					t.Fatalf("verifiedPoolTriggerWorkDir err = %v, want errPoolTriggerWorktreeEvidence", err)
+				}
+				if got, want := assignedWorkCounts(tc, wb, shape.refs), assignedWorkCounts(tc, plain, shape.refs); !reflect.DeepEqual(got, want) {
+					t.Fatalf("PoolDesiredCounts = %v, want %v, the counts of the same work without evidence", got, want)
+				}
+			})
+		}
+	}
+}
