@@ -11,6 +11,7 @@ go_library(
         "auggie_reader.go",
         "claude_api_error.go",
         "codex_batch.go",
+        "codex_identity.go",
         "codex_reader.go",
         "codex_usage.go",
         "context.go",
@@ -65,6 +66,7 @@ go_test(
         "claude_project_slug_test.go",
         "codex_batch_test.go",
         "codex_history_usage_test.go",
+        "codex_identity_test.go",
         "codex_reader_test.go",
         "codex_turn_error_test.go",
         "codex_usage_test.go",
@@ -104,6 +106,7 @@ go_test(
     deps = [
         "//internal/bootstrap/packs/core",
         "//internal/citylayout",
+        "//internal/fsys",
         "//internal/modelwindow",
         "//internal/testenv",
     ],
