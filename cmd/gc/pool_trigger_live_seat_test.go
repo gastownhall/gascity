@@ -474,6 +474,31 @@ func TestLegacySameTriggerStaleResumeSeatMovesToItsWorktree(t *testing.T) {
 	}
 }
 
+// TestLegacyResumeReRepointKeepsCanonicalTriggerStoreRef pins the stamp half
+// of gastownhall/gascity#5753's resume tier: re-pointing a seat already
+// stamped with the canonical leg ref to another bead of the same leg keeps
+// the stamp — the resume request now carries the leg ref, where an
+// evidence-less request cleared it on every re-point.
+func TestLegacyResumeReRepointKeepsCanonicalTriggerStoreRef(t *testing.T) {
+	spec, path := liveSeatManagedSpec(t, "gc-b")
+	res := liveSeatReuse{
+		running:  false,
+		extra:    map[string]string{beadmeta.TriggerBeadStoreRefMetadataKey: "rig:r1"},
+		assigned: func(id string) []beads.Bead { return []beads.Bead{workBeadWithManagedSpec(spec, id)} },
+		request:  func(id string) SessionRequest { return resumeRequestFromAssignedWork(spec, id) },
+	}.reused(t)
+	row := res.row(t)
+	if got := row.Metadata[beadmeta.TriggerBeadIDMetadataKey]; got != "gc-b" {
+		t.Fatalf("trigger = %q, want the seat re-pointed to gc-b", got)
+	}
+	if got := row.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey]; got != "rig:r1" {
+		t.Fatalf("trigger store ref = %q, want the canonical stamp rig:r1 kept across the re-point", got)
+	}
+	if got := row.Metadata[beadmeta.WorkDirMetadataKey]; got != path {
+		t.Fatalf("gc.work_dir = %q, want %q", got, path)
+	}
+}
+
 // A running seat is not handed work bound to another verified worktree: its
 // claim would leave that work. The work gets a fresh session in its own
 // worktree, and the seat's row keeps its own trigger and directory.
