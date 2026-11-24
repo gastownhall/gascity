@@ -5026,8 +5026,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// that is already closed on a live read is pure loss, so
 					// re-check it before killing. Failing to read it falls through
 					// to the cycle: Q1 just established a complete scan with no
-					// claim, so the cycle costs no in-flight work.
-					if terminal, err := freshAnchorBeadTerminal(topo, decision.AssignedWorkBeadID); err == nil && terminal {
+					// claim, so the cycle costs no in-flight work. The same live
+					// row also decides ownership: an anchor that is now unassigned
+					// (blank assignee included) or owned outside this session's
+					// own identifiers was released or handed off since the stale
+					// snapshot, so there is nothing to cycle this session onto.
+					if terminal, anchorAssignee, err := freshAnchorBeadTerminal(topo, decision.AssignedWorkBeadID); err == nil &&
+						(terminal || !slices.Contains(sessionAssignmentIdentifiersForConfigInfo(info, cfg), anchorAssignee)) {
 						continue
 					}
 					if ran, fold := cycleAliveSessionForFreshReassign(cityPath, infoByID[target.info.ID], target.tp, sp, store, cfg, cb, name, decision.AssignedWorkBeadID, clk.Now(), stdout, stderr, trace); ran {

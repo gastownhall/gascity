@@ -320,11 +320,11 @@ func TestFreshAnchorBeadTerminal_BypassesPrimedCacheOnExternalClose(t *testing.T
 	}
 	reproCloseForReal(t, backing, "ga-anchor") // another process closes it; the cache is not told
 
-	control, err := freshAnchorBeadTerminal(residencyTopologyForCity("", nil, backing, nil), "ga-anchor")
+	control, _, err := freshAnchorBeadTerminal(residencyTopologyForCity("", nil, backing, nil), "ga-anchor")
 	if err != nil || !control {
 		t.Fatalf("uncached control: terminal = %v, err = %v; want terminal", control, err)
 	}
-	terminal, err := freshAnchorBeadTerminal(residencyTopologyForCity("", nil, cached, nil), "ga-anchor")
+	terminal, _, err := freshAnchorBeadTerminal(residencyTopologyForCity("", nil, cached, nil), "ga-anchor")
 	if err != nil {
 		t.Fatalf("primed cache: %v", err)
 	}

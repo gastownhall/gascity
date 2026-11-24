@@ -143,12 +143,16 @@ func sessionHasFreshInProgressClaim(sw *SeatWork, info sessionpkg.Info) (bool, e
 // freshAnchorBeadTerminal fetches the fresh-cycle guard's anchor bead
 // (ComputeAwakeSet's decision.AssignedWorkBeadID) with one fresh, uncached
 // read over the caller's residency topology and reports whether it is
-// already terminal (closed). ga-pvjbx3 Q2: the tick's assigned-work snapshot
-// can already be several minutes stale by the time the kill decision runs;
-// cycling a session onto an anchor that has since closed is pure loss — there
-// is no work left to reassign onto. An error (including a bead no leg holds)
-// is "could not tell", and the caller then proceeds to the cycle: Q1 has
-// already established that the session holds no claim a kill could cost.
+// already terminal (closed), together with its trimmed live assignee.
+// ga-pvjbx3 Q2: the tick's assigned-work snapshot can already be several
+// minutes stale by the time the kill decision runs; cycling a session onto an
+// anchor that has since closed is pure loss — there is no work left to
+// reassign onto. The same holds for an anchor that was released or handed to
+// another owner since the snapshot: the caller compares the returned assignee
+// with the session's own identifiers. Status and assignee come from the one
+// row, so they cannot disagree. An error (including a bead no leg holds) is
+// "could not tell", and the caller then proceeds to the cycle: Q1 has already
+// established that the session holds no claim a kill could cost.
 //
 // The topology only names which store owns the anchor. The row is then read
 // from that store's live reader (beads.LiveFor), and the row the owner probe
@@ -157,16 +161,16 @@ func sessionHasFreshInProgressClaim(sw *SeatWork, info sessionpkg.Info) (bool, e
 // read, and a close made by another process (`bd close`) reaches the backing
 // store alone. Reading through the cache would report that closed anchor as
 // live and cycle the session onto work that no longer exists.
-func freshAnchorBeadTerminal(topo storeref.Topology, anchorID string) (bool, error) {
+func freshAnchorBeadTerminal(topo storeref.Topology, anchorID string) (terminal bool, assignee string, err error) {
 	owner, err := byIDOwnerRowForTopology(topo, anchorID)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	anchor, err := beads.LiveFor(owner.Resident).Get(anchorID)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
-	return convoycore.IsTerminalStatus(anchor.Status), nil
+	return convoycore.IsTerminalStatus(anchor.Status), strings.TrimSpace(anchor.Assignee), nil
 }
 
 // cycleAliveSessionForFreshReassign tears down a live wake_mode=fresh

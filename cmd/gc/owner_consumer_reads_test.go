@@ -275,7 +275,7 @@ func TestOwnerReadsReadPastAStaleCacheThroughAHandle(t *testing.T) {
 			if err != nil || open || assignee != "worker-1" {
 				t.Errorf("prevAssignedBeadStatus = open %v assignee %q err %v, want the backing's closed row", open, assignee, err)
 			}
-			if terminal, err := freshAnchorBeadTerminal(topo, id); err != nil || !terminal {
+			if terminal, _, err := freshAnchorBeadTerminal(topo, id); err != nil || !terminal {
 				t.Errorf("freshAnchorBeadTerminal = %v, %v; want the backing's closed row", terminal, err)
 			}
 
