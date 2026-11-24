@@ -235,6 +235,9 @@ type CityRuntime struct {
 	// pass set before that read, zero after a pass that completed.
 	orderSweepWatchdogNotClosedDue     time.Time
 	orderSweepWatchdogNotClosedBackoff time.Duration
+	// orderTrackingRetentionWatchdogLast is the retention sweep's interval
+	// stamp. Only the retention lane's goroutine touches it, so it needs no
+	// lock.
 	orderTrackingRetentionWatchdogLast time.Time
 	nudgeMailSweepWatchdogLast         time.Time
 	wispIndexMigrationApplied          bool
@@ -2350,8 +2353,9 @@ func bulkDeleteMaxAge(_ *config.City) time.Duration {
 // runOrderTrackingRetentionWatchdog deletes closed order-tracking beads that
 // are past their TTL (defaulting to 7d) and beyond the retain-10 floor, at
 // most once every orderTrackingRetentionWatchdogInterval. It deletes at most
-// orderTrackingRetentionWatchdogDeleteBudget beads per invocation. The orders
-// lane runs it with its pass's config snapshot.
+// orderTrackingRetentionWatchdogDeleteBudget beads per invocation. The
+// retention lane (order_tracking_retention_lane.go) runs it with its pass's
+// config snapshot.
 func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(cfg *config.City, now time.Time) {
 	if !cr.orderTrackingRetentionWatchdogLast.IsZero() &&
 		now.Sub(cr.orderTrackingRetentionWatchdogLast) < orderTrackingRetentionWatchdogInterval {
