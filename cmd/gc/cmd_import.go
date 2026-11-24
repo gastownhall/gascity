@@ -46,6 +46,10 @@ var (
 	// (and so have no real cache content on disk for the loader to expand)
 	// can stub this too. See #5382.
 	validateComposedConfigAfterInstall = func(cityPath string) error {
+		// Install rewrote the pack cache and packs.lock, including sources an
+		// earlier load in this command did not report. Drop the memo before
+		// the validation load so it reads what install wrote.
+		invalidateInvocationConfigMemo()
 		_, err := loadCityConfig(cityPath, io.Discard)
 		return err
 	}

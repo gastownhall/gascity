@@ -1,9 +1,11 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -44,20 +46,38 @@ import (
 // scope, so a caller must not write through a map, any other slice, or a
 // pointer reachable from the config. The *config.Provenance is not copied at
 // all: every caller of a key, the first included, gets the one the memo
-// stored, so no caller may modify it. What a cached answer gives up is a
-// re-read of files edited during the few hundred milliseconds between two of
-// the helpers' loads, which the uncached path never guaranteed either (each
-// load already reads its sources one by one).
+// stored, so no caller may modify it. A cached answer is reused only while
+// its sources are unchanged; the freshness rules below say when the next
+// helper's load reads the files again.
 //
 // The scope also carries the builtin readiness deferral: the cities whose
 // readiness pass the gc bd passthrough loader skipped
 // (deferBuiltinReadinessForInvocation). It lives here so it dies with the
-// scope and can never leak into a long-lived process.
+// scope and can never leak into a long-lived process. It stays only while the
+// composition it was taken from is still current; a stale composition retires
+// it, so a later load does not skip readiness on files the command has since
+// changed.
 //
 // The scope also answers the city.toml [beads] peek (peekCityTOMLBeads): the
-// first peek of a file decodes it and later peeks in the scope get that answer.
-// A peek that could not read or parse the file, or decode one of its fields, is
-// not remembered.
+// first peek of a file decodes it and later peeks in the scope get that answer
+// while the file's size and mtime are unchanged. A peek that could not read or
+// parse the file, or decode one of its fields, is not remembered.
+//
+// Freshness. A remembered composition, peek, or readiness deferral is reused
+// only while every file that composition reported, plus packs.lock and
+// .gc/site.toml, still has the size and mtime it had when the load ran. A
+// missing file is part of that record, so creating it is a change. That is
+// how a city.toml write, an edited include, an imported pack, or a rig
+// binding in site.toml is visible to the next read in the same command.
+// Three events drop answers even when no stat moved, because the writer may
+// have preserved size and mtime or changed a file the load did not report:
+//   - invalidateInvocationConfigMemo, from the city.toml edit writer and from
+//     the post-install validation load;
+//   - the first builtin-pack refresh of a city in the scope
+//     (noteBuiltinPackRefresh), which can rewrite caches composed earlier.
+//
+// A later refresh in the same scope keeps entries composed after the first.
+// Errors are still never remembered.
 type invocationConfigMemo struct {
 	mu      sync.Mutex
 	entries map[string]invocationConfigMemoEntry
@@ -66,7 +86,26 @@ type invocationConfigMemo struct {
 	readinessDeferred map[string]struct{}
 	// beadsPeeks are the decoded [beads] tables of the city.toml files this
 	// scope peeked (peekCityTOMLBeads), by normalized path.
-	beadsPeeks map[string]cityTOMLBeadsPeek
+	beadsPeeks map[string]memoizedBeadsPeek
+	// refreshed holds city.toml paths whose builtin-pack refresh has already
+	// run in this scope. The first refresh drops answers composed before it.
+	refreshed map[string]struct{}
+}
+
+// invocationMemoSource is one file a remembered load depends on, as it was
+// when the load or peek ran. A file that did not exist is recorded too.
+type invocationMemoSource struct {
+	path    string
+	exists  bool
+	size    int64
+	modTime time.Time
+}
+
+// memoizedBeadsPeek is one remembered [beads] decode plus the stat of the
+// file it was decoded from.
+type memoizedBeadsPeek struct {
+	peek   cityTOMLBeadsPeek
+	source invocationMemoSource
 }
 
 // deferBuiltinReadinessForInvocation records that this invocation composed
@@ -86,8 +125,9 @@ func deferBuiltinReadinessForInvocation(cityPath string) {
 }
 
 // builtinReadinessDeferredInInvocation reports whether the open invocation
-// scope deferred cityPath's builtin readiness pass. It is false outside a
-// scope.
+// scope deferred cityPath's builtin readiness pass and that composition's
+// sources are still unchanged. It is false outside a scope, and a stale
+// deferral is dropped rather than honored.
 func builtinReadinessDeferredInInvocation(cityPath string) bool {
 	memo := currentInvocationConfigMemo()
 	if memo == nil {
@@ -95,13 +135,26 @@ func builtinReadinessDeferredInInvocation(cityPath string) bool {
 	}
 	memo.mu.Lock()
 	defer memo.mu.Unlock()
-	_, ok := memo.readinessDeferred[normalizePathForCompare(cityPath)]
-	return ok
+	cityKey := normalizePathForCompare(cityPath)
+	if _, ok := memo.readinessDeferred[cityKey]; !ok {
+		return false
+	}
+	// The deferral is the passthrough's promise that nothing after its
+	// composition needs the readiness pass. That promise ends when the
+	// composition's sources have changed, or when the composition itself
+	// was dropped.
+	tomlKey := invocationMemoKey(filepath.Join(cityPath, "city.toml"))
+	if entry, ok := memo.entries[tomlKey]; ok && entry.current() {
+		return true
+	}
+	delete(memo.readinessDeferred, cityKey)
+	return false
 }
 
 type invocationConfigMemoEntry struct {
-	cfg  *config.City
-	prov *config.Provenance
+	cfg     *config.City
+	prov    *config.Provenance
+	sources []invocationMemoSource
 }
 
 // composedCityConfigLoads counts the composed loads loadComposedCityConfig
@@ -128,7 +181,10 @@ func beginInvocationConfigMemo() func() {
 	if activeInvocationConfigMemo != nil {
 		return func() {}
 	}
-	memo := &invocationConfigMemo{entries: map[string]invocationConfigMemoEntry{}}
+	memo := &invocationConfigMemo{
+		entries:   map[string]invocationConfigMemoEntry{},
+		refreshed: map[string]struct{}{},
+	}
 	activeInvocationConfigMemo = memo
 	return func() {
 		invocationConfigMemoMu.Lock()
@@ -151,20 +207,64 @@ func currentInvocationConfigMemo() *invocationConfigMemo {
 // its fields, is retried by the next caller, the rule the composed-config
 // entries keep for errors.
 func (m *invocationConfigMemo) cityTOMLBeadsPeek(tomlPath string) cityTOMLBeadsPeek {
-	key := normalizePathForCompare(filepath.Clean(tomlPath))
+	key := invocationMemoKey(tomlPath)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if peek, ok := m.beadsPeeks[key]; ok {
-		return peek
+	if peeked, ok := m.beadsPeeks[key]; ok && peeked.source.unchanged() {
+		return peeked.peek
 	}
+	delete(m.beadsPeeks, key)
+	before := statInvocationMemoSource(key)
 	peek, ok := decodeCityTOMLBeadsPeek(tomlPath)
-	if ok {
+	if ok && before.unchanged() {
 		if m.beadsPeeks == nil {
-			m.beadsPeeks = map[string]cityTOMLBeadsPeek{}
+			m.beadsPeeks = map[string]memoizedBeadsPeek{}
 		}
-		m.beadsPeeks[key] = peek
+		m.beadsPeeks[key] = memoizedBeadsPeek{peek: peek, source: before}
 	}
 	return peek
+}
+
+// invalidateInvocationConfigMemo drops every composition, beads peek, and
+// readiness deferral in the open scope. City.toml writers and the import
+// install validation load call it so a later read in the same command sees
+// what they wrote, including a write that preserved size and mtime and a
+// pack tree the earlier load did not report. It is a no-op outside a scope.
+func invalidateInvocationConfigMemo() {
+	memo := currentInvocationConfigMemo()
+	if memo == nil {
+		return
+	}
+	memo.mu.Lock()
+	defer memo.mu.Unlock()
+	memo.entries = map[string]invocationConfigMemoEntry{}
+	memo.beadsPeeks = nil
+	memo.readinessDeferred = nil
+}
+
+// noteBuiltinPackRefresh records that the builtin-pack refresh for tomlPath's
+// city has run. The first refresh in the scope drops that city's composition,
+// beads peek, and readiness deferral: they may predate files the refresh
+// rewrote. A later refresh in the same scope keeps answers composed after the
+// first. It is a no-op outside a scope.
+func noteBuiltinPackRefresh(tomlPath string) {
+	memo := currentInvocationConfigMemo()
+	if memo == nil {
+		return
+	}
+	key := invocationMemoKey(tomlPath)
+	memo.mu.Lock()
+	defer memo.mu.Unlock()
+	if memo.refreshed == nil {
+		memo.refreshed = map[string]struct{}{}
+	}
+	if _, already := memo.refreshed[key]; already {
+		return
+	}
+	memo.refreshed[key] = struct{}{}
+	delete(memo.entries, key)
+	delete(memo.beadsPeeks, key)
+	delete(memo.readinessDeferred, invocationMemoCityKey(tomlPath))
 }
 
 // loadComposedCityConfig is config.LoadWithIncludesOptions for the cmd/gc
@@ -176,19 +276,94 @@ func loadComposedCityConfig(fs fsys.FS, tomlPath string, opts config.LoadOptions
 		composedCityConfigLoads.Add(1)
 		return config.LoadWithIncludesOptions(fs, tomlPath, opts)
 	}
-	key := normalizePathForCompare(filepath.Clean(tomlPath))
+	key := invocationMemoKey(tomlPath)
 	memo.mu.Lock()
 	defer memo.mu.Unlock()
 	if entry, ok := memo.entries[key]; ok {
-		return callerCopyOfCityConfig(entry.cfg), entry.prov, nil
+		if entry.current() {
+			return callerCopyOfCityConfig(entry.cfg), entry.prov, nil
+		}
+		delete(memo.entries, key)
+		delete(memo.readinessDeferred, invocationMemoCityKey(tomlPath))
 	}
+	// A city.toml rewritten while the load runs could pair the new file's
+	// stat with the old file's content. Leave that load unmemoized.
+	before := statInvocationMemoSource(key)
 	composedCityConfigLoads.Add(1)
 	cfg, prov, err := config.LoadWithIncludesOptions(fs, tomlPath, opts)
 	if err != nil {
 		return cfg, prov, err
 	}
-	memo.entries[key] = invocationConfigMemoEntry{cfg: callerCopyOfCityConfig(cfg), prov: prov}
+	if before.unchanged() {
+		memo.entries[key] = invocationConfigMemoEntry{
+			cfg:     callerCopyOfCityConfig(cfg),
+			prov:    prov,
+			sources: invocationMemoSources(tomlPath, prov),
+		}
+	}
 	return cfg, prov, nil
+}
+
+func invocationMemoKey(path string) string {
+	return normalizePathForCompare(filepath.Clean(path))
+}
+
+func invocationMemoCityKey(tomlPath string) string {
+	return normalizePathForCompare(filepath.Dir(tomlPath))
+}
+
+// invocationMemoSources lists the files a composition depends on: every source
+// the load reported (city.toml, includes, pack files, rig fragments) plus
+// packs.lock and .gc/site.toml, which the load does not report. The lock pins
+// imported packs; site.toml holds the machine-local rig bindings.
+func invocationMemoSources(tomlPath string, prov *config.Provenance) []invocationMemoSource {
+	cityDir := filepath.Dir(tomlPath)
+	paths := []string{
+		tomlPath,
+		filepath.Join(cityDir, "packs.lock"),
+		filepath.Join(cityDir, ".gc", "site.toml"),
+	}
+	if prov != nil {
+		paths = append(paths, prov.Sources...)
+	}
+	seen := make(map[string]struct{}, len(paths))
+	sources := make([]invocationMemoSource, 0, len(paths))
+	for _, path := range paths {
+		key := invocationMemoKey(path)
+		if key == "" {
+			continue
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		sources = append(sources, statInvocationMemoSource(key))
+	}
+	return sources
+}
+
+func statInvocationMemoSource(path string) invocationMemoSource {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return invocationMemoSource{path: path}
+	}
+	return invocationMemoSource{path: path, exists: true, size: fi.Size(), modTime: fi.ModTime()}
+}
+
+func (s invocationMemoSource) unchanged() bool {
+	now := statInvocationMemoSource(s.path)
+	return now.exists == s.exists && now.size == s.size && now.modTime.Equal(s.modTime)
+}
+
+// current reports whether every file the entry's load depended on is as it
+// was when the load ran.
+func (e invocationConfigMemoEntry) current() bool {
+	for _, source := range e.sources {
+		if !source.unchanged() {
+			return false
+		}
+	}
+	return true
 }
 
 // callerCopyOfCityConfig gives one caller its own view of a memoized config:

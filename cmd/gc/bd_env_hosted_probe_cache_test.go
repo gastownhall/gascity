@@ -91,6 +91,11 @@ func TestHostedCredentialProbeReadsThroughTheInvocationMemo(t *testing.T) {
 	if _, _, err := loadComposedCityConfig(fsys.OSFS{}, tomlPath, invocationMemoLoadOptions); err != nil {
 		t.Fatal(err)
 	}
+	storagePath := filepath.Join(cityPath, "storage.toml")
+	originalStorage, err := os.ReadFile(storagePath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	writeHostedProbeCity(t, cityPath, false, stamp.Add(time.Second))
 
 	// Control: a fresh composition reads the rewrite, so the probe's answer
@@ -101,6 +106,32 @@ func TestHostedCredentialProbeReadsThroughTheInvocationMemo(t *testing.T) {
 	}
 	if configSelectsHostedBeadsCredentialProvider(fresh) {
 		t.Fatal("rewriting storage.toml did not drop the hosted binding; the test cannot tell a memo read from a fresh one")
+	}
+
+	// The freshness contract recomposes when size or mtime moves. Put the
+	// rewritten storage back at the seeded stat, padded so the bytes still
+	// drop the binding, and the probe can only still report hosted by
+	// reading the memo.
+	rewrittenStorage, err := os.ReadFile(storagePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rewrittenStorage) > len(originalStorage) {
+		t.Fatalf("rewritten storage.toml is %d bytes, longer than the seeded %d; it cannot be restored to the seeded stat", len(rewrittenStorage), len(originalStorage))
+	}
+	// Trailing spaces keep the rewritten binding and the seeded size. The
+	// hosted and non-hosted fixtures differ by one byte ("infra" vs "work").
+	padded := append([]byte{}, rewrittenStorage...)
+	for len(padded) < len(originalStorage) {
+		padded = append(padded, ' ')
+	}
+	if err := os.WriteFile(storagePath, padded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{tomlPath, storagePath} {
+		if err := os.Chtimes(path, stamp, stamp); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	composedBefore := composedCityConfigLoads.Load()

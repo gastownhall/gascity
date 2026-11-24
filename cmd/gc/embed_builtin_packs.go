@@ -47,11 +47,12 @@ func ensureBuiltinPacksForConfigLoad(fs fsys.FS, tomlPath string, warningWriter 
 	}
 	cityPath := filepath.Dir(tomlPath)
 	// Inside a one-shot invocation scope, a city this process already readied
-	// (or whose readiness the gc bd passthrough deferred) is not re-validated:
-	// the same contract ensureBuiltinRuntimeAssetsForSuppliedConfig already
-	// has. Nothing in the invocation rewrites the caches between two loads.
-	// Long-lived processes never open the scope and keep the warm
-	// revalidation.
+	// (or whose readiness the gc bd passthrough deferred, while that
+	// composition's sources are unchanged) is not re-validated: the same
+	// contract ensureBuiltinRuntimeAssetsForSuppliedConfig already has. A
+	// city.toml write, an external source change, a pack refresh, or import
+	// install drops the deferral first. Long-lived processes never open the
+	// scope and keep the warm revalidation.
 	if currentInvocationConfigMemo() != nil &&
 		(builtinRuntimeReadied(cityPath) || builtinReadinessDeferredInInvocation(cityPath)) {
 		return nil
@@ -69,6 +70,10 @@ var builtinReadinessPasses atomic.Int64
 // warning when the required caches are already usable.
 func EnsureBuiltinRuntimeAssets(cityPath string, warningWriter io.Writer) error {
 	builtinReadinessPasses.Add(1)
+	// The first refresh in an invocation may rewrite caches a composition
+	// already memoized. Drop that city's answers before the rewrite; a later
+	// refresh in the same invocation keeps what was composed after the first.
+	noteBuiltinPackRefresh(filepath.Join(cityPath, "city.toml"))
 	key := normalizePathForCompare(cityPath)
 	stateAny, _ := builtinRuntimeReadyCache.LoadOrStore(key, &builtinRuntimeState{})
 	state := stateAny.(*builtinRuntimeState)
