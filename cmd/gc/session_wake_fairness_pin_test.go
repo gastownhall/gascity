@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -31,12 +32,17 @@ func TestWakeFairnessInfoTwinCharacterization(t *testing.T) {
 	base := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 
 	// infoFairnessTime mirrors wakeFairnessTime's rule off the typed twin: parse
-	// last_woke_at, else slept_at, else fall back to CreatedAt, else zero. Kept
-	// local so the pin stays honest even after wakeFairnessTime itself moves onto
-	// Info.
+	// last_woke_at, else reset_committed_at while a reset is pending, else
+	// slept_at, else fall back to CreatedAt, else zero. Kept local so the pin
+	// stays honest even after wakeFairnessTime itself moves onto Info.
 	infoFairnessTime := func(i session.Info) time.Time {
 		if t, err := time.Parse(time.RFC3339, i.LastWokeAt); err == nil {
 			return t
+		}
+		if strings.TrimSpace(i.ContinuationResetPending) == "true" {
+			if t, err := time.Parse(time.RFC3339, strings.TrimSpace(i.ResetCommittedAt)); err == nil {
+				return t
+			}
 		}
 		if t, err := time.Parse(time.RFC3339, i.SleptAt); err == nil {
 			return t
@@ -255,6 +261,32 @@ func TestWakeFairnessResetPendingRanksByResetCommit(t *testing.T) {
 	})
 	if got, want := wakeFairnessTime(half), base.Add(-5*24*time.Hour); !got.Equal(want) {
 		t.Fatalf("wakeFairnessTime(pending without commit) = %v, want slept_at %v", got, want)
+	}
+
+	// A valid last_woke_at outranks the reset tier.
+	wokeAt := base.Add(-2 * time.Minute)
+	wokeMeta := map[string]string{
+		"template": "worker",
+		"slept_at": base.Add(-5 * 24 * time.Hour).Format(time.RFC3339),
+	}
+	for k, v := range session.RestartRequestPatchAt("", resetAt) {
+		wokeMeta[k] = v
+	}
+	wokeMeta["last_woke_at"] = wokeAt.Format(time.RFC3339)
+	woke := seed("woke-after-reset", base.Add(-16*24*time.Hour), wokeMeta)
+	if got := wakeFairnessTime(woke); !got.Equal(wokeAt) {
+		t.Fatalf("wakeFairnessTime(pending with last_woke_at) = %v, want last_woke_at %v", got, wokeAt)
+	}
+
+	// A malformed reset_committed_at is not a reset tier: fall through.
+	malformed := seed("malformed-reset", base.Add(-16*24*time.Hour), map[string]string{
+		"template":                   "worker",
+		"continuation_reset_pending": "true",
+		"reset_committed_at":         "not-a-timestamp",
+		"slept_at":                   base.Add(-5 * 24 * time.Hour).Format(time.RFC3339),
+	})
+	if got, want := wakeFairnessTime(malformed), base.Add(-5*24*time.Hour); !got.Equal(want) {
+		t.Fatalf("wakeFairnessTime(pending with malformed commit) = %v, want slept_at %v", got, want)
 	}
 
 	waitingPool := seed("pool-waiting", resetAt.Add(-3*time.Minute), map[string]string{"template": "worker"})
