@@ -749,3 +749,45 @@ func TestApplyGraphControlsFanoutControlKeepsNoDownstreamAsSink(t *testing.T) {
 		t.Fatalf("workflow-finalize needs = %v, want A-fanout", finalizer.Needs)
 	}
 }
+
+// TestApplyGraphControlsFinalizerNeedsForNestedCheck (issue #9412 AC-8) is a
+// guard: with the nested check-with-children compile fixed, the finalizer's
+// needs must keep naming the outer control and must not name any nested
+// attempt lineage — the inner control, the inner iteration scopes, their
+// members or the members' scope-checks. It passes at the fix's base (the
+// buggy compile kept the lineage out by other means) and pins the companion
+// graphSinkStepIDs change, without which the inner control would become a
+// stale workflow-finalize blocker.
+func TestApplyGraphControlsFinalizerNeedsForNestedCheck(t *testing.T) {
+	t.Parallel()
+
+	expanded, err := ApplyRetries(nestedCheckSteps(true))
+	if err != nil {
+		t.Fatalf("ApplyRetries failed: %v", err)
+	}
+	expanded, err = ApplyRalph(expanded)
+	if err != nil {
+		t.Fatalf("ApplyRalph failed: %v", err)
+	}
+	f := &Formula{Steps: expanded}
+	ApplyGraphControls(f)
+
+	finalizer := findGraphStepByID(collectGraphSteps(f.Steps), "workflow-finalize")
+	if finalizer == nil {
+		t.Fatal("missing workflow-finalize")
+	}
+	if !containsString(finalizer.Needs, "outer") {
+		t.Fatalf("workflow-finalize needs = %v, want the outer control outer", finalizer.Needs)
+	}
+	for _, stale := range []string{
+		"outer.iteration.1",
+		"outer.iteration.1.inner",
+		"outer.iteration.1.inner.iteration.1",
+		"outer.iteration.1.inner.iteration.1.i1",
+		"outer.iteration.1.inner.iteration.1.i1-scope-check",
+	} {
+		if containsString(finalizer.Needs, stale) {
+			t.Fatalf("workflow-finalize needs = %v, must not include nested lineage %q", finalizer.Needs, stale)
+		}
+	}
+}
