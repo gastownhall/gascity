@@ -330,6 +330,7 @@ go_test(
         "//internal/runtime/auto",
         "//internal/runtime/exec",
         "//internal/runtime/hybrid",
+        "//internal/runtime/herdr/herdrtest",
         "//internal/runtime/proctable",
         "//internal/runtime/tmux",
         "//internal/sessionlog",

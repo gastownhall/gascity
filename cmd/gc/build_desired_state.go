@@ -2375,7 +2375,7 @@ func convergedRoutedWorkBinding(
 	rigStores map[string]beads.Store,
 	suspendedRigPaths map[string]bool,
 ) beads.Store {
-	legs, err := routedWorkStoreCandidates(cityPath, cfg, store, rigStores, suspendedRigPaths, censusRefScoped)
+	legs, err := routedWorkStoreCandidates(cityPath, cfg, store, rigStores, suspendedRigPaths)
 	// An unresolvable topology takes the same conservative nil as a legacy city:
 	// fall back to the legacy target rather than guess a store. The error is not
 	// swallowed — collectOpenUnassignedRoutedWork resolves this same leg set later
@@ -6897,7 +6897,7 @@ func collectOpenUnassignedRoutedWork(cityPath string, cfg *config.City, store be
 	// Refs are the canonical scoped spelling the rows' gc.root_store_ref is
 	// matched against; a binding keeps its own "class:*" ref, which reads back as
 	// city scope.
-	stores, legErr := routedWorkStoreCandidates(cityPath, cfg, store, rigStores, suspendedRigPaths, censusRefScoped)
+	stores, legErr := routedWorkStoreCandidates(cityPath, cfg, store, rigStores, suspendedRigPaths)
 	if legErr != nil {
 		// The only demand signal this set feeds is openControlDispatcherDemand,
 		// and a refused city reporting zero would drain a live dispatcher. Say so

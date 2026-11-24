@@ -268,7 +268,7 @@ func TestDroppingALegBreaksAgreementAndNotTheRowCorpus(t *testing.T) {
 // Plan(RoutedWork) as the claim reader, narrowed to the runtime plane.
 func (e legAgreementEnv) runtimeDemandLegs(t *testing.T) []beads.Store {
 	t.Helper()
-	candidates, err := routedWorkStoreCandidates(e.cityPath, e.cfg, e.leading(), e.rigs, nil, censusRefScoped)
+	candidates, err := routedWorkStoreCandidates(e.cityPath, e.cfg, e.leading(), e.rigs, nil)
 	if err != nil {
 		t.Fatalf("routedWorkStoreCandidates: %v", err)
 	}
