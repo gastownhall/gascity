@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"slices"
 	"testing"
 	"time"
@@ -26,9 +27,13 @@ func TestDrainWorkflowServeWorkQuietRetryDoesNotReportPending(t *testing.T) {
 	blocked := errors.New(`pl-pujtf: completing workflow head: updating bead "pl-pujtf": exit status 1: cannot close blocked issue: pl-pujtf is blocked by [pl-mmneh]`)
 	pending := fmt.Errorf("%w: rig %q not found in city config", dispatch.ErrControlPending, "ghostrig")
 
+	// previous is the pending set of the caller's previous completed sweep;
+	// rows without one are the one-shot --serve path and the first --follow
+	// sweep, which behave exactly as before the baseline existed.
 	tests := []struct {
 		name            string
 		serveErr        error
+		previous        workflowServePendingRefusals
 		wantPendingAny  bool
 		wantProcessed   bool
 		wantSweepGrowth bool
@@ -79,6 +84,44 @@ func TestDrainWorkflowServeWorkQuietRetryDoesNotReportPending(t *testing.T) {
 			wantProcessed:   false,
 			wantSweepGrowth: true,
 		},
+		{
+			// gastownhall/gascity#6025: a finalize waiting on an open blocker
+			// answers the same unmarked refusal every sweep. Repeating the
+			// previous sweep's refusal verbatim is retried but not pending.
+			name:            "verbatim repeat of the previous sweep's pending does not pin the backoff",
+			serveErr:        pending,
+			previous:        workflowServePendingRefusals{"pl-mmneh": pending.Error()},
+			wantPendingAny:  false,
+			wantSweepGrowth: true,
+		},
+		{
+			name:            "changed pending refusal still wakes the loop",
+			serveErr:        pending,
+			previous:        workflowServePendingRefusals{"pl-mmneh": dispatch.ErrControlPending.Error()},
+			wantPendingAny:  true,
+			wantSweepGrowth: false,
+		},
+		{
+			name:            "another bead's pending baseline does not quiet this bead",
+			serveErr:        pending,
+			previous:        workflowServePendingRefusals{"pl-other": pending.Error()},
+			wantPendingAny:  true,
+			wantSweepGrowth: false,
+		},
+		{
+			name:            "pending baseline does not quiet a transient refusal",
+			serveErr:        blocked,
+			previous:        workflowServePendingRefusals{"pl-mmneh": blocked.Error()},
+			wantPendingAny:  true,
+			wantSweepGrowth: false,
+		},
+		{
+			name:            "quiet pending stays quiet whatever the baseline holds",
+			serveErr:        dispatch.MarkQuietControllerRetry(pending),
+			previous:        workflowServePendingRefusals{"pl-mmneh": "a different refusal"},
+			wantPendingAny:  false,
+			wantSweepGrowth: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -106,7 +149,7 @@ func TestDrainWorkflowServeWorkQuietRetryDoesNotReportPending(t *testing.T) {
 
 			cityPath := t.TempDir()
 			result, err := drainWorkflowServeWork(
-				config.Agent{Name: "control-dispatcher"}, cityPath, cityPath, "bd ready", nil, nil, io.Discard)
+				config.Agent{Name: "control-dispatcher"}, cityPath, cityPath, "bd ready", nil, tt.previous, io.Discard)
 			if err != nil {
 				t.Fatalf("drainWorkflowServeWork: %v", err)
 			}
@@ -118,6 +161,15 @@ func TestDrainWorkflowServeWorkQuietRetryDoesNotReportPending(t *testing.T) {
 			}
 			if result.pendingAny != tt.wantPendingAny {
 				t.Fatalf("pendingAny = %v, want %v", result.pendingAny, tt.wantPendingAny)
+			}
+			// The drain hands its pending set to the next sweep as that sweep's
+			// baseline, recording the refusal text whether or not it was quiet.
+			wantPending := workflowServePendingRefusals{}
+			if errors.Is(tt.serveErr, dispatch.ErrControlPending) {
+				wantPending["pl-mmneh"] = tt.serveErr.Error()
+			}
+			if !maps.Equal(result.pending, wantPending) {
+				t.Fatalf("pending = %v, want %v", result.pending, wantPending)
 			}
 
 			// runWorkflowServeFollow's own arithmetic: pendingAny resets
