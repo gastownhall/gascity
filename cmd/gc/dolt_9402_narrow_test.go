@@ -21,7 +21,7 @@ func TestManagedDoltQueryProbeUsesEndpointKeyedPassword(t *testing.T) {
 	orig := managedDoltQueryProbeDirectFn
 	t.Cleanup(func() { managedDoltQueryProbeDirectFn = orig })
 	called := false
-	managedDoltQueryProbeDirectFn = func(host, port, user string) error {
+	managedDoltQueryProbeDirectFn = func(_, _, _ string) error {
 		called = true
 		return nil
 	}
