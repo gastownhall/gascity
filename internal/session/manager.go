@@ -1824,21 +1824,26 @@ func (m *Manager) updateWakeStamp(id string, next func(current string) (string, 
 // unconfirmed missing-server answer, such as a live server whose socket file
 // was deleted, still fails the stop.
 //
-// A Stop failure is suppressed ONLY when the runtime did not report a live
-// process beforehand (historical Suspend semantics: cleanup of an already-dead
-// session is best-effort). A failure to tear down a runtime that WAS live is
-// reported: callers treat a nil return as "the seat stopped" — stopTargetsBounded
-// prints "Stopped agent", counts it, and records SessionStopped — so swallowing
-// it would make `gc stop` claim success over a pane that is still alive holding
-// its pool slot name, which is the exact condition this whole change exists to
-// surface.
+// A Stop failure is suppressed ONLY when the runtime answered "not running"
+// (historical Suspend semantics: cleanup of an already-dead session is
+// best-effort). A failure to tear down a runtime that could not be reached
+// at all — one wrapping runtime.ErrRuntimeUnavailable, such as a k8s or
+// herdr Stop cut at its bound — is reported even though liveness could not
+// report the session live either: the runtime's state is unknown, not
+// "already dead", and an unknown state must not certify the session stopped
+// (#6055). A failure to tear down a runtime that WAS live is reported:
+// callers treat a nil return as "the seat stopped" — stopTargetsBounded
+// prints "Stopped agent", counts it, and records SessionStopped — so
+// swallowing it would make `gc stop` claim success over a pane that is still
+// alive holding its pool slot name, which is the exact condition this whole
+// change exists to surface.
 func (m *Manager) tearDownRuntimeForSuspend(sessName string) error {
 	if strings.TrimSpace(sessName) == "" {
 		return nil
 	}
 	running := m.sp.IsRunning(sessName)
 	err := runtime.StopForCleanup(m.sp, sessName)
-	if err != nil && !running {
+	if err != nil && !running && !errors.Is(err, runtime.ErrRuntimeUnavailable) {
 		err = nil
 	}
 	if err != nil {
