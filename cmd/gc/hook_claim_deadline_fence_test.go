@@ -185,3 +185,66 @@ func TestHookClaimRefusesCandidatePastDeadlineFence(t *testing.T) {
 		}
 	})
 }
+
+// TestHookClaimReleasesLandingPastDeadline pins AC-5 of #5533: under
+// `gc hook --claim --timeout 15s`, a claim mutation that starts inside the
+// fence runs on the 4s claim reserve, never past the 12s at which the hook
+// must answer, and a claim that still lands after those 12s is released as a
+// straddle (claim_window_straddled) with nothing on stdout, rather than
+// handed to a caller whose budget is gone.
+func TestHookClaimReleasesLandingPastDeadline(t *testing.T) {
+	t.Setenv("GC_HOOK_CLAIM_WINDOW", "")
+	answerBy := 12 * time.Second
+
+	landingAt := func(c *deadlineClaim, landed time.Duration) {
+		claim := c.ops.Claim
+		c.ops.Claim = func(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
+			c.clock = c.t0.Add(landed)
+			return claim(ctx, dir, env, beadID, assignee)
+		}
+	}
+
+	t.Run("a claim landing at 12.5s is released", func(t *testing.T) {
+		c := newDeadlineClaim(t, 7*time.Second, hookDeadlineClaimBudget)
+		landingAt(c, 12500*time.Millisecond)
+		code, stdout, stderr := c.run(c.reader(7*time.Second, turnBoundRoutedWork))
+		if len(c.rec.claimCtx) != 1 {
+			t.Fatalf("claim contexts = %d, want one claim started inside the fence; stderr=%s", len(c.rec.claimCtx), stderr)
+		}
+		deadline, ok := c.rec.claimCtx[0].Deadline()
+		if !ok {
+			t.Fatal("the claim ran with no deadline")
+		}
+		if limit := c.t0.Add(answerBy); deadline.After(limit) {
+			t.Fatalf("claim deadline = %s past the invocation, want at most %s: the claim must not run past the time the hook answers by",
+				deadline.Sub(c.t0).Round(time.Millisecond), answerBy)
+		}
+		if code == 0 {
+			t.Fatalf("exit = 0, want non-zero; stdout=%q stderr=%s", stdout, stderr)
+		}
+		if stdout != "" {
+			t.Fatalf("stdout = %q, want nothing: a claim that landed past the deadline is not delivered", stdout)
+		}
+		if len(c.rec.releases) != 1 || c.rec.releases[0] != "work-1" {
+			t.Fatalf("releases = %v, want [work-1]", c.rec.releases)
+		}
+		if len(c.rec.claimReleased) != 1 || c.rec.claimReleased[0].Reason != hookClaimReleaseReasonStraddled {
+			t.Fatalf("claim releases = %+v, want one %s", c.rec.claimReleased, hookClaimReleaseReasonStraddled)
+		}
+		if !strings.Contains(stderr, "4s claim reserve") {
+			t.Fatalf("stderr = %q, want the 4s claim reserve named", stderr)
+		}
+	})
+
+	t.Run("a claim landing inside the reserve stands", func(t *testing.T) {
+		c := newDeadlineClaim(t, 7*time.Second, hookDeadlineClaimBudget)
+		landingAt(c, 11900*time.Millisecond)
+		code, stdout, stderr := c.run(c.reader(7900*time.Millisecond, turnBoundRoutedWork))
+		if code != 0 || len(c.rec.releases) != 0 {
+			t.Fatalf("exit = %d, releases = %v; want the claim delivered; stderr=%s", code, c.rec.releases, stderr)
+		}
+		if result := decodeTurnBoundResult(t, stdout); result.Action != "work" || result.BeadID != "work-1" {
+			t.Fatalf("result = %+v, want work-1 delivered", result)
+		}
+	})
+}
