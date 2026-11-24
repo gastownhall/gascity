@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -2627,7 +2628,124 @@ func boundedSumDirBytes(root string) (int64, bool, error) {
 	return sumDirBytesWithContext(ctx, root)
 }
 
+// duStderrLimit caps how much du stderr duDirBytes keeps. A scan over a
+// tree that is being reaped can report one vanished path per entry; past
+// the cap the output is no longer fully classifiable, so du's non-zero
+// exit stays an error.
+const duStderrLimit = 1 << 20
+
+// duRun is the outcome of one `du -sk` invocation.
+type duRun struct {
+	stdout          []byte
+	stderr          []byte
+	stderrTruncated bool
+	// exitCode is du's exit status; -1 when du did not exit normally
+	// (killed by a signal).
+	exitCode int
+}
+
+// duRunner runs `du -sk root`. A non-zero du exit is reported through
+// duRun.exitCode, not the error, which is reserved for failing to run du at
+// all (for example exec.ErrNotFound) or being canceled.
+type duRunner func(ctx context.Context, root string) (duRun, error)
+
+// cappedBuffer collects up to limit bytes and discards the rest, noting
+// that it did.
+type cappedBuffer struct {
+	buf       bytes.Buffer
+	limit     int
+	truncated bool
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	if room := b.limit - b.buf.Len(); len(p) > room {
+		b.truncated = true
+		if room > 0 {
+			b.buf.Write(p[:room])
+		}
+		return len(p), nil
+	}
+	return b.buf.Write(p)
+}
+
+// runDuSk is the production duRunner. It pins LC_ALL=C so du's diagnostics
+// are in the English form duVanishedOnly recognizes.
+func runDuSk(ctx context.Context, root string) (duRun, error) {
+	cmd := exec.CommandContext(ctx, "du", "-sk", root)
+	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	var stdout bytes.Buffer
+	stderr := &cappedBuffer{limit: duStderrLimit}
+	cmd.Stdout = &stdout
+	cmd.Stderr = stderr
+	err := cmd.Run()
+	run := duRun{stdout: stdout.Bytes(), stderr: stderr.buf.Bytes(), stderrTruncated: stderr.truncated}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		run.exitCode = exitErr.ExitCode()
+		return run, nil
+	}
+	return run, err
+}
+
+// duVanishedLine reports whether a du stderr line is a "No such file or
+// directory" report, the GNU ("du: cannot access '/p': ...") or BSD
+// ("du: /p: ...") form of an entry that disappeared mid-walk.
+func duVanishedLine(line string) bool {
+	return strings.HasPrefix(line, "du: ") && strings.HasSuffix(line, ": No such file or directory")
+}
+
+// duVanishedOnly reports whether a non-zero du run failed only because
+// entries disappeared while it walked the tree: du exited 1 and every
+// stderr line is a vanished-path report. du still prints the total of what
+// it measured in that case. Any other stderr line (permission denied, I/O
+// error), truncated stderr, or a different exit status is a real failure.
+func duVanishedOnly(run duRun) bool {
+	if run.exitCode != 1 || run.stderrTruncated {
+		return false
+	}
+	seen := false
+	for _, line := range strings.Split(string(run.stderr), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if !duVanishedLine(line) {
+			return false
+		}
+		seen = true
+	}
+	return seen
+}
+
+// duFailureLine returns the stderr line that best explains a failed du: the
+// first line that is not a vanished-path report, else the first non-empty
+// line, else "".
+func duFailureLine(run duRun) string {
+	first := ""
+	for _, line := range strings.Split(string(run.stderr), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if !duVanishedLine(line) {
+			return line
+		}
+		if first == "" {
+			first = line
+		}
+	}
+	return first
+}
+
 func duDirBytes(root string) (int64, bool, error) {
+	return measureDirWithDu(root, runDuSk)
+}
+
+// measureDirWithDu sizes root with `du -sk` through run. A du that exits 1
+// only because entries vanished mid-walk (worktrees reaped and re-cut while
+// the scan runs) still reports the total of what it saw, so that total is
+// the measurement rather than an error.
+func measureDirWithDu(root string, run duRunner) (int64, bool, error) {
 	info, err := os.Stat(root)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -2642,8 +2760,7 @@ func duDirBytes(root string) (int64, bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), doltDirMeasureTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "du", "-sk", root)
-	out, err := cmd.Output()
+	res, err := run(ctx, root)
 	if ctx.Err() == context.DeadlineExceeded {
 		total, exists, fallbackErr := boundedSumDirBytes(root)
 		if fallbackErr != nil {
@@ -2657,8 +2774,14 @@ func duDirBytes(root string) (int64, bool, error) {
 		}
 		return 0, true, fmt.Errorf("measure directory with du -sk: %w", err)
 	}
+	if res.exitCode != 0 && !duVanishedOnly(res) {
+		if line := duFailureLine(res); line != "" {
+			return 0, true, fmt.Errorf("measure directory with du -sk: exit status %d: %s", res.exitCode, line)
+		}
+		return 0, true, fmt.Errorf("measure directory with du -sk: exit status %d", res.exitCode)
+	}
 
-	fields := strings.Fields(string(out))
+	fields := strings.Fields(string(res.stdout))
 	if len(fields) == 0 {
 		return 0, true, fmt.Errorf("measure directory with du -sk: empty output")
 	}

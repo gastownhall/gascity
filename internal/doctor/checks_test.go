@@ -3483,6 +3483,142 @@ func TestDuDirBytes_NonSparseFile(t *testing.T) {
 	}
 }
 
+func fakeDuRunner(run duRun, err error) duRunner {
+	return func(context.Context, string) (duRun, error) { return run, err }
+}
+
+func TestMeasureDirWithDu_VanishedPaths(t *testing.T) {
+	const gnuGone = "du: cannot access '/w/a/x': No such file or directory\n"
+	const gnuDirGone = "du: cannot read directory '/w/a': No such file or directory\n"
+	const bsdGone = "du: /w/a/x: No such file or directory\n"
+	tests := []struct {
+		name      string
+		run       duRun
+		wantBytes int64
+		wantErr   string // substring; empty means measured
+	}{
+		{
+			name:      "clean exit",
+			run:       duRun{stdout: []byte("268\t/w\n")},
+			wantBytes: 268 * 1024,
+		},
+		{
+			name:      "exit 1 total and ENOENT only measured",
+			run:       duRun{stdout: []byte("268\t/w\n"), stderr: []byte(gnuGone + gnuDirGone + bsdGone), exitCode: 1},
+			wantBytes: 268 * 1024,
+		},
+		{
+			name:    "exit 1 permission denied is an error",
+			run:     duRun{stdout: []byte("268\t/w\n"), stderr: []byte("du: cannot read directory '/w/p': Permission denied\n"), exitCode: 1},
+			wantErr: "Permission denied",
+		},
+		{
+			name:    "exit 1 ENOENT mixed with permission denied is an error",
+			run:     duRun{stdout: []byte("268\t/w\n"), stderr: []byte(gnuGone + "du: cannot read directory '/w/p': Permission denied\n"), exitCode: 1},
+			wantErr: "Permission denied",
+		},
+		{
+			name:    "exit 1 with no output is an error",
+			run:     duRun{exitCode: 1},
+			wantErr: "exit status 1",
+		},
+		{
+			name:    "exit 1 ENOENT only without a total is an error",
+			run:     duRun{stderr: []byte(gnuGone), exitCode: 1},
+			wantErr: "empty output",
+		},
+		{
+			name:    "exit 1 unparseable total is an error",
+			run:     duRun{stdout: []byte("garbage\t/w\n"), stderr: []byte(gnuGone), exitCode: 1},
+			wantErr: "parse",
+		},
+		{
+			name:    "truncated stderr is an error",
+			run:     duRun{stdout: []byte("268\t/w\n"), stderr: []byte(gnuGone), stderrTruncated: true, exitCode: 1},
+			wantErr: "exit status 1",
+		},
+		{
+			name:    "exit 2 with ENOENT stderr is an error",
+			run:     duRun{stdout: []byte("268\t/w\n"), stderr: []byte(gnuGone), exitCode: 2},
+			wantErr: "exit status 2",
+		},
+		{
+			name:    "killed by signal is an error",
+			run:     duRun{stdout: []byte("268\t/w\n"), stderr: []byte(gnuGone), exitCode: -1},
+			wantErr: "exit status -1",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, exists, err := measureDirWithDu(t.TempDir(), fakeDuRunner(tc.run, nil))
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("measureDirWithDu = (%d, %v, nil), want error containing %q", got, exists, tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error = %q, want it to contain %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("measureDirWithDu: %v", err)
+			}
+			if !exists {
+				t.Fatal("exists = false, want true")
+			}
+			if got != tc.wantBytes {
+				t.Fatalf("bytes = %d, want %d", got, tc.wantBytes)
+			}
+		})
+	}
+}
+
+func TestMeasureDirWithDu_RunnerFailure(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "chunk"), make([]byte, 8*1024), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("du missing falls back to a walk", func(t *testing.T) {
+		got, exists, err := measureDirWithDu(dir, fakeDuRunner(duRun{}, exec.ErrNotFound))
+		if err != nil || !exists {
+			t.Fatalf("measureDirWithDu = (%d, %v, %v), want walk fallback", got, exists, err)
+		}
+		if got < 8*1024 {
+			t.Fatalf("bytes = %d, want at least %d", got, 8*1024)
+		}
+	})
+
+	t.Run("other run failure is an error", func(t *testing.T) {
+		_, _, err := measureDirWithDu(dir, fakeDuRunner(duRun{}, errors.New("fork failed")))
+		if err == nil || !strings.Contains(err.Error(), "fork failed") {
+			t.Fatalf("error = %v, want it to wrap the run failure", err)
+		}
+	})
+}
+
+func TestCappedBuffer(t *testing.T) {
+	b := &cappedBuffer{limit: 8}
+	if n, err := b.Write([]byte("12345")); n != 5 || err != nil {
+		t.Fatalf("Write = (%d, %v), want (5, nil)", n, err)
+	}
+	if b.truncated {
+		t.Fatal("truncated after an in-limit write")
+	}
+	if n, err := b.Write([]byte("6789abc")); n != 7 || err != nil {
+		t.Fatalf("Write = (%d, %v), want (7, nil): a full buffer must not fail the writer", n, err)
+	}
+	if !b.truncated {
+		t.Fatal("truncated = false after exceeding the limit")
+	}
+	if got := b.buf.String(); got != "12345678" {
+		t.Fatalf("kept %q, want %q", got, "12345678")
+	}
+	if n, err := b.Write([]byte("more")); n != 4 || err != nil || b.buf.Len() != 8 {
+		t.Fatalf("Write on a full buffer = (%d, %v), kept %d bytes", n, err, b.buf.Len())
+	}
+}
+
 func TestDoltNomsSizeCheck_WarnAtThreshold(t *testing.T) {
 	dir := setupManagedDoltCity(t)
 	// 3 GB — above warn (2 GB), below error (20 GB). Sparse file (Truncate)
