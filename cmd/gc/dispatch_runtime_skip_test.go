@@ -149,7 +149,7 @@ func countServeDispatches(t *testing.T) map[string]int {
 func drainServeSkipCity(t *testing.T, cityDir string) workflowServeDrainResult {
 	t.Helper()
 	var stderr bytes.Buffer
-	result, err := drainWorkflowServeWork(freshnessControlAgent(), cityDir, cityDir, workflowServeControlReadyQuery(freshnessControlAgent()), nil, &stderr)
+	result, err := drainWorkflowServeWork(freshnessControlAgent(), cityDir, cityDir, workflowServeControlReadyQuery(freshnessControlAgent()), nil, nil, &stderr)
 	if err != nil {
 		t.Fatalf("drainWorkflowServeWork: %v (stderr=%q)", err, stderr.String())
 	}
@@ -332,7 +332,7 @@ func TestDrainWorkflowServeWorkPendingWinsOverSkip(t *testing.T) {
 	}
 
 	cityPath := t.TempDir()
-	result, err := drainWorkflowServeWork(config.Agent{Name: "control-dispatcher"}, cityPath, cityPath, "bd ready", nil, io.Discard)
+	result, err := drainWorkflowServeWork(config.Agent{Name: "control-dispatcher"}, cityPath, cityPath, "bd ready", nil, nil, io.Discard)
 	if err != nil {
 		t.Fatalf("drainWorkflowServeWork: %v", err)
 	}
