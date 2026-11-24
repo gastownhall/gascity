@@ -252,22 +252,35 @@ type envelope struct {
 const (
 	// herdrCLIDefaultTimeout bounds a verb that has no timeout of its own.
 	herdrCLIDefaultTimeout = 30 * time.Second
+	// herdrCLITimeoutMargin is added to a verb's own --timeout so herdr's
+	// answer to its own timeout (an error envelope) arrives before the kill.
+	herdrCLITimeoutMargin = 10 * time.Second
 	// herdrCLIWaitDelay bounds Output() after the process is killed or exits
 	// while a grandchild still holds stdout.
 	herdrCLIWaitDelay = 2 * time.Second
 )
 
-// cliBounds returns the default bound and the WaitDelay, honoring the client's
-// test overrides.
-func (c *client) cliBounds() (bound, waitDelay time.Duration) {
-	bound, waitDelay = c.cliTimeout, c.cliWaitDelay
+// cliBounds returns the default bound, the per-verb margin and the WaitDelay,
+// honoring the client's test overrides.
+func (c *client) cliBounds() (bound, margin, waitDelay time.Duration) {
+	bound, margin, waitDelay = c.cliTimeout, c.cliMargin, c.cliWaitDelay
 	if bound <= 0 {
 		bound = herdrCLIDefaultTimeout
+	}
+	if margin <= 0 {
+		margin = herdrCLITimeoutMargin
 	}
 	if waitDelay <= 0 {
 		waitDelay = herdrCLIWaitDelay
 	}
-	return bound, waitDelay
+	return bound, margin, waitDelay
+}
+
+// verbBound is the bound for a verb that carries its own --timeout of timeoutMS:
+// that timeout plus the margin, never less than the default.
+func (c *client) verbBound(timeoutMS int) time.Duration {
+	bound, margin, _ := c.cliBounds()
+	return max(bound, time.Duration(timeoutMS)*time.Millisecond+margin)
 }
 
 // runWithin is the one place a herdr CLI process is run and waited on: lead then
@@ -282,9 +295,9 @@ func (c *client) cliBounds() (bound, waitDelay time.Duration) {
 // anything the process wrote.
 func (c *client) runWithin(ctx context.Context, bound time.Duration, lead, declared, args []string) ([]byte, error) {
 	if bound <= 0 {
-		bound, _ = c.cliBounds()
+		bound, _, _ = c.cliBounds()
 	}
-	_, waitDelay := c.cliBounds()
+	_, _, waitDelay := c.cliBounds()
 	cctx, cancel := context.WithTimeout(ctx, bound)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, c.bin, append(append([]string(nil), lead...), args...)...)
@@ -320,9 +333,16 @@ func (c *client) sessionLead() []string { return []string{"--session", c.session
 //
 // Its errors are scrubbed of anything this client's flag grammar can identify;
 // see redaction.go. An argv carrying a credential anywhere else needs
-// [client.runWithSecrets].
+// [client.runWithSecrets]; a verb whose argv carries herdr's own --timeout
+// needs [client.runVerbTimeout], or the default bound cuts its wait short.
 func (c *client) run(ctx context.Context, args ...string) (json.RawMessage, error) {
 	return c.runDecoded(ctx, 0, nil, args)
+}
+
+// runVerbTimeout is run for a verb whose argv carries `--timeout timeoutMS`:
+// it is bounded by that timeout plus the margin instead of the default.
+func (c *client) runVerbTimeout(ctx context.Context, timeoutMS int, args ...string) (json.RawMessage, error) {
+	return c.runDecoded(ctx, c.verbBound(timeoutMS), nil, args)
 }
 
 // runWithSecrets is run for an argv carrying a credential the grammar cannot
@@ -409,7 +429,7 @@ func (c *client) startAgentKind(ctx context.Context, name, kind, paneID string, 
 		cli = append(cli, "--")
 		cli = append(cli, args...)
 	}
-	res, err := c.run(ctx, cli...)
+	res, err := c.runVerbTimeout(ctx, agentStartTimeoutMS, cli...)
 	if err != nil {
 		return agentInfo{}, err
 	}
@@ -740,7 +760,7 @@ func (c *client) deliverStartupTurn(ctx context.Context, paneID, text, mode stri
 			args = append(args, "--until", s)
 		}
 		args = append(args, "--timeout", strconv.Itoa(timeoutMS))
-		_, err := c.run(ctx, args...)
+		_, err := c.runVerbTimeout(ctx, timeoutMS, args...)
 		if err == nil {
 			if attempt > 1 {
 				fmt.Fprintf(os.Stderr, "herdr: startup turn on pane %s taken on attempt %d, %s after the first submit\n", //nolint:errcheck // best-effort diagnostic
@@ -1000,7 +1020,7 @@ func (c *client) recoverStalledStartup(ctx context.Context, paneID string, stall
 			wait = append(wait, "--until", s)
 		}
 		wait = append(wait, "--timeout", strconv.Itoa(waitMS))
-		if _, werr = c.run(ctx, wait...); werr == nil {
+		if _, werr = c.runVerbTimeout(ctx, waitMS, wait...); werr == nil {
 			return "", nil
 		}
 		if herdrAnswerCode(werr) != "timeout" {

@@ -828,3 +828,32 @@ func TestStopReportsUnreachableWhenTheAPINeverAnswered(t *testing.T) {
 		}
 	})
 }
+
+// TestStartRunsOnTheCallersContextAlone guards #6055's shape: Start is not a
+// ctx-free verb. It runs on the caller's lease context, which may outlive the
+// request bound (creating a pod legitimately takes longer than a status
+// read), so Start must not acquire a verb bound: a create held past the
+// request bound under a caller ctx with a later deadline completes.
+func TestStartRunsOnTheCallersContextAlone(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ops := newHoldOps(func(method string, n int, _ []string) time.Duration {
+			if method == "createPod" && n == 0 {
+				return 2 * testRequestBound
+			}
+			return 0
+		})
+		p := deadlineProvider(ops)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*testRequestBound)
+		defer cancel()
+
+		if err := p.Start(ctx, deadlineSession, runtime.Config{Command: "claude"}); err != nil {
+			t.Fatalf("Start = %v; a create within its caller's deadline must complete", err)
+		}
+		if ops.cutCount() != 0 {
+			t.Fatalf("cut calls = %d; Start's calls must end on the caller's context, never a verb bound", ops.cutCount())
+		}
+		if _, created := ops.pods[SanitizeName(deadlineSession)]; !created {
+			t.Fatal("the pod was never created")
+		}
+	})
+}
