@@ -268,6 +268,52 @@ includes = ["../legacy"]
 	}
 }
 
+func TestLoadWithIncludes_LegacyPackTomlCommandNativeHelp(t *testing.T) {
+	dir := t.TempDir()
+	packDir := filepath.Join(dir, "legacy")
+	cityDir := filepath.Join(dir, "city")
+
+	writeTestFile(t, packDir, "pack.toml", `
+[pack]
+name = "legacy"
+schema = 1
+
+[[commands]]
+name = "opted"
+description = "Opted in"
+long_description = "commands/help.txt"
+script = "commands/opted.sh"
+native_help = true
+
+[[commands]]
+name = "plain"
+description = "Not opted in"
+long_description = "commands/help.txt"
+script = "commands/plain.sh"
+`)
+	writeTestFile(t, packDir, "commands/opted.sh", "#!/bin/sh\nexit 0\n")
+	writeTestFile(t, packDir, "commands/plain.sh", "#!/bin/sh\nexit 0\n")
+	writeTestFile(t, packDir, "commands/help.txt", "legacy help")
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+includes = ["../legacy"]
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	got := map[string]bool{}
+	for _, cmd := range cfg.PackCommands {
+		got[cmd.Name] = cmd.NativeHelp
+	}
+	want := map[string]bool{"opted": true, "plain": false}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("NativeHelp by command = %v, want %v", got, want)
+	}
+}
+
 func TestLoadWithIncludes_TransitiveFalseFiltersNestedCommandsAndDoctors(t *testing.T) {
 	dir := t.TempDir()
 	parentDir := filepath.Join(dir, "parent")

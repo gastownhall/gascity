@@ -78,7 +78,7 @@ func (c *v2DemandMigrationsCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 	if len(s.problems) > 0 {
 		msg += fmt.Sprintf("; %d read problem(s), counts are a lower bound", len(s.problems))
 	}
-	mode, resolved := doctorReconcilerMode(c.cfg, c.lookupEnv)
+	mode, resolved := doctorReconcilerMode(c.cfg, c.cityPath, c.lookupEnv)
 	details = append(details, resolved)
 	switch {
 	case len(s.problems) > 0, total > 0 && mode == reconcilerV2:

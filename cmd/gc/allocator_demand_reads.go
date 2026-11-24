@@ -128,10 +128,11 @@ func demandLegCache(store beads.Store) (cache *beads.CachingStore, exact bool) {
 // v2DemandReads is the v2 allocator's demand reads for one pass, at one
 // clock (now). Per read:
 //
-//   - RawOpen and ReadyAll on an exact leg: the cache's List{open} and its
-//     strict ReadyContext, falling back to Ready, which reads the local
-//     backing. On an exact backing the cached status is the raw status and
-//     the cached ready projection is complete.
+//   - RawOpen and ReadyAll on an exact leg: the cache's List{open}, less the
+//     rows the backing's Live "open" leaves out (beads.LiveOpenLeavesOut),
+//     and its strict ReadyContext, falling back to Ready, which reads the
+//     local backing. On an exact backing the cached status is the raw status
+//     and the cached ready projection is complete.
 //   - RawOpen and ReadyAll on any other leg: the recording's copy of
 //     legacy's own live read. A missing source, or one past its freshness,
 //     is a PartialResultError with no rows: the collectors
@@ -141,7 +142,9 @@ func demandLegCache(store beads.Store) (cache *beads.CachingStore, exact bool) {
 //   - ReadyAll on a split city's gate leg (crossStoreGateLegs), exact or not:
 //     the recording's Ready as the lane gated it (legRecording.gatedReady),
 //     because judging a row's cross-store blockers reads other stores. One
-//     the lane did not gate is a PartialResultError with no rows.
+//     the lane did not gate is a PartialResultError with no rows. On an
+//     exact gate leg, the rows the cross-store rule settles by the leg's own
+//     verdict are judged from its cache instead (ReadyAll).
 //   - Cached: the cache's List on an exact leg; the strict cached List on
 //     any other, with no live fallback.
 //   - CachedReady: unavailable, so ReadyAll is the whole Ready answer.
@@ -192,8 +195,26 @@ func (r *v2DemandReads) RawOpen(store beads.Store) ([]beads.Bead, error) {
 		return r.recorded(store, "raw_open", func(l legRecording) ([]beads.Bead, error) { return l.RawOpen, l.RawOpenErr })
 	}
 	return r.once(demandLegRead{leg: cache, shape: "raw_open"}, func() ([]beads.Bead, error) {
-		return cache.List(beads.ListQuery{Status: "open", AllowScan: true, TierMode: beads.TierBoth})
+		rows, err := cache.List(beads.ListQuery{Status: "open", AllowScan: true, TierMode: beads.TierBoth})
+		return exactLegRawOpen(rows, r.now), err
 	})
+}
+
+// exactLegRawOpen is an exact leg's raw open from its cache's open rows: those
+// rows less the ones the backing's own Live "open" leaves out
+// (beads.LiveOpenLeavesOut). It returns a new slice, since rows may alias the
+// cache.
+func exactLegRawOpen(rows []beads.Bead, now time.Time) []beads.Bead {
+	if len(rows) == 0 {
+		return rows
+	}
+	out := make([]beads.Bead, 0, len(rows))
+	for _, b := range rows {
+		if !beads.LiveOpenLeavesOut(b, now) {
+			out = append(out, b)
+		}
+	}
+	return out
 }
 
 // Cached memoizes by status alone: the collectors' cached Lists differ only
@@ -216,9 +237,36 @@ func (r *v2DemandReads) Cached(store beads.Store, query beads.ListQuery) ([]bead
 	})
 }
 
+// ReadyAll on a split city's gate leg is the external-reads lane's gated
+// recording, except for the rows the cross-store rule settles by the leg's own
+// verdict (readywork.OwnVerdictStands), which an exact leg's cache judges in
+// the pass (withOwnVerdictRows). Those rows need no other store, so the pass
+// reads them as it reads an unsplit city's exact leg, and a row whose
+// in-namespace blocker just closed is served on the next pass rather than
+// after the lane's next recording.
+//
+// A recording that is missing, stale, ungated or failed is served exactly as
+// before, rows and error alike: the partial leg retains its templates and
+// blocks their creates, so a fresh half buys nothing there, and serving it
+// without the error would under-count the other half. A cache that cannot
+// judge leaves the recording to serve alone, so the pass reads no backing.
 func (r *v2DemandReads) ReadyAll(store beads.Store) ([]beads.Bead, error) {
-	if crossStoreGateLeg(r.gateLegs, store) >= 0 {
-		return r.recorded(store, "ready", legRecording.gatedReady)
+	if own := crossStoreGateLeg(r.gateLegs, store); own >= 0 {
+		recorded, err := r.recorded(store, "ready", legRecording.gatedReady)
+		cache, exact := demandLegCache(store)
+		if err != nil || !exact {
+			return recorded, err
+		}
+		leg := r.gateLegs[own]
+		return r.once(demandLegRead{leg: cache, shape: "gated-ready"}, func() ([]beads.Bead, error) {
+			judged, err := cache.ReadyJudgmentContext(context.Background(), beads.ReadyQuery{TierMode: beads.TierBoth})
+			if err != nil {
+				return recorded, nil
+			}
+			return withOwnVerdictRows(recorded, judged, func(id string, deps []beads.Dep) bool {
+				return readywork.OwnVerdictStands(leg, id, deps, judged.Holds)
+			}), nil
+		})
 	}
 	cache, exact := demandLegCache(store)
 	if !exact {
@@ -233,6 +281,29 @@ func (r *v2DemandReads) ReadyAll(store beads.Store) ([]beads.Bead, error) {
 		}
 		return cache.Ready(query)
 	})
+}
+
+// withOwnVerdictRows merges a gate leg's Ready: a row the cache judged whose
+// own verdict stands comes from the cache, served exactly when the cache
+// finds it ready; every other row comes from the recording, as recorded.
+func withOwnVerdictRows(recorded []beads.Bead, judged beads.ReadyJudgment, ownVerdict func(id string, deps []beads.Dep) bool) []beads.Bead {
+	settled := func(id string) bool {
+		deps, vouched := judged.Deps[id]
+		return vouched && ownVerdict(id, deps)
+	}
+	rows := make([]beads.Bead, 0, len(recorded)+len(judged.Rows))
+	for _, b := range recorded {
+		if !settled(b.ID) {
+			rows = append(rows, b)
+		}
+	}
+	for _, b := range judged.Rows {
+		if settled(b.ID) {
+			rows = append(rows, b)
+		}
+	}
+	beads.SortBeadsReadyOrder(rows)
+	return rows
 }
 
 func (r *v2DemandReads) CachedReady(beads.Store) ([]beads.Bead, error) {

@@ -44,6 +44,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -317,68 +318,93 @@ type storeSharer struct {
 // registered city. It returns this store's attestation token and every
 // sharer; an error is a registry or config that could not be read.
 func findStoreSharers(cityPath, label, selfRoot string) (string, []storeSharer, error) {
-	self := storeDoltIdentityOf(cityPath, selfRoot)
+	return findIdentitySharers(cityPath, label, selfRoot, storeDoltIdentityOf(cityPath, selfRoot))
+}
+
+// findIdentitySharers is findStoreSharers for a store already resolved to
+// self. selfRoot is the store's scope directory, or "" for a database of the
+// city's managed Dolt that no scope of the city keeps its store in, which
+// shares no directory.
+func findIdentitySharers(cityPath, label, selfRoot string, self storeDoltIdentity) (string, []storeSharer, error) {
 	token := self.token(selfRoot)
 	others, err := storeSharerCities(cityPath)
 	if err != nil {
 		return token, nil, fmt.Errorf("%s: reading the city registry to rule out a shared store: %w; nothing was written", label, err)
 	}
-	// A store with no Dolt database (a file store) shares none but its
-	// directory. One whose endpoint cannot be resolved and which pins no
-	// database name cannot be told apart from any other city's Dolt store,
-	// so it is compared, and refused, rather than skipped.
-	noDatabase := self.Database == "" && !self.Unresolved
 	var sharers []storeSharer
 	for _, otherPath := range others {
-		cfg, err := readOtherCityConfig(otherPath)
-		if err == nil && cfg == nil {
-			err = errors.New("it loaded no configuration")
-		}
+		scopes, err := otherCityStoreScopes(otherPath)
 		if err != nil {
 			return token, nil, fmt.Errorf("%s: city %s is registered but its config cannot be read (%w), so it cannot be ruled out as sharing the store; nothing was written", label, otherPath, err)
 		}
-		type scope struct{ name, root string }
-		scopes := []scope{{"city store", otherPath}}
-		for _, other := range cfg.Rigs {
-			if strings.TrimSpace(other.Path) != "" {
-				scopes = append(scopes, scope{"rig " + other.Name, rigStoreRoot(otherPath, other)})
-			}
-		}
 		for _, sc := range scopes {
-			add := func(format string, args ...any) {
-				sharers = append(sharers, storeSharer{OtherPath: otherPath, Refusal: fmt.Sprintf(format, args...)})
-			}
-			if samePath(sc.root, selfRoot) {
-				add("%s's store %s is also city %s's %s: a shared store holds rows another city owns", label, selfRoot, otherPath, sc.name)
-				continue
-			}
-			if noDatabase {
-				continue
-			}
-			theirs := storeDoltIdentityOf(otherPath, sc.root)
-			if theirs.Database == "" && !theirs.Unresolved {
-				continue
-			}
-			switch {
-			case self.Unresolved && self.Database == "":
-				add("%s's Dolt endpoint cannot be resolved (%v) and its .beads/metadata.json pins no dolt_database, so it cannot be ruled out as city %s's %s's database: fix what keeps the endpoint from resolving, or pin its database name", label, self.Err, otherPath, sc.name)
-			case self.Unresolved || theirs.Unresolved:
-				if theirs.Database != "" && theirs.Database != self.Database {
-					continue
-				}
-				why := theirs.Err
-				if self.Unresolved {
-					why = self.Err
-				}
-				add("%s's Dolt database %q may also be city %s's %s, and the endpoints cannot be compared (%v): fix what keeps that endpoint from resolving so they can be, or unregister that city if it is gone", label, self.Database, otherPath, sc.name, why)
-			case theirs.Database == self.Database:
-				if at, shared := self.sharedAt(theirs); shared {
-					add("%s's Dolt database %s at %s is also city %s's %s: a shared store holds rows another city owns", label, self.Database, at, otherPath, sc.name)
-				}
+			if refusal := storeSharerRefusal(label, selfRoot, self, otherPath, sc); refusal != "" {
+				sharers = append(sharers, storeSharer{OtherPath: otherPath, Refusal: refusal})
 			}
 		}
 	}
 	return token, sharers, nil
+}
+
+// otherStoreScope is one store of another registered city: its city store or
+// a rig's, by its name in that city and its scope directory.
+type otherStoreScope struct{ name, root string }
+
+// otherCityStoreScopes lists the stores of the registered city at otherPath:
+// its city store, then each rig with a path.
+func otherCityStoreScopes(otherPath string) ([]otherStoreScope, error) {
+	cfg, err := readOtherCityConfig(otherPath)
+	if err == nil && cfg == nil {
+		err = errors.New("it loaded no configuration")
+	}
+	if err != nil {
+		return nil, err
+	}
+	scopes := []otherStoreScope{{"city store", otherPath}}
+	for _, other := range cfg.Rigs {
+		if strings.TrimSpace(other.Path) != "" {
+			scopes = append(scopes, otherStoreScope{"rig " + other.Name, rigStoreRoot(otherPath, other)})
+		}
+	}
+	return scopes, nil
+}
+
+// storeSharerRefusal compares the store resolved to self (label names it;
+// selfRoot is its scope directory, or "") with sc, a store of the city at
+// otherPath, and returns the sentence that names the two when they are one
+// store or cannot be told apart, else "". A store with no Dolt database (a
+// file store) shares none but its directory. One whose endpoint cannot be
+// resolved and which pins no database name cannot be told apart from any other
+// city's Dolt store, so it is compared, and refused, rather than skipped.
+func storeSharerRefusal(label, selfRoot string, self storeDoltIdentity, otherPath string, sc otherStoreScope) string {
+	if selfRoot != "" && samePath(sc.root, selfRoot) {
+		return fmt.Sprintf("%s's store %s is also city %s's %s: a shared store holds rows another city owns", label, selfRoot, otherPath, sc.name)
+	}
+	if self.Database == "" && !self.Unresolved {
+		return ""
+	}
+	theirs := storeDoltIdentityOf(otherPath, sc.root)
+	if theirs.Database == "" && !theirs.Unresolved {
+		return ""
+	}
+	switch {
+	case self.Unresolved && self.Database == "":
+		return fmt.Sprintf("%s's Dolt endpoint cannot be resolved (%v) and its .beads/metadata.json pins no dolt_database, so it cannot be ruled out as city %s's %s's database: fix what keeps the endpoint from resolving, or pin its database name", label, self.Err, otherPath, sc.name)
+	case self.Unresolved || theirs.Unresolved:
+		if theirs.Database != "" && theirs.Database != self.Database {
+			return ""
+		}
+		why := theirs.Err
+		if self.Unresolved {
+			why = self.Err
+		}
+		return fmt.Sprintf("%s's Dolt database %q may also be city %s's %s, and the endpoints cannot be compared (%v): fix what keeps that endpoint from resolving so they can be, or unregister that city if it is gone", label, self.Database, otherPath, sc.name, why)
+	case theirs.Database == self.Database:
+		if at, shared := self.sharedAt(theirs); shared {
+			return fmt.Sprintf("%s's Dolt database %s at %s is also city %s's %s: a shared store holds rows another city owns", label, self.Database, at, otherPath, sc.name)
+		}
+	}
+	return ""
 }
 
 // sharedStoreExclusion is what the shared-store check leaves held. Under an
@@ -392,14 +418,14 @@ type sharedStoreExclusion struct {
 	Attested bool
 	// token is the identity the lifting attestation named.
 	token string
-	locks []*os.File
+	locks []*coTenantLock
 }
 
 // Release drops the co-tenant locks. The verb releases them when it exits,
 // after its writes and their cleanup, and before its own controller lock.
 func (e sharedStoreExclusion) Release() {
 	for _, lock := range e.locks {
-		lock.Close() //nolint:errcheck // releasing a held lock
+		lock.release()
 	}
 }
 
@@ -492,13 +518,75 @@ func sharedStoreRefusal(cityPath, label, selfRoot string, force storageForce) (s
 	return held, nil
 }
 
-// acquireCoTenantControllerLock takes a co-tenant city's controller lock. A
-// city that never started has no .gc yet, and its first start creates it and
-// then takes the lock, so the directory is created here as that start would:
+// coTenantLocks are the co-tenant controller locks this process holds, by
+// the city's canonical path. A verb can need one co-tenant's lock more than
+// once: a city that shares this city's work store and a rig store is a
+// co-tenant of both, and the reverse holds both exclusions at once. The lock
+// is a flock, and a second flock on a fresh descriptor conflicts even inside
+// this process, so the second take would read as a live co-tenant. Every
+// take in the process shares the one held descriptor instead, and it is
+// closed when the last holder releases it.
+var coTenantLocks struct {
+	sync.Mutex
+	held map[string]*coTenantLockEntry
+}
+
+// coTenantLockEntry is one held co-tenant lock and how many holders share it.
+type coTenantLockEntry struct {
+	file *os.File
+	refs int
+}
+
+// coTenantLock is one holder's share of a co-tenant's controller lock.
+type coTenantLock struct {
+	key      string
+	released bool
+}
+
+// release drops this holder's share; the lock is closed with the last one.
+// A second release of the same share does nothing.
+func (l *coTenantLock) release() {
+	coTenantLocks.Lock()
+	defer coTenantLocks.Unlock()
+	if l.released {
+		return
+	}
+	l.released = true
+	entry := coTenantLocks.held[l.key]
+	if entry == nil {
+		return
+	}
+	entry.refs--
+	if entry.refs > 0 {
+		return
+	}
+	delete(coTenantLocks.held, l.key)
+	entry.file.Close() //nolint:errcheck // releasing a held lock
+}
+
+// acquireCoTenantControllerLock takes a co-tenant city's controller lock, or
+// a share of it when this process already holds it (coTenantLocks). A city
+// that never started has no .gc yet, and its first start creates it and then
+// takes the lock, so the directory is created here as that start would:
 // otherwise the city could start mid-run.
-func acquireCoTenantControllerLock(otherPath string) (*os.File, error) {
+func acquireCoTenantControllerLock(otherPath string) (*coTenantLock, error) {
 	if err := os.MkdirAll(filepath.Join(otherPath, ".gc"), 0o755); err != nil {
 		return nil, fmt.Errorf("creating its runtime directory: %w", err)
 	}
-	return acquireControllerLock(otherPath)
+	key := canonicalIdentityPath(otherPath)
+	coTenantLocks.Lock()
+	defer coTenantLocks.Unlock()
+	if entry := coTenantLocks.held[key]; entry != nil {
+		entry.refs++
+		return &coTenantLock{key: key}, nil
+	}
+	file, err := acquireControllerLock(otherPath)
+	if err != nil {
+		return nil, err
+	}
+	if coTenantLocks.held == nil {
+		coTenantLocks.held = map[string]*coTenantLockEntry{}
+	}
+	coTenantLocks.held[key] = &coTenantLockEntry{file: file, refs: 1}
+	return &coTenantLock{key: key}, nil
 }

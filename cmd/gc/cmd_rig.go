@@ -28,7 +28,7 @@ import (
 const rigDeferredStoreInitWait = 30 * time.Second
 
 var (
-	rigReloadControllerConfig = reloadControllerConfig
+	rigReloadControllerConfig = reloadControllerConfigAndWait
 	rigWaitForStoreAccessible = waitForRigStoreAccessible
 	rigListSessionProvider    = newSessionProvider
 )
@@ -402,11 +402,7 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 				fmt.Fprintf(stderr, "gc rig add: warning: writing .beads/.env: %v\n", err) //nolint:errcheck // best-effort stderr
 			}
 
-			if err := rigReloadControllerConfig(cityPath); err == nil && pc.Deferred && cityUsesBdStoreContract(cityPath) {
-				if waitErr := rigWaitForStoreAccessible(cityPath, rigPath, rigDeferredStoreInitWait); waitErr != nil {
-					fmt.Fprintf(stderr, "gc rig add: warning: controller init still pending for rig %q: %v\n", name, waitErr) //nolint:errcheck // best-effort stderr
-				}
-			}
+			reloadControllerAfterRigAdd(cityPath, rigPath, name, pc.Deferred, stderr)
 			return nil
 		},
 		OnStep: func(s rig.ProvisionStep) {
@@ -449,6 +445,23 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 	return r, 0
 }
 
+// reloadControllerAfterRigAdd asks the controller to apply the config a rig add
+// just saved and, for a rig whose store init was deferred to the controller on
+// a bd-store city, waits for that store to become accessible. The rig is
+// already saved, so an incomplete reload or a store that is still pending only
+// warns.
+func reloadControllerAfterRigAdd(cityPath, rigPath, name string, deferred bool, stderr io.Writer) {
+	reloadErr := rigReloadControllerConfig(cityPath)
+	if errors.Is(reloadErr, errRigReloadIncomplete) {
+		fmt.Fprintf(stderr, "gc rig add: warning: rig %q saved but controller reload did not complete: %v; run gc reload\n", name, reloadErr) //nolint:errcheck // best-effort stderr
+	}
+	if reloadErr == nil && deferred && cityUsesBdStoreContract(cityPath) {
+		if waitErr := rigWaitForStoreAccessible(cityPath, rigPath, rigDeferredStoreInitWait); waitErr != nil {
+			fmt.Fprintf(stderr, "gc rig add: warning: controller init still pending for rig %q: %v\n", name, waitErr) //nolint:errcheck // best-effort stderr
+		}
+	}
+}
+
 // recordNewRigClean writes the S4 clean record for a rig `gc rig add` just
 // added, adopted or re-added on a split city whose binding has converged,
 // when a census of its store finds no infrastructure row (recordCensusClean):
@@ -477,7 +490,7 @@ func recordNewRigClean(cityPath string, cfg *config.City, r config.Rig, stderr i
 	// create (or start a server for) the store being asked about.
 	row := rigCensusRow{Rig: r.Name, State: rigCensusAwaiting}
 	if !rigScopeHasNoStore(cityPath, r) {
-		row = censusRig(cityPath, loadedCityName(cfg, cityPath), cfg, target, r, false)
+		row = censusRig(cityPath, loadedCityName(cfg, cityPath), cfg, target, r, false, storageForce{})
 	}
 	if _, err := recordCensusClean(cityPath, target, r, &row, "gc rig add"); err != nil {
 		fmt.Fprintf(stderr, "gc rig add: warning: recording rig %s clean for the split store: %v (run `%s` to record it)\n", r.Name, err, rigImportInstruction(r.Name)) //nolint:errcheck // best-effort stderr
@@ -761,8 +774,9 @@ func routeRigList(cityPath string, c *api.Client, nilReason string, jsonOutput b
 // effective suspension); a rig the controller has not loaded yet has no
 // running agent and the on-disk suspension doRigList reads. HQ info and
 // per-rig beads status are derived locally (neither lives on the API
-// response); the output carries an _cache_age_s envelope field (JSON) or
-// staleness banner (human).
+// response); the JSON output carries an _cache_age_s envelope field, which
+// the server reports as 0 because the rig list is not read from the bead
+// cache, and human output prints no cache-age footer.
 func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.RigView], jsonOutput bool, stdout, stderr io.Writer) int {
 	// CLI-unification Move-1: mirror doRigList — suppress advisory config
 	// warnings (e.g. missing builtin-pack import) in --json mode so both the
@@ -815,6 +829,7 @@ func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.R
 	for i := range cfg.Rigs {
 		rig := cfg.Rigs[i]
 		suspended, running := suspNames[rig.Name], false
+		federation, namespace := rigListFederation(&rig)
 		if view, ok := loaded[rig.Name]; ok {
 			suspended, running = view.Suspended, view.RunningCount > 0
 		}
@@ -827,6 +842,8 @@ func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.R
 			Running:             running,
 			DefaultSlingTarget:  rig.DefaultSlingTarget,
 			DefaultSlingTargets: rig.DefaultSlingTargets,
+			Federation:          federation,
+			Namespace:           namespace,
 			Beads:               rigBeadsStatus(fs, rig.Path),
 		})
 	}
@@ -835,10 +852,6 @@ func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.R
 		return renderRigListJSON(result, stdout, stderr)
 	}
 	renderRigListText(loadedCityName(cfg, cityPath), result, stdout)
-	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
-		fmt.Fprintln(stdout, "")                                                               //nolint:errcheck // best-effort stdout
-		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
-	}
 	return 0
 }
 
@@ -866,8 +879,8 @@ func renderRigListJSON(result RigListJSON, stdout, stderr io.Writer) int {
 
 // renderRigListText renders the human rig-list table from result. displayName is
 // the HQ header name (loadedCityName), which intentionally differs from the HQ
-// item's JSON Name (EffectiveCityName). Shared by both rig-list paths; the
-// API-render path appends its own cache-age banner after calling this.
+// item's JSON Name (EffectiveCityName). Shared by both rig-list paths, so
+// their human output is identical.
 func renderRigListText(displayName string, result RigListJSON, stdout io.Writer) {
 	w := func(s string) { fmt.Fprintln(stdout, s) } //nolint:errcheck // best-effort stdout
 	w("")
@@ -892,14 +905,16 @@ func renderRigListText(displayName string, result RigListJSON, stdout io.Writer)
 		if rig.DefaultBranch != "" {
 			w(fmt.Sprintf("    Default branch: %s", rig.DefaultBranch))
 		}
+		if rig.Federation != "" {
+			line := "    Federation: " + rig.Federation
+			if rig.Namespace != "" {
+				line += " (namespace: " + rig.Namespace + ")"
+			}
+			w(line + " (not enforced by this build)")
+		}
 		w(fmt.Sprintf("    Beads:  %s", rig.Beads))
 	}
 }
-
-// cacheAgeBannerThresholdSeconds is the cache-age cutoff above which human
-// output appends the "reconciler may be lagging" banner. Matches the
-// enabler contract D5 documented in the ga-h6w plan.
-const cacheAgeBannerThresholdSeconds = 30.0
 
 // RigListJSON is the JSON output format for "gc rig list --json".
 type RigListJSON struct {
@@ -925,7 +940,24 @@ type RigListItem struct {
 	Running             bool     `json:"running"`
 	DefaultSlingTarget  string   `json:"default_sling_target,omitempty"`
 	DefaultSlingTargets []string `json:"default_sling_targets,omitempty"`
-	Beads               string   `json:"beads"`
+	// Federation and Namespace mirror the rig's federation settings. Each is
+	// present only when it differs from its default ("city" and "shared"), so
+	// output for a rig that sets neither is unchanged.
+	Federation string `json:"federation,omitempty"`
+	Namespace  string `json:"namespace,omitempty"`
+	Beads      string `json:"beads"`
+}
+
+// rigListFederation returns the rig's federation and namespace for rig-list
+// output, each blank when it is the default.
+func rigListFederation(r *config.Rig) (federation, namespace string) {
+	if r.FederationGuarded() {
+		federation = r.EffectiveFederation()
+	}
+	if r.NamespaceExclusive() {
+		namespace = r.EffectiveNamespace()
+	}
+	return federation, namespace
 }
 
 type RigListSummary struct {
@@ -1001,6 +1033,7 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 		if jsonOutput {
 			running = rigHasRunningAgent(cfg, cfg.Rigs[i].Name, sp)
 		}
+		federation, namespace := rigListFederation(&cfg.Rigs[i])
 		result.Rigs = append(result.Rigs, RigListItem{
 			Name:                cfg.Rigs[i].Name,
 			Path:                cfg.Rigs[i].Path,
@@ -1010,6 +1043,8 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 			Running:             running,
 			DefaultSlingTarget:  cfg.Rigs[i].DefaultSlingTarget,
 			DefaultSlingTargets: cfg.Rigs[i].DefaultSlingTargets,
+			Federation:          federation,
+			Namespace:           namespace,
 			Beads:               rigBeadsStatus(fs, cfg.Rigs[i].Path),
 		})
 	}
@@ -1135,6 +1170,38 @@ func cmdRigSuspend(args []string, stdout, stderr io.Writer) int {
 		// Connection error — fall through to direct mutation.
 	}
 	return finishDirectRigSuspension(cityPath, "suspend", doRigSuspend(fsys.OSFS{}, cityPath, rigName, stdout, stderr), stderr)
+}
+
+// errRigReloadIncomplete reports that a running controller answered the
+// reload request without applying the new config.
+var errRigReloadIncomplete = errors.New("controller reload did not complete")
+
+// reloadControllerConfigAndWait asks the running controller to reload config
+// and returns once it has applied it. `gc rig add` needs this: a reload that is
+// only queued leaves the controller serving `gc ready` from the pre-rig config
+// until its reconcile tick starts the reload, so work created in the new rig
+// right after the add is missing from a controller-served answer. Only an
+// absent controller (no socket, a refused connection, or an unavailable
+// controller) wakes the supervisor as reloadControllerConfig does; any other
+// failed exchange with a running controller reports errRigReloadIncomplete.
+func reloadControllerConfigAndWait(cityPath string) error {
+	if onWorkerSite(cityPath) {
+		return errWorkerSiteNoController
+	}
+	reply, err := sendReloadControlRequestHook(cityPath, reloadControlRequest{Wait: true, Timeout: "5m"})
+	if err != nil {
+		// No controller listening: wake the supervisor; a later start reads the saved rig.
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, errControllerUnavailable) {
+			return pokeSupervisor()
+		}
+		// A controller answered the connection but the exchange failed (timeout,
+		// unresponsive, unparsable reply): the rig is saved but may not be served yet.
+		return fmt.Errorf("%w: %w", errRigReloadIncomplete, err)
+	}
+	if reply.Outcome != reloadOutcomeApplied && reply.Outcome != reloadOutcomeNoChange {
+		return fmt.Errorf("%w: outcome=%q error=%q message=%q", errRigReloadIncomplete, reply.Outcome, reply.Error, reply.Message)
+	}
+	return nil
 }
 
 // Direct writes bypass the API's mutateAndPoke path. Reload the running
@@ -1365,8 +1432,34 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 
 	// Remove the rig and every block that would dangle without it (#3666).
 	if !cfg.RemoveRig(rigName) {
-		fmt.Fprintln(stderr, rigNotFoundMsg("gc rig remove", rigName, cfg)) //nolint:errcheck // best-effort stderr
-		return 1
+		// city.toml has no entry, but .gc/site.toml may still carry a
+		// machine-local binding orphaned by an out-of-band city.toml edit
+		// (a hand edit, a git pull, or a regeneration script never touches
+		// the machine-local file). Clean that up instead of just erroring,
+		// since the command's own help text promises it removes the site
+		// binding too (#8337).
+		binding, err := config.LoadSiteBinding(fsys.OSFS{}, cityPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc rig remove: loading site binding: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		hasOrphanBinding := false
+		for _, r := range binding.Rigs {
+			if strings.TrimSpace(r.Name) == rigName {
+				hasOrphanBinding = true
+				break
+			}
+		}
+		if !hasOrphanBinding {
+			fmt.Fprintln(stderr, rigNotFoundMsg("gc rig remove", rigName, cfg)) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if err := config.PersistRigSiteBindingsRemovingRigs(fsys.OSFS{}, cityPath, cfg.Rigs, rigName); err != nil {
+			fmt.Fprintf(stderr, "gc rig remove: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		fmt.Fprintf(stdout, "Rig '%s' is not declared in city.toml; removed its orphaned .gc/site.toml binding\n", rigName) //nolint:errcheck // best-effort stdout
+		return 0
 	}
 
 	// Detach before changing city.toml. If its write fails, the configured rig

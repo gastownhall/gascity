@@ -5,7 +5,10 @@ go_library(
     srcs = ["exec.go"],
     importpath = "github.com/gastownhall/gascity/internal/events/exec",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/events"],
+    deps = [
+        "//internal/events",
+        "//internal/execenv",
+    ],
 )
 
 go_test(

@@ -1,11 +1,18 @@
+//go:build unix
+
+// Every case drives managed dolt's lock/SIGKILL race through a shell shim
+// that ignores SIGTERM, and asserts on signal-delivery outcomes. Managed dolt
+// is gated off on Windows, and the signal semantics under test do not exist
+// there.
+
 package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -279,9 +286,6 @@ func TestStopManagedDoltWaitsForLockReleaseAfterExit(t *testing.T) {
 // process that is not our managed dolt server is not — that is exactly the
 // reused-PID case the escalation must skip.
 func TestManagedDoltProcessControllableGatesForcedStopByOwnership(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX process semantics required")
-	}
 	city, _ := raceTestCity(t, "")
 	layout, err := resolveManagedDoltRuntimeLayout(city)
 	if err != nil {
@@ -292,7 +296,11 @@ func TestManagedDoltProcessControllableGatesForcedStopByOwnership(t *testing.T) 
 	// Owned: cwd is the managed data dir, so the ownership inspection
 	// (processCWDMatches) attributes it to our server.
 	owned := startSigtermIgnoringProcess(t, dataDir)
-	if !managedDoltProcessControllable(owned, layout) {
+	ownedControllable, err := managedDoltProcessControllable(owned, layout)
+	if err != nil {
+		t.Fatalf("ownership inspection for pid %d: %v", owned, err)
+	}
+	if !ownedControllable {
 		t.Fatalf("owned managed dolt process pid %d reported not controllable; a genuine forced stop would be skipped", owned)
 	}
 
@@ -301,7 +309,64 @@ func TestManagedDoltProcessControllableGatesForcedStopByOwnership(t *testing.T) 
 	// kill must skip it.
 	unownedDir := t.TempDir()
 	unowned := startSigtermIgnoringProcess(t, unownedDir)
-	if managedDoltProcessControllable(unowned, layout) {
+	unownedControllable, err := managedDoltProcessControllable(unowned, layout)
+	if err != nil {
+		t.Fatalf("ownership inspection for pid %d: %v", unowned, err)
+	}
+	if unownedControllable {
 		t.Fatalf("unrelated process pid %d (cwd %s) reported controllable; forced stop would SIGKILL a reused PID", unowned, unownedDir)
+	}
+}
+
+// TestStopManagedDoltRefusesToClearStateWhenOwnershipUnreadableAfterSIGTERM
+// pins that an ownership read failing after SIGTERM is not mistaken for a
+// reused PID. The process is still alive and may still be our server, so stop
+// must fail with the identity error and leave the PID and runtime-state
+// records in place instead of clearing them.
+func TestStopManagedDoltRefusesToClearStateWhenOwnershipUnreadableAfterSIGTERM(t *testing.T) {
+	city, _ := raceTestCity(t, "[workspace]\nname = \"race-test\"\n\n[daemon]\ndolt_stop_timeout = \"0s\"\n")
+	shimLockReleaseTimeout(t, 150*time.Millisecond)
+
+	dataDir := filepath.Join(city, ".beads", "dolt")
+	pid := startSigtermIgnoringProcess(t, dataDir)
+	pidFile := os.Getenv("GC_DOLT_PID_FILE")
+	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(pid)+"\n"), 0o644); err != nil {
+		t.Fatalf("write pid file: %v", err)
+	}
+	stateFile := os.Getenv("GC_DOLT_STATE_FILE")
+	if err := writeDoltRuntimeStateFile(stateFile, doltRuntimeState{Running: true, PID: pid, DataDir: dataDir}); err != nil {
+		t.Fatalf("write runtime state: %v", err)
+	}
+
+	orig := managedDoltProcessControllableFn
+	t.Cleanup(func() { managedDoltProcessControllableFn = orig })
+	calls := 0
+	managedDoltProcessControllableFn = func(int, managedDoltRuntimeLayout) (bool, error) {
+		calls++
+		if calls == 1 {
+			return true, nil
+		}
+		return false, fmt.Errorf("%w: test", errManagedDoltIdentityUnavailable)
+	}
+
+	_, err := stopManagedDoltProcessWithOptions(city, "", false)
+	if !errors.Is(err, errManagedDoltIdentityUnavailable) {
+		t.Fatalf("stop with ownership unreadable after SIGTERM = %v, want errManagedDoltIdentityUnavailable", err)
+	}
+	if calls < 2 {
+		t.Fatalf("ownership check ran %d times; the test did not reach the post-SIGTERM re-check", calls)
+	}
+	if _, err := os.Stat(pidFile); err != nil {
+		t.Errorf("pid file was removed despite undecided ownership: %v", err)
+	}
+	state, err := readDoltRuntimeStateFile(stateFile)
+	if err != nil {
+		t.Fatalf("read runtime state: %v", err)
+	}
+	if !state.Running || state.PID != pid {
+		t.Errorf("runtime state was cleared despite undecided ownership: %+v", state)
+	}
+	if !pidAlive(pid) {
+		t.Error("process was killed despite undecided ownership")
 	}
 }
