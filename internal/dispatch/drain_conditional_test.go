@@ -185,6 +185,151 @@ func TestReserveDrainMemberTakesOverMissingOwner(t *testing.T) {
 	}
 }
 
+// TestReserveDrainMemberOwnerLookupFaultIsAnErrorNeverARelease is the fault
+// control for the owner check: a lookup that could not be completed reaches
+// the drain as an error, never as a dead owner whose member it may take. The
+// reservation stays with its owner, and a transient fault re-enters on a later
+// pass instead of closing the drain.
+func TestReserveDrainMemberOwnerLookupFaultIsAnErrorNeverARelease(t *testing.T) {
+	mem := beads.NewMemStore()
+	owner := createExclusiveDrainControl(t, mem, "reservation owner")
+	control, member := newDrainReservationFixtures(t, mem)
+	if err := mem.SetMetadata(member.ID, beadmeta.ExclusiveDrainReservationMetadataKey, owner.ID); err != nil {
+		t.Fatalf("stamp reservation: %v", err)
+	}
+	fault := errors.New("dial tcp: i/o timeout")
+	store := drainOwnerGetFaultStore{Store: mem, ownerID: owner.ID, err: fault}
+
+	err := reserveDrainMember(beadstest.Graph(store), control, member, ProcessOptions{Work: beadstest.Work(store)})
+	if !errors.Is(err, fault) {
+		t.Fatalf("reserveDrainMember error = %v, want the owner lookup fault %v", err, fault)
+	}
+	if !retryableDrainReservationError(err) {
+		t.Fatalf("retryableDrainReservationError(%v) = false, want a transient owner lookup fault to re-enter on a later pass", err)
+	}
+	if got := reservationOwner(t, mem, member.ID); got != owner.ID {
+		t.Fatalf("reservation = %q, want it left with %s", got, owner.ID)
+	}
+}
+
+// drainOwnerGetFaultStore fails every point read of one bead, the reservation
+// owner, and serves every other read from the store it wraps.
+type drainOwnerGetFaultStore struct {
+	beads.Store
+	ownerID string
+	err     error
+}
+
+func (s drainOwnerGetFaultStore) Get(id string) (beads.Bead, error) {
+	if id == s.ownerID {
+		return beads.Bead{}, s.err
+	}
+	return s.Store.Get(id)
+}
+
+// TestReserveDrainMemberItemWorkFaultIsAnErrorNeverARelease is the fault
+// control for the check on a dead owner's item work: a lookup, or a park on
+// the open item root, that could not be completed reaches the drain as an
+// error, never as an owner with no item work left whose member it may take.
+// The reservation stays with the dead owner, and a transient fault re-enters
+// on a later pass instead of closing the drain.
+func TestReserveDrainMemberItemWorkFaultIsAnErrorNeverARelease(t *testing.T) {
+	fault := errors.New("dial tcp: i/o timeout")
+	for _, tc := range []struct {
+		name  string
+		fault func(mem *beads.MemStore, owner, root beads.Bead) beads.Store
+	}{
+		{name: "listing the owner's item roots", fault: func(mem *beads.MemStore, owner, _ beads.Bead) beads.Store {
+			return drainItemWorkFaultStore{Store: mem, listOwnerID: owner.ID, err: fault}
+		}},
+		{name: "re-reading an item root", fault: func(mem *beads.MemStore, _, root beads.Bead) beads.Store {
+			return drainItemWorkFaultStore{Store: mem, getID: root.ID, err: fault}
+		}},
+		{name: "parking on the open item root", fault: func(mem *beads.MemStore, _, root beads.Bead) beads.Store {
+			return drainItemWorkFaultStore{Store: mem, depAddOnID: root.ID, err: fault}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := beads.NewMemStore()
+			control, member := newDrainReservationFixtures(t, mem)
+			owner, root := seedClosedOwnerWithOpenItemRoot(t, mem, member.ID)
+			store := tc.fault(mem, owner, root)
+
+			err := reserveDrainMember(beadstest.Graph(store), control, member, ProcessOptions{Work: beadstest.Work(store)})
+			if !errors.Is(err, fault) {
+				t.Fatalf("reserveDrainMember error = %v, want the item-work fault %v", err, fault)
+			}
+			if !retryableDrainReservationError(err) {
+				t.Fatalf("retryableDrainReservationError(%v) = false, want a transient item-work fault to re-enter on a later pass", err)
+			}
+			if got := reservationOwner(t, mem, member.ID); got != owner.ID {
+				t.Fatalf("reservation = %q, want it left with the dead owner %s while its item workflow %s is open", got, owner.ID, root.ID)
+			}
+		})
+	}
+}
+
+// seedClosedOwnerWithOpenItemRoot persists what a drain control closed from
+// outside leaves behind: the control, closed and still named by the member's
+// reservation, and the item workflow root it launched for the member, open.
+func seedClosedOwnerWithOpenItemRoot(t *testing.T, store beads.Store, memberID string) (owner, root beads.Bead) {
+	t.Helper()
+	owner = createExclusiveDrainControl(t, store, "closed drain")
+	root, err := store.Create(beads.Bead{
+		Title: "item workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+			beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+			beadmeta.DrainControlIDMetadataKey:  owner.ID,
+			beadmeta.DrainMemberIDMetadataKey:   memberID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create item root: %v", err)
+	}
+	if err := store.SetMetadata(memberID, beadmeta.ExclusiveDrainReservationMetadataKey, owner.ID); err != nil {
+		t.Fatalf("stamp the owner's reservation: %v", err)
+	}
+	if err := store.Close(owner.ID); err != nil {
+		t.Fatalf("close the owner: %v", err)
+	}
+	return owner, root
+}
+
+// drainItemWorkFaultStore fails one kind of call on a dead owner's item work
+// and serves every other call from the store it wraps: the list of the
+// owner's item roots (listOwnerID), the point read of one root (getID), or
+// the edge parking a drain on one root (depAddOnID).
+type drainItemWorkFaultStore struct {
+	beads.Store
+	listOwnerID string
+	getID       string
+	depAddOnID  string
+	err         error
+}
+
+func (s drainItemWorkFaultStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if s.listOwnerID != "" && query.Metadata[beadmeta.DrainControlIDMetadataKey] == s.listOwnerID {
+		return nil, s.err
+	}
+	return s.Store.List(query)
+}
+
+func (s drainItemWorkFaultStore) Get(id string) (beads.Bead, error) {
+	if s.getID != "" && id == s.getID {
+		return beads.Bead{}, s.err
+	}
+	return s.Store.Get(id)
+}
+
+func (s drainItemWorkFaultStore) DepAdd(issueID, dependsOnID, depType string) error {
+	if s.depAddOnID != "" && dependsOnID == s.depAddOnID {
+		return s.err
+	}
+	return s.Store.DepAdd(issueID, dependsOnID, depType)
+}
+
 // TestReserveDrainMemberCASTakeoverContention races two open drains that both
 // see a member reserved by a closed drain. The takeover is fenced on the dead
 // owner's value, so exactly one drain owns the member and the other conflicts
@@ -497,6 +642,7 @@ func TestRetryableDrainReservationErrorClassification(t *testing.T) {
 		{"CAS exhaustion re-enters", &beads.CASRetriesExhaustedError{ID: "m", Key: "k", Attempts: 4}, true},
 		{"runtime unsupported latch re-enters (next resolve degrades)", beads.ErrConditionalWriteUnsupported, true},
 		{"transport transient re-enters", errors.New("dial tcp: i/o timeout"), true},
+		{"a dead owner's open item work re-enters once it closes", fmt.Errorf("%w: item workflow still open", ErrControlPending), true},
 		{"plain store error stays terminal (pre-fence behavior)", errors.New("corrupt manifest"), false},
 	}
 	for _, tc := range cases {
