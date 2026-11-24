@@ -12353,3 +12353,76 @@ func TestCmdWorkflowDeleteSourceIgnoresConvoyLinksItDoesNotOwn(t *testing.T) {
 		}
 	}
 }
+
+func TestCmdWorkflowDeleteSourceRefusesSharedAutomaticInputConvoy(t *testing.T) {
+	cityDir, store := newDeleteSourceTestCity(t)
+	source := createDeleteSourceTestBead(t, store, beads.Bead{Title: "Source", Type: "task", Status: "in_progress"})
+	other := createDeleteSourceTestBead(t, store, beads.Bead{Title: "Other", Type: "task", Status: "open"})
+	convoyID, root, steps := createConvoyFirstRun(t, store, source.ID)
+	if err := store.DepAdd(convoyID, other.ID, convoycore.TrackingDepType); err != nil {
+		t.Fatalf("DepAdd(tracks other): %v", err)
+	}
+	run := append([]beads.Bead{root}, steps...)
+
+	for _, apply := range []bool{false, true} {
+		var stdout, stderr bytes.Buffer
+		if code := cmdWorkflowDeleteSource(source.ID, sourceWorkflowStoreSelector{}, apply, false, &stdout, &stderr); code != 1 {
+			t.Fatalf("apply=%t: cmdWorkflowDeleteSource = %d, want 1; stdout=%s stderr=%s", apply, code, stdout.String(), stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "input convoy "+convoyID) || !strings.Contains(stderr.String(), "gc convoy delete-source "+convoyID) {
+			t.Fatalf("apply=%t: stderr = %q, want the shared convoy %s and its remedy named", apply, stderr.String(), convoyID)
+		}
+		reloaded, err := openStoreAtForCity(cityDir, cityDir)
+		if err != nil {
+			t.Fatalf("openStoreAtForCity(reload): %v", err)
+		}
+		for _, b := range run {
+			got, err := reloaded.Get(b.ID)
+			if err != nil {
+				t.Fatalf("Get(%s): %v", b.ID, err)
+			}
+			if got.Status == "closed" {
+				t.Fatalf("apply=%t: %s was closed by a refused sweep", apply, b.ID)
+			}
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWorkflowDeleteSource(convoyID, sourceWorkflowStoreSelector{}, true, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("remedy cmdWorkflowDeleteSource(%s) = %d; stdout=%s stderr=%s", convoyID, code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "result=cleaned source_bead_id="+convoyID+" matched_roots=1 ") {
+		t.Fatalf("remedy stdout = %q, want the run cleaned through its convoy", stdout.String())
+	}
+	reloaded, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(reload): %v", err)
+	}
+	for _, b := range run {
+		assertWorkflowBeadClosedWith(t, reloaded, b.ID, beadmeta.OutcomeSkipped, sourceworkflow.WorkflowSkippedCloseReason)
+	}
+}
+
+// TestCmdWorkflowDeleteSourceIgnoresSharedConvoyWithNothingOpen pins that a
+// shared automatic convoy whose runs are all finished is no ambiguity to refuse.
+func TestCmdWorkflowDeleteSourceIgnoresSharedConvoyWithNothingOpen(t *testing.T) {
+	_, store := newDeleteSourceTestCity(t)
+	source := createDeleteSourceTestBead(t, store, beads.Bead{Title: "Source", Type: "task", Status: "in_progress"})
+	other := createDeleteSourceTestBead(t, store, beads.Bead{Title: "Other", Type: "task", Status: "open"})
+	convoyID, err := graphv2.NormalizeInputConvoy(beads.WorkStore{Store: store}, source.ID)
+	if err != nil {
+		t.Fatalf("NormalizeInputConvoy: %v", err)
+	}
+	if err := store.DepAdd(convoyID, other.ID, convoycore.TrackingDepType); err != nil {
+		t.Fatalf("DepAdd(tracks other): %v", err)
+	}
+	createGraphWorkflowRun(t, store, "closed", map[string]string{beadmeta.InputConvoyIDMetadataKey: convoyID}, 0)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWorkflowDeleteSource(source.ID, sourceWorkflowStoreSelector{}, true, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdWorkflowDeleteSource = %d; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "result=already_clean") {
+		t.Fatalf("stdout = %q, want already_clean", stdout.String())
+	}
+}

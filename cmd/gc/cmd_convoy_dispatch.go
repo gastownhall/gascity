@@ -3376,6 +3376,18 @@ func (c *sourceWorkflowMatchCollector) scanStore(index int, info convoyStoreView
 		if err != nil {
 			return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing source workflows", err)
 		}
+		for _, shared := range listed.shared {
+			open, err := openRootOf(graph, shared.roots)
+			if err != nil {
+				return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing source workflow beads", err)
+			}
+			if open != "" {
+				return nil, fmt.Errorf(
+					"source %s shares automatic input convoy %s with other beads, so its open workflow %s is not the source's alone; rerun gc convoy delete-source %s",
+					currentSourceID, shared.convoyID, open, shared.convoyID,
+				)
+			}
+		}
 		if err := c.mergeRootMatches(info, graph, listed.roots); err != nil {
 			return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing source workflow beads", err)
 		}
@@ -3389,9 +3401,17 @@ func (c *sourceWorkflowMatchCollector) scanStore(index int, info convoyStoreView
 }
 
 // sourceRootListing is what one view holds for the current source: the roots
-// attributed to it.
+// attributed to it, and the roots of each shared automatic launch convoy.
 type sourceRootListing struct {
-	roots []beads.Bead
+	roots  []beads.Bead
+	shared []sharedLaunchConvoyRoots
+}
+
+// sharedLaunchConvoyRoots are the roots launched on an automatic input convoy
+// that tracks the source among other beads.
+type sharedLaunchConvoyRoots struct {
+	convoyID string
+	roots    []beads.Bead
 }
 
 // listSourceRoots lists the roots in one view attributed to the current
@@ -3406,17 +3426,36 @@ func (c *sourceWorkflowMatchCollector) listSourceRoots(graph beads.MoleculeTarge
 	}
 	listing := sourceRootListing{roots: roots}
 	for _, launch := range launches {
-		if !launch.owned || (launch.holder != index && !info.isClassBinding()) {
+		if launch.holder != index && !info.isClassBinding() {
 			continue
 		}
 		convoyRoots, err := sourceworkflow.ListInputConvoyRoots(graph, launch.id)
 		if err != nil {
 			return sourceRootListing{}, err
 		}
+		if !launch.owned {
+			listing.shared = append(listing.shared, sharedLaunchConvoyRoots{convoyID: launch.id, roots: convoyRoots})
+			continue
+		}
 		listing.roots = append(listing.roots, convoyRoots...)
 	}
 	listing.roots = uniqueBeads(listing.roots)
 	return listing, nil
+}
+
+// openRootOf returns the first of roots with anything of its workflow tree
+// still open, or "" when every one is finished.
+func openRootOf(graph beads.MoleculeTarget, roots []beads.Bead) (string, error) {
+	for _, root := range roots {
+		open, err := sourceworkflow.OpenWorkflowTreeMembers(graph, root.ID)
+		if err != nil {
+			return "", err
+		}
+		if len(open) > 0 {
+			return root.ID, nil
+		}
+	}
+	return "", nil
 }
 
 // mergeRootMatches gathers the still-open workflows of each root's tree in one
