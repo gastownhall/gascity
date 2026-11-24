@@ -3669,7 +3669,26 @@ func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bd ready: %w", err)
 	}
-	issues, parseErr := parseIssuesTolerant(extractJSON(out))
+	data := extractJSON(out)
+	rawRows, shapeErr := bdListIssueRows(data)
+	if shapeErr != nil {
+		return nil, fmt.Errorf("bd ready: parsing JSON: %w", shapeErr)
+	}
+	if rawRows == nil {
+		return nil, fmt.Errorf("bd ready: parsing JSON: expected a non-null issues array")
+	}
+	issues, parseErr := parseIssuesTolerant(data)
+	// Validate every row before normalization and limiting: toBead maps an
+	// absent status to open, and a limit must not hide corruption later on.
+	valid := issues[:0]
+	for i := range issues {
+		if strings.TrimSpace(issues[i].ID) == "" || strings.TrimSpace(issues[i].Status) == "" {
+			parseErr = errors.Join(parseErr, fmt.Errorf("row %d: missing nonblank id or status", i))
+			continue
+		}
+		valid = append(valid, issues[i])
+	}
+	issues = valid
 	// Same latch as List, and for the same reason: the tier, assignee and limit
 	// filters below can empty a frontier bd answered with rows, and that says
 	// nothing about which database answered.
