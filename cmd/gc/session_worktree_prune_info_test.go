@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/git"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -388,4 +389,96 @@ func TestLookupRigRootForSessionInfo(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPruneAgentHomeWorktreeIfSafeInfo_NestedGitPreserved(t *testing.T) {
+	fx := newPruneFixture(t)
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, currentBranch: "home"})
+	nested := filepath.Join(fx.workerDir, ".worktrees", "nested", ".git")
+	if err := os.MkdirAll(filepath.Dir(nested), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(nested, []byte("gitdir: elsewhere\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	pruneAgentHomeWorktreeIfSafeInfo(fx.sessionInfo(), fx.cityPath, fx.cfg, &stderr)
+	if fx.probesByWD[fx.rigRoot] != nil && fx.probesByWD[fx.rigRoot].removeInvoked {
+		t.Fatal("removed a home containing nested git metadata")
+	}
+	assertWorktreeStaleMarker(t, fx.workerDir, "home", "nested-worktree")
+}
+
+func TestPruneAgentHomeWorktreeIfSafeInfo_LockedNestedWorktree(t *testing.T) {
+	city := t.TempDir()
+	rig := filepath.Join(city, "repo")
+	if err := os.MkdirAll(rig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, rig, "init")
+	runGit(t, rig, "config", "user.email", "test@example.com")
+	runGit(t, rig, "config", "user.name", "Test")
+	runGit(t, rig, "commit", "--allow-empty", "-m", "initial")
+	remote := t.TempDir()
+	runGit(t, remote, "init", "--bare")
+	runGit(t, rig, "remote", "add", "origin", remote)
+	runGit(t, rig, "push", "origin", "HEAD")
+	home := filepath.Join(city, ".gc", "worktrees", "demo", "home")
+	if err := os.MkdirAll(filepath.Dir(home), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, rig, "worktree", "add", "--detach", home, "HEAD")
+	gitDir := strings.TrimSpace(runGit(t, home, "rev-parse", "--git-common-dir"))
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(home, gitDir)
+	}
+	if err := os.MkdirAll(filepath.Join(gitDir, "info"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "info", "exclude"), []byte(".worktrees/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(home, ".worktrees", "child")
+	if err := os.MkdirAll(filepath.Dir(nested), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, rig, "worktree", "add", "--detach", nested, "HEAD")
+	runGit(t, rig, "worktree", "lock", nested)
+	t.Cleanup(func() { runGit(t, rig, "worktree", "unlock", nested) })
+	probe := git.New(home)
+	if probe.HasUncommittedWork() {
+		t.Fatal("fixture home must appear clean to git")
+	}
+	if unpushed, err := probe.HasUnpushedCommitsResult(); err != nil || unpushed {
+		t.Fatalf("fixture home must be pushed: unpushed=%v err=%v", unpushed, err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "demo", Path: rig}}}
+	var stderr bytes.Buffer
+	pruneAgentHomeWorktreeIfSafeInfo(managedSeatInfo(home), city, cfg, &stderr)
+	if _, err := os.Stat(filepath.Join(nested, ".git")); err != nil {
+		t.Fatalf("nested worktree lost: %v; stderr=%s", err, &stderr)
+	}
+	assertWorktreeStaleMarker(t, home, "HEAD", "nested-worktree")
+}
+
+func TestPruneAgentHomeWorktreeIfSafeInfo_RegisteredNestedWorktree(t *testing.T) {
+	fx := newPruneFixture(t)
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, currentBranch: "home", worktrees: []git.Worktree{{Path: filepath.Join(fx.workerDir, "missing", "child")}}})
+	var stderr bytes.Buffer
+	pruneAgentHomeWorktreeIfSafeInfo(fx.sessionInfo(), fx.cityPath, fx.cfg, &stderr)
+	if fx.probesByWD[fx.rigRoot] != nil && fx.probesByWD[fx.rigRoot].removeInvoked {
+		t.Fatal("removed home with registered nested worktree")
+	}
+	assertWorktreeStaleMarker(t, fx.workerDir, "home", "nested-worktree")
+}
+
+func TestPruneAgentHomeWorktreeIfSafeInfo_WorktreeListError(t *testing.T) {
+	fx := newPruneFixture(t)
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, currentBranch: "home", worktreeListErr: errors.New("list failed")})
+	var stderr bytes.Buffer
+	pruneAgentHomeWorktreeIfSafeInfo(fx.sessionInfo(), fx.cityPath, fx.cfg, &stderr)
+	if fx.probesByWD[fx.rigRoot] != nil && fx.probesByWD[fx.rigRoot].removeInvoked {
+		t.Fatal("removed home after failed worktree list")
+	}
+	assertWorktreeStaleMarker(t, fx.workerDir, "home", "nested-worktree")
 }

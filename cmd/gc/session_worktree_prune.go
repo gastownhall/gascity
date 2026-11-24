@@ -27,6 +27,7 @@ type gitProbe interface {
 	GitDir() (string, error)
 	CurrentBranch() (string, error)
 	HasUncommittedWork() bool
+	WorktreeList() ([]git.Worktree, error)
 	HasUnpushedCommitsResult() (bool, error)
 	WorktreeRemove(path string, force bool) error
 }
@@ -58,6 +59,38 @@ func managedWorktreeRefusal(gp gitProbe) string {
 		return fmt.Sprintf("cannot read its worktree provenance: %v", err)
 	}
 	return fmt.Sprintf("managed worktree of bead %s owned by %q; only its owner removes it (gc worktree cleanup)", provenance.BeadID, provenance.Owner)
+}
+
+// nestedWorktreeRefusal checks registrations and nested Git metadata. Ignored
+// checkouts are invisible to git status; registrations may outlive their paths.
+// Failure to inspect either also keeps the home.
+func nestedWorktreeRefusal(gp gitProbe, workerDir string) error {
+	worktrees, err := gp.WorktreeList()
+	if err != nil {
+		return fmt.Errorf("listing worktrees: %w", err)
+	}
+	for _, wt := range worktrees {
+		rel, relErr := filepath.Rel(workerDir, wt.Path)
+		lexicallyNested := relErr == nil && rel != "." && !pathutil.IsOutsideDir(rel)
+		if lexicallyNested || (!pathutil.SamePath(workerDir, wt.Path) && pathutil.PathWithin(workerDir, wt.Path)) {
+			return fmt.Errorf("registered nested worktree %s", wt.Path)
+		}
+	}
+	return filepath.WalkDir(workerDir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return fmt.Errorf("scanning %s: %w", path, err)
+		}
+		if path == workerDir || entry.Name() != ".git" {
+			return nil
+		}
+		if filepath.Dir(path) == workerDir {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		return fmt.Errorf("nested git metadata at %s", path)
+	})
 }
 
 // writeWorktreeStaleMarker records why workerDir was left in place instead of
@@ -95,6 +128,7 @@ func writeWorktreeStaleMarker(gp gitProbe, workerDir, reason string, stderr io.W
 //   - the worker_dir is missing on disk or has no .git pointer
 //   - the worker_dir is a managed worktree, or its provenance cannot be read
 //     (managedWorktreeRefusal)
+//   - a nested worktree or Git metadata exists, or its safety scan fails
 //   - the worktree has uncommitted changes or unpushed commits
 //   - the rig that owns the session cannot be resolved to a filesystem path
 //
@@ -129,6 +163,11 @@ func pruneAgentHomeWorktreeIfSafe(session beads.Bead, cityPath string, cfg *conf
 	}
 	if reason := managedWorktreeRefusal(gp); reason != "" {
 		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: %s\n", workerDir, reason) //nolint:errcheck
+		return false
+	}
+	if err := nestedWorktreeRefusal(gp, workerDir); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: %v\n", workerDir, err) //nolint:errcheck
+		writeWorktreeStaleMarker(gp, workerDir, "nested-worktree", stderr)
 		return false
 	}
 	if gp.HasUncommittedWork() {
@@ -198,6 +237,11 @@ func pruneAgentHomeWorktreeIfSafeInfo(info sessionpkg.Info, cityPath string, cfg
 	}
 	if reason := managedWorktreeRefusal(gp); reason != "" {
 		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: %s\n", workerDir, reason) //nolint:errcheck
+		return
+	}
+	if err := nestedWorktreeRefusal(gp, workerDir); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: %v\n", workerDir, err) //nolint:errcheck
+		writeWorktreeStaleMarker(gp, workerDir, "nested-worktree", stderr)
 		return
 	}
 	if gp.HasUncommittedWork() {
