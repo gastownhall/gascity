@@ -210,3 +210,36 @@ func TestReapClosedBeadWorktrees_OnlyRigWorktreesDirIsWidened(t *testing.T) {
 		}
 	}
 }
+
+// TestReapClosedBeadWorktrees_RigWorktreesDirSymlinkedOutsideRigIsNotScanned
+// pins the boundary clause of scanRootFor for the rig root. <rig>/worktrees is
+// a symlink to a directory outside the rig (the trees moved to a bigger disk)
+// and the closed bead's worktree is registered at its real path there.
+// PathWithin resolves the symlink, so that worktree sits "within"
+// <rig>/worktrees/; only the boundary check, that a candidate stays strictly
+// under the rig root, keeps it out of scope. It is neither reaped nor
+// reported, and stays on disk.
+func TestReapClosedBeadWorktrees_RigWorktreesDirSymlinkedOutsideRigIsNotScanned(t *testing.T) {
+	cityPath, rigRoot := initReapRig(t)
+	outside := filepath.Join(filepath.Dir(rigRoot), "bigdisk")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatalf("mkdir outside dir: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(rigRoot, "worktrees")); err != nil {
+		t.Skipf("symlinks unsupported on this platform: %v", err)
+	}
+	wt := filepath.Join(outside, "ga-esc01")
+	mustGit(t, rigRoot, "worktree", "add", "-b", "wt-esc01", wt)
+	backdateWorktreeGitFile(t, wt, 24*time.Hour)
+	store := beads.NewMemStoreFrom(1, []beads.Bead{{ID: "ga-esc01", Status: "closed"}}, nil)
+	injectLiveness(t, liveWorktreeState{scanned: true})
+
+	report, stderr := reapRigWorktreesDir(t, cityPath, reapTestConfig(rigRoot), store, false)
+
+	if len(report.Reaped) != 0 || len(report.Protected) != 0 {
+		t.Fatalf("reaper acted on a worktree reached only through a <rig>/worktrees symlink pointing outside the rig: Reaped=%+v Protected=%+v\nstderr:\n%s", report.Reaped, report.Protected, stderr)
+	}
+	if _, err := os.Stat(wt); err != nil {
+		t.Fatalf("worktree %s outside the rig was removed or unstattable: %v", wt, err)
+	}
+}
