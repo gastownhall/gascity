@@ -3515,6 +3515,47 @@ func TestManifestLoadAndReservationAgreeOnACoResidentMember(t *testing.T) {
 	}
 }
 
+// TestReserveDrainMemberLiveRelicOwnerConflicts pins the owner check to the
+// drain's residency frame. On a split city a drain control minted before the
+// split stays in the work store while the reserving control lives on the
+// binding: the owner is live even though the binding has no row for it, so
+// the reservation must conflict. Closing that control releases it.
+func TestReserveDrainMemberLiveRelicOwnerConflicts(t *testing.T) {
+	work, graph, control, member := seedCoResidentDrainMember(t)
+	opts := ProcessOptions{Work: beadstest.Work(work), MemberTail: true}
+	relic := createExclusiveDrainControl(t, work, "pre-split drain")
+	if _, err := graph.Get(relic.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("graph.Get(%s) error = %v, want not found: the owner must live only in the work store", relic.ID, err)
+	}
+	if err := graph.SetMetadata(member.ID, beadmeta.ExclusiveDrainReservationMetadataKey, relic.ID); err != nil {
+		t.Fatalf("stamp reservation on the binding copy: %v", err)
+	}
+
+	err := reserveDrainMember(beadstest.Graph(graph), control, member, opts)
+	var re drainReservationError
+	if !errors.As(err, &re) {
+		t.Fatalf("reserveDrainMember error = %v, want drainReservationError naming the open work-store owner", err)
+	}
+	if re.Owner != relic.ID || re.MemberID != member.ID || re.ControlID != control.ID {
+		t.Fatalf("reservation error = %+v, want owner %s member %s control %s", re, relic.ID, member.ID, control.ID)
+	}
+	if owner := reservationOwner(t, graph, member.ID); owner != relic.ID {
+		t.Fatalf("binding reservation = %q, want it left with %s", owner, relic.ID)
+	}
+
+	t.Run("closed relic owner is taken over", func(t *testing.T) {
+		if err := work.Close(relic.ID); err != nil {
+			t.Fatalf("close relic drain: %v", err)
+		}
+		if err := reserveDrainMember(beadstest.Graph(graph), control, member, opts); err != nil {
+			t.Fatalf("reserveDrainMember over a closed work-store owner: %v", err)
+		}
+		if owner := reservationOwner(t, graph, member.ID); owner != control.ID {
+			t.Fatalf("binding reservation = %q, want taken over by %s", owner, control.ID)
+		}
+	})
+}
+
 // TestCoResidentDrainMemberAnswersFromTheBinding is the absolute row behind the
 // relative one above. A drain member is a FOREIGN bead of statically unknown
 // class — the drain reads it, it did not mint it — so a binding copy of a member
