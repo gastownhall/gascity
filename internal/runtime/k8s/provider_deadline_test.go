@@ -1,0 +1,688 @@
+package k8s
+
+import (
+	"context"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"testing/synctest"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/gastownhall/gascity/internal/runtime"
+)
+
+// The tests below pin the per-call deadlines of the ctx-free provider verbs
+// (#6055). They run in a synctest bubble: the apiserver is a stub whose
+// calls are held for fake time, so "returns within the bound" is an exact
+// comparison on the fake clock and no test sleeps.
+
+const (
+	testRequestBound = 5 * time.Second
+	testCopyBound    = 50 * time.Second
+	// testHold is how long a "black hole" call is held when nothing cuts it.
+	testHold = time.Hour
+	// deadlineSlack covers the wall-clock distance between a subtest's
+	// time.Now() and the verbCtx the verb creates under it; the deadline is
+	// still asserted to be the bound, not the bound plus a second call.
+	deadlineSlack = 2 * time.Second
+)
+
+const deadlineSession = "deadline-session"
+
+// holdOps wraps the in-memory fake and holds chosen calls in fake time. A held
+// call ends when its ctx ends, or when hold elapses, whichever is first.
+type holdOps struct {
+	*fakeK8sOps
+	// hold returns how long the n-th (0-based) call of method is held before it
+	// reaches the fake; zero passes straight through.
+	hold func(method string, n int, cmd []string) time.Duration
+
+	mu    sync.Mutex
+	calls map[string]int
+	cut   int // calls ended by their ctx
+}
+
+func newHoldOps(hold func(method string, n int, cmd []string) time.Duration) *holdOps {
+	return &holdOps{fakeK8sOps: newFakeK8sOps(), hold: hold, calls: map[string]int{}}
+}
+
+// holdAll holds every call for testHold.
+func holdAll() func(string, int, []string) time.Duration {
+	return func(string, int, []string) time.Duration { return testHold }
+}
+
+// holdMethods holds every call of the named methods for testHold.
+func holdMethods(methods ...string) func(string, int, []string) time.Duration {
+	return func(m string, _ int, _ []string) time.Duration {
+		for _, want := range methods {
+			if m == want {
+				return testHold
+			}
+		}
+		return 0
+	}
+}
+
+func (h *holdOps) gate(ctx context.Context, method string, cmd []string) error {
+	h.mu.Lock()
+	n := h.calls[method]
+	h.calls[method]++
+	h.mu.Unlock()
+	d := h.hold(method, n, cmd)
+	if d <= 0 {
+		return nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		h.mu.Lock()
+		h.cut++
+		h.mu.Unlock()
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+func (h *holdOps) cutCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.cut
+}
+
+func (h *holdOps) createPod(ctx context.Context, pod *corev1.Pod) (*corev1.Pod, error) {
+	if err := h.gate(ctx, "createPod", nil); err != nil {
+		return nil, err
+	}
+	return h.fakeK8sOps.createPod(ctx, pod)
+}
+
+func (h *holdOps) getPod(ctx context.Context, name string) (*corev1.Pod, error) {
+	if err := h.gate(ctx, "getPod", nil); err != nil {
+		return nil, err
+	}
+	return h.fakeK8sOps.getPod(ctx, name)
+}
+
+func (h *holdOps) deletePod(ctx context.Context, name string, grace int64) error {
+	if err := h.gate(ctx, "deletePod", nil); err != nil {
+		return err
+	}
+	return h.fakeK8sOps.deletePod(ctx, name, grace)
+}
+
+func (h *holdOps) listPods(ctx context.Context, selector, fieldSelector string) ([]corev1.Pod, error) {
+	if err := h.gate(ctx, "listPods", nil); err != nil {
+		return nil, err
+	}
+	return h.fakeK8sOps.listPods(ctx, selector, fieldSelector)
+}
+
+func (h *holdOps) execInPod(ctx context.Context, pod, container string, cmd []string, stdin io.Reader) (string, error) {
+	if err := h.gate(ctx, "execInPod", cmd); err != nil {
+		return "", err
+	}
+	return h.fakeK8sOps.execInPod(ctx, pod, container, cmd, stdin)
+}
+
+// addRunningPods seeds n Running pods for deadlineSession.
+func addRunningPods(fake *fakeK8sOps, n int) {
+	for i := 0; i < n; i++ {
+		podName := SanitizeName(deadlineSession)
+		if i > 0 {
+			podName += "-" + string(rune('a'+i))
+		}
+		fake.pods[podName] = &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   podName,
+				Labels: map[string]string{"app": "gc-agent", "gc-session": SanitizeLabel(deadlineSession)},
+			},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		}
+	}
+}
+
+func deadlineProvider(ops k8sOps) *Provider {
+	p := newProviderWithOps(ops)
+	p.requestBound = testRequestBound
+	p.copyBound = testCopyBound
+	return p
+}
+
+// recOps records the deadline of every Kubernetes call that passes through it,
+// so a test can assert that a verb ran every call under one bound.
+type recOps struct {
+	*fakeK8sOps
+	mu      sync.Mutex
+	calls   int
+	undead  bool // a call carried no deadline
+	latest  time.Time
+	missing []string // methods whose call had no deadline
+}
+
+func newRecOps(fake *fakeK8sOps) *recOps { return &recOps{fakeK8sOps: fake} }
+
+func (r *recOps) record(ctx context.Context, method string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls++
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		r.undead = true
+		r.missing = append(r.missing, method)
+		return
+	}
+	if deadline.After(r.latest) {
+		r.latest = deadline
+	}
+}
+
+func (r *recOps) createPod(ctx context.Context, pod *corev1.Pod) (*corev1.Pod, error) {
+	r.record(ctx, "createPod")
+	return r.fakeK8sOps.createPod(ctx, pod)
+}
+
+func (r *recOps) getPod(ctx context.Context, name string) (*corev1.Pod, error) {
+	r.record(ctx, "getPod")
+	return r.fakeK8sOps.getPod(ctx, name)
+}
+
+func (r *recOps) deletePod(ctx context.Context, name string, grace int64) error {
+	r.record(ctx, "deletePod")
+	return r.fakeK8sOps.deletePod(ctx, name, grace)
+}
+
+func (r *recOps) listPods(ctx context.Context, selector, fieldSelector string) ([]corev1.Pod, error) {
+	r.record(ctx, "listPods")
+	return r.fakeK8sOps.listPods(ctx, selector, fieldSelector)
+}
+
+func (r *recOps) execInPod(ctx context.Context, pod, container string, cmd []string, stdin io.Reader) (string, error) {
+	r.record(ctx, "execInPod")
+	return r.fakeK8sOps.execInPod(ctx, pod, container, cmd, stdin)
+}
+
+// TestCtxFreeVerbsRunUnderDeadline is AC-1 of #6055: every Kubernetes call a
+// ctx-free verb makes carries a deadline no later than the verb's bound — the
+// request bound for the request verbs, the copy bound for CopyTo — so a
+// wedged API server cannot hold a verb open past one bound.
+func TestCtxFreeVerbsRunUnderDeadline(t *testing.T) {
+	cases := []struct {
+		name  string
+		pods  int
+		call  func(p *Provider)
+		bound func(p *Provider) time.Duration
+	}{
+		{name: "Stop", pods: 1, call: func(p *Provider) { _ = p.Stop(deadlineSession) }, bound: (*Provider).requestTimeout},
+		{name: "Interrupt", pods: 1, call: func(p *Provider) { _ = p.Interrupt(deadlineSession) }, bound: (*Provider).requestTimeout},
+		{name: "IsRunning", pods: 1, call: func(p *Provider) { p.IsRunning(deadlineSession) }, bound: (*Provider).requestTimeout},
+		{name: "IsAttached", pods: 1, call: func(p *Provider) { p.IsAttached(deadlineSession) }, bound: (*Provider).requestTimeout},
+		{name: "ProcessAlive", pods: 1, call: func(p *Provider) { p.ProcessAlive(deadlineSession, []string{"claude"}) }, bound: (*Provider).requestTimeout},
+		{name: "Nudge", pods: 1, call: func(p *Provider) {
+			_ = p.Nudge(deadlineSession, []runtime.ContentBlock{{Type: "text", Text: "hi"}})
+		}, bound: (*Provider).requestTimeout},
+		{name: "SendKeys", pods: 1, call: func(p *Provider) { _ = p.SendKeys(deadlineSession, "Enter") }, bound: (*Provider).requestTimeout},
+		{name: "SetMeta", pods: 1, call: func(p *Provider) { _ = p.SetMeta(deadlineSession, "k", "v") }, bound: (*Provider).requestTimeout},
+		{name: "GetMeta", pods: 1, call: func(p *Provider) { _, _ = p.GetMeta(deadlineSession, "k") }, bound: (*Provider).requestTimeout},
+		{name: "RemoveMeta", pods: 1, call: func(p *Provider) { _ = p.RemoveMeta(deadlineSession, "k") }, bound: (*Provider).requestTimeout},
+		{name: "Peek", pods: 1, call: func(p *Provider) { _, _ = p.Peek(deadlineSession, 10) }, bound: (*Provider).requestTimeout},
+		{name: "ListRunning", call: func(p *Provider) { _, _ = p.ListRunning("") }, bound: (*Provider).requestTimeout},
+		{name: "GetLastActivity", pods: 1, call: func(p *Provider) { _, _ = p.GetLastActivity(deadlineSession) }, bound: (*Provider).requestTimeout},
+		{name: "ClearScrollback", pods: 1, call: func(p *Provider) { _ = p.ClearScrollback(deadlineSession) }, bound: (*Provider).requestTimeout},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newFakeK8sOps()
+			addRunningPods(fake, tc.pods)
+			ops := newRecOps(fake)
+			p := deadlineProvider(ops)
+
+			start := time.Now()
+			tc.call(p)
+
+			ops.mu.Lock()
+			defer ops.mu.Unlock()
+			if ops.calls == 0 {
+				t.Fatal("the verb made no Kubernetes call: the test is vacuous")
+			}
+			if ops.undead {
+				t.Fatalf("%s made calls with no deadline: %v", tc.name, ops.missing)
+			}
+			if limit := start.Add(tc.bound(p) + deadlineSlack); ops.latest.After(limit) {
+				t.Fatalf("%s ran a call with a deadline %v, later than its bound %v", tc.name, ops.latest, tc.bound(p))
+			}
+		})
+	}
+
+	t.Run("CopyTo", func(t *testing.T) {
+		src := filepath.Join(t.TempDir(), "payload.txt")
+		if err := os.WriteFile(src, []byte("payload"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		fake := newFakeK8sOps()
+		addRunningPods(fake, 1)
+		ops := newRecOps(fake)
+		p := deadlineProvider(ops)
+
+		start := time.Now()
+		_ = p.CopyTo(deadlineSession, src, "x/payload.txt")
+
+		ops.mu.Lock()
+		defer ops.mu.Unlock()
+		if ops.calls == 0 {
+			t.Fatal("CopyTo made no Kubernetes call: the test is vacuous")
+		}
+		if ops.undead {
+			t.Fatalf("CopyTo made calls with no deadline: %v", ops.missing)
+		}
+		if limit := start.Add(p.copyTimeout() + deadlineSlack); ops.latest.After(limit) {
+			t.Fatalf("CopyTo ran a call with a deadline %v, later than its bound %v", ops.latest, p.copyTimeout())
+		}
+	})
+}
+
+// TestRequestVerbsReturnWithinRequestBound is the black-hole acceptance: with
+// the apiserver a black hole, each of the 14 request-style verbs returns within
+// the request bound with its existing error shape.
+func TestRequestVerbsReturnWithinRequestBound(t *testing.T) {
+	type outcome struct {
+		err error
+		out string
+		ok  bool
+		ts  time.Time
+	}
+	cases := []struct {
+		name  string
+		pods  int
+		hold  func(string, int, []string) time.Duration
+		call  func(p *Provider) outcome
+		check func(t *testing.T, o outcome)
+	}{
+		{
+			name: "Stop/list", hold: holdAll(),
+			call: func(p *Provider) outcome { return outcome{err: p.Stop(deadlineSession)} },
+			check: func(t *testing.T, o outcome) {
+				if o.err == nil || !strings.Contains(o.err.Error(), "k8s stop") || !strings.Contains(o.err.Error(), "listing pods") {
+					t.Fatalf("Stop = %v, want wrapped listing error", o.err)
+				}
+				if runtime.IsSessionGone(o.err) {
+					t.Fatalf("Stop deadline error %v must not match IsSessionGone", o.err)
+				}
+			},
+		},
+		{
+			name: "Stop/delete", pods: 1, hold: holdMethods("deletePod"),
+			call: func(p *Provider) outcome { return outcome{err: p.Stop(deadlineSession)} },
+			check: func(t *testing.T, o outcome) {
+				if o.err == nil || !strings.Contains(o.err.Error(), "deleting pod") {
+					t.Fatalf("Stop = %v, want joined delete error", o.err)
+				}
+				if runtime.IsSessionGone(o.err) {
+					t.Fatalf("Stop deadline error %v must not match IsSessionGone", o.err)
+				}
+			},
+		},
+		{
+			name: "Interrupt", hold: holdAll(),
+			call:  func(p *Provider) outcome { return outcome{err: p.Interrupt(deadlineSession)} },
+			check: func(t *testing.T, o outcome) { wantNilErr(t, "Interrupt", o.err) },
+		},
+		{
+			name: "IsRunning/list", hold: holdAll(),
+			call:  func(p *Provider) outcome { return outcome{ok: p.IsRunning(deadlineSession)} },
+			check: func(t *testing.T, o outcome) { wantFalse(t, "IsRunning", o.ok) },
+		},
+		{
+			name: "IsRunning/exec", pods: 1, hold: holdMethods("execInPod"),
+			call:  func(p *Provider) outcome { return outcome{ok: p.IsRunning(deadlineSession)} },
+			check: func(t *testing.T, o outcome) { wantFalse(t, "IsRunning", o.ok) },
+		},
+		{
+			name: "IsAttached/list", hold: holdAll(),
+			call:  func(p *Provider) outcome { return outcome{ok: p.IsAttached(deadlineSession)} },
+			check: func(t *testing.T, o outcome) { wantFalse(t, "IsAttached", o.ok) },
+		},
+		{
+			name: "IsAttached/exec", pods: 1, hold: holdMethods("execInPod"),
+			call:  func(p *Provider) outcome { return outcome{ok: p.IsAttached(deadlineSession)} },
+			check: func(t *testing.T, o outcome) { wantFalse(t, "IsAttached", o.ok) },
+		},
+		{
+			name: "ProcessAlive/list", hold: holdAll(),
+			call:  func(p *Provider) outcome { return outcome{ok: p.ProcessAlive(deadlineSession, []string{"claude"})} },
+			check: func(t *testing.T, o outcome) { wantFalse(t, "ProcessAlive", o.ok) },
+		},
+		{
+			name: "ProcessAlive/exec", pods: 1, hold: holdMethods("execInPod"),
+			call:  func(p *Provider) outcome { return outcome{ok: p.ProcessAlive(deadlineSession, []string{"claude"})} },
+			check: func(t *testing.T, o outcome) { wantFalse(t, "ProcessAlive", o.ok) },
+		},
+		{
+			name: "Nudge", pods: 1, hold: holdMethods("execInPod"),
+			call: func(p *Provider) outcome {
+				return outcome{err: p.Nudge(deadlineSession, []runtime.ContentBlock{{Type: "text", Text: "hi"}})}
+			},
+			check: func(t *testing.T, o outcome) {
+				if o.err == nil {
+					t.Fatal("Nudge = nil, want the deadline error")
+				}
+			},
+		},
+		{
+			name: "SendKeys", pods: 1, hold: holdMethods("execInPod"),
+			call: func(p *Provider) outcome { return outcome{err: p.SendKeys(deadlineSession, "Enter")} },
+			check: func(t *testing.T, o outcome) {
+				if o.err == nil {
+					t.Fatal("SendKeys = nil, want the deadline error")
+				}
+			},
+		},
+		{
+			name: "SetMeta", hold: holdAll(),
+			call:  func(p *Provider) outcome { return outcome{err: p.SetMeta(deadlineSession, "k", "v")} },
+			check: func(t *testing.T, o outcome) { wantNilErr(t, "SetMeta", o.err) },
+		},
+		{
+			name: "GetMeta", hold: holdAll(),
+			call: func(p *Provider) outcome {
+				v, err := p.GetMeta(deadlineSession, "k")
+				return outcome{out: v, err: err}
+			},
+			check: func(t *testing.T, o outcome) {
+				wantNilErr(t, "GetMeta", o.err)
+				if o.out != "" {
+					t.Fatalf("GetMeta = %q, want empty", o.out)
+				}
+			},
+		},
+		{
+			name: "RemoveMeta", hold: holdAll(),
+			call:  func(p *Provider) outcome { return outcome{err: p.RemoveMeta(deadlineSession, "k")} },
+			check: func(t *testing.T, o outcome) { wantNilErr(t, "RemoveMeta", o.err) },
+		},
+		{
+			name: "Peek", pods: 1, hold: holdMethods("execInPod"),
+			call: func(p *Provider) outcome {
+				v, err := p.Peek(deadlineSession, 10)
+				return outcome{out: v, err: err}
+			},
+			check: func(t *testing.T, o outcome) {
+				wantNilErr(t, "Peek", o.err)
+				if o.out != "" {
+					t.Fatalf("Peek = %q, want empty", o.out)
+				}
+			},
+		},
+		{
+			name: "ListRunning", hold: holdAll(),
+			call: func(p *Provider) outcome {
+				names, err := p.ListRunning("")
+				return outcome{out: strings.Join(names, ","), err: err}
+			},
+			check: func(t *testing.T, o outcome) {
+				if o.err == nil {
+					t.Fatal("ListRunning err = nil, want the deadline error")
+				}
+				if o.out != "" {
+					t.Fatalf("ListRunning names = %q, want none", o.out)
+				}
+			},
+		},
+		{
+			name: "GetLastActivity", pods: 1, hold: holdMethods("execInPod"),
+			call: func(p *Provider) outcome {
+				ts, err := p.GetLastActivity(deadlineSession)
+				return outcome{ts: ts, err: err}
+			},
+			check: func(t *testing.T, o outcome) {
+				wantNilErr(t, "GetLastActivity", o.err)
+				if !o.ts.IsZero() {
+					t.Fatalf("GetLastActivity = %v, want zero time", o.ts)
+				}
+			},
+		},
+		{
+			name: "ClearScrollback", pods: 1, hold: holdMethods("execInPod"),
+			call:  func(p *Provider) outcome { return outcome{err: p.ClearScrollback(deadlineSession)} },
+			check: func(t *testing.T, o outcome) { wantNilErr(t, "ClearScrollback", o.err) },
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ops := newHoldOps(tc.hold)
+				addRunningPods(ops.fakeK8sOps, tc.pods)
+				p := deadlineProvider(ops)
+
+				start := time.Now()
+				o := tc.call(p)
+				elapsed := time.Since(start)
+
+				if elapsed > testRequestBound {
+					t.Fatalf("verb took %v, want within the %v request bound", elapsed, testRequestBound)
+				}
+				if ops.cutCount() == 0 {
+					t.Fatal("no apiserver call was cut by its ctx: the stub was never held, the test is vacuous")
+				}
+				tc.check(t, o)
+			})
+		})
+	}
+}
+
+func wantNilErr(t *testing.T, verb string, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("%s err = %v, want nil", verb, err)
+	}
+}
+
+func wantFalse(t *testing.T, verb string, got bool) {
+	t.Helper()
+	if got {
+		t.Fatalf("%s = true, want false", verb)
+	}
+}
+
+// TestStopHasOneDeadlineAcrossItsDeleteLoop is Stop's loop shape: the first
+// delete eats most of the bound and the second blocks, and the verb still
+// returns after one bound, not one bound per call.
+func TestStopHasOneDeadlineAcrossItsDeleteLoop(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		first := testRequestBound * 8 / 10
+		ops := newHoldOps(func(method string, n int, _ []string) time.Duration {
+			if method != "deletePod" {
+				return 0
+			}
+			if n == 0 {
+				return first
+			}
+			return testHold
+		})
+		addRunningPods(ops.fakeK8sOps, 2)
+		p := deadlineProvider(ops)
+
+		start := time.Now()
+		err := p.Stop(deadlineSession)
+		elapsed := time.Since(start)
+
+		if err == nil {
+			t.Fatal("Stop = nil, want the deadline error from the second delete")
+		}
+		if elapsed > testRequestBound {
+			t.Fatalf("Stop took %v, want one %v bound over both deletes", elapsed, testRequestBound)
+		}
+		if ops.cutCount() != 1 {
+			t.Fatalf("cut calls = %d, want exactly the second delete", ops.cutCount())
+		}
+	})
+}
+
+// TestProcessAliveHasOneDeadlineAcrossItsProbeLoop is ProcessAlive's loop
+// shape: one bound over the whole pgrep loop.
+func TestProcessAliveHasOneDeadlineAcrossItsProbeLoop(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		first := testRequestBound * 8 / 10
+		ops := newHoldOps(func(method string, n int, _ []string) time.Duration {
+			if method != "execInPod" {
+				return 0
+			}
+			if n == 0 {
+				return first
+			}
+			return testHold
+		})
+		ops.execFunc = func(string, []string) (string, error) { return "", errors.New("no such process") }
+		addRunningPods(ops.fakeK8sOps, 1)
+		p := deadlineProvider(ops)
+
+		start := time.Now()
+		alive := p.ProcessAlive(deadlineSession, []string{"a", "b", "c"})
+		elapsed := time.Since(start)
+
+		if alive {
+			t.Fatal("ProcessAlive = true, want false")
+		}
+		if elapsed > testRequestBound {
+			t.Fatalf("ProcessAlive took %v, want one %v bound over the whole loop", elapsed, testRequestBound)
+		}
+		// The second probe is cut at the bound; the third finds the ctx already
+		// ended and fails at once, so at least one call, not exactly one.
+		if ops.cutCount() == 0 {
+			t.Fatal("no probe was cut by the ctx: the test is vacuous")
+		}
+	})
+}
+
+// TestCopyToRunsUnderTheCopyBound is CopyTo's own, longer bound.
+func TestCopyToRunsUnderTheCopyBound(t *testing.T) {
+	writeSrc := func(t *testing.T) string {
+		t.Helper()
+		src := filepath.Join(t.TempDir(), "payload.txt")
+		if err := os.WriteFile(src, []byte("payload"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return src
+	}
+	tarHold := func(d time.Duration) func(string, int, []string) time.Duration {
+		return func(method string, _ int, cmd []string) time.Duration {
+			if method == "execInPod" && len(cmd) > 0 && cmd[0] == "tar" {
+				return d
+			}
+			return 0
+		}
+	}
+
+	t.Run("stream longer than the request bound completes", func(t *testing.T) {
+		src := writeSrc(t)
+		synctest.Test(t, func(t *testing.T) {
+			ops := newHoldOps(tarHold(4 * testRequestBound))
+			addRunningPods(ops.fakeK8sOps, 1)
+			p := deadlineProvider(ops)
+
+			if err := p.CopyTo(deadlineSession, src, "x/payload.txt"); err != nil {
+				t.Fatalf("CopyTo = %v, want nil: a stream under the copy bound must finish", err)
+			}
+			if ops.cutCount() != 0 {
+				t.Fatalf("cut calls = %d, want none", ops.cutCount())
+			}
+		})
+	})
+	t.Run("stream past the copy bound is cut", func(t *testing.T) {
+		src := writeSrc(t)
+		synctest.Test(t, func(t *testing.T) {
+			ops := newHoldOps(tarHold(testHold))
+			addRunningPods(ops.fakeK8sOps, 1)
+			p := deadlineProvider(ops)
+
+			start := time.Now()
+			err := p.CopyTo(deadlineSession, src, "x/payload.txt")
+			elapsed := time.Since(start)
+
+			if err == nil {
+				t.Fatal("CopyTo = nil, want the stream's deadline error")
+			}
+			if elapsed > testCopyBound {
+				t.Fatalf("CopyTo took %v, want within the %v copy bound", elapsed, testCopyBound)
+			}
+			if ops.cutCount() == 0 {
+				t.Fatal("the stream was never cut: the test is vacuous")
+			}
+		})
+	})
+	t.Run("lookup past the copy bound still returns nil", func(t *testing.T) {
+		src := writeSrc(t)
+		synctest.Test(t, func(t *testing.T) {
+			ops := newHoldOps(holdAll())
+			p := deadlineProvider(ops)
+
+			start := time.Now()
+			err := p.CopyTo(deadlineSession, src, "x/payload.txt")
+			elapsed := time.Since(start)
+
+			if err != nil {
+				t.Fatalf("CopyTo = %v, want nil: a lookup failure is best-effort", err)
+			}
+			if elapsed > testCopyBound {
+				t.Fatalf("CopyTo took %v, want within the %v copy bound", elapsed, testCopyBound)
+			}
+			if ops.cutCount() == 0 {
+				t.Fatal("the lookup was never cut: the test is vacuous")
+			}
+		})
+	})
+}
+
+// TestBoundsDefaultToTheNamedConstants pins the named constants and the
+// zero-field fallback, with no sleep.
+func TestBoundsDefaultToTheNamedConstants(t *testing.T) {
+	if verbRequestBound != 30*time.Second {
+		t.Fatalf("verbRequestBound = %v, want 30s", verbRequestBound)
+	}
+	if verbCopyBound != 120*time.Second {
+		t.Fatalf("verbCopyBound = %v, want 120s", verbCopyBound)
+	}
+	var zero Provider
+	if got := zero.requestTimeout(); got != verbRequestBound {
+		t.Fatalf("zero requestBound resolves to %v, want %v", got, verbRequestBound)
+	}
+	if got := zero.copyTimeout(); got != verbCopyBound {
+		t.Fatalf("zero copyBound resolves to %v, want %v", got, verbCopyBound)
+	}
+	set := Provider{requestBound: time.Second, copyBound: 2 * time.Second}
+	if got := set.requestTimeout(); got != time.Second {
+		t.Fatalf("injected requestBound resolves to %v, want 1s", got)
+	}
+	if got := set.copyTimeout(); got != 2*time.Second {
+		t.Fatalf("injected copyBound resolves to %v, want 2s", got)
+	}
+}
+
+// TestVerbCtxCarriesTheBound pins the helper: a deadline of exactly the bound
+// from now, canceled by the returned cancel.
+func TestVerbCtxCarriesTheBound(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var p Provider
+		now := time.Now()
+		ctx, cancel := p.verbCtx(testRequestBound)
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("verbCtx has no deadline")
+		}
+		if got := deadline.Sub(now); got != testRequestBound {
+			t.Fatalf("deadline is %v from now, want %v", got, testRequestBound)
+		}
+		cancel()
+		if ctx.Err() == nil {
+			t.Fatal("cancel did not end the ctx")
+		}
+	})
+}
