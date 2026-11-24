@@ -843,14 +843,49 @@ func TestRalphFinalizeRecoveredAfterTwoFailedIterations(t *testing.T) {
 	ralphAssertOutcome(t, "iteration 3 m1", res.get(t, "loop.iteration.3.m1"), "pass")
 }
 
-// TestRalphFinalizeOuterExhaustsInnerPasses is skipped on purpose: a ralph with
-// children nested inside a ralph body does not run today. The compile stamps the
-// inner iteration scope and its members with the OUTER iteration's scope_ref,
-// ralph_step_id and attempt, so the inner member's scope check evaluates the
-// outer scope and answers "continue", the inner scope never closes, and the
-// workflow makes no progress.
+// TestRalphFinalizeOuterExhaustsInnerPasses: the outer check never passes (max
+// 2) while the nested inner check-with-children passes its iteration 1 in each
+// outer iteration. Outer iteration 2 is spawned with a seeded inner loop whose
+// scope and i1 pass, both inner controls pass, and the outer control exhausts:
+// it fails, and the root fails with the outer control as the source's failure
+// subject while the source stays open.
 func TestRalphFinalizeOuterExhaustsInnerPasses(t *testing.T) {
-	t.Skip("nested ralph-with-children deadlocks before the finalizer: the inner scope carries the outer iteration's identity")
+	res := runWiringWorkflow(t, wiringScenario{
+		formula:       wiringNestedCheckFormula(2, 2, true),
+		checkPassIter: map[string]int{"outer": 0, "inner": 1},
+	})
+	var seeded []beads.Bead
+	for _, b := range res.all {
+		if strings.HasSuffix(beadRef(b), "outer.iteration.2.inner") && b.Metadata["gc.kind"] == "ralph" {
+			seeded = append(seeded, b)
+		}
+	}
+	if len(seeded) != 1 {
+		t.Fatalf("seeded inner controls in outer iteration 2 = %d, want 1", len(seeded))
+	}
+	ralphAssertOutcome(t, "outer iteration 1 inner control", res.get(t, "outer.iteration.1.inner"), "pass")
+	ralphAssertOutcome(t, "outer iteration 2 inner control", seeded[0], "pass")
+	for _, suffix := range []string{"outer.iteration.2.inner.iteration.1", "outer.iteration.2.inner.iteration.1.i1"} {
+		var matched []beads.Bead
+		for _, b := range res.all {
+			if strings.HasSuffix(beadRef(b), suffix) {
+				matched = append(matched, b)
+			}
+		}
+		if len(matched) != 1 {
+			t.Fatalf("beads with step ref ending %s = %d, want 1", suffix, len(matched))
+		}
+		ralphAssertOutcome(t, "seeded "+suffix, matched[0], "pass")
+	}
+	outer := res.get(t, "outer")
+	ralphAssertOutcome(t, "outer control", outer, "fail")
+	ralphAssertOutcome(t, "workflow root", res.root(t), "fail")
+	if got := res.sourceSubjectRef(t); got != res.ref("outer") {
+		t.Errorf("source gc.failure_subject ref = %q, want the outer control %q", got, res.ref("outer"))
+	}
+	if st := res.source(t).Status; st == "closed" {
+		t.Errorf("source bead status = %q, want open", st)
+	}
 }
 
 // wiringNestedCheckFormula is a check "outer" whose body is a check-with-children
