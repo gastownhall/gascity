@@ -224,3 +224,154 @@ func TestRunWorkflowServeFollowBacksOffOnRepeatedPending(t *testing.T) {
 		t.Fatalf("control dispatches = %d, want 6 (a repeat must still be retried on every sweep)", serveCalls)
 	}
 }
+
+// TestRunWorkflowServeFollowNewPendingResetsBackoff pins that only a verbatim
+// repeat is quiet: any pending outcome the previous completed sweep did not
+// end with — a changed refusal, a new pending bead, or the same bead re-pending
+// after a sweep where it was absent, skipped or processed — reports pending
+// again and resets the idle backoff, exactly as a fresh pending onset does.
+func TestRunWorkflowServeFollowNewPendingResetsBackoff(t *testing.T) {
+	clearGCEnv(t)
+
+	refusalA := fmt.Errorf("%w: waiting on gc-a", dispatch.ErrControlPending)
+	refusalB := fmt.Errorf("%w: waiting on gc-b", dispatch.ErrControlPending)
+	joinRefusal := fmt.Errorf("%w: waiting on gate gc-gate", dispatch.ErrControlPending)
+
+	blockedRow := hookBead{ID: "gc-blocked", Metadata: hookBeadMetadata{"gc.kind": "workflow-finalize"}}
+	joinerRow := hookBead{ID: "gc-joiner", Metadata: hookBeadMetadata{"gc.kind": "workflow-finalize"}}
+	blocked := func() []hookBead { return []hookBead{blockedRow} }
+
+	tests := []struct {
+		name    string
+		attempt int
+		queue   func(listCall int) ([]hookBead, error)
+		serve   func(listCall int, beadID string) error
+		want    []serveFollowWaitCall
+	}{
+		{
+			// Three identical refusals let the backoff grow, then the refusal
+			// text changes and the next wait is back at the 1s floor.
+			name:  "changed refusal text reports pending again",
+			queue: func(int) ([]hookBead, error) { return blocked(), nil },
+			serve: func(c int, _ string) error {
+				if c <= 3 {
+					return refusalA
+				}
+				return refusalB
+			},
+			want: []serveFollowWaitCall{
+				{idleSweeps: 0, sleepDur: 1 * time.Second},
+				{idleSweeps: 0, sleepDur: 1 * time.Second},
+				{idleSweeps: 1, sleepDur: 2 * time.Second},
+				{idleSweeps: 0, sleepDur: 1 * time.Second},
+			},
+		},
+		{
+			// A second bead joining the queue is a new pending onset, even
+			// though the first bead keeps repeating its own refusal.
+			name: "a new pending bead reports pending again",
+			queue: func(c int) ([]hookBead, error) {
+				if c <= 3 {
+					return blocked(), nil
+				}
+				return []hookBead{blockedRow, joinerRow}, nil
+			},
+			serve: func(_ int, beadID string) error {
+				if beadID == "gc-joiner" {
+					return joinRefusal
+				}
+				return refusalA
+			},
+			want: []serveFollowWaitCall{
+				{idleSweeps: 0, sleepDur: 1 * time.Second},
+				{idleSweeps: 0, sleepDur: 1 * time.Second},
+				{idleSweeps: 1, sleepDur: 2 * time.Second},
+				{idleSweeps: 0, sleepDur: 1 * time.Second},
+			},
+		},
+		{
+			// Absent for one sweep, then pending again with the same text: a
+			// fresh onset, because the baseline only holds the sweep before it.
+			name: "absent for one sweep then re-pending reports pending again",
+			queue: func(c int) ([]hookBead, error) {
+				if c == 4 {
+					return nil, nil
+				}
+				return blocked(), nil
+			},
+			serve: func(int, string) error { return refusalA },
+			want: []serveFollowWaitCall{
+				{idleSweeps: 0, sleepDur: 1 * time.Second},
+				{idleSweeps: 0, sleepDur: 1 * time.Second},
+				{idleSweeps: 1, sleepDur: 2 * time.Second},
+				{idleSweeps: 2, sleepDur: 4 * time.Second},
+				{idleSweeps: 0, sleepDur: 1 * time.Second},
+			},
+		},
+		{
+			// Skipped for one sweep (bead no longer open at dispatch time),
+			// then pending again with the same text.
+			name:  "skipped for one sweep then re-pending reports pending again",
+			queue: func(int) ([]hookBead, error) { return blocked(), nil },
+			serve: func(c int, _ string) error {
+				if c == 4 {
+					return errControlNotProcessed
+				}
+				return refusalA
+			},
+			want: []serveFollowWaitCall{
+				{idleSweeps: 0, sleepDur: 1 * time.Second},
+				{idleSweeps: 0, sleepDur: 1 * time.Second},
+				{idleSweeps: 1, sleepDur: 2 * time.Second},
+				{idleSweeps: 2, sleepDur: 4 * time.Second},
+				{idleSweeps: 0, sleepDur: 1 * time.Second},
+			},
+		},
+		{
+			// Processed for one sweep (the drain re-queries once, hence the
+			// empty queue on the following list call), then pending again
+			// with the same text.
+			name:    "processed for one sweep then re-pending reports pending again",
+			attempt: 0,
+			queue: func(c int) ([]hookBead, error) {
+				if c == 4 {
+					return blocked(), nil
+				}
+				if c == 5 {
+					return nil, nil
+				}
+				return blocked(), nil
+			},
+			serve: func(c int, _ string) error {
+				if c == 4 {
+					return nil
+				}
+				return refusalA
+			},
+			want: []serveFollowWaitCall{
+				{idleSweeps: 0, sleepDur: 1 * time.Second},
+				{idleSweeps: 0, sleepDur: 1 * time.Second},
+				{idleSweeps: 1, sleepDur: 2 * time.Second},
+				{idleSweeps: 0, sleepDur: 1 * time.Second},
+				{idleSweeps: 0, sleepDur: 1 * time.Second},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prevAttempts := workflowServeIdlePollAttempts
+			t.Cleanup(func() { workflowServeIdlePollAttempts = prevAttempts })
+			workflowServeIdlePollAttempts = tt.attempt
+
+			waits, stopErr := stubServeFollowLoop(t, tt.queue, tt.serve, len(tt.want))
+			err := runWorkflowServeFollow(config.Agent{Name: "control-dispatcher"}, t.TempDir(), t.TempDir(), "bd ready", nil, io.Discard)
+			if !errors.Is(err, stopErr) {
+				t.Fatalf("runWorkflowServeFollow error = %v, want %v", err, stopErr)
+			}
+			if !slices.Equal(*waits, tt.want) {
+				t.Fatalf("waits = %+v, want %+v", *waits, tt.want)
+			}
+		})
+	}
+}
