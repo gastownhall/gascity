@@ -1899,6 +1899,10 @@ func managedNudgeWakeSkipReason(target nudgeTarget, backed bool) string {
 		return "the target resolved to no session bead id"
 	case strings.TrimSpace(target.cityPath) == "":
 		return "the target resolved to no city"
+	case target.agent.Suspended:
+		return fmt.Sprintf("the target agent %q is suspended", target.agent.Name)
+	case target.agent.MaxActiveSessions != nil && *target.agent.MaxActiveSessions == 0:
+		return fmt.Sprintf("the target agent %q allows zero active sessions", target.agent.Name)
 	case !nudgeCityUsesManagedReconciler(target.cityPath):
 		return fmt.Sprintf("no controller or supervisor was detected for %s", target.cityPath)
 	default:

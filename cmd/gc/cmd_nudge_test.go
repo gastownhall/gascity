@@ -716,22 +716,60 @@ func TestSendMailNotifyWithoutControllerReportsSkippedWake(t *testing.T) {
 	c.requireOneNotifyLine(t, "no managed wake was requested", "no controller or supervisor was detected")
 }
 
-// TestSendMailNotifyRecordedWakeIsQuiet: the managed wake the notice exists
-// for is recorded once, the controller is poked once, and nothing extra is
-// printed.
-func TestSendMailNotifyRecordedWakeIsQuiet(t *testing.T) {
-	c := newMailNotifyWakeCity(t, true)
-	if err := c.mgr.Suspend(context.Background(), testActorIn(t, session.ActorOperator, c.dir), c.id, false); err != nil {
-		t.Fatalf("Suspend: %v", err)
+// A mail notice queues even when its target cannot wake.
+func TestManagedNudgeWakeForMailNotify(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		suspended bool
+		max       *int
+		skip      string
+	}{
+		{"suspended", true, nil, "is suspended"},
+		{"zero capacity", false, intPtrNudge(0), "zero active sessions"},
+		{"both", true, intPtrNudge(0), "is suspended"},
+		{"unset capacity", false, nil, ""},
+		{"unlimited capacity", false, intPtrNudge(-1), ""},
+		{"positive capacity", false, intPtrNudge(2), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newMailNotifyWakeCity(t, true)
+			if err := c.mgr.Suspend(context.Background(), testActorIn(t, session.ActorOperator, c.dir), c.id, false); err != nil {
+				t.Fatalf("Suspend: %v", err)
+			}
+			sleepUnheld(t, c.store, c.id)
+			c.target.agent.Suspended = tc.suspended
+			c.target.agent.MaxActiveSessions = tc.max
+			c.target.cfg.Agents[0] = c.target.agent
+			c.notify(t)
+			c.requireOneQueued(t)
+			if tc.skip != "" {
+				if got := c.wakeRequest(t); c.pokes != 0 || got != "" {
+					t.Fatalf("pokes = %d, wake_request = %q; want neither", c.pokes, got)
+				}
+				c.requireOneNotifyLine(t, "no managed wake was requested", tc.skip)
+				return
+			}
+			if got := c.wakeRequest(t); c.pokes != 1 || got != string(session.WakeCauseExplicit) {
+				t.Fatalf("pokes = %d, wake_request = %q; want 1 and explicit", c.pokes, got)
+			}
+			if lines := c.notifyLines(); len(lines) != 0 {
+				t.Fatalf("gc mail notify lines = %q, want none for a recorded wake", lines)
+			}
+		})
 	}
-	sleepUnheld(t, c.store, c.id)
-	c.notify(t)
-	c.requireOneQueued(t)
-	if got := c.wakeRequest(t); c.pokes != 1 || got != string(session.WakeCauseExplicit) {
-		t.Fatalf("pokes = %d, wake_request = %q; want 1 and explicit", c.pokes, got)
+}
+
+// The wake gate checks prerequisites before probing the controller.
+func TestManagedNudgeWakeSkipReasonPrecedence(t *testing.T) {
+	old := nudgeCityUsesManagedReconciler
+	nudgeCityUsesManagedReconciler = func(string) bool { t.Fatal("unexpected controller probe"); return false }
+	t.Cleanup(func() { nudgeCityUsesManagedReconciler = old })
+	target := nudgeTarget{cityPath: "/tmp/city", sessionID: "s1", agent: config.Agent{Suspended: true}}
+	if got := managedNudgeWakeSkipReason(target, false); !strings.Contains(got, "no session store") {
+		t.Fatalf("skip reason = %q, want missing store", got)
 	}
-	if lines := c.notifyLines(); len(lines) != 0 {
-		t.Fatalf("gc mail notify lines = %q, want none for a recorded wake", lines)
+	if got := managedNudgeWakeSkipReason(target, true); !strings.Contains(got, "is suspended") {
+		t.Fatalf("skip reason = %q, want suspension", got)
 	}
 }
 
