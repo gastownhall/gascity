@@ -412,3 +412,41 @@ func TestOrderTrackingRetentionLaneFirstPassSkipsOnStaleBackup(t *testing.T) {
 		t.Fatal("orderTrackingRetentionWatchdogLast is zero, want the skipped pass to consume the interval")
 	}
 }
+
+// untouchableStore fails the test on any bead-store call: its embedded Store
+// is nil, so a method it does not override panics, and the overrides name the
+// calls a retention sweep makes first.
+type untouchableStore struct {
+	beads.Store
+	t *testing.T
+}
+
+func (s untouchableStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.t.Errorf("store List(%+v) on a suspended city", q)
+	return nil, errors.New("untouchable store")
+}
+
+func (s untouchableStore) Get(id string) (beads.Bead, error) {
+	s.t.Errorf("store Get(%q) on a suspended city", id)
+	return beads.Bead{}, errors.New("untouchable store")
+}
+
+// A suspended city's retention pass makes no bead-store call: a read would
+// restart the proxies suspension retired, as the order pass already avoids.
+func TestOrderTrackingRetentionLanePassSkipsSuspendedCity(t *testing.T) {
+	now := time.Now()
+	cr, _ := retentionLaneRuntime(t, now, time.Hour, untouchableStore{t: t}, nil)
+	t.Setenv("GC_SUSPENDED", "1")
+
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("the retention pass called the store on a suspended city: %v", r)
+			}
+		}()
+		cr.runOrderTrackingRetentionLanePass(context.Background())
+	}()
+	if !cr.orderTrackingRetentionWatchdogLast.IsZero() {
+		t.Fatalf("orderTrackingRetentionWatchdogLast = %v, want zero: a suspended pass is not a sweep", cr.orderTrackingRetentionWatchdogLast)
+	}
+}

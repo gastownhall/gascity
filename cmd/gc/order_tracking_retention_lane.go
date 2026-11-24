@@ -39,12 +39,19 @@ func (cr *CityRuntime) startOrderTrackingRetentionLane(ctx context.Context) func
 // runOrderTrackingRetentionLanePass is one retention lane pass: the watchdog
 // with the current config snapshot. The lane goroutine is its only caller
 // outside tests.
+//
+// A suspended city gets no pass, by the predicate the order pass applies: the
+// sweep reads every scope's store, which would restart the proxies suspension
+// retired.
 func (cr *CityRuntime) runOrderTrackingRetentionLanePass(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
 	cfg := cr.serviceConfigSnapshot()
 	if cfg == nil {
+		return
+	}
+	if effectiveCitySuspended(cfg, loadSuspensionStateBestEffort(cr.cityPath)) {
 		return
 	}
 	cr.runOrderTrackingRetentionWatchdog(cfg, time.Now())
