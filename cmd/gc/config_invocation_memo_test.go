@@ -349,7 +349,7 @@ func TestInvocationConfigMemoWriteHookIgnoresUnchangedStat(t *testing.T) {
 		t.Fatalf("load after restoring the seeded file read %q, want demo", loaded.Workspace.Name)
 	}
 	if got := composedCityConfigLoads.Load() - before; got != 1 {
-		t.Fatalf("compositions after the edit writer = %d, want 1 (the hook dropped the memo)", got)
+		t.Fatalf("compositions after the edit writer = %d, want 1: the edit writer must drop the memo", got)
 	}
 }
 
@@ -398,12 +398,13 @@ func TestInvocationConfigMemoPackRefreshAndImportInstall(t *testing.T) {
 		t.Fatalf("compositions after a later refresh = %d, want 0", got)
 	}
 
-	invalidateInvocationConfigMemo()
+	// The memo still holds a current composition, so only the hook inside
+	// the post-install validation can make this load compose again.
 	before = composedCityConfigLoads.Load()
 	if err := validateComposedConfigAfterInstall(cityDir); err != nil {
 		t.Fatal(err)
 	}
 	if got := composedCityConfigLoads.Load() - before; got < 1 {
-		t.Fatalf("import-install validation composed %d times, want at least 1 fresh load", got)
+		t.Fatalf("import-install validation composed %d times, want at least 1: the install hook must drop the memo", got)
 	}
 }
