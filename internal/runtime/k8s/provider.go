@@ -51,19 +51,20 @@ type Provider struct {
 	memRequest         string
 	cpuLimit           string
 	memLimit           string
-	serviceAccount     string              // pod service account name (GC_K8S_SERVICE_ACCOUNT)
-	prebaked           bool                // skip staging + init container for prebaked images
-	cityName           string              // the controller's city name, for the pod's remote-stage record
-	nodeSelector       map[string]string   // GC_K8S_NODE_SELECTOR (JSON)
-	tolerations        []corev1.Toleration // GC_K8S_TOLERATIONS (JSON)
-	affinity           *corev1.Affinity    // GC_K8S_AFFINITY (JSON)
-	priorityClassName  string              // GC_K8S_PRIORITY_CLASS_NAME
-	postStartSettle    time.Duration       // settle time before post-start liveness check
-	stderr             io.Writer           // warning output (default os.Stderr)
-	pokes              runtime.PokeLedger  // gc's own input, discounted from GetLastActivity
-	now                func() time.Time    // the poke ledger's clock; nil is time.Now
-	requestBound       time.Duration       // per-verb deadline of the request-style verbs; zero is verbRequestBound
-	copyBound          time.Duration       // CopyTo's deadline; zero is verbCopyBound
+	serviceAccount     string                                         // pod service account name (GC_K8S_SERVICE_ACCOUNT)
+	prebaked           bool                                           // skip staging + init container for prebaked images
+	cityName           string                                         // the controller's city name, for the pod's remote-stage record
+	nodeSelector       map[string]string                              // GC_K8S_NODE_SELECTOR (JSON)
+	tolerations        []corev1.Toleration                            // GC_K8S_TOLERATIONS (JSON)
+	affinity           *corev1.Affinity                               // GC_K8S_AFFINITY (JSON)
+	priorityClassName  string                                         // GC_K8S_PRIORITY_CLASS_NAME
+	postStartSettle    time.Duration                                  // settle time before post-start liveness check
+	stderr             io.Writer                                      // warning output (default os.Stderr)
+	pokes              runtime.PokeLedger                             // gc's own input, discounted from GetLastActivity
+	now                func() time.Time                               // the poke ledger's clock; nil is time.Now
+	requestBound       time.Duration                                  // per-verb deadline of the request-style verbs; zero is verbRequestBound
+	copyBound          time.Duration                                  // CopyTo's deadline; zero is verbCopyBound
+	run                func(ctx context.Context, args []string) error // runs kubectl for Attach; nil execs the real kubectl
 }
 
 // verbRequestBound is the default deadline over a whole request-style verb:
@@ -575,10 +576,14 @@ func (p *Provider) IsAttached(name string) bool {
 	return strings.TrimSpace(output) == "1"
 }
 
-// Attach shells out to kubectl exec -it for full TTY passthrough.
+// Attach shells out to kubectl exec -it for full TTY passthrough. Only its
+// pod lookup runs under the request bound; the interactive kubectl stream it
+// hands the terminal to has no deadline, so it lasts as long as the user's
+// terminal does.
 func (p *Provider) Attach(name string) error {
-	ctx := context.Background()
-	podName, err := p.findRunningPod(ctx, name)
+	lookupCtx, cancel := p.verbCtx(p.requestTimeout())
+	podName, err := p.findRunningPod(lookupCtx, name)
+	cancel()
 	if err != nil {
 		return fmt.Errorf("attach: no running pod for session %q", name)
 	}
@@ -590,6 +595,12 @@ func (p *Provider) Attach(name string) error {
 	args = append(args, "-n", p.namespace, "exec", "-it", podName, "--",
 		"tmux", "attach", "-t", tmuxSession)
 
+	// The interactive stream runs under a ctx with no deadline: it lasts as
+	// long as the user's terminal does.
+	ctx := context.Background()
+	if p.run != nil {
+		return p.run(ctx, args)
+	}
 	cmd := exec.CommandContext(ctx, "kubectl", args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
