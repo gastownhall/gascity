@@ -277,3 +277,93 @@ func TestRunWorkflowServeFollowBacksOffOnRepeatedPending(t *testing.T) {
 		t.Fatalf("gc-blocked dispatched %d times, want 6 (a repeat is still retried every sweep)", got)
 	}
 }
+
+// TestRunWorkflowServeFollowNewPendingResetsBackoff pins that only a verbatim
+// repeat of the previous completed sweep's pending refusal is quiet. A changed
+// refusal, a newly pending bead, or a bead pending again after a sweep where it
+// was absent, skipped or processed reports pending and puts the backoff back on
+// its 1s floor.
+func TestRunWorkflowServeFollowNewPendingResetsBackoff(t *testing.T) {
+	waitingOn := func(blocker string) error {
+		return fmt.Errorf("%w: waiting on %s", dispatch.ErrControlPending, blocker)
+	}
+	blocked := pendingFollowRow{id: "gc-blocked", err: dispatch.ErrControlPending}
+	// Three repeats of the same refusal grow the backoff to idle_sweeps=2
+	// before each row's change, so a reset back to {0,1s} is visible.
+	grown := []pendingFollowWait{{0, 1 * time.Second}, {0, 1 * time.Second}, {1, 2 * time.Second}}
+
+	tests := []struct {
+		name   string
+		sweeps []pendingFollowSweep
+		want   []pendingFollowWait
+	}{
+		{
+			name: "changed refusal",
+			sweeps: append(
+				repeatSweeps(3, pendingFollowRow{id: "gc-blocked", err: waitingOn("gc-a")}),
+				repeatSweeps(3, pendingFollowRow{id: "gc-blocked", err: waitingOn("gc-b")})...),
+			want: append(slices.Clone(grown),
+				pendingFollowWait{0, 1 * time.Second},
+				pendingFollowWait{0, 1 * time.Second},
+				pendingFollowWait{1, 2 * time.Second}),
+		},
+		{
+			name: "second bead joins",
+			sweeps: append(
+				repeatSweeps(3, blocked),
+				repeatSweeps(3, blocked, pendingFollowRow{id: "gc-other", err: dispatch.ErrControlPending})...),
+			want: append(slices.Clone(grown),
+				pendingFollowWait{0, 1 * time.Second},
+				pendingFollowWait{0, 1 * time.Second},
+				pendingFollowWait{1, 2 * time.Second}),
+		},
+		{
+			name: "absent for one sweep",
+			sweeps: append(append(
+				repeatSweeps(3, blocked),
+				pendingFollowSweep{}),
+				repeatSweeps(3, blocked)...),
+			want: append(slices.Clone(grown),
+				pendingFollowWait{2, 4 * time.Second},
+				pendingFollowWait{0, 1 * time.Second},
+				pendingFollowWait{0, 1 * time.Second},
+				pendingFollowWait{1, 2 * time.Second}),
+		},
+		{
+			name: "skipped for one sweep",
+			sweeps: append(append(
+				repeatSweeps(3, blocked),
+				repeatSweeps(1, pendingFollowRow{id: "gc-blocked", err: errControlNotProcessed})...),
+				repeatSweeps(3, blocked)...),
+			want: append(slices.Clone(grown),
+				pendingFollowWait{2, 4 * time.Second},
+				pendingFollowWait{0, 1 * time.Second},
+				pendingFollowWait{0, 1 * time.Second},
+				pendingFollowWait{1, 2 * time.Second}),
+		},
+		{
+			name: "processed for one sweep",
+			sweeps: append(append(
+				repeatSweeps(3, blocked),
+				repeatSweeps(1, pendingFollowRow{id: "gc-blocked"})...),
+				repeatSweeps(3, blocked)...),
+			want: append(slices.Clone(grown),
+				pendingFollowWait{0, 1 * time.Second},
+				pendingFollowWait{0, 1 * time.Second},
+				pendingFollowWait{0, 1 * time.Second},
+				pendingFollowWait{1, 2 * time.Second}),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearGCEnv(t)
+
+			waits, _ := runPendingFollowScript(t, tt.sweeps)
+
+			if !slices.Equal(waits, tt.want) {
+				t.Fatalf("waits = %+v, want %+v", waits, tt.want)
+			}
+		})
+	}
+}
