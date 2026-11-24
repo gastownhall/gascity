@@ -244,23 +244,25 @@ func TestRefreshDesiredStateDefersFreshSessionCreationOnSingleStoreCity(t *testi
 	}
 }
 
-// TestFullBuildReadsPoolDemandFromWorkClassOnRelocatedCity guards the split
-// that production hit: passing the relocated sessions store as the build's
-// only city store made every city-scoped pool blind to ordinary routed work.
-// The build must read demand from workStore while creating the pool's session
-// bead only in sessionsStore.
-func TestFullBuildReadsPoolDemandFromWorkClassOnRelocatedCity(t *testing.T) {
+// TestFullBuildReadsPoolDemandFromRoutedWorkBindingOnSplitCity guards the
+// production split: routed graph work lives in the infra binding, while the
+// retained work ledger is deliberately outside the runtime demand plane. The
+// full build must read pool demand from the same narrowed Plan(RoutedWork) that
+// gc ready/claim uses, while writing the pool's session bead via sessions class.
+func TestFullBuildReadsPoolDemandFromRoutedWorkBindingOnSplitCity(t *testing.T) {
 	cityPath := t.TempDir()
 	workStore := beads.NewMemStore()
-	sessionsStore := beads.NewMemStore()
-	if _, err := workStore.Create(beads.Bead{
-		ID:     "gc-work-1",
+	bindingStore := beads.NewMemStore()
+	bindingStore.HonorExplicitIDs = true
+	routes := splitRoutes(bindingStore)
+	registerResidencyRoutes(cityPath, routes, func() beads.Store { return workStore })
+	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
+	if _, err := bindingStore.Create(beads.Bead{
+		ID:     "gcg-work-1",
 		Title:  "routed business work",
 		Status: "open",
 		Type:   "task",
-		Metadata: map[string]string{
-			"gc.routed_to": "accountant",
-		},
+		Metadata: map[string]string{"gc.routed_to": "accountant"},
 	}); err != nil {
 		t.Fatalf("seed work demand: %v", err)
 	}
@@ -286,16 +288,21 @@ func TestFullBuildReadsPoolDemandFromWorkClassOnRelocatedCity(t *testing.T) {
 		cityName:      "demo",
 		cityPath:      cityPath,
 		stderr:        io.Discard,
-		storageRoutes: relocatedSessionRoutes(sessionsStore),
+		storageRoutes: routes,
 	}
 	cr.buildFnWithClassStores = supervisorBuildAgentsFnWithClassStores(cityPath, "demo", io.Discard)
 
 	result := cr.buildDesiredState(cr.loadSessionBeadSnapshot(), nil)
 	if got := result.ScaleCheckCounts["accountant"]; got != 1 {
-		t.Fatalf("accountant demand = %d, want 1 from the work-class store", got)
+		t.Fatalf("accountant demand = %d, want 1 from the routed-work binding", got)
 	}
-
-	sessions, err := sessionsStore.List(beads.ListQuery{IncludeClosed: true, AllowScan: true})
+	if len(result.ReadyUnassignedRoutedWorkBeads) != 1 || result.ReadyUnassignedRoutedWorkBeads[0].ID != "gcg-work-1" {
+		t.Fatalf("ready routed demand = %#v, want binding bead gcg-work-1", result.ReadyUnassignedRoutedWorkBeads)
+	}
+	if got := result.ReadyUnassignedRoutedWorkStoreRefs; len(got) != 1 || !strings.HasPrefix(got[0], "class:") {
+		t.Fatalf("ready routed demand refs = %v, want one class binding ref", got)
+	}
+	sessions, err := bindingStore.List(beads.ListQuery{IncludeClosed: true, AllowScan: true})
 	if err != nil {
 		t.Fatalf("list sessions store: %v", err)
 	}
@@ -306,13 +313,13 @@ func TestFullBuildReadsPoolDemandFromWorkClassOnRelocatedCity(t *testing.T) {
 		}
 	}
 	if accountantSessions != 1 {
-		t.Fatalf("sessions binding accountant rows = %d, want exactly one; rows=%#v", accountantSessions, sessions)
+		t.Fatalf("infra binding accountant session rows = %d, want exactly one; rows=%#v", accountantSessions, sessions)
 	}
 	work, err := workStore.List(beads.ListQuery{IncludeClosed: true, AllowScan: true})
 	if err != nil {
 		t.Fatalf("list work store: %v", err)
 	}
-	if len(work) != 1 || work[0].Type != "task" || work[0].Metadata["gc.routed_to"] != "accountant" {
-		t.Fatalf("work store was polluted with session rows: %#v", work)
+	if len(work) != 0 {
+		t.Fatalf("retained work store was read for runtime demand or polluted with session rows: %#v", work)
 	}
 }

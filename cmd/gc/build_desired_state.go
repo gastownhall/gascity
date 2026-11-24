@@ -1601,6 +1601,16 @@ func buildDemandTargets(
 		}
 		pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir, env: env, newDemand: store != nil})
 	}
+	// The eligibility pass above decided WHICH templates need a default
+	// routed-work probe. Resolve WHERE those probes read through the runtime
+	// plane used by the broad open snapshot: on a converged split city routed
+	// work lives in the infra binding, not in the retained work ledger.
+	defaultScaleTargets = retargetScaleCheckTargetsToRoutedWorkPlane(
+		cityPath, cfg, store, rigStores, suspendedRigPaths, defaultScaleTargets,
+	)
+	defaultNamedScaleTargets = retargetScaleCheckTargetsToRoutedWorkPlane(
+		cityPath, cfg, store, rigStores, suspendedRigPaths, defaultNamedScaleTargets,
+	)
 	return demandTargets{
 		pendingPools:             pendingPools,
 		defaultScaleTargets:      defaultScaleTargets,
@@ -1609,6 +1619,73 @@ func buildDemandTargets(
 		namedOnDemandTemplates:   namedOnDemandTemplates,
 		nameOnlyTemplates:        nameOnlyTemplates,
 	}
+}
+
+// retargetScaleCheckTargetsToRoutedWorkPlane keeps the template eligibility
+// decisions made by the agent loop, but replaces its provisional physical
+// stores with the authoritative runtime-plane RoutedWork leg set. Error targets
+// stay intact so a rig whose work store is unavailable remains partial.
+func retargetScaleCheckTargetsToRoutedWorkPlane(
+	cityPath string,
+	cfg *config.City,
+	workStore beads.Store,
+	rigStores map[string]beads.Store,
+	suspendedRigPaths map[string]bool,
+	targets []defaultScaleCheckTarget,
+) []defaultScaleCheckTarget {
+	if len(targets) == 0 {
+		return nil
+	}
+	type templateTarget struct {
+		template string
+		healthy  bool
+	}
+	byTemplate := make(map[string]*templateTarget)
+	order := make([]string, 0, len(targets))
+	var preservedErrors []defaultScaleCheckTarget
+	for _, target := range targets {
+		template := strings.TrimSpace(target.template)
+		if template == "" {
+			continue
+		}
+		state := byTemplate[template]
+		if state == nil {
+			state = &templateTarget{template: template}
+			byTemplate[template] = state
+			order = append(order, template)
+		}
+		if target.err != nil || target.store == nil {
+			preservedErrors = append(preservedErrors, target)
+			continue
+		}
+		state.healthy = true
+	}
+	legs, resolveErr := routedWorkStoreCandidates(cityPath, cfg, workStore, rigStores, suspendedRigPaths, censusRefScoped)
+	out := append([]defaultScaleCheckTarget(nil), preservedErrors...)
+	for _, template := range order {
+		state := byTemplate[template]
+		if state == nil || !state.healthy {
+			continue
+		}
+		if resolveErr != nil {
+			out = append(out, defaultScaleCheckTarget{
+				template: template,
+				err:      fmt.Errorf("default scale_check %s: resolving routed-work stores: %w", template, resolveErr),
+			})
+			continue
+		}
+		if len(legs) == 0 {
+			out = append(out, defaultScaleCheckTarget{
+				template: template,
+				err:      fmt.Errorf("default scale_check %s: routed-work store unavailable", template),
+			})
+			continue
+		}
+		for _, leg := range legs {
+			out = append(out, defaultScaleCheckTarget{template: template, storeKey: leg.ref, store: leg.store})
+		}
+	}
+	return out
 }
 
 func buildSuspendedRigPathsForCity(cfg *config.City, cityPath string) map[string]bool {
