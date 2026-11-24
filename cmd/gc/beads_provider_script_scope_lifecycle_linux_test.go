@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -342,6 +343,396 @@ func TestGcBeadsBdProviderOwnedInitAnchorsBeadsDirBeforeBdInit(t *testing.T) {
 	}
 }
 
+// This test stubs the canonical gc helper at the process boundary; the helper's
+// reconciliation behavior has its own command tests. Here we pin that provider
+// init calls it after bd succeeds with the scope metadata and selected endpoint.
+func TestGcBeadsBdProviderOwnedInitEnsuresProjectIdentityAfterSuccessfulBdInit(t *testing.T) {
+	const (
+		// Loopback IPv6 catches accidental connect_host normalization when
+		// reconciling a provider-owned direct/external init binding.
+		host      = "::1"
+		port      = "3344"
+		user      = "provider-user"
+		prefix    = "px"
+		database  = "provider_db"
+		projectID = "provider-owned-project-id"
+		bdFailure = 23
+		gcFailure = 29
+	)
+	for _, tc := range []struct {
+		name       string
+		bdExit     int
+		gcExit     int
+		wantCalls  []string
+		wantAnchor bool
+	}{
+		{
+			name:       "successful init reconciles identity after bd",
+			wantCalls:  []string{"bd init", "gc dolt-state ensure-project-id"},
+			wantAnchor: true,
+		},
+		{
+			name:       "failed bd init skips identity and removes only the fresh anchor",
+			bdExit:     bdFailure,
+			wantCalls:  []string{"bd init"},
+			wantAnchor: false,
+		},
+		{
+			name:       "identity failure keeps successful init state",
+			gcExit:     gcFailure,
+			wantCalls:  []string{"bd init", "gc dolt-state ensure-project-id"},
+			wantAnchor: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			scopeDir := filepath.Join(cityDir, "rigs", "provider")
+			if err := os.MkdirAll(scopeDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			captureDir := t.TempDir()
+			bdPath := writeNamedTestScript(t, "provider-owned-bd.sh", "#!/bin/sh\nset -eu\ncapture_dir="+strconv.Quote(captureDir)+"\n"+`
+printf 'bd init\n' >> "$capture_dir/calls"
+printf '%s\n' "$@" > "$capture_dir/bd-args"
+if [ "${BD_INIT_EXIT:-0}" -ne 0 ]; then
+  exit "$BD_INIT_EXIT"
+fi
+scope=""
+for arg in "$@"; do
+  scope="$arg"
+done
+mkdir -p "$scope/.beads"
+cat > "$scope/.beads/metadata.json" <<JSON
+{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"provider_db","dolt_server_host":"${GC_DOLT_HOST}","dolt_server_port":${GC_DOLT_PORT},"issue_prefix":"px"}
+JSON
+`)
+
+			gcPath := writeNamedTestScript(t, "provider-owned-gc-helper.sh", "#!/bin/sh\nset -eu\ncapture_dir="+strconv.Quote(captureDir)+"\n"+`
+command="${1:-} ${2:-}"
+case "$command" in
+  "dolt-state allocate-port")
+    printf '%s\n' "${GC_DOLT_PORT:-}"
+    exit 0
+    ;;
+  "dolt-state ensure-project-id")
+    shift 2
+    printf 'gc dolt-state ensure-project-id\n' >> "$capture_dir/calls"
+    printf '%s\n' "$@" > "$capture_dir/gc-args"
+    if [ "${GC_HELPER_EXIT:-0}" -ne 0 ]; then
+      exit "$GC_HELPER_EXIT"
+    fi
+    cat > "$BEADS_DIR/identity.toml" <<'TOML'
+[project]
+id = "provider-owned-project-id"
+TOML
+    python3 - "$BEADS_DIR/metadata.json" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["project_id"] = "provider-owned-project-id"
+path.write_text(json.dumps(data, indent=2) + "\n")
+PY
+    ;;
+  *)
+    echo "unexpected gc helper command: $command" >&2
+    exit 64
+  ;;
+esac
+`)
+
+			env := sanitizedBaseEnv(
+				"GC_CITY_PATH="+cityDir,
+				"BEADS_DIR="+filepath.Join(scopeDir, ".beads"),
+				"GC_BIN="+gcPath,
+				"BD_BIN="+bdPath,
+				"GC_BEADS_PROVIDER_OWNED=1",
+				"GC_BEADS_TRANSPORT=direct",
+				"GC_BEADS_TARGET=external",
+				"GC_DOLT_HOST="+host,
+				"GC_DOLT_PORT="+port,
+				"GC_DOLT_USER="+user,
+				"BD_INIT_EXIT="+strconv.Itoa(tc.bdExit),
+				"GC_HELPER_EXIT="+strconv.Itoa(tc.gcExit),
+			)
+			out, err := runProviderOwnedScriptOp(t, env, "init", scopeDir, prefix, database)
+			if tc.bdExit == 0 && tc.gcExit == 0 && err != nil {
+				t.Fatalf("provider-owned init: %v\n%s", err, out)
+			}
+			if (tc.bdExit != 0 || tc.gcExit != 0) && err == nil {
+				t.Fatalf("provider-owned init succeeded despite configured failure:\n%s", out)
+			}
+			if tc.bdExit != 0 {
+				var exitErr *exec.ExitError
+				if !errors.As(err, &exitErr) || exitErr.ExitCode() != tc.bdExit {
+					t.Fatalf("provider-owned init error = %v, want bd exit %d\n%s", err, tc.bdExit, out)
+				}
+			}
+
+			calls, err := os.ReadFile(filepath.Join(captureDir, "calls"))
+			if err != nil {
+				t.Fatalf("read calls: %v", err)
+			}
+			if got, want := strings.TrimSpace(string(calls)), strings.Join(tc.wantCalls, "\n"); got != want {
+				t.Fatalf("calls = %q, want %q", got, want)
+			}
+
+			anchorPath := filepath.Join(scopeDir, ".beads", "config.yaml")
+			_, anchorErr := os.Stat(anchorPath)
+			if tc.wantAnchor && anchorErr != nil {
+				t.Fatalf("fresh anchor missing after init: %v", anchorErr)
+			}
+			if !tc.wantAnchor && !errors.Is(anchorErr, os.ErrNotExist) {
+				t.Fatalf("fresh anchor after failed bd init = %v, want removed", anchorErr)
+			}
+
+			bdArgs, err := os.ReadFile(filepath.Join(captureDir, "bd-args"))
+			if err != nil {
+				t.Fatalf("read bd args: %v", err)
+			}
+			wantBDArgs := []string{
+				"init", "--init-if-missing", "--quiet", "--server", "--external",
+				"--server-host", host, "--server-port", port,
+				"-p", prefix, "--skip-hooks", "--skip-agents", "--database", database, scopeDir,
+			}
+			if got, want := strings.TrimSpace(string(bdArgs)), strings.Join(wantBDArgs, "\n"); got != want {
+				t.Fatalf("bd args = %q, want %q", got, want)
+			}
+
+			metadataPath := filepath.Join(scopeDir, ".beads", "metadata.json")
+			if tc.bdExit != 0 {
+				if _, err := os.Stat(metadataPath); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("metadata after failed bd init: err=%v, want absent", err)
+				}
+				if _, err := os.Stat(filepath.Join(captureDir, "gc-args")); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("gc helper args after failed bd init: err=%v, want absent", err)
+				}
+				return
+			}
+
+			if tc.gcExit != 0 {
+				if _, err := os.Stat(metadataPath); err != nil {
+					t.Fatalf("metadata after identity failure: %v", err)
+				}
+				if _, err := os.Stat(filepath.Join(scopeDir, ".beads", "identity.toml")); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("identity after failed reconciliation: err=%v, want absent", err)
+				}
+				return
+			}
+
+			gcArgs, err := os.ReadFile(filepath.Join(captureDir, "gc-args"))
+			if err != nil {
+				t.Fatalf("read gc args: %v", err)
+			}
+			wantGCArgs := []string{
+				"--city", cityDir,
+				"--metadata", metadataPath,
+				"--host", host,
+				"--port", port,
+				"--user", user,
+				"--database", database,
+			}
+			if got, want := strings.TrimSpace(string(gcArgs)), strings.Join(wantGCArgs, "\n"); got != want {
+				t.Fatalf("gc args = %q, want %q", got, want)
+			}
+
+			meta, ok, err := contract.LoadMetadataState(fsys.OSFS{}, metadataPath)
+			if err != nil || !ok {
+				t.Fatalf("metadata after init: ok=%v err=%v", ok, err)
+			}
+			if meta.DoltMode != "server" || meta.DoltDatabase != database {
+				t.Fatalf("server metadata = %#v, want database %q in server mode", meta, database)
+			}
+			binding, ok, err := contract.ReadPersistedServerBinding(fsys.OSFS{}, metadataPath)
+			if err != nil || !ok {
+				t.Fatalf("server binding after init: ok=%v err=%v", ok, err)
+			}
+			if binding.DoltHost != host || binding.DoltPort != port {
+				t.Fatalf("server binding = %q:%q, want %q:%q", binding.DoltHost, binding.DoltPort, host, port)
+			}
+			metadataID, err := readManagedMetadataProjectID(metadataPath)
+			if err != nil {
+				t.Fatalf("read metadata project identity: %v", err)
+			}
+			identityID, ok, err := contract.ReadProjectIdentity(fsys.OSFS{}, scopeDir)
+			if err != nil || !ok {
+				t.Fatalf("canonical project identity: ok=%v err=%v", ok, err)
+			}
+			if metadataID != projectID || identityID != projectID || metadataID != identityID {
+				t.Fatalf("project identity metadata=%q canonical=%q, want %q", metadataID, identityID, projectID)
+			}
+		})
+	}
+}
+
+func TestGcBeadsBdProviderOwnedLocalInitDefersEndpointResolutionToGc(t *testing.T) {
+	for _, transport := range []string{"direct", "proxied"} {
+		t.Run(transport, func(t *testing.T) {
+			cityDir := t.TempDir()
+			scopeDir := filepath.Join(cityDir, "rigs", "provider")
+			if err := os.MkdirAll(scopeDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			captureDir := t.TempDir()
+			bdPath := writeNamedTestScript(t, "provider-owned-local-bd.sh", "#!/bin/sh\nset -eu\ncapture_dir="+strconv.Quote(captureDir)+"\n"+`
+printf 'bd init\n' >> "$capture_dir/calls"
+scope=""
+for arg in "$@"; do scope="$arg"; done
+mkdir -p "$scope/.beads"
+mode=server
+if [ "${GC_BEADS_TRANSPORT:-}" = proxied ]; then mode=proxied-server; fi
+printf '{"database":"dolt","backend":"dolt","dolt_mode":"%s","dolt_database":"provider_db"}\n' "$mode" > "$scope/.beads/metadata.json"
+`)
+			gcPath := writeNamedTestScript(t, "provider-owned-local-gc-helper.sh", "#!/bin/sh\nset -eu\ncapture_dir="+strconv.Quote(captureDir)+"\n"+`
+if [ "${1:-} ${2:-}" != "dolt-state ensure-project-id" ]; then
+  echo "unexpected gc helper command: $*" >&2
+  exit 64
+fi
+shift 2
+printf '%s\n' "$@" > "$capture_dir/gc-args"
+`)
+			env := sanitizedBaseEnv(
+				"GC_CITY_PATH="+cityDir,
+				"BEADS_DIR="+filepath.Join(scopeDir, ".beads"),
+				"GC_BIN="+gcPath,
+				"BD_BIN="+bdPath,
+				"GC_BEADS_PROVIDER_OWNED=1",
+				"GC_BEADS_TRANSPORT="+transport,
+				"GC_BEADS_TARGET=local",
+				"GC_BEADS_PROXIED_IDLE_TIMEOUT=0",
+			)
+			out, err := runProviderOwnedScriptOp(t, env, "init", scopeDir, "px", "provider_db")
+			if err != nil {
+				t.Fatalf("provider-owned local init: %v\n%s", err, out)
+			}
+			data, err := os.ReadFile(filepath.Join(captureDir, "gc-args"))
+			if err != nil {
+				t.Fatalf("read gc args: %v", err)
+			}
+			args := strings.Split(strings.TrimSpace(string(data)), "\n")
+			for _, arg := range args {
+				if arg == "--host" || arg == "--port" {
+					t.Fatalf("gc helper received managed endpoint arg %q for provider-owned %s init: %q", arg, transport, args)
+				}
+			}
+			wantArgs := []string{
+				"--city", cityDir,
+				"--metadata", filepath.Join(scopeDir, ".beads", "metadata.json"),
+				"--user", "root",
+				"--database", "provider_db",
+			}
+			if got, want := strings.Join(args, "\n"), strings.Join(wantArgs, "\n"); got != want {
+				t.Fatalf("gc helper args = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// A direct/external socket init hands bd --server-socket, so identity
+// reconciliation must use the persisted socket binding rather than forwarding
+// an inherited GC_DOLT_PORT as a TCP endpoint.
+func TestGcBeadsBdProviderOwnedSocketInitIgnoresInheritedTCPPort(t *testing.T) {
+	cityDir := t.TempDir()
+	scopeDir := filepath.Join(cityDir, "rigs", "provider")
+	if err := os.MkdirAll(scopeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	captureDir := t.TempDir()
+	bdPath := writeNamedTestScript(t, "provider-owned-socket-bd.sh", "#!/bin/sh\nset -eu\ncapture_dir="+strconv.Quote(captureDir)+"\n"+`
+printf '%s\n' "$@" > "$capture_dir/bd-args"
+scope=""
+for arg in "$@"; do scope="$arg"; done
+mkdir -p "$scope/.beads"
+printf '{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"provider_db","dolt_server_socket":"%s"}\n' "$BEADS_DOLT_SERVER_SOCKET" > "$scope/.beads/metadata.json"
+`)
+	gcPath := writeNamedTestScript(t, "provider-owned-socket-gc-helper.sh", "#!/bin/sh\nset -eu\ncapture_dir="+strconv.Quote(captureDir)+"\n"+`
+if [ "${1:-} ${2:-}" != "dolt-state ensure-project-id" ]; then
+  echo "unexpected gc helper command: $*" >&2
+  exit 64
+fi
+shift 2
+printf '%s\n' "$@" > "$capture_dir/gc-args"
+`)
+	env := sanitizedBaseEnv(
+		"GC_CITY_PATH="+cityDir,
+		"BEADS_DIR="+filepath.Join(scopeDir, ".beads"),
+		"GC_BIN="+gcPath,
+		"BD_BIN="+bdPath,
+		"GC_BEADS_PROVIDER_OWNED=1",
+		"GC_BEADS_TRANSPORT=direct",
+		"GC_BEADS_TARGET=external",
+		"BEADS_DOLT_SERVER_SOCKET=/run/dolt/x.sock",
+		"GC_DOLT_PORT=3344",
+	)
+	out, err := runProviderOwnedScriptOp(t, env, "init", scopeDir, "px", "provider_db")
+	if err != nil {
+		t.Fatalf("provider-owned socket init: %v\n%s", err, out)
+	}
+	bdArgs, err := os.ReadFile(filepath.Join(captureDir, "bd-args"))
+	if err != nil {
+		t.Fatalf("read bd args: %v", err)
+	}
+	if !slices.Contains(strings.Split(strings.TrimSpace(string(bdArgs)), "\n"), "--server-socket") {
+		t.Fatalf("bd args = %q, want --server-socket", bdArgs)
+	}
+	gcArgs, err := os.ReadFile(filepath.Join(captureDir, "gc-args"))
+	if err != nil {
+		t.Fatalf("read gc args: %v", err)
+	}
+	for _, arg := range strings.Split(strings.TrimSpace(string(gcArgs)), "\n") {
+		if arg == "--host" || arg == "--port" {
+			t.Fatalf("gc helper received TCP endpoint arg %q for socket init: %q", arg, gcArgs)
+		}
+	}
+}
+
+// gc's ProviderRoot must resolve the proxy root under the same shared-server
+// opt-out bd ran under, so an inherited BEADS_DOLT_SHARED_SERVER=1 cannot send
+// identity reconciliation to a different root than the one bd initialized.
+func TestGcBeadsBdProviderOwnedProxiedInitPinsSharedServerForIdentity(t *testing.T) {
+	cityDir := t.TempDir()
+	scopeDir := filepath.Join(cityDir, "rigs", "provider")
+	if err := os.MkdirAll(scopeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	captureDir := t.TempDir()
+	bdPath := writeNamedTestScript(t, "provider-owned-shared-bd.sh", `#!/bin/sh
+set -eu
+scope=""
+for arg in "$@"; do scope="$arg"; done
+mkdir -p "$scope/.beads"
+printf '{"database":"dolt","backend":"dolt","dolt_mode":"proxied-server","dolt_database":"provider_db"}\n' > "$scope/.beads/metadata.json"
+`)
+	gcPath := writeNamedTestScript(t, "provider-owned-shared-gc-helper.sh", "#!/bin/sh\nset -eu\ncapture_dir="+strconv.Quote(captureDir)+"\n"+`
+if [ "${1:-} ${2:-}" != "dolt-state ensure-project-id" ]; then
+  echo "unexpected gc helper command: $*" >&2
+  exit 64
+fi
+printf '%s\n' "${BEADS_DOLT_SHARED_SERVER:-}" > "$capture_dir/shared-server"
+`)
+	env := sanitizedBaseEnv(
+		"GC_CITY_PATH="+cityDir,
+		"BEADS_DIR="+filepath.Join(scopeDir, ".beads"),
+		"GC_BIN="+gcPath,
+		"BD_BIN="+bdPath,
+		"GC_BEADS_PROVIDER_OWNED=1",
+		"GC_BEADS_TRANSPORT=proxied",
+		"GC_BEADS_TARGET=local",
+		"GC_BEADS_PROXIED_IDLE_TIMEOUT=0",
+		"BEADS_DOLT_SHARED_SERVER=1",
+	)
+	out, err := runProviderOwnedScriptOp(t, env, "init", scopeDir, "px", "provider_db")
+	if err != nil {
+		t.Fatalf("provider-owned proxied init: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(filepath.Join(captureDir, "shared-server"))
+	if err != nil {
+		t.Fatalf("read gc helper shared-server env: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "0" {
+		t.Fatalf("gc helper BEADS_DOLT_SHARED_SERVER = %q, want 0", got)
+	}
+}
+
 // A city (or rig) created anywhere below another bd workspace — inside a repo
 // that uses beads, or under a home directory holding ~/.beads — must get its
 // own store. Before the anchor, bd v1.3.0 ignored the scope's still-empty
@@ -359,6 +750,9 @@ func TestGcBeadsBdProviderOwnedRealInitIgnoresAncestorBeadsWorkspace(t *testing.
 			parent := t.TempDir()
 			home := filepath.Join(t.TempDir(), "home")
 			if err := os.MkdirAll(home, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := testutil.SeedDoltGlobalConfig(home); err != nil {
 				t.Fatal(err)
 			}
 			testutil.RunGit(t, parent, "init", "-q")
@@ -379,7 +773,13 @@ func TestGcBeadsBdProviderOwnedRealInitIgnoresAncestorBeadsWorkspace(t *testing.
 			if err := os.MkdirAll(dir, 0o755); err != nil {
 				t.Fatal(err)
 			}
-			env := sanitizedBaseEnv("HOME="+home, "DOLT_ROOT_PATH="+home, "GC_CITY_PATH="+dir, "BEADS_DIR="+filepath.Join(dir, ".beads"), "BD_BIN="+bdPath, "GC_BEADS_PROVIDER_OWNED=1", "GC_BEADS_TRANSPORT="+transport, "GC_BEADS_TARGET=local", "GC_BEADS_PROXIED_IDLE_TIMEOUT=0")
+			// Every HTTPS request the init makes goes to a normally unroutable
+			// proxy. The proxied init probes `dolt version`, whose update check is
+			// a network call unless the dolt config seeded above disables it; on a
+			// healthy network that call returns in 0.2 s and hides a missing
+			// config, so on most hosts the slow network is reproduced instead of
+			// waited for.
+			env := sanitizedBaseEnv(append([]string{"HOME=" + home, "DOLT_ROOT_PATH=" + home, "GC_CITY_PATH=" + dir, "BEADS_DIR=" + filepath.Join(dir, ".beads"), "BD_BIN=" + bdPath, "GC_BEADS_PROVIDER_OWNED=1", "GC_BEADS_TRANSPORT=" + transport, "GC_BEADS_TARGET=local", "GC_BEADS_PROXIED_IDLE_TIMEOUT=0"}, testutil.UnroutableHTTPSProxyEnv()...)...)
 			t.Cleanup(func() {
 				_, _ = runProviderOwnedScriptOp(t, env, "stop")
 				for _, root := range []string{dir, parent} {

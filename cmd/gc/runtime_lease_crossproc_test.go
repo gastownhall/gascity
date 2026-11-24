@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -47,7 +48,7 @@ func openRequireSQLite(t *testing.T, dir string) beads.Store {
 	}
 	s := opened.(*beads.SQLiteStore)
 	t.Cleanup(func() { _ = s.CloseStore() })
-	if err := beads.StampOpenedStore(s, "SQLiteStore", gate.Require, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(s, "SQLiteStore", gate.Require, false, nil, nil); err != nil {
 		t.Fatalf("StampOpenedStore: %v", err)
 	}
 	return s
@@ -78,7 +79,7 @@ func TestRuntimeLeaseCLIStartRole(t *testing.T) {
 	city, id := os.Getenv("GC_TEST_LEASE_CITY"), os.Getenv("GC_TEST_LEASE_ID")
 	sp := stdinGatedProvider{runtime.NewFake()}
 	if role == "cli-start" {
-		mgr := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(city), sessionpkg.WithRuntimeLeaseTTL(time.Minute))
+		mgr := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp, sessionpkg.WithCityPath(city), sessionpkg.WithRuntimeLeaseTTL(time.Minute))
 		fmt.Printf("started err=%v\n", mgr.Start(context.Background(), testActorIn(t, sessionpkg.ActorOperator, city), id, "worker", runtime.Config{}))
 		return
 	}
@@ -166,8 +167,9 @@ func TestRuntimeLeaseCLIVsLegacyStart(t *testing.T) {
 		if got := f.run(); got != 0 || !strings.Contains(f.log.String(), "outcome=deferred_by_runtime_lease") {
 			t.Fatalf("legacy start while the CLI starts = %d, log %q; want deferred", got, f.log.String())
 		}
-		if meta := mustGetBead(t, f.store, f.cand.info.ID).Metadata; meta["generation"] != "1" || meta[sessionpkg.RuntimeLeaseEpochKey] != "1" || len(f.sp.starts) != 0 {
-			t.Fatalf("row %v, starts %q; want the CLI's epoch 1 and no legacy PreWake or Start", meta, f.sp.starts)
+		// Generation 2 is the CLI start's own mint (I-MINT), under its lease.
+		if meta := mustGetBead(t, f.store, f.cand.info.ID).Metadata; meta["generation"] != "2" || meta[sessionpkg.RuntimeLeaseEpochKey] != "1" || len(f.sp.starts) != 0 {
+			t.Fatalf("row %v, starts %q; want the CLI's mint and epoch 1 and no legacy PreWake or Start", meta, f.sp.starts)
 		}
 		proceed()
 		expect("started err=<nil>")
@@ -185,7 +187,7 @@ func TestRuntimeLeaseCLIVsLegacyStart(t *testing.T) {
 		f := newLeaseStartFixture(t, openRequireSQLite(t, storeDir))
 		expect, proceed, _ := spawn(t, f, storeDir, "legacy-start")
 		expect("starting")
-		mgr := sessionpkg.NewManagerWithOptions(f.store, runtime.NewFake(), sessionpkg.WithCityPath(f.city), sessionpkg.WithRuntimeLeaseTTL(time.Minute))
+		mgr := sessionpkg.NewManagerWithOptions(beadstest.Sessions(f.store), runtime.NewFake(), sessionpkg.WithCityPath(f.city), sessionpkg.WithRuntimeLeaseTTL(time.Minute))
 		if err := mgr.Start(context.Background(), testActorIn(t, sessionpkg.ActorOperator, f.city), f.cand.info.ID, "worker", runtime.Config{}); !errors.Is(err, sessionpkg.ErrSessionStarting) {
 			t.Fatalf("CLI start while the controller starts = %v, want ErrSessionStarting", err)
 		}

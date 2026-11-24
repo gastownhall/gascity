@@ -159,7 +159,7 @@ func TestNudgesSuiteRejectsBrokenQueues(t *testing.T) {
 		{
 			name:   "a claim that ignores the session fence",
 			defect: NudgesDefectClaimIgnoresFence,
-			want:   []string{"ClaimDueAdoptsANudgeFencedToASupersededSession", "ClaimDueHonorsTheSessionFence"},
+			want:   []string{"AnotherSessionsTurnIsNeitherClaimedNorDroppedNorAdopted", "ClaimDueAdoptsANudgeFencedToASupersededSession", "ClaimDueHonorsTheSessionFence"},
 		},
 		{
 			name:   "a failure report that includes the retried items",
@@ -177,6 +177,21 @@ func TestNudgesSuiteRejectsBrokenQueues(t *testing.T) {
 				"ClaimBatchWaitsOnASplitBatch",
 				"RecordFailureRejectionUnpins",
 				"ReleaseClaimsHonorsNotBefore",
+			},
+		},
+		{
+			name:   "a claim that ignores the launch a startup turn is bound to",
+			defect: NudgesDefectClaimIgnoresLaunch,
+			want: []string{
+				"AFailedTurnOfAReplacedLaunchIsDroppedNotRedelivered",
+				"ALapsedTurnOfAReplacedLaunchIsDroppedNotRedelivered",
+				"AReleasedTurnOfAReplacedLaunchIsDroppedNotRedelivered",
+				"ATurnFirstSeenAfterTheReadIsHeldNotDropped",
+				"AnInFlightTurnOfAReplacedLaunchDiesAtTheReplacementsClaim",
+				"ConcurrentClaimsNeverDeliverAStaleTurnTwice",
+				"TheBarrierReleases",
+				"TheInitialMessageWaitsBehindItsTurnAndOutlivesIt",
+				"TheNewestTurnOfOneLaunchWins",
 			},
 		},
 	}
@@ -216,8 +231,9 @@ func TestNudgesSuitePolicyCasesCutBothWays(t *testing.T) {
 	}{
 		{name: "a legacy queue that declares its behaviors", keeps: legacy, declares: legacy},
 		// Undeclared, verb maintenance also expires items inside Enqueue,
-		// before the expired-item case can claim them.
-		{name: "a queue whose verbs maintain, undeclared", keeps: verbsMaintain, want: []string{agesOut, "TouchingAnExpiredItemDeadLettersIt"}},
+		// before the expired-item case can claim them, and re-dues a lapsed
+		// lease at the wall clock inside ReleaseClaims, after the case's now.
+		{name: "a queue whose verbs maintain, undeclared", keeps: verbsMaintain, want: []string{agesOut, "ReleaseClaimsLeavesALapsedLeaseAlone", "TouchingAnExpiredItemDeadLettersIt"}},
 		{name: "a queue that forgets retired ids, undeclared", keeps: forgets, want: []string{staysRetire}},
 		{name: "a contract queue that claims its verbs maintain", declares: verbsMaintain, want: []string{agesOut}},
 		{name: "a contract queue that claims to forget retired ids", declares: forgets, want: []string{staysRetire}},

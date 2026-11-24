@@ -1,7 +1,8 @@
 # Contributing to Gas City
 
-Gas City is experimental software, but the repo is now structured for external
-contributors. Before making changes, read:
+Gas City is open source under the MIT license and stewarded by
+[Gas City, Inc.](https://gascity.com) It is experimental software, but the repo
+is structured for external contributors. Before making changes, read:
 
 - [docs/index.mdx](docs/index.mdx)
 - [engdocs/contributors/index.md](engdocs/contributors/index.md)
@@ -43,7 +44,8 @@ CI runs Bazel, so a change is ready when the Bazel tiers it touches pass:
 | Imports, packages, or files added/removed | `make bazel-sync`, then commit the regenerated BUILD files |
 
 Narrow while iterating: `bazel test //internal/config:config_test`.
-`go test ./internal/config -run TestX` is fine as a quick inner loop, but it
+`go test ./internal/config -run TestX` is fine as a human's quick inner loop
+(agents run tests only with `bazel test`: AGENTS.md "Build and test"), but it
 is not what CI enforces: it runs none of the nogo, format, generated-artifact
 or policy targets. Each `make` target above has a plain-Go twin
 (`make test-go`, `make check-go`, `make test-acceptance-go`,
@@ -214,7 +216,7 @@ When updating docs:
 
 ### Docs link conventions
 
-`docs/` is published to **[docs.gascityhall.com](https://docs.gascityhall.com)**
+`docs/` is published to **[docs.gascity.com](https://docs.gascity.com)**
 via Mintlify — it is **not** meant to be read directly on GitHub. The published
 site serves **route-based, extensionless URLs**, so internal page links must be
 written that way:
@@ -319,7 +321,7 @@ Before tagging a release, run the macOS smoke test on a Mac:
 
 ```bash
 ./scripts/smoke-macos.sh                     # latest release, arm64
-GC_VERSION=v0.13.4 ./scripts/smoke-macos.sh  # specific version
+GC_VERSION=vX.Y.Z ./scripts/smoke-macos.sh  # a specific release
 GC_ARCH=amd64 ./scripts/smoke-macos.sh       # Intel binary
 ```
 
@@ -404,7 +406,7 @@ remove them.
 | `status/human-review-required` | Opt-out from auto-merge; waits for a co-maintainer |
 | `needs-architectural-review` | Permanent hold pending architectural review; blocks auto-merge |
 | `status/needs-bugflow` | Bugflow investigation requested on an issue |
-| `needs-mac`, `needs-review-formulas` | Run optional CI lanes on this PR |
+| `needs-mac`, `needs-review-formulas` | Run optional CI lanes on this PR (`needs-mac` adds the full Mac tier; the Mac smoke tier runs on every non-docs PR) |
 
 ## Questions
 

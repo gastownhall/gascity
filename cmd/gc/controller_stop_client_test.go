@@ -46,7 +46,7 @@ func TestControllerStopClientAcceptsOnlyExactAcknowledgement(t *testing.T) {
 			conn := &scriptedControllerStopConn{reply: tt.reply, readErr: tt.readErr}
 			client := controllerStopClient{
 				stat:         func(string) (os.FileInfo, error) { return info, nil },
-				dial:         func(string, string, time.Duration) (net.Conn, error) { return conn, nil },
+				dial:         func(string, time.Duration) (net.Conn, error) { return conn, nil },
 				dialTimeout:  time.Second,
 				writeTimeout: time.Second,
 				readTimeout:  time.Second,
@@ -91,6 +91,15 @@ func TestControllerStopClientClassifiesEntryBoundary(t *testing.T) {
 			stats:       []controllerStopStat{{info: controllerStopStatInfo(t, "before-dial")}},
 			dialErr:     dialErr,
 			wantOutcome: controllerStopDefinitePreEntryUnavailable,
+			wantDials:   1,
+		},
+		{
+			// A worker site's controller is the remote one, so the seam's
+			// refusal to dial it is no proof that none runs.
+			name:        "worker-site dial refusal",
+			stats:       []controllerStopStat{{info: controllerStopStatInfo(t, "before-refusal")}},
+			dialErr:     errWorkerSiteNoController,
+			wantOutcome: controllerStopOutcomeInvalid,
 			wantDials:   1,
 		},
 		{
@@ -154,7 +163,7 @@ func TestControllerStopClientClassifiesEntryBoundary(t *testing.T) {
 					statIndex++
 					return result.info, result.err
 				},
-				dial: func(string, string, time.Duration) (net.Conn, error) {
+				dial: func(string, time.Duration) (net.Conn, error) {
 					dials++
 					return tt.conn, tt.dialErr
 				},
@@ -227,8 +236,10 @@ func (c *scriptedControllerStopConn) Close() error {
 	return nil
 }
 
-func (*scriptedControllerStopConn) LocalAddr() net.Addr  { return scriptedControllerStopAddr("local") }
+func (*scriptedControllerStopConn) LocalAddr() net.Addr { return scriptedControllerStopAddr("local") }
+
 func (*scriptedControllerStopConn) RemoteAddr() net.Addr { return scriptedControllerStopAddr("remote") }
+
 func (*scriptedControllerStopConn) SetDeadline(time.Time) error {
 	return errors.New("unexpected SetDeadline")
 }

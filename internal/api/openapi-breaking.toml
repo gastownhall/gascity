@@ -270,3 +270,14 @@ target = "POST /v0/city/{cityName}/extmsg/outbound"
 # the response property `TranscriptEntry` became optional for the status `200`
 reason = "the handler sent null for absent records where the spec declared a required non-nullable object; it now omits them and the spec marks them optional to match the wire (ga-1up872)"
 pr = "#7084"
+
+# PR #8145 (OJ-17): the conversation lane lowers a when: now or legacy
+# interrupt message into a deliver-now unit, so the propose route no longer
+# refuses them 409 when-not-supported (#8144, OJ-20).
+[[waiver]]
+fingerprint = "058aa805e264"
+check = "problem-type-removed"
+target = "components"
+# removed the problem type `urn:gascity:error:when-not-supported` from ErrorModel.type x-gascity-problem-types
+reason = "the lane now runs every message when as a lane op (now and the legacy interrupt as a deliver-now unit), so POST /v0/city/{cityName}/session/{id}/ops accepts them and no route returns when-not-supported; the type existed only for that refusal (#8144)"
+pr = "#8145"

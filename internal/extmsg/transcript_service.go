@@ -19,11 +19,11 @@ const (
 )
 
 type transcriptService struct {
-	store beads.Store
+	store beads.MailStore
 	locks *bindingLockPool
 }
 
-func newTranscriptService(store beads.Store, locks *bindingLockPool) *transcriptService {
+func newTranscriptService(store beads.MailStore, locks *bindingLockPool) *transcriptService {
 	return &transcriptService{store: store, locks: locks}
 }
 

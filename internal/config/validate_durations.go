@@ -136,6 +136,7 @@ func ValidateDurations(cfg *City, source string) []string {
 	check("[daemon]", "wisp_gc_interval", cfg.Daemon.WispGCInterval)
 	check("[daemon]", "wisp_ttl", cfg.Daemon.WispTTL)
 	check("[daemon]", "drift_drain_timeout", cfg.Daemon.DriftDrainTimeout)
+	checkPositive("[daemon]", "drift_deferral_escalate_after", cfg.Daemon.DriftDeferralEscalateAfter)
 	check("[daemon]", "start_ready_timeout", cfg.Daemon.StartReadyTimeout)
 	check("[daemon]", "dolt_stop_timeout", cfg.Daemon.DoltStopTimeout)
 	check("[daemon]", "dolt_start_address_in_use_retry_window", cfg.Daemon.DoltStartAddressInUseRetryWindow)
@@ -271,11 +272,18 @@ func ValidateNonNegativeDurations(cfg *City, source string) error {
 }
 
 // ValidateEventsRotation returns non-fatal warnings for risky but intentional
-// events rotation settings.
+// events rotation settings, and for an [events.mirror] that gc will skip.
 func ValidateEventsRotation(cfg *City) []string {
 	if cfg == nil {
 		return nil
 	}
+	if problem := cfg.Events.Mirror.Problem(); problem != "" {
+		return append([]string{"events.mirror: warning: " + problem + "; the events mirror is disabled"}, validateEventsRotationRetainAge(cfg)...)
+	}
+	return validateEventsRotationRetainAge(cfg)
+}
+
+func validateEventsRotationRetainAge(cfg *City) []string {
 	raw := cfg.Events.Rotation.ArchiveRetainAge
 	if raw == "" {
 		return nil
