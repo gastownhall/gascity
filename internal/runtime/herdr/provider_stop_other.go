@@ -4,7 +4,11 @@ package herdr
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os/exec"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // Stop closes the agent's pane and clears its metadata sidecar. Idempotent.
@@ -20,10 +24,15 @@ import (
 // Otherwise a herdr that cannot answer (the pane lookup, an exited agent's
 // reap or the close fails) is an error, and the sidecar is kept so a retried
 // Stop still finds the pane (RUNTIME-CONTRACT-003: runtime.StopForCleanup
-// propagates it rather than certify the session gone).
+// propagates it rather than certify the session gone). A call that ended at
+// its deadline, by a cancel, or at the WaitDelay never got herdr's answer, so
+// that error also wraps runtime.ErrRuntimeUnavailable.
 func (p *Provider) Stop(name string) error {
 	ctx := context.Background()
 	if err := p.closeSessionPane(ctx, name); err != nil && !p.c.serverConfirmedDead(ctx) {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, exec.ErrWaitDelay) {
+			return fmt.Errorf("herdr: stopping %q: %w: %w", name, runtime.ErrRuntimeUnavailable, err)
+		}
 		return fmt.Errorf("herdr: stopping %q: %w", name, err)
 	}
 	if err := p.clearMeta(name); err != nil {

@@ -524,18 +524,30 @@ func (p *Provider) Stop(name string) error {
 		if apierrors.IsNotFound(err) {
 			return nil // session genuinely gone
 		}
-		return fmt.Errorf("k8s stop %q: listing pods: %w", name, err)
+		return fmt.Errorf("k8s stop %q: listing pods: %w", name, unanswered(err))
 	}
 	var errs []error
 	for i := range pods {
 		if delErr := p.ops.deletePod(ctx, pods[i].Name, 5); delErr != nil && !apierrors.IsNotFound(delErr) {
-			errs = append(errs, fmt.Errorf("deleting pod %q: %w", pods[i].Name, delErr))
+			errs = append(errs, fmt.Errorf("deleting pod %q: %w", pods[i].Name, unanswered(delErr)))
 		}
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("k8s stop %q: %w", name, errors.Join(errs...))
 	}
 	return nil
+}
+
+// unanswered marks an API error the API server never answered (a deadline, a
+// cancel, a dial or transport failure: anything without a Kubernetes API
+// status) as runtime.ErrRuntimeUnavailable, keeping the cause. Such a call
+// cannot tell whether the pod is gone. An error carrying an API status is the
+// server's own answer and is returned as is.
+func unanswered(err error) error {
+	if errors.As(err, new(apierrors.APIStatus)) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", runtime.ErrRuntimeUnavailable, err)
 }
 
 // Interrupt sends Ctrl-C to the tmux session inside the pod.
