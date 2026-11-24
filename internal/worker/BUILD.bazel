@@ -69,6 +69,7 @@ go_test(
         "acp_capture_test.go",
         "activity_memo_test.go",
         "actor_helpers_test.go",
+        "admission_start_test.go",
         "codex_history_metadata_test.go",
         "codex_usage_attach_test.go",
         "factory_deferred_submits_test.go",
