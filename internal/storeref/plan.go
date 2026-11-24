@@ -17,6 +17,8 @@ package storeref
 import (
 	"strconv"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 // Mode selects the executor a plan is run through. It is a property of the
@@ -91,6 +93,24 @@ const (
 	// legs of a union, and the binding placed LAST on the federation intents so
 	// a co-resident id answers from work and agrees with claim.
 	RoleFederationTail
+
+	// RoleRelic is a scope store read for rows of a relocated class that were
+	// written there before the split (S4 debt). Only Stores.Plan produces it,
+	// and only where the class is relocated by handle identity and the scope is
+	// not proven relic-free (Leg.RelicFree): a single-store city has no relic
+	// leg, and a relic-free scope has none either. Its reads go through a relic
+	// leg, which the split-strict gate counts as debt.
+	RoleRelic
+
+	// RoleNear is the store a molecule walk started from — the closed bead's
+	// own store — read beside the graph placement because a molecule minted
+	// before the split, or in a v1 work ledger, lives beside its member rather
+	// than in the binding.
+	RoleNear
+
+	// RoleV1 is a work leg read for a v1 poured molecule, which is work class
+	// and so lives in a work ledger rather than in the graph placement.
+	RoleV1
 )
 
 // ownedByCallersWorkAxis reports whether a by-id plan carries this leg on
@@ -122,6 +142,12 @@ func (r Role) String() string {
 		return "ResidenceProbe"
 	case RoleFederationTail:
 		return "FederationTail"
+	case RoleRelic:
+		return "Relic"
+	case RoleNear:
+		return "Near"
+	case RoleV1:
+		return "V1"
 	default:
 		return "Role(" + strconv.Itoa(int(r)) + ")"
 	}
@@ -148,6 +174,13 @@ const (
 	// class could own — a refused city still serves WORK from its work ledger,
 	// so the refusal establishes nothing about that id.
 	PolicyRefusalTolerated
+
+	// PolicyFatalUnlessResolved is a first-owner leg whose hard error does not
+	// stop the walk: the error is remembered, a later leg that finds the bead
+	// wins, and with no hit the first hard error is the answer rather than a
+	// not-found (R2, the attachment probe: the graph leg refusing must not hide
+	// a v1 molecule the work leg holds, and must not read as absence either).
+	PolicyFatalUnlessResolved
 )
 
 // String renders the policy as it appears in a corpus row.
@@ -159,6 +192,8 @@ func (p ErrPolicy) String() string {
 		return "PartialDegrade"
 	case PolicyRefusalTolerated:
 		return "RefusalTolerated"
+	case PolicyFatalUnlessResolved:
+		return "FatalUnlessResolved"
 	default:
 		return "ErrPolicy(" + strconv.Itoa(int(p)) + ")"
 	}
@@ -170,14 +205,27 @@ type PlanLeg struct {
 	Leg     Leg
 	Role    Role
 	OnError ErrPolicy
+
+	// Gate is the role the leg's reads declare to the split-strict gate when
+	// a typed executor mints its reader (TypedLeg): a federated leg's miss is
+	// covered by another leg, a relic leg's read is S4 debt, and NoLegRole is
+	// a strict leg the gate polices (OD-T7-1: a union leg no marker covered
+	// stays strict). Only Stores.Plan sets it. A by-id walk reads through a
+	// federated leg whatever it says, as the residence probe always has.
+	Gate beads.LegRole
 }
 
 // String renders one leg of a corpus row: `<ref>[<Role>,<Policy>]`, with the
-// work ref rendered as `""` so an empty ref is visible rather than blank.
+// work ref rendered as `""` so an empty ref is visible rather than blank, and
+// the gate role appended (`[<Role>,<Policy>,<gate>]`) when the leg declares
+// one.
 func (l PlanLeg) String() string {
 	ref := string(l.Leg.Ref)
 	if ref == "" {
 		ref = `""`
+	}
+	if l.Gate != beads.NoLegRole {
+		return ref + "[" + l.Role.String() + "," + l.OnError.String() + "," + l.Gate.String() + "]"
 	}
 	return ref + "[" + l.Role.String() + "," + l.OnError.String() + "]"
 }

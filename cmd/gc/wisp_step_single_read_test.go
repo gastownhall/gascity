@@ -47,7 +47,7 @@ func seedStepFixture(beadsIn []stepFixtureBead) *beads.MemStore {
 // TestActiveWispStepSingleReadMatchesPerQuestionReads pins that answering the
 // step reminder's in-progress questions from one listing resolves the same
 // bead as asking each question its own listing, across every resolution
-// branch: molecule, wisp, the newest-updated-of-five rule and its tie,
+// branch: molecule, the newest-updated-of-five rule and its tie,
 // in-progress and entry steps, the claimed and routed bridges, and the
 // description fallback with its ten-bead sample.
 func TestActiveWispStepSingleReadMatchesPerQuestionReads(t *testing.T) {
@@ -123,7 +123,7 @@ func TestActiveWispStepSingleReadMatchesPerQuestionReads(t *testing.T) {
 		"description beyond the sample":               "<none>",
 		"molecule with in-progress step":              "s-1",
 		"molecule entry step":                         "s-1",
-		"wisp root":                                   "s-1",
+		"wisp root":                                   "<none>",
 		"molecule preferred over wisp":                "s-m",
 		"newest updated of the five newest molecules": "s-2",
 		"updated tie keeps the newest created":        "s-0",
@@ -134,9 +134,9 @@ func TestActiveWispStepSingleReadMatchesPerQuestionReads(t *testing.T) {
 	for name, fixture := range cases {
 		t.Run(name, func(t *testing.T) {
 			store := seedStepFixture(fixture)
-			want, wantErr := resolveActiveWispStep(store, &splitStoreHandle{Store: store}, assignees)
+			want, wantErr := resolveActiveWispStep(store, testStores(store, &splitStoreHandle{Store: store}), assignees)
 			rec := beadstest.NewOpRecordingStore(store)
-			got, gotErr := resolveActiveWispStep(rec, rec, assignees)
+			got, gotErr := resolveActiveWispStep(rec, testStores(rec, rec), assignees)
 			if (wantErr == nil) != (gotErr == nil) {
 				t.Fatalf("errors differ: single read %v, per question %v", gotErr, wantErr)
 			}

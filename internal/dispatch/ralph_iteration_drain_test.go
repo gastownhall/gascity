@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/molecule"
 )
 
@@ -170,7 +171,7 @@ func buildRalphDrainFixture(t *testing.T, tc drainStoreCase, formulaText string,
 func cookRalphDrainFixture(t *testing.T, tc drainStoreCase, city compiledRalphCity) ralphDrainFixture {
 	t.Helper()
 	base, mem := tc.open(t)
-	cooked, err := molecule.Cook(context.Background(), base, city.name, []string{city.formulaDir}, molecule.Options{})
+	cooked, err := molecule.Cook(context.Background(), beadstest.GraphMolecule(base), city.name, []string{city.formulaDir}, molecule.Options{})
 	if err != nil {
 		t.Fatalf("Cook: %v", err)
 	}
@@ -293,7 +294,7 @@ func TestCompiledRalphIterationDrainControlBlocksLiveMember(t *testing.T) {
 			b := drainBeadByRefSuffix(t, all, "loop.iteration.1.b")
 			drainClaimed(t, fx.store, b)
 			a := drainBeadByRefSuffix(t, all, "loop.iteration.1.a")
-			if err := updateMetadataAndClose(fx.store, a.ID, workerFailure(beadmeta.FailureClassTransient, "rate_limited")); err != nil {
+			if err := updateMetadataAndClose(beadstest.Graph(fx.store), a.ID, workerFailure(beadmeta.FailureClassTransient, "rate_limited")); err != nil {
 				t.Fatalf("closing worker A: %v", err)
 			}
 
@@ -367,7 +368,7 @@ func TestCompiledRalphIterationDrainContinuesAfterMemberCloses(t *testing.T) {
 			fx := buildRalphDrainFixture(t, tc, compiledRalphDrainFormula, 0)
 			all := drainStoreAll(t, fx.store)
 			drainClaimed(t, fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.1.b"))
-			if err := updateMetadataAndClose(fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.1.a").ID,
+			if err := updateMetadataAndClose(beadstest.Graph(fx.store), drainBeadByRefSuffix(t, all, "loop.iteration.1.a").ID,
 				workerFailure(beadmeta.FailureClassTransient, "rate_limited")); err != nil {
 				t.Fatalf("closing worker A: %v", err)
 			}
@@ -378,7 +379,7 @@ func TestCompiledRalphIterationDrainContinuesAfterMemberCloses(t *testing.T) {
 			drainRequireNoIteration(t, drainStoreAll(t, fx.store), 2)
 			body := drainBeadByRefSuffix(t, drainStoreAll(t, fx.store), "loop.iteration.1")
 
-			if err := updateMetadataAndClose(fx.store, drainBeadByRefSuffix(t, drainStoreAll(t, fx.store),
+			if err := updateMetadataAndClose(beadstest.Graph(fx.store), drainBeadByRefSuffix(t, drainStoreAll(t, fx.store),
 				"loop.iteration.1.b").ID, workerPass); err != nil {
 				t.Fatalf("closing worker B: %v", err)
 			}
@@ -422,13 +423,13 @@ func TestCompiledRalphIterationDrainHardFailAfterMemberCloses(t *testing.T) {
 			fx := buildRalphDrainFixture(t, tc, compiledRalphDrainFormula, 0)
 			all := drainStoreAll(t, fx.store)
 			drainClaimed(t, fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.1.b"))
-			if err := updateMetadataAndClose(fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.1.a").ID,
+			if err := updateMetadataAndClose(beadstest.Graph(fx.store), drainBeadByRefSuffix(t, all, "loop.iteration.1.a").ID,
 				workerFailure(beadmeta.FailureClassTransient, "rate_limited")); err != nil {
 				t.Fatalf("closing worker A: %v", err)
 			}
 			drainServeHeld(t, fx.crashFixture)
 
-			if err := updateMetadataAndClose(fx.store, drainBeadByRefSuffix(t, drainStoreAll(t, fx.store),
+			if err := updateMetadataAndClose(beadstest.Graph(fx.store), drainBeadByRefSuffix(t, drainStoreAll(t, fx.store),
 				"loop.iteration.1.b").ID, workerFailure(beadmeta.FailureClassHard, reason)); err != nil {
 				t.Fatalf("closing worker B: %v", err)
 			}
@@ -470,7 +471,7 @@ func TestCompiledRalphIterationDrainForcedSettleHoldsNextIteration(t *testing.T)
 			fx := buildRalphDrainFixture(t, tc, compiledRalphDrainFanoutFormula, 0)
 			all := drainStoreAll(t, fx.store)
 			drainClaimed(t, fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.1.b"))
-			if err := updateMetadataAndClose(fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.1.a").ID,
+			if err := updateMetadataAndClose(beadstest.Graph(fx.store), drainBeadByRefSuffix(t, all, "loop.iteration.1.a").ID,
 				workerFailure(beadmeta.FailureClassTransient, "rate_limited")); err != nil {
 				t.Fatalf("closing worker A: %v", err)
 			}
@@ -487,7 +488,7 @@ func TestCompiledRalphIterationDrainForcedSettleHoldsNextIteration(t *testing.T)
 			}
 			drainRequireNoIteration(t, all, 2)
 
-			if err := updateMetadataAndClose(fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.1.b").ID, workerPass); err != nil {
+			if err := updateMetadataAndClose(beadstest.Graph(fx.store), drainBeadByRefSuffix(t, all, "loop.iteration.1.b").ID, workerPass); err != nil {
 				t.Fatalf("closing worker B: %v", err)
 			}
 			if errs := serveToQuiescence(t, fx.crashFixture, &writeFaultInjector{}); len(errs) != 0 {
@@ -530,7 +531,7 @@ func TestCompiledRalphIterationDrainHoldsRuntimeSpawnedIteration(t *testing.T) {
 	}
 
 	drainClaimed(t, fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.2.b"))
-	if err := updateMetadataAndClose(fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.2.a").ID,
+	if err := updateMetadataAndClose(beadstest.Graph(fx.store), drainBeadByRefSuffix(t, all, "loop.iteration.2.a").ID,
 		workerFailure(beadmeta.FailureClassTransient, "rate_limited")); err != nil {
 		t.Fatalf("closing iteration-2 worker A: %v", err)
 	}
@@ -542,7 +543,7 @@ func TestCompiledRalphIterationDrainHoldsRuntimeSpawnedIteration(t *testing.T) {
 		t.Errorf("iteration-2 worker B = %s/%s, want still claimed in_progress by pool-worker", b.Status, b.Assignee)
 	}
 
-	if err := updateMetadataAndClose(fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.2.b").ID, workerPass); err != nil {
+	if err := updateMetadataAndClose(beadstest.Graph(fx.store), drainBeadByRefSuffix(t, all, "loop.iteration.2.b").ID, workerPass); err != nil {
 		t.Fatalf("closing iteration-2 worker B: %v", err)
 	}
 	if errs := serveToQuiescence(t, fx.crashFixture, &writeFaultInjector{}); len(errs) != 0 {
@@ -593,7 +594,7 @@ func TestCompiledRalphIterationDrainDrainedIterationVerdictsUnchanged(t *testing
 	drainCloseAllWorkers := func(t *testing.T, store beads.Store, all []beads.Bead, iterationRef string) {
 		t.Helper()
 		for _, ref := range []string{iterationRef + ".a", iterationRef + ".b"} {
-			if err := updateMetadataAndClose(store, drainBeadByRefSuffix(t, all, ref).ID, workerPass); err != nil {
+			if err := updateMetadataAndClose(beadstest.Graph(store), drainBeadByRefSuffix(t, all, ref).ID, workerPass); err != nil {
 				t.Fatalf("closing %s: %v", ref, err)
 			}
 		}
@@ -684,7 +685,7 @@ func TestCompiledRalphIterationDrainHoldsNextIteration(t *testing.T) {
 				all := drainStoreAll(t, fx.store)
 				drainClaimed(t, fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.1.b"))
 				a := drainBeadByRefSuffix(t, all, "loop.iteration.1.a")
-				if err := updateMetadataAndClose(fx.store, a.ID, failure.meta); err != nil {
+				if err := updateMetadataAndClose(beadstest.Graph(fx.store), a.ID, failure.meta); err != nil {
 					t.Fatalf("closing worker A: %v", err)
 				}
 
@@ -743,7 +744,7 @@ func iterationDrainCrashScenario(t *testing.T, name string, tc drainStoreCase, f
 			fx := cookRalphDrainFixture(t, tc, city)
 			all := drainStoreAll(t, fx.store)
 			drainClaimed(t, fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.1.b"))
-			if err := updateMetadataAndClose(fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.1.a").ID,
+			if err := updateMetadataAndClose(beadstest.Graph(fx.store), drainBeadByRefSuffix(t, all, "loop.iteration.1.a").ID,
 				workerFailure(beadmeta.FailureClassTransient, "rate_limited")); err != nil {
 				t.Fatalf("closing worker A: %v", err)
 			}

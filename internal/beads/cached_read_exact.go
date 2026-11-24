@@ -1,11 +1,15 @@
 package beads
 
+import "time"
+
 // CachedReadExact is an optional declaration on a backing store: when
 // CachedReadExact reports true, a CachingStore over it holds rows exactly as
 // the store's own live reads return them. Cached statuses are raw (no fold of
 // richer statuses into "open"), labels and metadata are complete, and the
 // cached ready projection answers every row the way the store's live Ready
-// does.
+// does. The store's Live "open" leaves out the open rows LiveOpenLeavesOut
+// names, so a reader that answers a Live "open" from the cache leaves them
+// out too.
 //
 // The controller's v2 demand reads serve a leg from its cache only when the
 // leg's backing declares this; every other leg is read live by the demand
@@ -28,3 +32,12 @@ type CachedReadExact interface {
 // SQLite stores raw statuses and full rows, and enrichReadyProjectionForCache
 // stamps every row with the verdict sqliteReadySQL computes.
 func (s *SQLiteStore) CachedReadExact() bool { return true }
+
+// LiveOpenLeavesOut reports whether a Live "open" leaves out b, a row its
+// store holds open, at now: b is deferred into the future. A store that
+// records a deferral by its defer_until alone answers its raw open without
+// such a row (sqliteListLeavesOutDeferred), as bd leaves its deferred status
+// out of its raw open.
+func LiveOpenLeavesOut(b Bead, now time.Time) bool {
+	return IsDeferred(b, now)
+}

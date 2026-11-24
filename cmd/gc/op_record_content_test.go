@@ -882,11 +882,11 @@ func TestSessionSubmitFallbackResumesTheHoldOfAnOpenLaneOp(t *testing.T) {
 				laneOp = proposeAsAPILane(t, h, c.bead.ID, key, text, session.SubmitIntentDefault, nil)
 			})
 			h, c = submitOpCity(t, "auto", srv)
-			if _, err := sessionFrontDoor(c.reload(t)).OperatorSuspend(c.bead.ID, tc.suspended); err != nil {
+			if _, err := sessionFrontDoor(c.reloadSessions(t)).OperatorSuspend(c.bead.ID, tc.suspended); err != nil {
 				t.Fatalf("suspending the session: %v", err)
 			}
 			if tc.draining {
-				if err := c.reload(t).SetMetadataBatch(c.bead.ID, map[string]string{"state": string(session.StateDraining)}); err != nil {
+				if err := c.reloadSessions(t).SetMetadataBatch(c.bead.ID, map[string]string{"state": string(session.StateDraining)}); err != nil {
 					t.Fatalf("draining the session: %v", err)
 				}
 			}
@@ -1112,7 +1112,7 @@ func TestSessionSubmitLocalQueuedClosesQueued(t *testing.T) {
 	h, c := submitOpCity(t, "auto", nil)
 	// A session still being created, with no runtime yet, queues the
 	// message for its first start.
-	if err := c.store.SetMetadata(c.bead.ID, "state", string(session.StateCreating)); err != nil {
+	if err := c.sessions.SetMetadata(c.bead.ID, "state", string(session.StateCreating)); err != nil {
 		t.Fatalf("marking the session creating: %v", err)
 	}
 	if err := c.sp.Stop(c.name); err != nil {
