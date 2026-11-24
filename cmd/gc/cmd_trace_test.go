@@ -622,3 +622,45 @@ func TestTraceStatusClampsFutureHeadWriteTime(t *testing.T) {
 		t.Fatalf("status output = %q, want no negative head write age", got)
 	}
 }
+
+// TestTraceStatusHeadWriteTimeFromRealWriter pins that the head write time
+// `gc trace status` reports is the one the real trace store records when it
+// flushes a batch, not only a hand-built head file.
+func TestTraceStatusHeadWriteTimeFromRealWriter(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityTOML(t, cityDir, "trace-town", "mayor")
+	t.Setenv("GC_CITY", cityDir)
+
+	before := time.Now().UTC()
+	store, err := newSessionReconcilerTraceStore(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("newSessionReconcilerTraceStore: %v", err)
+	}
+	rec := newTraceRecord(TraceRecordDecision)
+	rec.TraceID = "cycle-1"
+	rec.TickID = "tick-1"
+	rec.RecordID = "record-1"
+	rec.Ts = time.Now().UTC()
+	if err := store.AppendBatch([]SessionReconcilerTraceRecord{rec}, TraceDurabilityMetadata); err != nil {
+		t.Fatalf("AppendBatch: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close trace store: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdTraceStatusWithJSON(true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdTraceStatusWithJSON(json) = %d; stderr=%s", code, stderr.String())
+	}
+	var statusJSON traceStatusResultJSON
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &statusJSON); err != nil {
+		t.Fatalf("unmarshalling trace status JSON: %v; output=%s", err, stdout.String())
+	}
+	if statusJSON.HeadUpdatedAt == nil {
+		t.Fatalf("head_updated_at missing after a real AppendBatch; output=%s", stdout.String())
+	}
+	if statusJSON.HeadUpdatedAt.Before(before.Add(-time.Second)) {
+		t.Fatalf("head_updated_at = %v, want at or after %v", statusJSON.HeadUpdatedAt, before)
+	}
+	validateJSONResultSchema(t, []string{"trace", "status"}, stdout.Bytes())
+}

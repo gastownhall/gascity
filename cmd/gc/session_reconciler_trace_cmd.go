@@ -604,12 +604,12 @@ func traceHeadSeq(rootDir string) (uint64, error) {
 	return head.Seq, nil
 }
 
-// traceHeadWrittenAt reports when the trace head was last written, or the zero
-// time when no readable head file exists yet.
+// traceHeadWrittenAt reports when the trace head file was last written, or the
+// zero time when no readable head file exists yet.
 //
-// The reconciler writes the head once per flushed batch and is silent between
-// cycles, so this is what distinguishes a head that is quiet from one that is
-// wedged. The sequence number alone cannot: it is identical in both cases.
+// The reconciler rewrites the head on every flushed batch (and on store
+// open/recovery) and is silent between cycles, so this timestamp tells a reader
+// how long the head has been quiet; the sequence number alone cannot.
 func traceHeadWrittenAt(rootDir string) time.Time {
 	data, err := os.ReadFile(filepath.Join(rootDir, sessionReconcilerTraceHeadFile))
 	if err != nil {
