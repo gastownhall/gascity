@@ -72,6 +72,7 @@ go_test(
         "finalize_query_timeout_tier_repro_test.go",
         "main_test.go",
         "nested_scope_match_test.go",
+        "nested_attempt_parity_test.go",
         "ralph_check_asset_test.go",
         "ralph_check_config_test.go",
         "ralph_check_infra_blind_test.go",
