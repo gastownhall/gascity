@@ -40,6 +40,7 @@ go_test(
         "name_test.go",
         "pod_prompt_test.go",
         "pod_test.go",
+        "provider_deadline_test.go",
         "provider_stale_probe_test.go",
         "provider_test.go",
         "seams_test.go",
@@ -47,6 +48,7 @@ go_test(
         "staging_test.go",
         "testenv_helpers_test.go",
         "testenv_import_test.go",
+        "verb_deadline_test.go",
     ],
     data = glob(
         ["**"],
