@@ -865,42 +865,9 @@ func (p *Provider) Reply(id, from, subject, body string) (mail.Message, error) {
 	if metadata == nil {
 		metadata = make(map[string]string)
 	}
-	replierSessionID := metadata[fromSessionIDMetadataKey]
-
-	parentSessionID := strings.TrimSpace(original.Metadata[fromSessionIDMetadataKey])
-	parentFrom := strings.TrimSpace(original.From)
-	parentDisplay := strings.TrimSpace(original.Metadata[fromDisplayMetadataKey])
-	if parentDisplay == "" {
-		parentDisplay = parentFrom
-	}
-
-	// Send stamps only the sender's identity, so the original's recipient is
-	// known only as its Assignee. The replier owns the parent when both carry
-	// the same session ID, or, with no session identity on either side, the
-	// same address.
-	replyingToOwnMessage := (replierSessionID != "" && replierSessionID == parentSessionID) ||
-		(replierSessionID == "" && parentSessionID == "" && from != "" && from == parentDisplay)
-
-	var to, toSessionID, toDisplay string
-	if replyingToOwnMessage {
-		to = strings.TrimSpace(original.Assignee)
-		toDisplay = to
-		if to == "" {
-			return mail.Message{}, fmt.Errorf("beadmail reply: original message %s has no other party to reply to", id)
-		}
-	} else {
-		toSessionID = parentSessionID
-		to = toSessionID
-		if to == "" {
-			to = parentFrom
-		}
-		toDisplay = parentDisplay
-		if to == "" {
-			return mail.Message{}, fmt.Errorf("beadmail reply: original message %s has no sender to reply to", id)
-		}
-	}
-	if (replierSessionID != "" && toSessionID == replierSessionID) || (from != "" && to == from) {
-		return mail.Message{}, fmt.Errorf("beadmail reply: reply to %s would address its own sender %q", id, from)
+	to, toSessionID, toDisplay, err := replyRecipient(original, id, from, metadata[fromSessionIDMetadataKey])
+	if err != nil {
+		return mail.Message{}, err
 	}
 	if toSessionID != "" {
 		metadata[toSessionIDMetadataKey] = toSessionID
@@ -930,6 +897,52 @@ func (p *Provider) Reply(id, from, subject, body string) (mail.Message, error) {
 		return mail.Message{}, fmt.Errorf("beadmail reply: %w", err)
 	}
 	return beadToMessage(b), nil
+}
+
+// replyRecipient picks the other party on the thread for a reply from from
+// (whose resolved session ID is replierSessionID) to original. It is the
+// original's sender unless the replier is that sender, in which case it is the
+// original's recipient. It errors rather than address a reply to its own sender.
+func replyRecipient(original beads.Bead, id, from, replierSessionID string) (to, toSessionID, toDisplay string, err error) {
+	parentSessionID := strings.TrimSpace(original.Metadata[fromSessionIDMetadataKey])
+	parentFrom := strings.TrimSpace(original.From)
+	parentDisplay := strings.TrimSpace(original.Metadata[fromDisplayMetadataKey])
+	if parentDisplay == "" {
+		parentDisplay = parentFrom
+	}
+
+	// Send stamps only the sender's identity, so the original's recipient is
+	// known only as its Assignee (plus any to_* metadata a reply carries). The
+	// replier owns the parent when both carry the same session ID, or, when
+	// either side lacks a session identity, the same address.
+	replyingToOwnMessage := (replierSessionID != "" && parentSessionID != "" && replierSessionID == parentSessionID) ||
+		((replierSessionID == "" || parentSessionID == "") && from != "" && from == parentDisplay)
+
+	if replyingToOwnMessage {
+		to = strings.TrimSpace(original.Assignee)
+		toSessionID = strings.TrimSpace(original.Metadata[toSessionIDMetadataKey])
+		toDisplay = strings.TrimSpace(original.Metadata[toDisplayMetadataKey])
+		if toDisplay == "" {
+			toDisplay = to
+		}
+		if to == "" {
+			return "", "", "", fmt.Errorf("beadmail reply: original message %s has no other party to reply to", id)
+		}
+	} else {
+		toSessionID = parentSessionID
+		to = toSessionID
+		if to == "" {
+			to = parentFrom
+		}
+		toDisplay = parentDisplay
+		if to == "" {
+			return "", "", "", fmt.Errorf("beadmail reply: original message %s has no sender to reply to", id)
+		}
+	}
+	if (replierSessionID != "" && (toSessionID == replierSessionID || to == replierSessionID)) || (from != "" && (to == from || toDisplay == from)) {
+		return "", "", "", fmt.Errorf("beadmail reply: reply to %s would address its own sender %q", id, from)
+	}
+	return to, toSessionID, toDisplay, nil
 }
 
 // beadmailError wraps a store error for the given mail operation, deliberately
