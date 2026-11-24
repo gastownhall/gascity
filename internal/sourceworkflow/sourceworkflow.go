@@ -297,22 +297,30 @@ func workflowMatchesSource(root beads.Bead, sourceBeadID, sourceStoreRef, rootSt
 // indexes on gc.source_bead_id and filters via IsWorkflowRoot so both
 // legacy gc.kind=workflow roots and graph.v2-only roots are visible.
 func ListLiveRoots(store beads.MoleculeTarget, sourceBeadID, sourceStoreRef, rootStoreRef string) ([]beads.Bead, error) {
-	return listLiveRoots(store, sourceBeadID, sourceStoreRef, rootStoreRef, exactStoreRefs)
+	return listSourceRoots(store, sourceBeadID, sourceStoreRef, rootStoreRef, exactStoreRefs, false)
 }
 
 // ListLiveRootsInCity is ListLiveRoots with store refs compared by
 // SameSourceStoreRef inside the city named cityName (see
 // WorkflowMatchesSourceInCity).
 func ListLiveRootsInCity(store beads.MoleculeTarget, sourceBeadID, sourceStoreRef, rootStoreRef, cityName string) ([]beads.Bead, error) {
-	return listLiveRoots(store, sourceBeadID, sourceStoreRef, rootStoreRef, cityStoreRefs(cityName))
+	return listSourceRoots(store, sourceBeadID, sourceStoreRef, rootStoreRef, cityStoreRefs(cityName), false)
 }
 
-func listLiveRoots(store beads.MoleculeTarget, sourceBeadID, sourceStoreRef, rootStoreRef string, sameStoreRef func(a, b string) bool) ([]beads.Bead, error) {
+// ListSourceRootsInCity is ListLiveRootsInCity with closed roots included: every
+// workflow root ever launched on sourceBeadID in store, for a sweep that must
+// reach work still open under a root that is already closed.
+func ListSourceRootsInCity(store beads.MoleculeTarget, sourceBeadID, sourceStoreRef, rootStoreRef, cityName string) ([]beads.Bead, error) {
+	return listSourceRoots(store, sourceBeadID, sourceStoreRef, rootStoreRef, cityStoreRefs(cityName), true)
+}
+
+func listSourceRoots(store beads.MoleculeTarget, sourceBeadID, sourceStoreRef, rootStoreRef string, sameStoreRef func(a, b string) bool, includeClosed bool) ([]beads.Bead, error) {
 	sourceBeadID = NormalizeSourceBeadID(sourceBeadID)
 	if store.Absent() || sourceBeadID == "" {
 		return nil, nil
 	}
 	roots, err := beads.LiveFor(store).List(beads.ListQuery{
+		IncludeClosed: includeClosed,
 		Metadata: map[string]string{
 			beadmeta.SourceBeadIDMetadataKey: sourceBeadID,
 		},

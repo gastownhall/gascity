@@ -12220,3 +12220,86 @@ func TestCmdWorkflowDeleteSourceClosesNestedDrainItemWorkflows(t *testing.T) {
 		assertWorkflowBeadClosedWith(t, reloaded, b.ID, beadmeta.OutcomeSkipped, sourceworkflow.WorkflowSkippedCloseReason)
 	}
 }
+
+func TestCmdWorkflowDeleteSourceSweepsItemWorkflowsUnderClosedRoots(t *testing.T) {
+	cityDir, store := newDeleteSourceTestCity(t)
+	source := createDeleteSourceTestBead(t, store, beads.Bead{Title: "Source", Type: "task", Status: "in_progress"})
+	root, _ := createGraphWorkflowRun(t, store, "closed", map[string]string{beadmeta.SourceBeadIDMetadataKey: source.ID}, 0)
+	drain := createDrainControl(t, store, root.ID, "closed")
+	// A member of the closed workflow itself, left open the way a run cancel
+	// spares its teardown tail: the sweep is not this workflow's to finish.
+	teardown := createDeleteSourceTestBead(t, store, beads.Bead{
+		Title:    "teardown",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
+	})
+	item, itemSteps := createDrainItemWorkflow(t, store, drain.ID, "in_progress", 2)
+	finished, _ := createDrainItemWorkflow(t, store, drain.ID, "closed", 0)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWorkflowDeleteSource(source.ID, sourceWorkflowStoreSelector{}, true, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdWorkflowDeleteSource = %d; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "result=cleaned source_bead_id="+source.ID+" matched_roots=1 matched_beads=3 closed=3 ") {
+		t.Fatalf("stdout = %q, want the open item workflow under the closed root cleaned", stdout.String())
+	}
+	reloaded, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(reload): %v", err)
+	}
+	for _, b := range append([]beads.Bead{item}, itemSteps...) {
+		assertWorkflowBeadClosedWith(t, reloaded, b.ID, beadmeta.OutcomeSkipped, sourceworkflow.WorkflowSkippedCloseReason)
+	}
+	got, err := reloaded.Get(teardown.ID)
+	if err != nil {
+		t.Fatalf("Get(teardown): %v", err)
+	}
+	if got.Status != "open" {
+		t.Errorf("teardown member of the closed workflow is %s, want it left open", got.Status)
+	}
+	gotFinished, err := reloaded.Get(finished.ID)
+	if err != nil {
+		t.Fatalf("Get(finished item): %v", err)
+	}
+	if gotFinished.Metadata[beadmeta.OutcomeMetadataKey] == beadmeta.OutcomeSkipped {
+		t.Errorf("finished item workflow %s was restamped skipped", finished.ID)
+	}
+}
+
+// TestCmdWorkflowDeleteSourceLeavesClosedHistoryAlreadyClean pins that a closed
+// root with nothing open anywhere under it is history, not a match.
+func TestCmdWorkflowDeleteSourceLeavesClosedHistoryAlreadyClean(t *testing.T) {
+	_, store := newDeleteSourceTestCity(t)
+	source := createDeleteSourceTestBead(t, store, beads.Bead{Title: "Source", Type: "task", Status: "in_progress"})
+	root, _ := createGraphWorkflowRun(t, store, "closed", map[string]string{beadmeta.SourceBeadIDMetadataKey: source.ID}, 0)
+	drain := createDrainControl(t, store, root.ID, "closed")
+	createDrainItemWorkflow(t, store, drain.ID, "closed", 0)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWorkflowDeleteSource(source.ID, sourceWorkflowStoreSelector{}, false, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdWorkflowDeleteSource = %d; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "result=already_clean") {
+		t.Fatalf("stdout = %q, want already_clean for fully closed history", stdout.String())
+	}
+}
+
+// TestCmdWorkflowReopenSourceIgnoresDebrisUnderClosedRoots pins that open item
+// workflows under a closed root are cleanup debris, not a live run: they do not
+// block reopen.
+func TestCmdWorkflowReopenSourceIgnoresDebrisUnderClosedRoots(t *testing.T) {
+	_, store := newDeleteSourceTestCity(t)
+	source := createDeleteSourceTestBead(t, store, beads.Bead{Title: "Source", Type: "task", Status: "closed"})
+	root, _ := createGraphWorkflowRun(t, store, "closed", map[string]string{beadmeta.SourceBeadIDMetadataKey: source.ID}, 0)
+	drain := createDrainControl(t, store, root.ID, "closed")
+	createDrainItemWorkflow(t, store, drain.ID, "in_progress", 1)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWorkflowReopenSource(source.ID, sourceWorkflowStoreSelector{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdWorkflowReopenSource = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "result=reopened") {
+		t.Fatalf("stdout = %q, want the source reopened", stdout.String())
+	}
+}

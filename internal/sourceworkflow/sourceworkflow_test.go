@@ -1319,6 +1319,35 @@ func workflowTitlesOf(bs []beads.Bead) []string {
 	return out
 }
 
+func TestListSourceRootsInCityIncludesClosedRootsThatListLiveRootsHides(t *testing.T) {
+	store := beads.NewMemStore()
+	meta := func() map[string]string {
+		return map[string]string{
+			"gc.kind":                 "workflow",
+			"gc.source_bead_id":       "BL-42",
+			SourceStoreRefMetadataKey: "city:mc",
+		}
+	}
+	live := createWorkflowTestBead(t, store, beads.Bead{Title: "wf-live", Status: "in_progress", Metadata: meta()})
+	done := createWorkflowTestBead(t, store, beads.Bead{Title: "wf-done", Status: "closed", Metadata: meta()})
+
+	got, err := ListLiveRootsInCity(beadstest.GraphMolecule(store), "BL-42", "city:mc", "city:mc", "mc")
+	if err != nil {
+		t.Fatalf("ListLiveRootsInCity: %v", err)
+	}
+	if ids := workflowIDsOf(got); len(ids) != 1 || ids[0] != live.ID {
+		t.Fatalf("ListLiveRootsInCity = %v, want only wf-live %s", workflowTitlesOf(got), live.ID)
+	}
+	got, err = ListSourceRootsInCity(beadstest.GraphMolecule(store), "BL-42", "city:mc", "city:mc", "mc")
+	if err != nil {
+		t.Fatalf("ListSourceRootsInCity: %v", err)
+	}
+	want := map[string]bool{live.ID: true, done.ID: true}
+	if len(got) != len(want) || !want[got[0].ID] || !want[got[1].ID] {
+		t.Fatalf("ListSourceRootsInCity = %v, want wf-live and wf-done", workflowTitlesOf(got))
+	}
+}
+
 func TestListInputConvoyRootsKeepsClosedRootsAndSkipsDrainItems(t *testing.T) {
 	store := beads.NewMemStore()
 	closedRoot := createWorkflowTestBead(t, store, beads.Bead{Title: "wf-closed", Status: "closed", Metadata: map[string]string{"gc.kind": "workflow", "gc.input_convoy_id": "cv-1"}})

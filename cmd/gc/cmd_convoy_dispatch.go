@@ -2690,12 +2690,17 @@ func cmdWorkflowReopenSource(sourceBeadID string, selector sourceWorkflowStoreSe
 			// stores so operators know coverage was degraded.
 			fmt.Fprintln(stderr, "warning:", formatSourceWorkflowStoreSkips(skips)) //nolint:errcheck
 		}
-		totalRoots, _, _ := summarizeSourceWorkflowMatches(matches)
-		if totalRoots > 0 {
-			ids := make([]string, 0, totalRoots)
-			for _, match := range matches {
-				ids = append(ids, rootIDs(match.roots)...)
+		// A closed root matches only for the open item workflows left under it:
+		// cleanup debris, not a live run, so it does not block the reopen.
+		var ids []string
+		for _, match := range matches {
+			for _, root := range match.roots {
+				if root.Status != "closed" {
+					ids = append(ids, root.ID)
+				}
 			}
+		}
+		if len(ids) > 0 {
 			_, _ = fmt.Fprintf(
 				stderr,
 				"result=conflict source_bead_id=%s blocking_workflow_ids=%s\n",
@@ -3390,12 +3395,12 @@ type sourceRootListing struct {
 }
 
 // listSourceRoots lists the roots in one view attributed to the current
-// source: the live ones keyed by gc.source_bead_id and the live ones launched
-// on one of its owned launch convoys. A launch convoy's roots are read
+// source: those keyed by gc.source_bead_id, closed ones included, and those
+// launched on one of its owned launch convoys. A launch convoy's roots are read
 // only from the view holding the convoy or from the class binding, so a
 // same-ID convoy in another store never attributes its runs to this source.
 func (c *sourceWorkflowMatchCollector) listSourceRoots(graph beads.MoleculeTarget, index int, info convoyStoreView, currentSourceID, currentSourceStoreRef, rootStoreRef string, launches []sourceLaunchConvoy) (sourceRootListing, error) {
-	roots, err := sourceworkflow.ListLiveRootsInCity(graph, currentSourceID, currentSourceStoreRef, rootStoreRef, c.cityName)
+	roots, err := sourceworkflow.ListSourceRootsInCity(graph, currentSourceID, currentSourceStoreRef, rootStoreRef, c.cityName)
 	if err != nil {
 		return sourceRootListing{}, err
 	}
@@ -3408,11 +3413,7 @@ func (c *sourceWorkflowMatchCollector) listSourceRoots(graph beads.MoleculeTarge
 		if err != nil {
 			return sourceRootListing{}, err
 		}
-		for _, root := range convoyRoots {
-			if root.Status != "closed" {
-				listing.roots = append(listing.roots, root)
-			}
-		}
+		listing.roots = append(listing.roots, convoyRoots...)
 	}
 	listing.roots = uniqueBeads(listing.roots)
 	return listing, nil
