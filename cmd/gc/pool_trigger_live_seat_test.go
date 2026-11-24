@@ -79,6 +79,10 @@ type liveSeatReuse struct {
 	// oneShot makes the pool one_shot, whose seat asleep for a freeable
 	// reason is reusable (reusablePoolSessionInfo).
 	oneShot bool
+	// seatInPoolDir stamps the seat's work-dir metadata with the pool's own
+	// directory once the config exists: the row a seat bound to unmanaged
+	// work records.
+	seatInPoolDir bool
 	// store wraps the store realization reads and writes, once the seat's
 	// row exists.
 	store    func(beads.Store) beads.Store
@@ -155,6 +159,15 @@ func (r liveSeatReuse) run(t *testing.T) liveSeatReuseResult {
 	}
 	if r.oneShot {
 		res.cfg.Agents[0].Lifecycle = config.AgentLifecycleOneShot
+	}
+	if r.seatInPoolDir {
+		poolDir := res.cfg.Agents[0].WorkDir
+		if err := store.SetMetadataBatch(seat.ID, map[string]string{
+			beadmeta.WorkDirMetadataKey:       poolDir,
+			beadmeta.LegacyWorkDirMetadataKey: poolDir,
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if r.store != nil {
 		res.store = r.store(store)
@@ -431,6 +444,33 @@ func TestLegacyResumeRequestFromAssignedWorkBindsVerifiedWorktree(t *testing.T) 
 	}
 	if rows := res.otherRows(t); len(rows) != 0 {
 		t.Fatalf("started %d other sessions; want the stopped seat reused", len(rows))
+	}
+}
+
+// TestLegacySameTriggerStaleResumeSeatMovesToItsWorktree pins the stale-record
+// half of gastownhall/gascity#5753: a stopped seat that already holds the
+// trigger but records the pool's own directory — the bind a seat with no
+// evidence produced before the fix — is rewritten to the work's verified
+// worktree, under both work_dir spellings.
+func TestLegacySameTriggerStaleResumeSeatMovesToItsWorktree(t *testing.T) {
+	spec, path := liveSeatManagedSpec(t, "gc-b")
+	res := liveSeatReuse{
+		running:       false,
+		seatInPoolDir: true,
+		extra:         map[string]string{beadmeta.TriggerBeadIDMetadataKey: "gc-b"},
+		assigned:      func(id string) []beads.Bead { return []beads.Bead{workBeadWithManagedSpec(spec, id)} },
+		request:       func(id string) SessionRequest { return resumeRequestFromAssignedWork(spec, id) },
+	}.reused(t)
+	poolDir := res.cfg.Agents[0].WorkDir
+	row := res.row(t)
+	if got := row.Metadata[beadmeta.WorkDirMetadataKey]; got != path {
+		t.Fatalf("gc.work_dir = %q, want the verified worktree %q, not the recorded pool dir %q", got, path, poolDir)
+	}
+	if got := row.Metadata[beadmeta.LegacyWorkDirMetadataKey]; got != path {
+		t.Fatalf("work_dir = %q, want %q", got, path)
+	}
+	if verifies := res.probe.worktreeVerifies.Load(); verifies != 1 {
+		t.Fatalf("worktree.Verify calls = %d, want exactly one", verifies)
 	}
 }
 
