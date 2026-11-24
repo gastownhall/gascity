@@ -3466,3 +3466,44 @@ func TestComputePoolDesiredStatesAssignedWorkEvidenceFailsClosed(t *testing.T) {
 		})
 	}
 }
+
+// TestComputePoolDesiredStatesUnmanagedAssignedWorkStaysUnmanaged pins the
+// no-regression half of gastownhall/gascity#5753: work that never claimed
+// worktree ownership — no work_dir at all, a work_dir with none of the nine
+// ownership keys (recipe drain items), or one stamped with only
+// gc.work_branch (hook claims) — keeps producing a request with a nil spec and
+// no error, so the seat binds the pool directory exactly as before.
+func TestComputePoolDesiredStatesUnmanagedAssignedWorkStaysUnmanaged(t *testing.T) {
+	zeroKeys := workBead("w-zero", "rig/claude", "sess-1", "in_progress", 5)
+	zeroKeys.Metadata[beadmeta.WorkDirMetadataKey] = "/tmp/recipe/w-zero"
+	branchOnly := workBead("w-branch", "rig/claude", "sess-1", "in_progress", 5)
+	branchOnly.Metadata[beadmeta.WorkDirMetadataKey] = "/tmp/hook/w-branch"
+	branchOnly.Metadata[beadmeta.WorkBranchMetadataKey] = "main"
+	cases := []struct {
+		name string
+		bead beads.Bead
+	}{
+		{name: "no work_dir", bead: workBead("w-plain", "rig/claude", "sess-1", "in_progress", 5)},
+		{name: "work_dir with zero ownership keys", bead: zeroKeys},
+		{name: "work_dir with only gc.work_branch", bead: branchOnly},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.City{Agents: []config.Agent{poolAgent("claude", "rig", intPtr(4), 0)}}
+			sessions := []beads.Bead{sessionBead("sess-1", "open")}
+
+			states := computePoolDesiredStatesParkedAt(cfg, []beads.Bead{tc.bead}, nil, []string{"r1"},
+				sessionInfosFromBeads(sessions), nil, nil, time.Time{}, nil, nil)
+			request := singleRequest(t, states)
+			if request.Tier != "resume" || request.WorkBeadID != tc.bead.ID {
+				t.Fatalf("request = %#v, want the resume for %s still emitted", request, tc.bead.ID)
+			}
+			if request.WorktreeSpec != nil {
+				t.Errorf("WorktreeSpec = %+v, want nil (unmanaged)", request.WorktreeSpec)
+			}
+			if request.WorktreeError != "" {
+				t.Errorf("WorktreeError = %q, want empty (unmanaged work is not an error)", request.WorktreeError)
+			}
+		})
+	}
+}

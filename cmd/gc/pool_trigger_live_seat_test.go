@@ -387,6 +387,14 @@ func workBeadWithManagedSpec(spec worktree.Spec, seatID string) beads.Bead {
 	return wb
 }
 
+// unmanagedRecipeWorkBead is assigned work carrying a work_dir and none of the
+// nine worktree ownership keys — the shape drain recipe steps are minted in.
+func unmanagedRecipeWorkBead(seatID string) beads.Bead {
+	wb := workBead("gc-b", "worker", seatID, "in_progress", 1)
+	wb.Metadata[beadmeta.WorkDirMetadataKey] = "/tmp/recipe/gc-b"
+	return wb
+}
+
 // resumeRequestFromAssignedWork plans the request the demand pass builds for
 // assigned work that names a managed worktree: the parked planner over the
 // evidence bead, read through a leg whose census ref is the bare rig name,
@@ -396,6 +404,24 @@ func resumeRequestFromAssignedWork(spec worktree.Spec, seatID string) SessionReq
 		Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(3),
 	}}}
 	states := computePoolDesiredStatesParkedAt(cfg, []beads.Bead{workBeadWithManagedSpec(spec, seatID)}, nil, []string{"r1"},
+		sessionInfosFromBeads([]beads.Bead{sessionBead(seatID, "open")}), nil, nil, time.Time{}, nil, nil)
+	for _, ds := range states {
+		for _, r := range ds.Requests {
+			if r.Tier == "resume" && r.SessionBeadID == seatID {
+				return r
+			}
+		}
+	}
+	return SessionRequest{}
+}
+
+// unmanagedResumeRequest plans the same resume request for assigned work that
+// never claimed worktree ownership.
+func unmanagedResumeRequest(seatID string) SessionRequest {
+	cfg := &config.City{Agents: []config.Agent{{
+		Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(3),
+	}}}
+	states := computePoolDesiredStatesParkedAt(cfg, []beads.Bead{unmanagedRecipeWorkBead(seatID)}, nil, []string{"r1"},
 		sessionInfosFromBeads([]beads.Bead{sessionBead(seatID, "open")}), nil, nil, time.Time{}, nil, nil)
 	for _, ds := range states {
 		for _, r := range ds.Requests {
@@ -496,6 +522,35 @@ func TestLegacyResumeReRepointKeepsCanonicalTriggerStoreRef(t *testing.T) {
 	}
 	if got := row.Metadata[beadmeta.WorkDirMetadataKey]; got != path {
 		t.Fatalf("gc.work_dir = %q, want %q", got, path)
+	}
+}
+
+// TestLegacyResumeUnmanagedWorkStillBindsPoolDir pins the no-regression half
+// of gastownhall/gascity#5753 at the seat: assigned work that never claimed
+// worktree ownership (a recipe drain item's work_dir with no ownership keys)
+// keeps binding the seat to the pool's own directory, exactly as before.
+func TestLegacyResumeUnmanagedWorkStillBindsPoolDir(t *testing.T) {
+	res := liveSeatReuse{
+		running:  false,
+		assigned: func(id string) []beads.Bead { return []beads.Bead{unmanagedRecipeWorkBead(id)} },
+		request:  unmanagedResumeRequest,
+	}.reused(t)
+	if res.request.WorktreeSpec != nil || res.request.WorktreeError != "" {
+		t.Fatalf("request = %#v, want unmanaged work: no spec, no error", res.request)
+	}
+	poolDir := res.cfg.Agents[0].WorkDir
+	row := res.row(t)
+	if got := row.Metadata[beadmeta.TriggerBeadIDMetadataKey]; got != "gc-b" {
+		t.Fatalf("trigger = %q, want the seat re-pointed to gc-b", got)
+	}
+	if got := row.Metadata[beadmeta.WorkDirMetadataKey]; got != poolDir {
+		t.Fatalf("gc.work_dir = %q, want the pool's own directory %q", got, poolDir)
+	}
+	if got := row.Metadata[beadmeta.LegacyWorkDirMetadataKey]; got != poolDir {
+		t.Fatalf("work_dir = %q, want %q", got, poolDir)
+	}
+	if verifies := res.probe.worktreeVerifies.Load(); verifies != 0 {
+		t.Fatalf("worktree.Verify calls = %d, want none for unmanaged work", verifies)
 	}
 }
 
