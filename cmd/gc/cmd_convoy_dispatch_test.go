@@ -12303,3 +12303,53 @@ func TestCmdWorkflowReopenSourceIgnoresDebrisUnderClosedRoots(t *testing.T) {
 		t.Fatalf("stdout = %q, want the source reopened", stdout.String())
 	}
 }
+
+// TestCmdWorkflowDeleteSourceIgnoresConvoyLinksItDoesNotOwn pins that only a
+// launch convoy minted for the source attributes a run to it: a convoy someone
+// created that tracks the source among other beads, and a drain's unit convoy
+// for the source inside another run, both launched runs that are not the
+// source's own.
+func TestCmdWorkflowDeleteSourceIgnoresConvoyLinksItDoesNotOwn(t *testing.T) {
+	cityDir, store := newDeleteSourceTestCity(t)
+	source := createDeleteSourceTestBead(t, store, beads.Bead{Title: "Source", Type: "task", Status: "in_progress"})
+	other := createDeleteSourceTestBead(t, store, beads.Bead{Title: "Other", Type: "task", Status: "open"})
+	batch := createDeleteSourceTestBead(t, store, beads.Bead{Title: "Batch", Type: "convoy", Status: "open"})
+	for _, id := range []string{source.ID, other.ID} {
+		if err := store.DepAdd(batch.ID, id, convoycore.TrackingDepType); err != nil {
+			t.Fatalf("DepAdd(tracks %s): %v", id, err)
+		}
+	}
+	batchRoot, batchSteps := createGraphWorkflowRun(t, store, "in_progress", map[string]string{beadmeta.InputConvoyIDMetadataKey: batch.ID}, 1)
+
+	otherSource := createDeleteSourceTestBead(t, store, beads.Bead{Title: "Other source", Type: "task", Status: "in_progress"})
+	otherRoot, _ := createGraphWorkflowRun(t, store, "in_progress", map[string]string{beadmeta.SourceBeadIDMetadataKey: otherSource.ID}, 0)
+	drain := createDrainControl(t, store, otherRoot.ID, "in_progress")
+	item, itemSteps := createDrainItemWorkflow(t, store, drain.ID, "in_progress", 1)
+	if err := store.DepAdd(item.Metadata[beadmeta.InputConvoyIDMetadataKey], source.ID, convoycore.TrackingDepType); err != nil {
+		t.Fatalf("DepAdd(unit tracks source): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWorkflowDeleteSource(source.ID, sourceWorkflowStoreSelector{}, true, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdWorkflowDeleteSource = %d; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "result=already_clean") {
+		t.Fatalf("stdout = %q, want nothing attributed to the source", stdout.String())
+	}
+	reloaded, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(reload): %v", err)
+	}
+	untouched := []beads.Bead{batchRoot, otherRoot, drain, item}
+	untouched = append(untouched, batchSteps...)
+	untouched = append(untouched, itemSteps...)
+	for _, b := range untouched {
+		got, err := reloaded.Get(b.ID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", b.ID, err)
+		}
+		if got.Status == "closed" {
+			t.Errorf("%s (%s) was closed by a sweep of a source it does not belong to", b.ID, b.Title)
+		}
+	}
+}
