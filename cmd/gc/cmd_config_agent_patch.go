@@ -45,7 +45,7 @@ This command requires a running mutable city API.`,
 				if asJSON {
 					writeJSONError(stdout, stderr, "agent_patch_failed", err.Error(), 1)
 				} else {
-					fmt.Fprintf(stderr, "gc config agent-patch: %v\n", err)
+					_, _ = fmt.Fprintf(stderr, "gc config agent-patch: %v\n", err)
 				} //nolint:errcheck
 				return errExit
 			}
@@ -104,7 +104,7 @@ func runAgentPatchCommand(client *api.Client, name string, change configedit.Age
 		if asJSON {
 			writeJSONError(stdout, stderr, "agent_patch_failed", err.Error(), 1)
 		} else {
-			fmt.Fprintf(stderr, "gc config agent-patch: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "gc config agent-patch: %v\n", err)
 		} //nolint:errcheck
 		return errExit
 	}
