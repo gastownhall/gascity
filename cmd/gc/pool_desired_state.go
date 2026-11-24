@@ -501,7 +501,7 @@ func computePoolDesiredStatesParkedAt(
 						continue
 					}
 					wakeRequestedTemplates[template] = struct{}{}
-					resumeRequests = append(resumeRequests, SessionRequest{
+					resumeRequests = append(resumeRequests, requestWithAssignedWorkProvenance(SessionRequest{
 						Template:     template,
 						BeadPriority: beadPriorityRank(beadPriority(wb)),
 						Tier:         "wake-known-identity",
@@ -513,7 +513,7 @@ func computePoolDesiredStatesParkedAt(
 						WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
 						WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
 						BrainParentSID: strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
-					})
+					}, wb, storeRefs, w))
 					if trace != nil {
 						trace.RecordDecision(TraceSitePoolWakeKnownIdentity, TraceReasonAssignedWork, TraceOutcomeScheduled, template, "", traceRecordPayload{
 							"tier":                   "wake-known-identity",
@@ -560,7 +560,7 @@ func computePoolDesiredStatesParkedAt(
 				continue
 			}
 			wakeRequestedTemplates[template] = struct{}{}
-			resumeRequests = append(resumeRequests, SessionRequest{
+			resumeRequests = append(resumeRequests, requestWithAssignedWorkProvenance(SessionRequest{
 				Template:       template,
 				BeadPriority:   beadPriorityRank(beadPriority(wb)),
 				Tier:           "wake-known-identity",
@@ -569,7 +569,7 @@ func computePoolDesiredStatesParkedAt(
 				WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
 				WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
 				BrainParentSID: strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
-			})
+			}, wb, storeRefs, w))
 			if trace != nil {
 				trace.RecordDecision(TraceSitePoolWakeKnownIdentity, TraceReasonAssignedWork, TraceOutcomeScheduled, template, "", traceRecordPayload{
 					"tier":      "wake-known-identity",

@@ -3303,3 +3303,60 @@ func TestComputePoolDesiredStatesResumeTierCarriesWorktreeEvidence(t *testing.T)
 		})
 	}
 }
+
+// wakeKnownCase is one way the wake-known-identity tier plans a clean session
+// for assigned work: its assignee is a closed or unknown identity of the pool,
+// or an asleep session of a wake_mode="fresh" agent with ready work.
+type wakeKnownCase struct {
+	name     string
+	cfg      *config.City
+	assignee string
+	sessions []beads.Bead
+	ready    []bool
+}
+
+// wakeKnownCases are the two wake-known-identity emission sites for template
+// worker.
+func wakeKnownCases() []wakeKnownCase {
+	fresh := config.Agent{Name: "worker", MaxActiveSessions: intPtr(3), WakeMode: "fresh"}
+	asleep := poolSessionBeadWithState("sess-1", "asleep", "")
+	asleep.Metadata["template"], asleep.Metadata["agent_name"] = "worker", "worker-1"
+	return []wakeKnownCase{
+		{
+			name:     "closed or unknown assignee",
+			cfg:      &config.City{Agents: []config.Agent{{Name: "worker", MaxActiveSessions: intPtr(3)}}},
+			assignee: "worker",
+		},
+		{
+			name:     "asleep fresh-mode holder",
+			cfg:      &config.City{Agents: []config.Agent{fresh}},
+			assignee: "sess-1",
+			sessions: []beads.Bead{asleep},
+			ready:    []bool{true},
+		},
+	}
+}
+
+// TestComputePoolDesiredStatesWakeKnownTiersCarryWorktreeEvidence pins
+// gastownhall/gascity#5753 for both wake-known-identity emission sites: the
+// clean session planned for work naming a managed worktree carries its spec
+// and the census leg's store guard.
+func TestComputePoolDesiredStatesWakeKnownTiersCarryWorktreeEvidence(t *testing.T) {
+	spec := fakeManagedSpec("w-1")
+	for _, tc := range wakeKnownCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			wb := withMetadata(workBead("w-1", "worker", tc.assignee, "in_progress", 2), worktreeEvidenceMetadata(spec))
+			req := assignedWorkRequest(t, tc.cfg, wb, tc.ready, []string{"r1"}, tc.sessions)
+			if req.Tier != "wake-known-identity" || req.SessionBeadID != "" {
+				t.Fatalf("request = %+v, want a wake-known-identity clean create", req)
+			}
+			if req.WorktreeSpec == nil || !reflect.DeepEqual(*req.WorktreeSpec, spec) {
+				t.Fatalf("WorktreeSpec = %+v, want %+v (a nil spec creates the session in the pool directory)", req.WorktreeSpec, spec)
+			}
+			if req.WorktreeError != "" || req.WorkStoreRef != "rig:r1" || req.WorkBindingResident {
+				t.Fatalf("(WorktreeError, WorkStoreRef, WorkBindingResident) = (%q, %q, %v), want (\"\", \"rig:r1\", false)",
+					req.WorktreeError, req.WorkStoreRef, req.WorkBindingResident)
+			}
+		})
+	}
+}
