@@ -121,8 +121,14 @@ func TestDivergenceClassification(t *testing.T) {
 		blocked    bool
 		confirmErr error
 		triggerID  string
-		wantClass  string
-		wantStat   string
+		// storeRef names the store the controller counted the row in. The
+		// default (empty) runs the row under BOTH canonical stamps — the seat's
+		// own leg and the city's — and demands the same verdict, because the
+		// verdict is a fact about the row, not about where it was counted. A
+		// row that sets it pins a stamp-specific answer instead.
+		storeRef  string
+		wantClass string
+		wantStat  string
 	}{
 		{
 			// The PRODUCTION shape: bd's payloads never carry is_blocked, so the
@@ -192,6 +198,16 @@ func TestDivergenceClassification(t *testing.T) {
 			wantClass: events.DemandClaimUnknown, wantStat: "unreadable",
 		},
 		{
+			// The same row that is divergence under a placeable stamp is unknown
+			// under one the seat cannot place, with no read issued: the resolver
+			// double refuses "rig:gone" the way the production resolver refuses
+			// an unknown rig.
+			name: "still open, but counted in a store the seat cannot place", triggerID: "wb-1",
+			bead:      beads.Bead{ID: "wb-1", Status: "open", Type: "task", Metadata: routed},
+			storeRef:  "rig:gone",
+			wantClass: events.DemandClaimUnknown, wantStat: demandTriggerStoreUnresolved,
+		},
+		{
 			name: "no trigger recorded", triggerID: "",
 			wantClass: events.DemandClaimUnknown, wantStat: "",
 		},
@@ -199,12 +215,18 @@ func TestDivergenceClassification(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			opts := divergenceOptions()
 			ops := demandDivergenceOpsForBlockedBead(tt.bead, tt.readErr, tt.blocked, tt.confirmErr)
-			status, class := classifyDemandTrigger(demandTrigger{ID: tt.triggerID, StoreRef: demandDivergenceTestRigRef}, opts, ops)
-			if class != tt.wantClass {
-				t.Errorf("classification = %q, want %q", class, tt.wantClass)
+			stamps := []string{demandDivergenceTestRigRef, demandDivergenceTestCityRef}
+			if tt.storeRef != "" {
+				stamps = []string{tt.storeRef}
 			}
-			if status != tt.wantStat {
-				t.Errorf("status = %q, want %q", status, tt.wantStat)
+			for _, stamp := range stamps {
+				status, class := classifyDemandTrigger(demandTrigger{ID: tt.triggerID, StoreRef: stamp}, opts, ops)
+				if class != tt.wantClass {
+					t.Errorf("stamp %q: classification = %q, want %q", stamp, class, tt.wantClass)
+				}
+				if status != tt.wantStat {
+					t.Errorf("stamp %q: status = %q, want %q", stamp, status, tt.wantStat)
+				}
 			}
 		})
 	}
