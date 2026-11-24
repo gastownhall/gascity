@@ -131,11 +131,13 @@ type hookStoreRunner func(command, dir string, env []string) (string, error)
 // That is the shape of the I5 known gap — a relocated coordination class is not
 // a bd workspace, so no leg of this list can reach the binding on its own. The
 // federated `gc ready` reader (ga-bvdha) now runs AS the primary leg's command
-// and covers the binding in-process, so the hook does see class ids; what it
-// still cannot do is claim one, because the claim is a bd subprocess rooted in
-// this leg's workspace. This function is the seam that pins it
-// (conformanceClaimRouting); closing the gap makes the claim stop being a bd
-// subprocess call, and I15 pins the see-but-cannot-claim asymmetry until it does.
+// and covers the binding and every work leg in-process, so the hook sees class
+// ids and other legs' ids alike. The claim is still a bd subprocess rooted in
+// this leg's workspace, so two routes carry it to the store that holds the
+// bead: the class route (claim_class_route.go) to the binding, and on the
+// primary-scoped branch the work-leg route (claim_work_leg_route.go) to another
+// work leg. This function is the seam that pins the leg shape
+// (conformanceClaimRouting).
 func hookWorkQueryStores(cityPath string, cfg *config.City, a *config.Agent, agentForQuery, workDir string, queryEnv []string, identityOverrides map[string]string, suspendedRigs map[string]bool) []hookStore {
 	return hookWorkQueryStoreFanOut(cityPath, cfg, a, agentForQuery, workDir, queryEnv, identityOverrides, suspendedRigs, false)
 }
@@ -145,6 +147,24 @@ func hookWorkQueryStores(cityPath string, cfg *config.City, a *config.Agent, age
 // scopeFederatedHookStores).
 func hookWorkQueryPrimaryStore(cityPath string, cfg *config.City, a *config.Agent, agentForQuery, workDir string, queryEnv []string, identityOverrides map[string]string) hookStore {
 	return hookWorkQueryStoreFanOut(cityPath, cfg, a, agentForQuery, workDir, queryEnv, identityOverrides, nil, true)[0]
+}
+
+// hookClaimStores is the store list a claim reads and the work-leg route that
+// goes with it. Where the agent's federated query differs from its
+// single-store form (hookStoresScopeToPrimary) the claim reads only the
+// primary entry, whose reader serves every work leg's beads, so the route
+// claims a candidate the primary proves absent in the leg that holds it
+// (claim_work_leg_route.go). On a single-store city, and for a custom
+// work_query, the claim fans out to every store, each claiming what its own
+// query returned, and carries no route. suspendedRigs is called only for the
+// fan-out.
+func hookClaimStores(cityPath string, cfg *config.City, a *config.Agent, agentForQuery, workDir string, queryEnv []string, identityOverrides map[string]string, workQuery, singleStoreWorkQuery string, suspendedRigs func() map[string]bool) ([]hookStore, *hookClaimWorkLegRoute) {
+	if !hookStoresScopeToPrimary(workQuery, singleStoreWorkQuery) {
+		return hookWorkQueryStores(cityPath, cfg, a, agentForQuery, workDir, queryEnv, identityOverrides, suspendedRigs()), nil
+	}
+	primary := hookWorkQueryPrimaryStore(cityPath, cfg, a, agentForQuery, workDir, queryEnv, identityOverrides)
+	route := newHookClaimWorkLegRoute(cityPath, cfg, a, primaryHookStoreRef(cityPath, cfg, agentForQuery, workDir, queryEnv), identityOverrides)
+	return []hookStore{primary}, route
 }
 
 // hookWorkQueryStoreFanOut is hookWorkQueryStores, stopping after the first
@@ -221,9 +241,20 @@ func appendRigHookStores(stores []hookStore, cityPath string, cfg *config.City, 
 // agent's own store first) and the rig-scoped hook path (which puts the rig
 // store first, as the agent's primary store).
 func appendOneRigHookStore(stores []hookStore, cityPath string, cfg *config.City, a *config.Agent, rigName string, identityOverrides map[string]string) []hookStore {
+	store, err := rigHookStore(cityPath, cfg, a, rigName, identityOverrides)
+	if err != nil {
+		return stores
+	}
+	return append(stores, store)
+}
+
+// rigHookStore builds the hookStore for a single named rig, as
+// appendOneRigHookStore appends it, and reports why it could not: an unknown
+// rig, or a rig whose env cannot be built.
+func rigHookStore(cityPath string, cfg *config.City, a *config.Agent, rigName string, identityOverrides map[string]string) (hookStore, error) {
 	rigName = strings.TrimSpace(rigName)
 	if cfg == nil || a == nil || rigName == "" {
-		return stores
+		return hookStore{}, fmt.Errorf("building the store of rig %q: no city config, agent or rig name", rigName)
 	}
 	known := false
 	for i := range cfg.Rigs {
@@ -233,25 +264,28 @@ func appendOneRigHookStore(stores []hookStore, cityPath string, cfg *config.City
 		}
 	}
 	if !known {
-		return stores
+		return hookStore{}, fmt.Errorf("building the store of rig %q: no such rig", rigName)
 	}
 	view := *a
 	view.Dir = rigName
 	rigEnv, err := hookStoreQueryEnv(cityPath, cfg, &view)
-	if err != nil || rigEnv == nil {
-		return stores
+	if err != nil {
+		return hookStore{}, fmt.Errorf("building the env of rig %q: %w", rigName, err)
+	}
+	if rigEnv == nil {
+		return hookStore{}, fmt.Errorf("building the env of rig %q: no env", rigName)
 	}
 	for _, k := range hookIdentityEnvKeys {
 		if v, ok := identityOverrides[k]; ok {
 			rigEnv[k] = v
 		}
 	}
-	return append(stores, hookStore{
+	return hookStore{
 		dir:      agentCommandDir(cityPath, &view, cfg.Rigs),
 		env:      mergeRuntimeEnv(os.Environ(), rigEnv),
 		rig:      rigName,
 		storeRef: "rig:" + rigName,
-	})
+	}, nil
 }
 
 // appendCityHookStore appends the CITY store as a best-effort federated entry
@@ -268,25 +302,38 @@ func appendOneRigHookStore(stores []hookStore, cityPath string, cfg *config.City
 // entry is appended LAST so the rig store keeps bestStoreWithWork's
 // emit-on-timeout contract as the primary entry.
 func appendCityHookStore(stores []hookStore, cityPath string, cfg *config.City, a *config.Agent, identityOverrides map[string]string) []hookStore {
-	if cfg == nil || a == nil {
+	store, err := cityHookStore(cityPath, cfg, a, identityOverrides)
+	if err != nil {
 		return stores
+	}
+	return append(stores, store)
+}
+
+// cityHookStore builds the CITY store's hookStore, as appendCityHookStore
+// appends it, and reports why it could not.
+func cityHookStore(cityPath string, cfg *config.City, a *config.Agent, identityOverrides map[string]string) (hookStore, error) {
+	if cfg == nil || a == nil {
+		return hookStore{}, errors.New("building the city store: no city config or agent")
 	}
 	view := *a
 	view.Dir = ""
 	cityEnv, err := hookStoreQueryEnv(cityPath, cfg, &view)
-	if err != nil || cityEnv == nil {
-		return stores
+	if err != nil {
+		return hookStore{}, fmt.Errorf("building the city env: %w", err)
+	}
+	if cityEnv == nil {
+		return hookStore{}, errors.New("building the city env: no env")
 	}
 	for _, k := range hookIdentityEnvKeys {
 		if v, ok := identityOverrides[k]; ok {
 			cityEnv[k] = v
 		}
 	}
-	return append(stores, hookStore{
+	return hookStore{
 		dir:      cityPath,
 		env:      mergeRuntimeEnv(os.Environ(), cityEnv),
 		storeRef: "city:" + hookStoreCityName(cityPath, loadedCityName(cfg, cityPath)),
-	})
+	}, nil
 }
 
 // primaryHookStoreRef names the store the agent's own work-query env reads.

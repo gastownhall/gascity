@@ -2550,6 +2550,14 @@ func fixtureGraphLeg(e splitEnv) beads.Store {
 // (hookClaimBeadIsElsewhere, unwidened). So the two halves of the split-city
 // worker now agree: the bead this query surfaces is one the same command claims.
 //
+// The same reader serves every WORK leg too — a bead routed to this agent from
+// another rig's store, or a city bead routed to a rig agent — while the scoped
+// claim runs against the primary leg alone. The work-leg route
+// (claim_work_leg_route.go, under the class route) closes that half: a bead the
+// primary proves absent is claimed in the first work leg, in the reader's
+// order, that holds it, and a leg it cannot read skips the bead unwritten. Its
+// rows live in claim_work_leg_route_test.go.
+//
 // The rows below assert both halves, because both still have to hold:
 //
 //  1. The WORK store still cannot resolve a relocated bead, and still fails with

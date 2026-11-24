@@ -354,6 +354,14 @@ type hookClaimOps struct {
 	// not-found from ONE leg be checked against the others before it opens the
 	// escalation. See claim_class_route.go.
 	ClassRoute *hookClaimClassRoute
+	// WorkLegRoute is the route to the work leg that holds a bead the primary
+	// leg proved absent, or nil off the primary-scoped claim branch. Like
+	// ClassRoute it is not a seam: the started key reads its memo to key a
+	// claim by the leg it landed in (hookStartedKeyFor), and the workflow stop
+	// gate and the continuation pin to read the claimed bead's workflow there
+	// (hookClaimWorkflowStop, preassignHookContinuationGroup). See
+	// claim_work_leg_route.go.
+	WorkLegRoute *hookClaimWorkLegRoute
 	// ClassesRelocated reports that the city relocates its coordination
 	// classes even when ClassRoute is nil because the route degraded (a
 	// binding with no claim CAS): a bead its leg serves may then reside in the
@@ -984,7 +992,7 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		// re-stamp and the workflow re-check below spend any more store time.
 		landedAt := ops.nowOrWallClock()
 		if err != nil {
-			if !ok && (hookClaimBeadIsElsewhere(err) || hookClaimBindingRefusedTheClaim(err) || hookClaimBeadIsAWisp(err)) {
+			if !ok && (hookClaimBeadIsElsewhere(err) || hookClaimBindingRefusedTheClaim(err) || hookClaimBeadIsAWisp(err) || errors.Is(err, errHookClaimWorkLegUnreadable)) {
 				// The read federated and the write did not: the assigned tier
 				// reads city-wide, so a graph step in a relocated class store
 				// arrives here while the claim runs against this store's bd
@@ -1005,6 +1013,11 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 				// the same reason (hookClaimBeadIsAWisp): the refusal lands before
 				// any write, so nothing is outstanding, and retrying against the
 				// same binding cannot change the answer.
+				//
+				// A work leg the work-leg route could not read while it looked
+				// for the bead the primary lacks (errHookClaimWorkLegUnreadable)
+				// stops the claim before any write, so nothing is outstanding
+				// either; the next tick reads that leg again.
 				fmt.Fprintf(stderr, "gc hook --claim: skipping ready assignment %s: %v\n", candidate.ID, err) //nolint:errcheck
 				claimsErrored = true
 				continue
@@ -1367,11 +1380,19 @@ func hookClaimWorkflowLinked(candidate beads.Bead) bool {
 // probe makes: one store hiccup must not idle every seat, and the claim CAS
 // that follows runs against the same store. A failed close still withholds the
 // bead; it stays visible to the next poll, which re-runs this gate.
+//
+// A candidate the work-leg route proved another work leg holds is read and
+// closed in that leg (claim_work_leg_route.go). The route proves a home only
+// once an op on the candidate missed in the primary, so the gate before such a
+// claim still reads the primary, which holds neither the candidate nor, as a
+// rule, its workflow, and the re-check after the claim reads the leg it
+// landed in, as the class route's re-check reads the binding.
 func hookClaimWorkflowStop(ctx context.Context, candidate beads.Bead, actor string, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) bool {
 	if !hookClaimWorkflowLinked(candidate) || ops.WorkflowStore == nil {
 		return false
 	}
-	store := ops.WorkflowStore(ctx, dir, opts.Env, candidate.ID, actor)
+	storeDir, storeEnv := ops.WorkLegRoute.at(dir, opts.Env, candidate.ID)
+	store := ops.WorkflowStore(ctx, storeDir, storeEnv, candidate.ID, actor)
 	// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
 	stop, err := molecule.WorkflowStopReason(beads.GraphMolecule(beads.GraphStore{Store: store}), candidate)
 	if err != nil {
@@ -1937,6 +1958,10 @@ func forgetHookWorkStarted(opts hookClaimOptions, ops hookClaimOps, key hookStar
 // an id's hyphenated one), and to its contributor auto-routing, which gc turns
 // off for every bd it runs (applyBdContributorRoutingOptOut).
 //
+// A bead the work-leg route proved another work leg holds is keyed by that
+// leg (claim_work_leg_route.go), resident: the probe that found it is the
+// proof.
+//
 // An adoption on a city that relocates classes (a class route, or one that
 // degraded) whose readback found it in no store (hookAdoptionUnverified: the
 // read failed, or the leg did not hold the bead and no route found it in the
@@ -1948,6 +1973,10 @@ func hookStartedKeyFor(ops hookClaimOps, dir, beadID string, verdict hookAdoptio
 	beadID = strings.TrimSpace(beadID)
 	if route := ops.ClassRoute; route != nil && route.knownResident(beadID) {
 		ref := route.storeRef()
+		return hookStartedKey{Store: ref, Bead: beadID, Resident: ref != ""}
+	}
+	if home, ok := ops.WorkLegRoute.homeOf(beadID); ok {
+		ref := ops.StoreRef(home.dir)
 		return hookStartedKey{Store: ref, Bead: beadID, Resident: ref != ""}
 	}
 	ref := ops.StoreRef(dir)
@@ -2256,7 +2285,8 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 	// under a stopped root, and its group siblings are ordinary work under that
 	// same root. Siblings share the bead's root, so one ancestry read, made only
 	// once there is a sibling to pin, answers for all of them; a failed read
-	// fails open like the gate itself.
+	// fails open like the gate itself. The read runs where the bead's own claim
+	// landed: in another work leg when the work-leg route took it there.
 	var workflowStore beads.MoleculeTarget
 	var ancestorStop molecule.WorkflowStop
 	ancestorRead := false
@@ -2266,8 +2296,9 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 		}
 		if !ancestorRead {
 			ancestorRead = true
-			// ops.WorkflowStore(ctx, dir, opts.Env, bead.ID, "") may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
-			workflowStore = beads.GraphMolecule(beads.GraphStore{Store: ops.WorkflowStore(ctx, dir, opts.Env, bead.ID, "")})
+			storeDir, storeEnv := ops.WorkLegRoute.at(dir, opts.Env, bead.ID)
+			// ops.WorkflowStore(ctx, storeDir, storeEnv, bead.ID, "") may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+			workflowStore = beads.GraphMolecule(beads.GraphStore{Store: ops.WorkflowStore(ctx, storeDir, storeEnv, bead.ID, "")})
 			if stop, err := molecule.StoppedWorkflowAncestor(workflowStore, bead); err == nil {
 				ancestorStop = stop
 			}

@@ -548,12 +548,14 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// other leg's environment is a managed-Dolt projection (~0.25 s each on
 	// maintainer-city) the claim would discard. No-op on a single-store city and
 	// for a custom work_query, where both forms are the same string.
-	var stores []hookStore
-	if singleStore := singleStoreHookWorkQuery(cityPath, cityName, cfg, &a, topo, stderr); hookStoresScopeToPrimary(workQuery, singleStore) {
-		stores = []hookStore{hookWorkQueryPrimaryStore(cityPath, cfg, &a, agentForQuery, workDir, queryEnv, overrides)}
-	} else {
-		stores = hookWorkQueryStores(cityPath, cfg, &a, agentForQuery, workDir, queryEnv, overrides, buildEffectiveSuspendedRigNames(cfg, st))
-	}
+	//
+	// The primary's reader serves every work leg's beads, so that branch also
+	// carries the work-leg route (hookClaimStores): a candidate the primary
+	// proves absent is claimed in the work leg that holds it.
+	singleStore := singleStoreHookWorkQuery(cityPath, cityName, cfg, &a, topo, stderr)
+	stores, legRoute := hookClaimStores(cityPath, cfg, &a, agentForQuery, workDir, queryEnv, overrides, workQuery, singleStore, func() map[string]bool {
+		return buildEffectiveSuspendedRigNames(cfg, st)
+	})
 
 	// emitQueryFailure surfaces a killed/timed-out work query on the event bus
 	// so the reconciler can escalate instead of silently treating the strand as
@@ -637,7 +639,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 				}
 			}
 		}
-		return claimHookWorkProvisioning(city, workQuery, workDir, queryEnv, stores, claimOpts, provisionWorktree, emitQueryFailure, stdout, stderr)
+		return claimHookWorkProvisioning(city, workQuery, workDir, queryEnv, stores, legRoute, claimOpts, provisionWorktree, emitQueryFailure, stdout, stderr)
 	}
 	// The discovery door is fenced too: a draining seat must not be handed its
 	// preassigned continuation sibling by the packs' post-close `gc hook`.
@@ -921,13 +923,14 @@ func hookClaimSessionEligibility(info session.Info, instanceToken string) (hookC
 // city that relocates nothing the route is nil and the ops are the work-store
 // ops alone.
 func claimHookWork(city *hookCity, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
-	return claimHookWorkProvisioning(city, workQuery, workDir, queryEnv, stores, claimOpts, nil, emitFailure, stdout, stderr)
+	return claimHookWorkProvisioning(city, workQuery, workDir, queryEnv, stores, nil, claimOpts, nil, emitFailure, stdout, stderr)
 }
 
 // claimHookWorkProvisioning is claimHookWork with the claimed bead's worktree
-// provisioned before its receipt is delivered (gc hook --claim --worktree).
-// A nil provisionWorktree is the plain claim.
-func claimHookWorkProvisioning(city *hookCity, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, provisionWorktree hookProvisionWorktreeFunc, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
+// provisioned before its receipt is delivered (gc hook --claim --worktree),
+// and with the work-leg route the primary-scoped branch builds (legRoute; nil
+// off that branch). A nil provisionWorktree is the plain claim.
+func claimHookWorkProvisioning(city *hookCity, workQuery, workDir string, queryEnv []string, stores []hookStore, legRoute *hookClaimWorkLegRoute, claimOpts hookClaimOptions, provisionWorktree hookProvisionWorktreeFunc, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
 	// The city relocates a class and its front door could not be projected.
 	// Claiming through the work store anyway would write ownership into a
 	// ledger that does not hold the bead, which is the wrong-answer lane this
@@ -937,10 +940,12 @@ func claimHookWorkProvisioning(city *hookCity, workQuery, workDir string, queryE
 	opened, err := hookClaimClassRouteForCity(city.path)
 	// Work-store writes announce themselves to the city's event log so the run
 	// views see a claim within a poll (hook_claim_bead_events.go). They are
-	// wrapped before the class route, whose binding writes announce themselves.
+	// wrapped before both routes, so a write the work-leg route sends to
+	// another leg is announced too; the class route's binding writes announce
+	// themselves.
 	base := city.claimOps()
 	base.ProvisionWorktree = provisionWorktree
-	ops, proceed := routedHookClaimOps(withHookClaimBeadEvents(base, city.path), opened, err, city.recorder, stderr)
+	ops, proceed := composeHookClaimOps(withHookClaimBeadEvents(base, city.path), legRoute, opened, err, city.recorder, stderr)
 	if !proceed {
 		return 1
 	}
@@ -950,6 +955,19 @@ func claimHookWorkProvisioning(city *hookCity, workQuery, workDir string, queryE
 	defer ops.announceBeadEvents()
 	run := hookRigLegRunner(city.path, city.cfg, stores, shellWorkQueryWithEnv)
 	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, run, emitFailure, stdout, stderr)
+}
+
+// composeHookClaimOps layers both claim routes over work, the work-store ops:
+// the work-leg route (legRoute; nil off the primary-scoped branch) first, then
+// the class route one resolution (opened, err) yields over it, and reports
+// whether the claim may proceed (routedHookClaimOps). The order is the
+// contract: the class route consults the binding only after the work-leg
+// route has had every work leg prove a work-shaped id absent, so an id a work
+// leg and the binding both hold is claimed in the work leg, whose copy the
+// reader served.
+func composeHookClaimOps(work hookClaimOps, legRoute *hookClaimWorkLegRoute, opened *hookClaimClassRoute, err error, recorder func() events.Recorder, stderr io.Writer) (hookClaimOps, bool) {
+	work = workLegRoutedHookClaimOps(work, legRoute, hookClaimClassesRelocated(opened, err))
+	return routedHookClaimOps(work, opened, err, recorder, stderr)
 }
 
 // routedHookClaimOps is the claim ops one class-route resolution (opened, err)
