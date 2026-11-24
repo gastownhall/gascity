@@ -1221,6 +1221,15 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			return readErr
 		}
 
+		admittedCtx, admitErr := m.admitRuntime(ctx, b.ID, template)
+		if admitErr != nil {
+			if rbErr := rollbackFailedCreate(); rbErr != nil {
+				return errors.Join(admitErr, rbErr)
+			}
+			return admitErr
+		}
+		ctx = admittedCtx
+
 		// If the provider supports Generate & Pass, inject --session-id into command.
 		startCommand := command
 		if resume.SessionIDFlag != "" && sessionKey != "" {

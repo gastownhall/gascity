@@ -2017,6 +2017,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// ga-ebb62d). The ctx param may legitimately be nil here, so the metric
 	// uses context.Background().
 	startedThisTick := 0
+	if err := sessionpkg.RefreshNativeCapacity(ctx, cityPath, clk.Now().UTC()); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: refreshing owned capacity: %v\n", err) //nolint:errcheck
+	}
 	defer func() {
 		telemetry.RecordReconcileCycle(context.Background(), startedThisTick)
 	}()
@@ -7868,6 +7871,12 @@ func relaunchAgentForLaunchDrift(
 	trace *sessionReconcilerTraceCycle,
 	stdout, stderr io.Writer,
 ) (bool, map[string]string) {
+	// A respawn may leave descendants of the old model alive. Native-managed
+	// sessions use the ordinary full restart path, whose common admission fence
+	// cannot replace the attempt until its exact owned cgroup is empty.
+	if enabled, err := sessionpkg.NativeManagedAdmission(cityPath, info.Template); err != nil || enabled {
+		return false, nil
+	}
 	r, ok := sp.(runtime.RelaunchProvider)
 	if !ok {
 		// Conjoined runtimes (subprocess/acp/t3bridge) do not implement
