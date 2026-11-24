@@ -623,7 +623,7 @@ func TestFormatExtmsgNotifyReminderExplicitTargetSanitization(t *testing.T) {
 func TestHandleExtMsgBindingListIncludesRoomBoundParticipant(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
-	services := extmsg.NewServices(fs.cityBeadStore)
+	services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
 	fs.extmsgSvc = &services
 
 	seatName := "example-rig/seat-1"

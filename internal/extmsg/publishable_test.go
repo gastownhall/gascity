@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // TestListPublishableBySessionFindsRoomBoundSeatByNameAndLiveID pins the
@@ -15,7 +16,7 @@ import (
 func TestListPublishableBySessionFindsRoomBoundSeatByNameAndLiveID(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	seatName := "example-rig/seat-1"
 	liveID := makeSessionBead(t, store, seatName)
 	ref := ConversationRef{
@@ -87,7 +88,7 @@ func TestListPublishableBySessionFindsRoomBoundSeatByNameAndLiveID(t *testing.T)
 func TestListPublishableBySessionPrefersRealBindingOverGroupSynthetic(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := testConversationRef()
 
 	binding, err := fabric.Bindings.Bind(context.Background(), testControllerCaller(), BindInput{
@@ -128,7 +129,7 @@ func TestListPublishableBySessionPrefersRealBindingOverGroupSynthetic(t *testing
 func TestListPublishableBySessionFindsOneToOneBindingBySessionName(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	seatName := "example-rig/seat-1"
 	liveID := makeSessionBead(t, store, seatName)
 	ref := testConversationRef()

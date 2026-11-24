@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -16,7 +17,7 @@ import (
 func TestInboundToAsleepRoomBoundSeatPersistsTranscript(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	seatName := "example-rig/seat-1"
 	liveID := makeSessionBead(t, store, seatName)
 	if err := store.SetMetadata(liveID, "state", string(session.StateAsleep)); err != nil {
