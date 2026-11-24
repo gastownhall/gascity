@@ -1,13 +1,24 @@
 package scripts_test
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -72,8 +83,13 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 	}
 	// And rbe_worker_sha, the canary commit (by hand, never the scaler:
 	// TestRBEPoolCanaryInput), empty by default.
-	if c, _ := inputs["rbe_worker_sha"].(map[string]any); len(inputs) != 4 || inputs["role"] == nil || c == nil || c["default"] != "" || c["type"] != "string" {
-		t.Errorf("workflow_dispatch inputs %v, want idle_minutes, max_minutes and role (what the scaler sends) and rbe_worker_sha (empty)", rbeSortedKeys(inputs))
+	// And hot_precheck_digest, the hot tier's pre-check (by hand:
+	// TestRBEHotPrecheckInput), empty by default.
+	c, _ := inputs["rbe_worker_sha"].(map[string]any)
+	h, _ := inputs["hot_precheck_digest"].(map[string]any)
+	if len(inputs) != 5 || inputs["role"] == nil || c == nil || c["default"] != "" || c["type"] != "string" ||
+		h == nil || h["default"] != "" || h["type"] != "string" {
+		t.Errorf("workflow_dispatch inputs %v, want idle_minutes, max_minutes and role (what the scaler sends), rbe_worker_sha and hot_precheck_digest (empty)", rbeSortedKeys(inputs))
 	}
 	if len(wf.Permissions) != 1 || wf.Permissions["contents"] != "read" {
 		t.Errorf("permissions %v, want contents: read only", wf.Permissions)
@@ -82,12 +98,13 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 	// The worker-env drift jobs beside it, and its measure step, are
 	// TestRBEPoolWorkflowsReportDriftWhileServing's.
 	job, ok := wf.Jobs["worker"]
-	if !ok || len(wf.Jobs) != 3 {
-		t.Fatalf("%s: jobs %v, want worker, await-drift and report-drift", rbeForkPoolWorkflow, rbeSortedKeys(wf.Jobs))
+	if !ok || len(wf.Jobs) != 4 || wf.Jobs["hot-precheck"].RunsOn == "" {
+		t.Fatalf("%s: jobs %v, want worker, await-drift, report-drift and hot-precheck", rbeForkPoolWorkflow, rbeSortedKeys(wf.Jobs))
 	}
 	// Blacksmith donates this compute for our OSS repos' workflows; the
 	// default branch only, as rbe-worker-pool.yml.
-	if want := "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"; job.If != want {
+	// (No worker on a hot tier pre-check run.)
+	if want := "github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.hot_precheck_digest == ''"; job.If != want {
 		t.Errorf("worker if: %q, want %q", job.If, want)
 	}
 	if job.RunsOn != "blacksmith-32vcpu-ubuntu-2404" {
@@ -148,6 +165,9 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 			"RBE_HOT_EVERY": "${{ vars.RBE_FORK_HOT_EVERY || '1' }}",
 			// The local CAS cap: empty is the script's 150 GB default.
 			"CAS_MAX_BYTES": "${{ vars.RBE_FORK_CAS_MAX_BYTES || '' }}",
+			// The setup downloads' mirror (rbe-fetch; every file checked
+			// against the pin's sha256): off unless the variable names it.
+			"RBE_DIST_MIRROR": "${{ vars.RBE_FORK_DIST_MIRROR || '' }}",
 		}
 		for k, v := range want {
 			if step.Env[k] != v {
@@ -168,8 +188,9 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 	// writes AC_OSS), and no repository variables but RBE_FORK_WIRE_ZSTD,
 	// RBE_FORK_WIRE_ZSTD_READ_URL, RBE_FORK_WARM_URL, RBE_FORK_WARM_EVERY,
 	// RBE_FORK_HOT_URL, RBE_FORK_HOT_EVERY and RBE_FORK_CAS_MAX_BYTES (pinned
-	// above): none can turn isolation down, and none picks the worker code
-	// (always the pin).
+	// above), and RBE_FORK_DIST_MIRROR (the measure and worker steps, twice):
+	// none can turn isolation down, and none picks the worker code (always
+	// the pin).
 	secrets := map[string]bool{}
 	for _, m := range regexp.MustCompile(`secrets\.([A-Za-z0-9_]+)`).FindAllStringSubmatch(text, -1) {
 		secrets[m[1]] = true
@@ -177,11 +198,11 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 	if got := rbeSortedKeys(secrets); strings.Join(got, ",") != "RBE_FORK_WORKER_TLS_CERT,RBE_FORK_WORKER_TLS_KEY" {
 		t.Errorf("%s uses secrets %v, want RBE_FORK_WORKER_TLS_CERT and RBE_FORK_WORKER_TLS_KEY only", rbeForkPoolWorkflow, got)
 	}
-	if n := strings.Count(text, "vars."); n != 7 || !strings.Contains(text, "vars.RBE_FORK_WIRE_ZSTD ") ||
+	if n := strings.Count(text, "vars."); n != 9 || strings.Count(text, "vars.RBE_FORK_DIST_MIRROR ") != 2 || !strings.Contains(text, "vars.RBE_FORK_WIRE_ZSTD ") ||
 		!strings.Contains(text, "vars.RBE_FORK_WIRE_ZSTD_READ_URL ") || !strings.Contains(text, "vars.RBE_FORK_WARM_URL ") ||
 		!strings.Contains(text, "vars.RBE_FORK_WARM_EVERY ") || !strings.Contains(text, "vars.RBE_FORK_HOT_URL ") ||
 		!strings.Contains(text, "vars.RBE_FORK_HOT_EVERY ") || !strings.Contains(text, "vars.RBE_FORK_CAS_MAX_BYTES ") {
-		t.Errorf("%s reads repository variables %d times; want RBE_FORK_WIRE_ZSTD, RBE_FORK_WIRE_ZSTD_READ_URL, RBE_FORK_WARM_URL, RBE_FORK_WARM_EVERY, RBE_FORK_HOT_URL, RBE_FORK_HOT_EVERY and RBE_FORK_CAS_MAX_BYTES once each, nothing else", rbeForkPoolWorkflow, n)
+		t.Errorf("%s reads repository variables %d times; want RBE_FORK_WIRE_ZSTD, RBE_FORK_WIRE_ZSTD_READ_URL, RBE_FORK_WARM_URL, RBE_FORK_WARM_EVERY, RBE_FORK_HOT_URL, RBE_FORK_HOT_EVERY and RBE_FORK_CAS_MAX_BYTES once each and RBE_FORK_DIST_MIRROR twice, nothing else", rbeForkPoolWorkflow, n)
 	}
 }
 
@@ -210,6 +231,11 @@ func TestRBEPoolWorkflowsNameTheirRole(t *testing.T) {
 			// A canary (rbe_worker_sha) is named canary, never floor or
 			// burst, and names its commit (TestRBEPoolCanaryInput).
 			want = "${{ format('" + tc.name + " ({0}, idle {1}m){2}', inputs.rbe_worker_sha && 'canary' || inputs.role || 'burst', inputs.idle_minutes, inputs.rbe_worker_sha && format(' rbe-worker {0}', inputs.rbe_worker_sha) || '') }}"
+		}
+		if tc.path == rbeForkPoolWorkflow {
+			// And a hot tier pre-check, hot-precheck with its digest
+			// (TestRBEHotPrecheckInput).
+			want = "${{ format('" + tc.name + " ({0}, idle {1}m){2}', inputs.hot_precheck_digest && 'hot-precheck' || inputs.rbe_worker_sha && 'canary' || inputs.role || 'burst', inputs.idle_minutes, inputs.hot_precheck_digest && format(' digest {0}', inputs.hot_precheck_digest) || inputs.rbe_worker_sha && format(' rbe-worker {0}', inputs.rbe_worker_sha) || '') }}"
 		}
 		if wf.Name != tc.name || wf.RunName != want {
 			t.Errorf("%s: name %q run-name %q, want %q and %q", tc.path, wf.Name, wf.RunName, tc.name, want)
@@ -436,4 +462,310 @@ echo "error=$(grep -o 'mint refused (HTTP [0-9]*)' out.txt || true)" >>.bazelrc.
 			t.Errorf("mint %s: %d requests, slept %q; want %d, %q\n%s", c.answer, calls, sleeps, c.calls, c.sleeps, b)
 		}
 	}
+}
+
+// The hot tier's B3 pre-check (infra nativelink-cas/west README "Hot blobs on
+// R2"), vendored from gascity/infra (private: no job here can fetch it) at the
+// commit below, with its sha256 beside it; the job checks the sha256 before it
+// runs it. The copy carries one fix infra does not have yet: its decode check
+// also fails when zstd rejects the stream, not only when the bytes zstd wrote
+// hash wrong (TestRBEHotPrecheckInput's decode cases). A new infra version:
+// copy the file, keep that fix until infra has it, and update
+// rbe-hot-precheck.sha256 and these two constants together.
+const (
+	rbeHotPrecheckDir         = ".github/rbe-hot"
+	rbeHotPrecheckSHA256      = "c0318d670c4f6357b254e59af875315be9b1662aefc106e3b7ed2d8752f1fc05"
+	rbeHotPrecheckInfraCommit = "1dbe5d9dad6a6718ab52ac685bce532e0071df00" // gascity/infra rbe-wi/fork-path, nativelink-cas/west/rbe-hot-precheck.sh, plus the decode fix
+)
+
+// TestRBEHotPrecheckInput: rbe-fork-pool.yml's hot_precheck_digest runs the
+// vendored pre-check instead of a worker: a person's dispatch alone (never
+// *[bot]), a strict digest of 64 MiB or more, never with rbe_worker_sha,
+// every value through env (no expression inside run), the fork worker
+// certificate in 0600 files for the one step, the sha256 checked before the
+// script runs, and the job failing unless the script prints "precheck: ok".
+// The worker and the drift jobs skip such a run.
+func TestRBEHotPrecheckInput(t *testing.T) {
+	root := repoRoot(t)
+	script := readFile(t, root, rbeHotPrecheckDir+"/rbe-hot-precheck.sh")
+	sum := sha256.Sum256([]byte(script))
+	if got := hex.EncodeToString(sum[:]); got != rbeHotPrecheckSHA256 {
+		t.Errorf("%s/rbe-hot-precheck.sh sha256 %s, want %s (infra %s plus the decode fix): vendor it byte for byte", rbeHotPrecheckDir, got, rbeHotPrecheckSHA256, rbeHotPrecheckInfraCommit)
+	}
+	if got := readFile(t, root, rbeHotPrecheckDir+"/rbe-hot-precheck.sha256"); got != rbeHotPrecheckSHA256+"  rbe-hot-precheck.sh\n" {
+		t.Errorf("rbe-hot-precheck.sha256 = %q, want the sha256sum line of %s", got, rbeHotPrecheckSHA256)
+	}
+	text := readFile(t, root, rbeForkPoolWorkflow)
+	var wf struct {
+		Jobs map[string]struct {
+			If     string `yaml:"if"`
+			RunsOn string `yaml:"runs-on"`
+			Steps  []struct {
+				Name string            `yaml:"name"`
+				Uses string            `yaml:"uses"`
+				With map[string]any    `yaml:"with"`
+				Env  map[string]string `yaml:"env"`
+				Run  string            `yaml:"run"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal([]byte(text), &wf); err != nil {
+		t.Fatal(err)
+	}
+	const onMain = "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
+	job := wf.Jobs["hot-precheck"]
+	if job.If != onMain+" && inputs.hot_precheck_digest != ''" || !strings.HasPrefix(job.RunsOn, "blacksmith-") {
+		t.Errorf("hot-precheck if %q runs-on %q, want the default branch with the input, on Blacksmith (the WAF)", job.If, job.RunsOn)
+	}
+	if !strings.HasSuffix(wf.Jobs["worker"].If, " && inputs.hot_precheck_digest == ''") ||
+		!strings.HasSuffix(wf.Jobs["await-drift"].If, " && inputs.hot_precheck_digest == ''") {
+		t.Errorf("worker if %q, await-drift if %q: neither may run on a pre-check", wf.Jobs["worker"].If, wf.Jobs["await-drift"].If)
+	}
+	if len(job.Steps) != 3 || !strings.HasPrefix(job.Steps[0].Uses, "actions/checkout@") || job.Steps[0].With["persist-credentials"] != false {
+		t.Fatalf("hot-precheck steps: want checkout (no persisted token), input, pre-check")
+	}
+	input, check := job.Steps[1], job.Steps[2]
+	for _, st := range job.Steps {
+		if strings.Contains(st.Run, "${{") {
+			t.Errorf("step %q: an expression inside run", st.Name)
+		}
+	}
+	if want := map[string]string{
+		"DIGEST": "${{ inputs.hot_precheck_digest }}", "ACTOR": "${{ github.triggering_actor }}",
+		"CANARY": "${{ inputs.rbe_worker_sha }}",
+	}; !reflect.DeepEqual(input.Env, want) {
+		t.Errorf("input step env %v, want %v", input.Env, want)
+	}
+	if want := map[string]string{
+		"DIGEST":   "${{ inputs.hot_precheck_digest }}",
+		"CERT_B64": "${{ secrets.RBE_FORK_WORKER_TLS_CERT }}", "KEY_B64": "${{ secrets.RBE_FORK_WORKER_TLS_KEY }}",
+	}; !reflect.DeepEqual(check.Env, want) {
+		t.Errorf("pre-check step env %v, want %v", check.Env, want)
+	}
+	order := []string{
+		"(cd .github/rbe-hot && sha256sum --strict -c rbe-hot-precheck.sha256)",
+		// Each install command its own: under set -e a failed apt-get update
+		// stops the step, where an && would carry on to the promotion.
+		"command -v zstd >/dev/null || { sudo apt-get update -qq; sudo apt-get install -y -qq zstd >/dev/null; }",
+		// The step runs under set -e, which holds inside the EXIT trap too:
+		// a failed shred (none on macOS) would end the trap before the rm and
+		// leave the certificates behind.
+		`trap 'shred -u "$pki"/*.pem 2>/dev/null || true; rm -rf "$pki"' EXIT`,
+		`(umask 077 && printf '%s' "$CERT_B64" | base64 -d >"$pki/cert.pem" && printf '%s' "$KEY_B64" | base64 -d >"$pki/key.pem")`,
+		`out=$(env -u CERT_B64 -u KEY_B64 DIGEST="$DIGEST" CERT="$pki/cert.pem" KEY="$pki/key.pem"`,
+		"bash .github/rbe-hot/rbe-hot-precheck.sh 2>&1) || true",
+		`grep -qx 'precheck: ok' <<<"$out" || {`,
+	}
+	at := 0
+	for _, want := range order {
+		i := strings.Index(check.Run[at:], want)
+		if i < 0 {
+			t.Fatalf("pre-check step: %q missing or out of order:\n%s", want, check.Run)
+		}
+		at += i + len(want)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(check.Run[at:]), `echo "::error`) {
+		t.Error("pre-check step: no 'precheck: ok' must fail the job")
+	}
+	// Secrets reach the pre-check step alone in this job.
+	if n := strings.Count(text, "secrets.RBE_FORK_WORKER_TLS_"); n != 4 {
+		t.Errorf("fork worker certificate secrets referenced %d times, want 4 (the worker step 2, the pre-check 2)", n)
+	}
+
+	// The step's first command checks the script with sha256sum --strict -c,
+	// which the job's Ubuntu runner has and a host without coreutils does not.
+	for _, tool := range []string{"bash", "sha256sum"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s not on PATH; the pre-check step runs on the job's Ubuntu runner", tool)
+		}
+	}
+
+	// The pre-check step, run as the job runs it: from the checkout, with path
+	// as PATH and the script's HOT_URL and PROMOTE_URL at edge. No case may
+	// leave a certificate file behind.
+	runCheck := func(t *testing.T, path, digest, edge string) (string, error) {
+		t.Helper()
+		dir := t.TempDir()
+		step := filepath.Join(dir, "check.sh")
+		if err := os.WriteFile(step, []byte(check.Run), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		tmp := filepath.Join(dir, "tmp")
+		if err := os.MkdirAll(tmp, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		env := append(os.Environ(), "PATH="+path, "DIGEST="+digest, "CERT_B64=Q0VSVAo=", "KEY_B64=S0VZCg==",
+			"GITHUB_STEP_SUMMARY="+filepath.Join(dir, "summary"), "TMPDIR="+tmp,
+			"HOT_URL="+edge+"/h/fork", "PROMOTE_URL="+edge+"/rbe.hot.v1.Hot/Promote")
+		out, stderr, err := runRBEScript(root, env, step)
+		if left, _ := filepath.Glob(filepath.Join(tmp, "*", "*.pem")); len(left) != 0 {
+			t.Errorf("certificate files left behind: %v", left)
+		}
+		return out + stderr, err
+	}
+	// zstdFirst puts a zstd stub first on PATH, so the step never installs
+	// one. The stub decodes as the script calls it (zstd -q -dc FILE) by
+	// writing the object, its own plaintext here, then runs the rest of body.
+	zstdFirst := func(t *testing.T, body string) string {
+		t.Helper()
+		bin := t.TempDir()
+		writeExecutable(t, filepath.Join(bin, "zstd"), "#!/bin/sh\ncat \"$3\"\n"+body+"\n")
+		return bin + string(os.PathListSeparator) + os.Getenv("PATH")
+	}
+	const unreachable = "http://127.0.0.1:1"
+	h := strings.Repeat("ab", 32)
+
+	// Against nothing (the edge unreachable): the script's FAIL fails the
+	// step, and the sha256 was checked first.
+	t.Run("a failed pre-check fails the step", func(t *testing.T) {
+		out, err := runCheck(t, zstdFirst(t, "exit 0"), h+"-103593364", unreachable)
+		if err == nil || !strings.Contains(out, "::error title=rbe hot pre-check::the pre-check did not print 'precheck: ok'") {
+			t.Errorf("step passed or said nothing: %v\n%s", err, out)
+		}
+		if !strings.Contains(out, "rbe-hot-precheck.sh: OK") {
+			t.Errorf("the sha256 was not checked first:\n%s", out)
+		}
+	})
+
+	// No zstd on the runner, and its install fails: the step stops there,
+	// before the certificate files and the script. An && between the install
+	// commands would carry on to the promotion, which spends the digest, and
+	// fail only at the decode.
+	t.Run("a failed zstd install stops the step", func(t *testing.T) {
+		bin := rbeHostCommandsWithout(t, "zstd", "sudo")
+		writeExecutable(t, filepath.Join(bin, "sudo"), "#!/bin/sh\necho \"sudo $*: refused\" >&2\nexit 1\n")
+		out, err := runCheck(t, bin, h+"-103593364", unreachable)
+		if err == nil || !strings.Contains(out, "sudo apt-get update -qq: refused") ||
+			strings.Contains(out, "apt-get install") || strings.Contains(out, "precheck:") {
+			t.Errorf("step went on past a failed zstd install (error %v):\n%s", err, out)
+		}
+	})
+
+	// Check 3, the decode, against a stand-in edge that serves the promoted
+	// object: "precheck: ok" needs both the bytes zstd wrote to hash to DIGEST
+	// and zstd to accept the whole stream. zstd writes every byte of a valid
+	// frame followed by garbage before it rejects the garbage, so the bytes
+	// alone pass and only zstd's status fails that object.
+	obj := []byte(strings.Repeat("hot tier pre-check\n", 1000))
+	objSum := sha256.Sum256(obj)
+	digest := hex.EncodeToString(objSum[:]) + "-" + strconv.Itoa(len(obj))
+	decodes := "after promotion, ?r=: the object decodes to " + digest
+	for _, c := range []struct {
+		name, zstd, decode, verdict string
+		ok                          bool
+	}{
+		{"zstd accepts the stream", "exit 0", "ok    " + decodes + " (zstd exit 0)", "precheck: ok", true},
+		{
+			"zstd rejects the stream after writing it", `echo "zstd: $3: unsupported format" >&2; exit 1`,
+			"FAIL  " + decodes + " (zstd exit 1)", "precheck: FAIL (1)", false,
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			out, err := runCheck(t, zstdFirst(t, c.zstd), digest, rbeHotEdge(t, digest, obj))
+			lines := strings.Split(out, "\n")
+			if !slices.Contains(lines, c.decode) || !slices.Contains(lines, c.verdict) || (err == nil) != c.ok {
+				t.Errorf("want the lines %q and %q and the step passing = %v; error %v:\n%s", c.decode, c.verdict, c.ok, err, out)
+			}
+		})
+	}
+
+	// The input step, run: who may dispatch, and what digest.
+	runInput := func(digest, actor, canary string) (string, error) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "input.sh")
+		if err := os.WriteFile(path, []byte(input.Run), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		summary := filepath.Join(dir, "summary")
+		env := append(os.Environ(), "DIGEST="+digest, "ACTOR="+actor, "CANARY="+canary, "GITHUB_STEP_SUMMARY="+summary)
+		out, stderr, err := runRBEScript(dir, env, path)
+		return out + stderr, err
+	}
+	for _, c := range []struct {
+		name, digest, actor, canary string
+		ok                          bool
+	}{
+		{"a person, 103 MB", h + "-103593364", "someone", "", true},
+		{"exactly 64 MiB", h + "-67108864", "someone", "", true},
+		{"the scalers' App", h + "-103593364", "bazel-allocator[bot]", "", false},
+		{"any bot", h + "-103593364", "dependabot[bot]", "", false},
+		{"under 64 MiB", h + "-67108863", "someone", "", false},
+		{"uppercase hex", strings.ToUpper(h) + "-103593364", "someone", "", false},
+		{"short hash", h[:63] + "-103593364", "someone", "", false},
+		// Octal 67108864: the size check alone would take it.
+		{"leading zero size", h + "-0400000000", "someone", "", false},
+		{"no size", h, "someone", "", false},
+		{"an injection", h + "-103593364; id", "someone", "", false},
+		{"two lines", h + "-103593364\n" + h + "-103593364", "someone", "", false},
+		{"with a canary", h + "-103593364", "someone", strings.Repeat("c", 40), false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			out, err := runInput(c.digest, c.actor, c.canary)
+			if (err == nil) != c.ok {
+				t.Errorf("accepted = %v, want %v\n%s", err == nil, c.ok, out)
+			}
+		})
+	}
+}
+
+// rbeHotEdge stands in for the hot tier's edge and its promoter, over plain
+// HTTP on loopback, at the pre-check's HOT_URL (<url>/h/fork) and PROMOTE_URL
+// (<url>/rbe.hot.v1.Hot/Promote): every key is a 404 until a Promote of
+// digest's hash and size, then digest's key answers obj, whatever the query
+// string. Promote answers as infra's rbe-hot.py does (json.dumps).
+func rbeHotEdge(t *testing.T, digest string, obj []byte) string {
+	t.Helper()
+	hash, size, _ := strings.Cut(digest, "-")
+	var promoted atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/rbe.hot.v1.Hot/Promote":
+			var req struct {
+				Hash string      `json:"hash"`
+				Size json.Number `json:"size"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Hash != hash || req.Size.String() != size {
+				http.Error(w, "not a Promote of "+digest, http.StatusBadRequest)
+				return
+			}
+			promoted.Store(true)
+			_, _ = fmt.Fprintf(w, `{"key": "h/fork/%s.zst"}`, digest)
+		case r.Method == http.MethodGet && r.URL.Path == "/h/fork/"+digest+".zst" && promoted.Load():
+			_, _ = w.Write(obj)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// rbeHostCommandsWithout links every command on the test's PATH except names
+// into a new directory, the first on PATH winning as for the shell: as PATH,
+// this host without those commands.
+func rbeHostCommandsWithout(t *testing.T, names ...string) string {
+	t.Helper()
+	bin := t.TempDir()
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		entries, err := os.ReadDir(dir)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue // the shell skips a missing PATH directory too
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			link := filepath.Join(bin, e.Name())
+			if slices.Contains(names, e.Name()) {
+				continue
+			}
+			if _, err := os.Lstat(link); err == nil {
+				continue
+			}
+			if err := os.Symlink(filepath.Join(dir, e.Name()), link); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	return bin
 }

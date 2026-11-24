@@ -1,4 +1,4 @@
-//go:build integration && chaos_dolt
+//go:build integration && chaos_dolt && unix
 
 package integration
 

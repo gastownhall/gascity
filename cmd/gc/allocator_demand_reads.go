@@ -128,10 +128,11 @@ func demandLegCache(store beads.Store) (cache *beads.CachingStore, exact bool) {
 // v2DemandReads is the v2 allocator's demand reads for one pass, at one
 // clock (now). Per read:
 //
-//   - RawOpen and ReadyAll on an exact leg: the cache's List{open} and its
-//     strict ReadyContext, falling back to Ready, which reads the local
-//     backing. On an exact backing the cached status is the raw status and
-//     the cached ready projection is complete.
+//   - RawOpen and ReadyAll on an exact leg: the cache's List{open}, less the
+//     rows the backing's Live "open" leaves out (beads.LiveOpenLeavesOut),
+//     and its strict ReadyContext, falling back to Ready, which reads the
+//     local backing. On an exact backing the cached status is the raw status
+//     and the cached ready projection is complete.
 //   - RawOpen and ReadyAll on any other leg: the recording's copy of
 //     legacy's own live read. A missing source, or one past its freshness,
 //     is a PartialResultError with no rows: the collectors
@@ -194,8 +195,26 @@ func (r *v2DemandReads) RawOpen(store beads.Store) ([]beads.Bead, error) {
 		return r.recorded(store, "raw_open", func(l legRecording) ([]beads.Bead, error) { return l.RawOpen, l.RawOpenErr })
 	}
 	return r.once(demandLegRead{leg: cache, shape: "raw_open"}, func() ([]beads.Bead, error) {
-		return cache.List(beads.ListQuery{Status: "open", AllowScan: true, TierMode: beads.TierBoth})
+		rows, err := cache.List(beads.ListQuery{Status: "open", AllowScan: true, TierMode: beads.TierBoth})
+		return exactLegRawOpen(rows, r.now), err
 	})
+}
+
+// exactLegRawOpen is an exact leg's raw open from its cache's open rows: those
+// rows less the ones the backing's own Live "open" leaves out
+// (beads.LiveOpenLeavesOut). It returns a new slice, since rows may alias the
+// cache.
+func exactLegRawOpen(rows []beads.Bead, now time.Time) []beads.Bead {
+	if len(rows) == 0 {
+		return rows
+	}
+	out := make([]beads.Bead, 0, len(rows))
+	for _, b := range rows {
+		if !beads.LiveOpenLeavesOut(b, now) {
+			out = append(out, b)
+		}
+	}
+	return out
 }
 
 // Cached memoizes by status alone: the collectors' cached Lists differ only

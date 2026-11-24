@@ -26,7 +26,8 @@ import (
 // bounds it.
 
 // conditionBudgetOrder is the condition-triggered exec order under test, whose
-// check verdict the caller chooses: "true" passes, "false" fails.
+// check verdict the caller chooses: "exit 0" passes, "exit 1" fails, under sh
+// and PowerShell alike.
 func conditionBudgetOrder(check string) orders.Order {
 	return orders.Order{Name: "queue-c", Trigger: "condition", Check: check, Exec: "true"}
 }
@@ -68,7 +69,7 @@ func TestDispatchFiresDueConditionOrderOutsideTheRotationBudget(t *testing.T) {
 	aa := []orders.Order{
 		cooldownBudgetOrder("sweep-a"),
 		cooldownBudgetOrder("sweep-b"),
-		conditionBudgetOrder("true"),
+		conditionBudgetOrder("exit 0"),
 	}
 	m, _, store := newConditionBudgetDispatcher(t, aa, 1)
 	cityPath := t.TempDir()
@@ -99,7 +100,7 @@ func TestDispatchFiresDueConditionOrderOutsideTheRotationBudget(t *testing.T) {
 // TestDispatchConditionOrderStillHonoursOpenTrackingGate: unbudgeted is not
 // ungated. A dispatch already recorded in flight suppresses the next one.
 func TestDispatchConditionOrderStillHonoursOpenTrackingGate(t *testing.T) {
-	a := conditionBudgetOrder("true")
+	a := conditionBudgetOrder("exit 0")
 	m, _, store := newConditionBudgetDispatcher(t, []orders.Order{a}, 1)
 
 	front := orders.NewStore(beads.OrdersStore{Store: store})
@@ -119,7 +120,7 @@ func TestDispatchConditionOrderStillHonoursOpenTrackingGate(t *testing.T) {
 // carrying the order's run label means the previous dispatch's work is still
 // moving, and that suppresses the fire whether or not a budget was consulted.
 func TestDispatchConditionOrderStillHonoursOpenWorkGate(t *testing.T) {
-	a := conditionBudgetOrder("true")
+	a := conditionBudgetOrder("exit 0")
 	m, _, store := newConditionBudgetDispatcher(t, []orders.Order{a}, 1)
 
 	front := orders.NewStore(beads.OrdersStore{Store: store})
@@ -151,7 +152,7 @@ func TestDispatchConditionOrderStillHonoursOpenWorkGate(t *testing.T) {
 // unbudgeted pass: it is selected by the check's verdict, not by the trigger
 // type.
 func TestDispatchConditionOrderWithFailingCheckDoesNotFire(t *testing.T) {
-	a := conditionBudgetOrder("false")
+	a := conditionBudgetOrder("exit 1")
 	m, _, store := newConditionBudgetDispatcher(t, []orders.Order{a}, 1)
 
 	m.dispatch(context.Background(), t.TempDir(), time.Now())

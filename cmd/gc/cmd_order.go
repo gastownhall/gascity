@@ -1397,8 +1397,13 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 					fmt.Fprintf(stderr, "gc order check: reading event cursor for %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
 					return 1
 				}
+				start, err := orders.CheckEventStart(ep, cursor)
+				if err != nil {
+					fmt.Fprintf(stderr, "gc order check: %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
+					return 1
+				}
 				cursorFn = func(string) uint64 {
-					return cursor
+					return start
 				}
 			}
 			triggerOpts, err := orderTriggerOptions(cityPath, cfg, a)
@@ -1488,8 +1493,13 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 				fmt.Fprintf(stderr, "gc order check: reading event cursor for %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
+			start, err := orders.CheckEventStart(ep, cursor)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc order check: %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
 			cursorFn = func(string) uint64 {
-				return cursor
+				return start
 			}
 		}
 		triggerOpts, err := orderTriggerOptions(cityPath, cfg, a)

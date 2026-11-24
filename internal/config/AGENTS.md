@@ -79,3 +79,9 @@ validation. Ordinary pack doctor checks, warm-up checks and fixes strip that
 reserved marker. Scripts retain policy and the 0/1/2+ diagnostic protocol;
 errors fail explicit validation, warnings remain advisory, and fixes/gates are
 never dispatched by validation. Bound each diagnostic subprocess.
+
+## Implicit agents carry no prompt_template
+
+`InjectImplicitAgents` leaves `PromptTemplate` empty. The startup prompt of an
+implicit agent's session is chosen in `cmd/gc` by `startupPromptTemplate`
+through `primeBuiltinPromptFile`; do not stamp a core-pack asset path in config.

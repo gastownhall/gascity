@@ -2,6 +2,8 @@ package herdr
 
 import (
 	"context"
+	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -9,38 +11,56 @@ import (
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
-// The setup deadline bounds the command, not the wait for an in-flight
-// process-env projection (mirrors the tmux adapter's runSetupCommand).
-func TestRunSetupCommandDeadlineStartsAfterAProcessEnvProjection(t *testing.T) {
+// processEnvProbe is the variable a held projection window changes.
+const processEnvProbe = "GC_HERDR_ENV_PROJECTION_PROBE"
+
+// holdProcessEnvProjection enters an execenv projection window, as a native
+// beads store open does, and projects a different processEnvProbe value than
+// the ambient one a child must inherit. The returned end is idempotent and also
+// runs at cleanup.
+func holdProcessEnvProjection(t *testing.T) (end func()) {
+	t.Helper()
+	t.Setenv(processEnvProbe, "ambient")
+	exit, err := execenv.EnterProjectionWindow(context.Background())
+	if err != nil {
+		t.Fatalf("EnterProjectionWindow: %v", err)
+	}
+	if err := os.Setenv(processEnvProbe, "projected"); err != nil {
+		exit()
+		t.Fatalf("projecting the probe: %v", err)
+	}
+	var once sync.Once
+	end = func() {
+		once.Do(func() {
+			_ = os.Setenv(processEnvProbe, "ambient")
+			exit()
+		})
+	}
+	t.Cleanup(end)
+	return end
+}
+
+// The setup command starts at once during an in-flight process-env projection
+// and its child carries the ambient value, not the projection (mirrors the tmux
+// adapter's runSetupCommand). The command exits non-zero when it sees anything
+// but the ambient value.
+func TestRunSetupCommandRunsAtOnceDuringAProcessEnvProjection(t *testing.T) {
 	const budget = time.Second
 	p := &Provider{setupTimeout: budget}
-	execenv.ProcessEnvLock.Lock()
-	projected := true
-	restore := func() {
-		if projected {
-			projected = false
-			execenv.ProcessEnvLock.Unlock()
-		}
-	}
-	t.Cleanup(restore)
+	end := holdProcessEnvProjection(t)
 
 	done := make(chan error, 1)
-	go func() { done <- p.runSetupCommand(context.Background(), "true", map[string]string{}) }()
-	// The window is the assertion: the command cannot run while the
-	// projection stands, and it stands past the command's budget.
-	select {
-	case err := <-done:
-		restore()
-		t.Fatalf("runSetupCommand returned (err=%v) while a process-env projection was in flight", err)
-	case <-time.After(2 * budget):
-	}
-	restore()
+	go func() {
+		done <- p.runSetupCommand(context.Background(), `test "$`+processEnvProbe+`" = ambient`, map[string]string{})
+	}()
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Fatalf("runSetupCommand after the projection restored: %v", err)
+			t.Fatalf("runSetupCommand during the projection: %v", err)
 		}
 	case <-time.After(testutil.ExecRaceTimeout):
-		t.Fatal("runSetupCommand did not return after the projection restored")
+		end()
+		t.Fatal("runSetupCommand did not start while a process-env projection stood")
 	}
+	end()
 }

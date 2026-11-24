@@ -18,8 +18,9 @@
 // name/version take precedence on conflict. Setting OTEL_SDK_DISABLED=true
 // keeps telemetry off regardless of any endpoint var.
 //
-// gc re-injects GC_-prefixed vars and the derived BD_OTEL_* vars into the
-// agent session environments it creates, but not the standard
+// gc re-injects GC_-prefixed vars, BD_OTEL_ENABLED and the derived
+// per-signal OTEL_EXPORTER_OTLP_{METRICS,LOGS}_ENDPOINT vars into the agent
+// session environments it creates, but not the bare standard
 // OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_SDK_DISABLED vars: nested sessions
 // see those only through ambient inheritance (tmux server env, shell
 // profiles). Standard-endpoint deployments that want nested gc and Claude

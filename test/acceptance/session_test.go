@@ -224,7 +224,10 @@ func TestSessionDefaultNamedSession(t *testing.T) {
 		if !strings.Contains(out, "mayor") {
 			t.Errorf("expected default named session in list, got:\n%s", out)
 		}
-		if !strings.Contains(out, string(session.StateCreating)) &&
+		// A born-split city runs the v2 reconciler, whose not-yet-started
+		// session row reads start-pending.
+		if !strings.Contains(out, string(session.StateStartPending)) &&
+			!strings.Contains(out, string(session.StateCreating)) &&
 			!strings.Contains(out, string(session.StateActive)) &&
 			!strings.Contains(out, string(session.StateAwake)) &&
 			!strings.Contains(out, string(session.StateAsleep)) {
@@ -275,7 +278,7 @@ func TestSessionDefaultNamedSession(t *testing.T) {
 		}
 		for _, sess := range got.Sessions {
 			switch sess.State {
-			case session.StateCreating, session.StateActive, session.StateAwake, session.StateAsleep:
+			case session.StateStartPending, session.StateCreating, session.StateActive, session.StateAwake, session.StateAsleep:
 			default:
 				t.Errorf("session %q state = %q, want materialized lifecycle state\n%s", sess.Template, sess.State, out)
 			}
