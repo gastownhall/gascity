@@ -393,6 +393,12 @@ type hookClaimOps struct {
 	// the class route took resides in the binding instead: the cells' key for
 	// a claim is hookStartedKeyFor's, never this alone.
 	StoreRef func(dir string) string
+	// DemandTriggerStore resolves a trigger's gc.trigger_bead_store_ref stamp
+	// to the leg that reads the store the controller counted it in: the
+	// inverse of StoreRef. Read only by the demand/claim divergence
+	// diagnostics, after the drain result is written. Nil, or an error, means
+	// the seat cannot place the counting store, which classifies unknown.
+	DemandTriggerStore func(storeRef string) (hookStore, error)
 	// EmitWorkStartedUnrecorded publishes work.started_unrecorded when a
 	// claim is delivered without its work_started record. Best-effort.
 	EmitWorkStartedUnrecorded func(sessionID, template, beadID string, cause error)
@@ -1974,8 +1980,9 @@ func hookStartedKeyFor(ops hookClaimOps, dir, beadID string, verdict hookAdoptio
 // eligible claim mutation errored — so an operational write failure stays
 // distinguishable from idle even though both still drain and reclaim next tick.
 //
-// dir is the store context the diagnostics classification reads through; it is
-// used ONLY after the drain has been written. See recordDemandClaimDivergence:
+// dir is the seat's primary store context, read by the drain-ack fence. The
+// diagnostics that run after the drain is written read the trigger in the
+// store the controller counted it in, not dir. See recordDemandClaimDivergence:
 // a demand-spawned seat draining empty is either correct pull or a broken
 // agreement invariant, and the drain itself cannot tell an operator which.
 func writeHookClaimNoWork(opts hookClaimOptions, ops hookClaimOps, claimsErrored bool, dir string, stdout, stderr io.Writer) int {
@@ -1990,7 +1997,7 @@ func writeHookClaimNoWork(opts hookClaimOptions, ops hookClaimOps, claimsErrored
 	// Strictly after the result: the drain is already written and its exit code
 	// is already decided, so nothing below can influence either.
 	if reason == hookClaimReasonNoWork {
-		hookRecordDemandClaimDivergence(reason, dir, opts, ops, stderr)
+		hookRecordDemandClaimDivergence(reason, opts, ops, stderr)
 	}
 	return code
 }

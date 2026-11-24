@@ -44,6 +44,11 @@ const demandSpawnOriginValue = "demand"
 // the seat's session row, or the trigger row its stamp names.
 const demandTriggerUnreadable = "unreadable"
 
+// demandTriggerStoreUnresolved is the TriggerStatusAtDrain of a trigger whose
+// gc.trigger_bead_store_ref the seat cannot place: the store the controller
+// counted the row in is not one this seat can read, so nothing was read.
+const demandTriggerStoreUnresolved = "store_unresolved"
+
 // hookRecordDemandClaimDivergence is the emitter seam, replaced in tests.
 var hookRecordDemandClaimDivergence = recordDemandClaimDivergence
 
@@ -56,7 +61,7 @@ var demandDivergenceRecorder = openCityRecorder
 // demand-spawned seat that drained with no work. It is best-effort and silent on
 // every failure: a diagnostics counter must never turn into a second failure
 // mode on the drain path.
-func recordDemandClaimDivergence(reason, dir string, opts hookClaimOptions, ops hookClaimOps, stderr io.Writer) {
+func recordDemandClaimDivergence(reason string, opts hookClaimOptions, ops hookClaimOps, stderr io.Writer) {
 	if hookClaimEnvValue(opts.Env, "GC_SPAWN_ORIGIN") != demandSpawnOriginValue {
 		return
 	}
@@ -68,7 +73,7 @@ func recordDemandClaimDivergence(reason, dir string, opts hookClaimOptions, ops 
 	triggerID := trigger.ID
 	status, classification := demandTriggerUnreadable, events.DemandClaimUnknown
 	if readErr == nil {
-		status, classification = classifyDemandTrigger(triggerID, dir, opts, ops)
+		status, classification = classifyDemandTrigger(trigger, opts, ops)
 	}
 	payload, err := json.Marshal(events.SessionDemandClaimDivergencePayload{
 		SessionID:            sessionID,
@@ -118,21 +123,36 @@ func demandSessionTrigger(sessionID string, ops hookClaimOps) (demandTrigger, er
 	return demandTrigger{ID: strings.TrimSpace(trigger.ID), StoreRef: strings.TrimSpace(trigger.StoreRef)}, nil
 }
 
-// classifyDemandTrigger reads the trigger row and reports (status, verdict).
+// classifyDemandTrigger reads the trigger row in the store the controller
+// counted it in (trigger.StoreRef) and reports (status, verdict).
+//
+// The seat's own leg is never read here. Within one store, a row that is no
+// longer claimable has moved on; across stores that reasoning is false, because
+// a same-id copy in the seat's store says nothing about the row the controller
+// counted. A stamp the seat cannot place is unknown with status
+// demandTriggerStoreUnresolved, and nothing is read.
 //
 // A read that FAILS is never absence here either: it classifies as unknown
 // rather than inventing a divergence, so a flaky store cannot manufacture the
 // exact metric this counter exists to trust.
-func classifyDemandTrigger(triggerID, dir string, opts hookClaimOptions, ops hookClaimOps) (status, classification string) {
-	if strings.TrimSpace(triggerID) == "" {
+func classifyDemandTrigger(trigger demandTrigger, opts hookClaimOptions, ops hookClaimOps) (status, classification string) {
+	triggerID := strings.TrimSpace(trigger.ID)
+	if triggerID == "" {
 		return "", events.DemandClaimUnknown
 	}
 	if ops.ReadWorkMeta == nil {
 		return "", events.DemandClaimUnknown
 	}
+	if ops.DemandTriggerStore == nil {
+		return demandTriggerStoreUnresolved, events.DemandClaimUnknown
+	}
+	leg, err := ops.DemandTriggerStore(trigger.StoreRef)
+	if err != nil {
+		return demandTriggerStoreUnresolved, events.DemandClaimUnknown
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
 	defer cancel()
-	bead, err := ops.ReadWorkMeta(ctx, dir, opts.Env, triggerID, opts.Assignee)
+	bead, err := ops.ReadWorkMeta(ctx, leg.dir, leg.env, triggerID, opts.Assignee)
 	if err != nil {
 		return demandTriggerUnreadable, events.DemandClaimUnknown
 	}
@@ -158,7 +178,7 @@ func classifyDemandTrigger(triggerID, dir string, opts hookClaimOptions, ops hoo
 		// would read zero forever and stop being the agreement signal it exists to
 		// be. Settle it instead, against the same live deps the drain-ack open arm
 		// settles on.
-		return status, classifyDemandTriggerBlockedness(triggerID, dir, opts, ops)
+		return status, classifyDemandTriggerBlockedness(triggerID, leg, opts, ops)
 	case demandRowStatusBlocked:
 		// bd's own blocked status is a fresh bead-local field and the ready query
 		// excludes the row whatever its dependencies, so it is proof, not a
@@ -175,7 +195,8 @@ func classifyDemandTrigger(triggerID, dir string, opts hookClaimOptions, ops hoo
 }
 
 // classifyDemandTriggerBlockedness settles a trigger row whose blockedness the
-// bead alone could not answer, by re-deriving it from live dependencies.
+// bead alone could not answer, by re-deriving it from live dependencies in leg,
+// the store the row was read from.
 //
 // A genuinely blocked row was never claimable, so it is not the agreement
 // invariant breaking — but it is not folded into benign either: it gets its own
@@ -188,13 +209,13 @@ func classifyDemandTrigger(triggerID, dir string, opts hookClaimOptions, ops hoo
 // unknown, never divergence and never blocked. Same discipline as the read above:
 // a flaky store must not be able to manufacture the metric this counter exists to
 // keep trustworthy.
-func classifyDemandTriggerBlockedness(triggerID, dir string, opts hookClaimOptions, ops hookClaimOps) string {
+func classifyDemandTriggerBlockedness(triggerID string, leg hookStore, opts hookClaimOptions, ops hookClaimOps) string {
 	if ops.ConfirmBlocked == nil {
 		return events.DemandClaimUnknown
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
 	defer cancel()
-	blocked, err := ops.ConfirmBlocked(ctx, dir, opts.Env, triggerID, opts.Assignee)
+	blocked, err := ops.ConfirmBlocked(ctx, leg.dir, leg.env, triggerID, opts.Assignee)
 	switch {
 	case err != nil:
 		return events.DemandClaimUnknown
@@ -204,6 +225,14 @@ func classifyDemandTriggerBlockedness(triggerID, dir string, opts hookClaimOptio
 		return events.DemandClaimDivergence
 	}
 }
+
+// demandDivergenceSeatStoreRef and demandDivergenceSeatDir name the rig-pool
+// seat the demandDivergenceOps adapters stand in for: its trigger was counted in
+// its own rig store, which its primary leg reads at demandDivergenceSeatDir.
+const (
+	demandDivergenceSeatStoreRef = "rig:rig"
+	demandDivergenceSeatDir      = "/rig"
+)
 
 // demandDivergenceOpsForBead is a tiny adapter so the classification read can be
 // driven directly in tests without constructing a whole claim. The blockedness
@@ -216,11 +245,18 @@ func demandDivergenceOpsForBead(bead beads.Bead, err error) hookClaimOps {
 // demandDivergenceOpsForBlockedBead is demandDivergenceOpsForBead with the
 // live-dep blockedness settlement stubbed too, so a test can drive a confirmed
 // blocker or a failed dependency read. The session row reads as stamped with
-// bead's id.
+// bead's id, counted in demandDivergenceSeatStoreRef, which resolves to the
+// seat's own leg at demandDivergenceSeatDir.
 func demandDivergenceOpsForBlockedBead(bead beads.Bead, readErr error, blocked bool, confirmErr error) hookClaimOps {
 	return hookClaimOps{
 		ReadSessionTrigger: func(string) (demandTrigger, error) {
-			return demandTrigger{ID: bead.ID}, nil
+			return demandTrigger{ID: bead.ID, StoreRef: demandDivergenceSeatStoreRef}, nil
+		},
+		DemandTriggerStore: func(ref string) (hookStore, error) {
+			if ref != demandDivergenceSeatStoreRef {
+				return hookStore{}, fmt.Errorf("store ref %q is not the seat's own", ref)
+			}
+			return hookStore{dir: demandDivergenceSeatDir, storeRef: ref}, nil
 		},
 		ReadWorkMeta: func(context.Context, string, []string, string, string) (beads.Bead, error) {
 			return bead, readErr

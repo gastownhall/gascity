@@ -57,7 +57,7 @@ func captureDivergenceEmitter(t *testing.T, stdout *bytes.Buffer) *divergenceCap
 	t.Helper()
 	capture := &divergenceCapture{}
 	prev := hookRecordDemandClaimDivergence
-	hookRecordDemandClaimDivergence = func(reason, _ string, _ hookClaimOptions, ops hookClaimOps, _ io.Writer) {
+	hookRecordDemandClaimDivergence = func(reason string, _ hookClaimOptions, ops hookClaimOps, _ io.Writer) {
 		capture.calls++
 		capture.reason = reason
 		capture.stdoutAt = stdout.String()
@@ -198,7 +198,7 @@ func TestDivergenceClassification(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			opts := divergenceOptions()
 			ops := demandDivergenceOpsForBlockedBead(tt.bead, tt.readErr, tt.blocked, tt.confirmErr)
-			status, class := classifyDemandTrigger(tt.triggerID, "/rig", opts, ops)
+			status, class := classifyDemandTrigger(demandTrigger{ID: tt.triggerID, StoreRef: demandDivergenceSeatStoreRef}, opts, ops)
 			if class != tt.wantClass {
 				t.Errorf("classification = %q, want %q", class, tt.wantClass)
 			}
@@ -224,7 +224,7 @@ func TestSiblingRaceLoserClassifiesBenign(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	recordDemandClaimDivergence(hookClaimReasonNoWork, "/rig", opts, demandDivergenceOpsForBead(winner, nil), &stderr)
+	recordDemandClaimDivergence(hookClaimReasonNoWork, opts, demandDivergenceOpsForBead(winner, nil), &stderr)
 
 	if len(rec.Events) != 1 {
 		t.Fatalf("events = %d, want exactly 1", len(rec.Events))
@@ -259,7 +259,7 @@ func TestDivergenceCaseIsReportedToTheWorkerStderr(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	recordDemandClaimDivergence(hookClaimReasonNoWork, "/rig", opts, demandDivergenceOpsForBead(stillThere, nil), &stderr)
+	recordDemandClaimDivergence(hookClaimReasonNoWork, opts, demandDivergenceOpsForBead(stillThere, nil), &stderr)
 
 	if len(rec.Events) != 1 || rec.Events[0].Message != events.DemandClaimDivergence {
 		t.Fatalf("events = %+v, want one divergence-classified event", rec.Events)
@@ -304,7 +304,7 @@ func TestDivergenceStatusBlockedRowIsBlockedWithoutSettlement(t *testing.T) {
 			}
 
 			var stderr bytes.Buffer
-			recordDemandClaimDivergence(hookClaimReasonNoWork, "/rig", divergenceOptions(demandSpawnEnv()...), ops, &stderr)
+			recordDemandClaimDivergence(hookClaimReasonNoWork, divergenceOptions(demandSpawnEnv()...), ops, &stderr)
 
 			if len(rec.Events) != 1 || rec.Events[0].Message != events.DemandClaimBlocked {
 				t.Fatalf("events = %+v, want one blocked-classified event", rec.Events)
@@ -345,7 +345,7 @@ func TestDivergenceStatusBlockedRowIsBlockedWithoutSettlement(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			_, class := classifyDemandTrigger(tt.bead.ID, "/rig", divergenceOptions(), demandDivergenceOpsForBlockedBead(tt.bead, nil, false, nil))
+			_, class := classifyDemandTrigger(demandTrigger{ID: tt.bead.ID, StoreRef: demandDivergenceSeatStoreRef}, divergenceOptions(), demandDivergenceOpsForBlockedBead(tt.bead, nil, false, nil))
 			if class != tt.want {
 				t.Errorf("classification = %q, want %q", class, tt.want)
 			}
@@ -370,7 +370,7 @@ func TestNonDemandSpawnedSeatRecordsNoDivergence(t *testing.T) {
 		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"},
 	}
 
-	recordDemandClaimDivergence(hookClaimReasonNoWork, "/rig", opts, demandDivergenceOpsForBead(stillThere, nil), &stderr)
+	recordDemandClaimDivergence(hookClaimReasonNoWork, opts, demandDivergenceOpsForBead(stillThere, nil), &stderr)
 
 	if len(rec.Events) != 0 {
 		t.Fatalf("events = %+v, want none for a seat not spawned from demand", rec.Events)
@@ -408,11 +408,11 @@ func TestDivergenceClassifiesTheSessionRowStampNotTheEnv(t *testing.T) {
 			var asked []string
 			ops.ReadSessionTrigger = func(sessionID string) (demandTrigger, error) {
 				asked = append(asked, sessionID)
-				return demandTrigger{ID: stillThere.ID}, nil
+				return demandTrigger{ID: stillThere.ID, StoreRef: demandDivergenceSeatStoreRef}, nil
 			}
 
 			var stderr bytes.Buffer
-			recordDemandClaimDivergence(hookClaimReasonNoWork, "/rig", divergenceOptions(c.env...), ops, &stderr)
+			recordDemandClaimDivergence(hookClaimReasonNoWork, divergenceOptions(c.env...), ops, &stderr)
 
 			if len(asked) != 1 || asked[0] != "gcs-1" {
 				t.Fatalf("session trigger reads = %v, want one read of gcs-1", asked)
@@ -486,5 +486,97 @@ func TestDivergenceWithAnUnreadableSessionRowIsUnknownAndLeavesTheDrainAlone(t *
 func TestDemandClaimDivergenceStaysOffTheExportAllowlist(t *testing.T) {
 	if eventexport.IsAllowed(events.SessionDemandClaimDivergence) {
 		t.Fatal("session.demand_claim_divergence is on the redacted-export allowlist; that is an egress-surface change and needs its own review")
+	}
+}
+
+// demandCountingLegs is a DemandTriggerStore double: each store ref it knows
+// resolves to its leg, anything else is a ref the seat cannot place.
+func demandCountingLegs(legs map[string]hookStore) func(string) (hookStore, error) {
+	return func(ref string) (hookStore, error) {
+		leg, ok := legs[ref]
+		if !ok {
+			return hookStore{}, fmt.Errorf("store ref %q is not placeable from this seat", ref)
+		}
+		return leg, nil
+	}
+}
+
+// gastownhall/gascity#5858, the benign direction: the controller counted the
+// trigger in the CITY store, where it has since moved on (closed, or claimed by
+// a sibling), while the seat's own rig leg still holds an open, route-matching
+// copy of the same id. The verdict is the counting store's, so it is benign;
+// and the classification never reads the seat's own leg at all, neither for
+// the row nor for its dependencies.
+func TestDivergenceClassifiesTheCountingStoreNotTheSeatsOwnLeg(t *testing.T) {
+	routed := map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"}
+	openInSeatLeg := beads.Bead{ID: "canary-8a1", Status: "open", Type: "task", Metadata: routed}
+	for _, tt := range []struct {
+		name     string
+		counted  beads.Bead
+		wantStat string
+	}{
+		{
+			name:     "closed where it was counted",
+			counted:  beads.Bead{ID: "canary-8a1", Status: "closed", Type: "task", Metadata: routed},
+			wantStat: "closed",
+		},
+		{
+			name:     "claimed by a sibling where it was counted",
+			counted:  beads.Bead{ID: "canary-8a1", Status: "in_progress", Type: "task", Assignee: "gc__worker-2", Metadata: routed},
+			wantStat: "in_progress",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := events.NewFake()
+			prev := demandDivergenceRecorder
+			demandDivergenceRecorder = func(io.Writer) events.Recorder { return rec }
+			t.Cleanup(func() { demandDivergenceRecorder = prev })
+
+			const seatDir, cityDir = "/rig", "/city"
+			ops := demandDivergenceOpsForBlockedBead(openInSeatLeg, nil, false, nil)
+			ops.ReadSessionTrigger = func(string) (demandTrigger, error) {
+				return demandTrigger{ID: "canary-8a1", StoreRef: "city"}, nil
+			}
+			ops.DemandTriggerStore = demandCountingLegs(map[string]hookStore{
+				"city": {dir: cityDir, env: []string{"GC_STORE=city"}},
+			})
+			var reads, depReads []string
+			ops.ReadWorkMeta = func(_ context.Context, dir string, env []string, _, _ string) (beads.Bead, error) {
+				reads = append(reads, dir+" "+strings.Join(env, ","))
+				if dir == cityDir {
+					return tt.counted, nil
+				}
+				return openInSeatLeg, nil
+			}
+			ops.ConfirmBlocked = func(_ context.Context, dir string, _ []string, _, _ string) (bool, error) {
+				depReads = append(depReads, dir)
+				return false, nil
+			}
+			ops.DrainAck = func(io.Writer) error { return nil }
+			ops.ReadWorkStarted = noStartedClaims
+
+			var stdout, stderr bytes.Buffer
+			writeHookClaimNoWork(divergenceOptions(demandSpawnEnv()...), ops, false, seatDir, &stdout, &stderr)
+
+			if len(rec.Events) != 1 {
+				t.Fatalf("events = %+v, want exactly 1", rec.Events)
+			}
+			var payload events.SessionDemandClaimDivergencePayload
+			if err := json.Unmarshal(rec.Events[0].Payload, &payload); err != nil {
+				t.Fatalf("decoding payload: %v", err)
+			}
+			if payload.Classification != events.DemandClaimBenign || payload.TriggerStatusAtDrain != tt.wantStat {
+				t.Fatalf("payload = %+v, want benign over the counting store's %q row", payload, tt.wantStat)
+			}
+			if len(reads) != 1 || reads[0] != cityDir+" GC_STORE=city" {
+				t.Fatalf("trigger reads = %q, want exactly one, in the counting leg %s with its env", reads, cityDir)
+			}
+			if len(depReads) != 0 {
+				t.Fatalf("dependency reads = %q, want none for a row that moved on", depReads)
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("stderr = %q, want silence for a benign classification", stderr.String())
+			}
+		})
 	}
 }
