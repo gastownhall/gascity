@@ -30,6 +30,46 @@ func seedClosedRun(t *testing.T, store *beads.MemStore, scoped string, seq uint6
 	}
 }
 
+// TestOrderDispatchEventOrderFiresAfterEventLogRestart (#8567, AC-6): an
+// order whose run was stamped 500 against a log that was then lost fires on
+// the restarted log's two matching events, does not fire again on them, fires
+// on the next one, and warns once naming the order, the stamp and the head.
+func TestOrderDispatchEventOrderFiresAfterEventLogRestart(t *testing.T) {
+	order := rareEventOrder()
+	store := beads.NewMemStore()
+	seedClosedRun(t, store, order.ScopedName(), 500)
+	ep := events.NewFake()
+	ep.Record(events.Event{Type: order.On, Actor: "controller"})
+	ep.Record(events.Event{Type: order.On, Actor: "controller"})
+	var runs int
+	var stderr bytes.Buffer
+	m := eventFloorDispatcher(order, store, ep, &runs, &stderr)
+	now := time.Now()
+
+	tickOrders(t, m, now)
+	if runs != 1 {
+		t.Fatalf("exec runs on the restarted log's events = %d, want 1; stderr:\n%s", runs, stderr.String())
+	}
+	tickOrders(t, m, now.Add(time.Minute))
+	if runs != 1 {
+		t.Fatalf("exec runs with no new event = %d, want still 1 (the consumed events must not replay); stderr:\n%s", runs, stderr.String())
+	}
+	ep.Record(events.Event{Type: order.On, Actor: "controller"})
+	tickOrders(t, m, now.Add(2*time.Minute))
+	if runs != 2 {
+		t.Fatalf("exec runs after one new matching event = %d, want 2; stderr:\n%s", runs, stderr.String())
+	}
+
+	const warning = "above the event log head"
+	if got := strings.Count(stderr.String(), warning); got != 1 {
+		t.Fatalf("reset warnings = %d, want 1; stderr:\n%s", got, stderr.String())
+	}
+	want := "event order " + order.ScopedName() + " has a run stamped seq 500 above the event log head 2"
+	if !strings.Contains(stderr.String(), want) {
+		t.Fatalf("stderr does not name the order, stamp 500 and head 2 (%q):\n%s", want, stderr.String())
+	}
+}
+
 // headFailingLog is an event log whose head reads fail from the nth read on
 // (counted from arm) and whose event reads can fail.
 type headFailingLog struct {
@@ -127,5 +167,42 @@ func TestOrderDispatchEventReadFailureKeepsTheSuppressionStreak(t *testing.T) {
 				t.Fatalf("suppression streak = %+v (present %v), want %+v preserved", got, ok, streak)
 			}
 		})
+	}
+}
+
+// TestNoteEventCursorResetWarnsOncePerEpisode: a reset warns on its first
+// check only; a check that read the log with no reset ends the episode, so a
+// later reset warns again, as does a different discarded stamp, and a failed
+// read with no reset found ends nothing.
+func TestNoteEventCursorResetWarnsOncePerEpisode(t *testing.T) {
+	var stderr bytes.Buffer
+	m := &memoryOrderDispatcher{stderr: &stderr}
+	reset := func(stamp uint64) orders.TriggerResult {
+		return orders.TriggerResult{CursorReset: &orders.CursorReset{Stamp: stamp, Head: 2}}
+	}
+	warnings := func() int { return strings.Count(stderr.String(), "above the event log head") }
+
+	m.noteEventCursorReset("o", reset(500))
+	m.noteEventCursorReset("o", reset(500))
+	if got := warnings(); got != 1 {
+		t.Fatalf("warnings after one episode = %d, want 1", got)
+	}
+	m.noteEventCursorReset("o", orders.TriggerResult{ReadFailed: true})
+	m.noteEventCursorReset("o", reset(500))
+	if got := warnings(); got != 1 {
+		t.Fatalf("warnings after a failed read = %d, want still 1", got)
+	}
+	m.noteEventCursorReset("other", reset(500))
+	if got := warnings(); got != 2 {
+		t.Fatalf("warnings after another order's reset = %d, want 2", got)
+	}
+	m.noteEventCursorReset("o", reset(700))
+	if got := warnings(); got != 3 {
+		t.Fatalf("warnings after a different stamp = %d, want 3", got)
+	}
+	m.noteEventCursorReset("o", orders.TriggerResult{})
+	m.noteEventCursorReset("o", reset(700))
+	if got := warnings(); got != 4 {
+		t.Fatalf("warnings after the episode ended and recurred = %d, want 4", got)
 	}
 }

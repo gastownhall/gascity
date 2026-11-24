@@ -392,6 +392,10 @@ type memoryOrderDispatcher struct {
 	// run. Guarded by cacheMu; memory only, carried across rebuilds by
 	// carryEventFloorsFrom.
 	eventSeeds map[string]uint64
+	// eventCursorResets holds, per scoped event order, the discarded run
+	// stamp of the cursor reset it last warned about (noteEventCursorReset),
+	// so an episode warns once. Guarded by cacheMu; memory only.
+	eventCursorResets map[string]uint64
 
 	dispatchCtx    context.Context
 	dispatchCancel context.CancelFunc
@@ -1071,6 +1075,7 @@ func (m *memoryOrderDispatcher) fireCandidate(ctx context.Context, cand *orderDi
 		return false
 	}
 	if a.Trigger == "event" {
+		m.noteEventCursorReset(scoped, result)
 		// An event check that could not read the log never proves that no
 		// event matched: it is reported and moves nothing (no run, no floor,
 		// no suppression streak cleared), and the next pass reads the same
@@ -1728,6 +1733,34 @@ func (m *memoryOrderDispatcher) eventCheckStart(scoped string, stamps []uint64) 
 		m.eventFloors[scoped] = floor
 	}
 	return append(slices.Clone(stamps), floor), head, nil
+}
+
+// noteEventCursorReset warns when an event order's check discarded a run
+// stamp above the event log's head (orders.CursorReset): the log may have been
+// lost or replaced while the bead store kept the order's run records. It
+// warns once per episode, an order and its highest discarded stamp; a check
+// that read the log without discarding a stamp ends the episode, and a failed
+// read that found no reset leaves it as it was.
+func (m *memoryOrderDispatcher) noteEventCursorReset(scoped string, result orders.TriggerResult) {
+	reset := result.CursorReset
+	m.cacheMu.Lock()
+	if reset == nil {
+		if !result.ReadFailed {
+			delete(m.eventCursorResets, scoped)
+		}
+		m.cacheMu.Unlock()
+		return
+	}
+	if warned, ok := m.eventCursorResets[scoped]; ok && warned == reset.Stamp {
+		m.cacheMu.Unlock()
+		return
+	}
+	if m.eventCursorResets == nil {
+		m.eventCursorResets = make(map[string]uint64)
+	}
+	m.eventCursorResets[scoped] = reset.Stamp
+	m.cacheMu.Unlock()
+	logDispatchError(m.stderr, "gc: order dispatch: warning: event order %s has a run stamped seq %d above the event log head %d, which the log cannot contain (it may have been lost or replaced); reading events after seq %d", scoped, reset.Stamp, reset.Head, reset.Cursor)
 }
 
 // watchEventOrders records the event head as the start of every event order
