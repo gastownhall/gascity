@@ -1432,6 +1432,11 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
+path = "cmd/gc/store_watchdog_lanes_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
 path = "cmd/gc/supervisor_log_rotation_test.go"
 resource = "fixed_sleep"
 calls = 1
