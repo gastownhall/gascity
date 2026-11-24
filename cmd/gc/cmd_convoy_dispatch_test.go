@@ -12426,3 +12426,85 @@ func TestCmdWorkflowDeleteSourceIgnoresSharedConvoyWithNothingOpen(t *testing.T)
 		t.Fatalf("stdout = %q, want already_clean", stdout.String())
 	}
 }
+
+// launchReadFailStore fails exactly one of the reads delete-source makes to
+// attribute a convoy-first run to its source.
+type launchReadFailStore struct {
+	beads.Store
+	read string
+	err  error
+}
+
+func (s launchReadFailStore) DepList(id, direction string) ([]beads.Dep, error) {
+	if (s.read == "tracking" && direction == "up") || (s.read == "members" && direction == "down") {
+		return nil, s.err
+	}
+	return s.Store.DepList(id, direction)
+}
+
+func (s launchReadFailStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	switch {
+	case s.read == "members" && query.ParentID != "",
+		s.read == "input-roots" && query.Metadata[beadmeta.InputConvoyIDMetadataKey] != "",
+		s.read == "tree" && (query.Metadata[beadmeta.RootBeadIDMetadataKey] != "" || query.Metadata[beadmeta.DrainControlIDMetadataKey] != ""):
+		return nil, s.err
+	}
+	return s.Store.List(query)
+}
+
+func TestCollectSourceWorkflowMatchesInputConvoyReadFailure(t *testing.T) {
+	const cityPath = "/city"
+	rigPath := filepath.Join(cityPath, "rigs", "frontend")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs:      []config.Rig{{Name: "frontend", Path: "rigs/frontend"}},
+	}
+	for _, read := range []string{"tracking", "members", "input-roots", "tree"} {
+		for _, holder := range []string{"selected", "binding", "tolerated"} {
+			t.Run(holder+"/"+read, func(t *testing.T) {
+				held := beads.NewMemStore()
+				source, err := held.Create(beads.Bead{Title: "Source", Type: "task", Status: "in_progress"})
+				if err != nil {
+					t.Fatalf("Create(source): %v", err)
+				}
+				createConvoyFirstRun(t, held, source.ID)
+				failing := launchReadFailStore{Store: held, read: read, err: errors.New("connection reset mid-scan")}
+
+				var views []convoyStoreView
+				sourceStoreRef := "city:test"
+				switch holder {
+				case "selected":
+					views = []convoyStoreView{{path: cityPath, store: failing}}
+				case "binding":
+					views = []convoyStoreView{
+						{path: cityPath, store: beads.NewMemStore()},
+						{path: convoyBindingViewPath, store: failing, role: convoyViewClassBinding},
+					}
+				case "tolerated":
+					sourceStoreRef = ""
+					views = []convoyStoreView{
+						{path: cityPath, store: beads.NewMemStore()},
+						{path: rigPath, store: failing},
+					}
+				}
+
+				matches, _, scans, err := collectSourceWorkflowMatchesFromStores(cfg, cityPath, source.ID, sourceStoreRef, views, nil)
+				if holder != "tolerated" {
+					if err == nil {
+						t.Fatalf("collect returned %d matches and no error; a failed %s read in the %s store must abort before any close", len(matches), read, holder)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("collect: %v (a failed read in another store is tolerated, not fatal)", err)
+				}
+				if len(matches) != 0 {
+					t.Fatalf("matches = %d, want none from the store whose scan failed", len(matches))
+				}
+				if got := assessZeroMatchSourceWorkflowScan(scans, source.ID); got.reason != "store-scan-failed" {
+					t.Fatalf("zero-match reason = %q, want store-scan-failed (a failed scan is never already_clean)", got.reason)
+				}
+			})
+		}
+	}
+}
