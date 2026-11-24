@@ -64,7 +64,7 @@ func (p resolvedSessionSleepPolicy) enabled() bool {
 // capability-downgrade switch, and the fingerprint — is computed from
 // cfg/agent/sp and is byte-identical to the bead form.
 func resolveSessionSleepPolicyInfo(info sessionpkg.Info, cfg *config.City, sp runtime.Provider) resolvedSessionSleepPolicy {
-	agent := findAgentByTemplate(cfg, normalizedSessionTemplateInfo(info, cfg))
+	agent := findSessionAgentByTemplate(cfg, normalizedSessionTemplateInfo(info, cfg))
 	resolved := config.ResolveSessionSleepPolicy(cfg, agent)
 	policy := resolvedSessionSleepPolicy{
 		Class:      resolved.Class,
