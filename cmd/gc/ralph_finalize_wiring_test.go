@@ -925,3 +925,71 @@ func TestRalphFinalizeNestedChecksPassFirstIteration(t *testing.T) {
 		})
 	}
 }
+
+// TestRalphFinalizeNestedInnerCheckRejectsThenPasses: the inner check rejects
+// its iteration 1 and passes iteration 2 while the outer passes iteration 1. The
+// runtime spawns inner iteration 2 as the inner loop's own scope (no scope_ref)
+// with i1 scoped to it, the inner control passes before o1 runs, and the root
+// finalizes pass.
+func TestRalphFinalizeNestedInnerCheckRejectsThenPasses(t *testing.T) {
+	res := runWiringWorkflow(t, wiringScenario{
+		formula:       wiringNestedCheckFormula(2, 3, true),
+		checkPassIter: map[string]int{"outer": 1, "inner": 2},
+	})
+	var scope beads.Bead
+	var found bool
+	for _, b := range res.all {
+		if strings.HasSuffix(beadRef(b), "outer.iteration.1.inner.iteration.2") {
+			scope, found = b, true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("no bead with step ref ending outer.iteration.1.inner.iteration.2")
+	}
+	if got := scope.Metadata["gc.kind"]; got != "scope" {
+		t.Errorf("inner iteration 2 gc.kind = %q, want scope", got)
+	}
+	if got := scope.Metadata["gc.scope_ref"]; got != "" {
+		t.Errorf("inner iteration 2 gc.scope_ref = %q, want none", got)
+	}
+	ralphAssertOutcome(t, "inner iteration 2 scope", scope, "pass")
+	var members []string
+	for _, b := range res.all {
+		if b.Metadata["gc.scope_ref"] == beadRef(scope) {
+			members = append(members, beadRef(b))
+		}
+	}
+	if len(members) == 0 {
+		t.Errorf("no bead is scoped to inner iteration 2 (%s)", beadRef(scope))
+	}
+	var i1 beads.Bead
+	found = false
+	for _, b := range res.all {
+		if strings.HasSuffix(beadRef(b), "outer.iteration.1.inner.iteration.2.i1") {
+			i1, found = b, true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("no bead with step ref ending outer.iteration.1.inner.iteration.2.i1")
+	}
+	ralphAssertOutcome(t, "inner iteration 2 i1", i1, "pass")
+	if got := i1.Metadata["gc.scope_ref"]; got != beadRef(scope) {
+		t.Errorf("inner iteration 2 i1 gc.scope_ref = %q, want %q", got, beadRef(scope))
+	}
+	if got := i1.Metadata["gc.ralph_step_id"]; got != "inner" {
+		t.Errorf("inner iteration 2 i1 gc.ralph_step_id = %q, want inner", got)
+	}
+	inner := res.get(t, "outer.iteration.1.inner")
+	ralphAssertOutcome(t, "inner control", inner, "pass")
+	res.assertWorkerAfterControlPass(t, inner, "outer.iteration.1.o1")
+	ralphAssertOutcome(t, "outer control", res.get(t, "outer"), "pass")
+	ralphAssertOutcome(t, "workflow root", res.root(t), "pass")
+	res.assertSourceFailureKeysEmpty(t)
+	for _, b := range res.all {
+		if b.Status != "closed" {
+			t.Errorf("%s (kind=%q) status = %q, want closed", beadRef(b), b.Metadata["gc.kind"], b.Status)
+		}
+	}
+}
