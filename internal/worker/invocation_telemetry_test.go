@@ -657,7 +657,7 @@ func TestMessageRecordsCodexTokensForResumedSession(t *testing.T) {
 	// Rollout created ~3h ago (well outside the 10m window plus tolerance),
 	// then appended to by the resumed run.
 	writeWorkerTestJSONL(t, codexWorkerRolloutPathWithID(t, searchBase, time.Now().Add(-3*time.Hour), sessionUUID), []map[string]any{
-		codexWorkerSessionMeta(workDir),
+		codexWorkerSessionMetaWithThread(workDir, sessionUUID),
 		codexWorkerTurnContext(),
 		codexWorkerTokenCount("2026-06-12T10:00:05.000Z", 15917, 15562, 10624, 355),
 		codexWorkerTokenCount("2026-06-12T10:00:10.000Z", 34114, 17888, 15232, 309),

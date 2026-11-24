@@ -68,7 +68,7 @@ func defaultPricingRegistry() *pricing.Registry {
 //   - codex: identity-first. When the session bead carries a session_key
 //     (captured from the codex hook; codex rollout filenames end in the
 //     same uuid), the rollout is resolved by that suffix via
-//     sessionlog.FindCodexSessionFileByID over the day dirs between bead
+//     sessionlog.FindCodexSessionFileByIdentity over the day dirs between bead
 //     creation and the wake anchor — this is what keeps telemetry alive for
 //     resumed sessions, whose rollout filename timestamp is the FIRST start
 //     and predates every later wake. A keyed miss records nothing: a
@@ -401,15 +401,16 @@ func discoverInvocationTranscriptViaManager(h *SessionHandle, id string, _ time.
 // creation time for directly-created sessions. Ambiguous or out-of-window
 // rollouts yield "" — telemetry silently records nothing rather than
 // misattributing.
-func discoverCodexInvocationTranscript(h *SessionHandle, _ string, createdAt time.Time, meta map[string]string) string {
+func discoverCodexInvocationTranscript(h *SessionHandle, sessionID string, createdAt time.Time, meta map[string]string) string {
 	anchor := createdAt
 	if woke, err := time.Parse(time.RFC3339, strings.TrimSpace(meta["last_woke_at"])); err == nil {
 		anchor = woke
 	}
 	workDir := contract.WorkerDirFromMetadata(meta)
 	if sessionKey := strings.TrimSpace(meta["session_key"]); sessionKey != "" {
-		return sessionlog.FindCodexSessionFileByID(
+		path, _, _ := discoverCodexKeyed(codexDiscoverySeamPromptOp, sessionID,
 			h.adapter.SearchPaths, workDir, sessionKey, createdAt, anchor)
+		return path
 	}
 	return sessionlog.FindCodexSessionFileNear(
 		h.adapter.SearchPaths,
@@ -590,10 +591,12 @@ func usagesSinceCursor(usages []sessionlog.TailUsage, cursor string) []sessionlo
 // nothing new was pending) OR the miss is permanent (unregistered family; a
 // keyless codex session whose bounded workdir+window fallback found no unambiguous
 // rollout in a CLEAN scan — a closed session's rollout is already on disk, so that
-// miss is ambiguity/out-of-window/TZ, which no retry resolves; or a keyless claude
+// miss is ambiguity/out-of-window/TZ, which no retry resolves; a keyed codex session
+// whose rollout is duplicated or whose first line contradicts the key, which no retry
+// resolves either; or a keyless claude
 // session whose transcript lookup refused an ambiguous shared workdir, which no
 // retry resolves either while the pool shares that directory); false when the
-// miss is transient (a keyed codex rollout not discovered yet, a keyless codex
+// miss is transient (a keyed codex rollout not discovered yet or read uncertainly, a keyless codex
 // scan clouded by a transient IO fault, a keyless claude transcript lookup that
 // failed to read the store, a keyless claude session that is UNAMBIGUOUS but whose
 // transcript is not on disk yet, an extraction error, or a sink Record
@@ -707,15 +710,16 @@ func (f *Factory) sweepSessionModelUsage(
 		return 0, false, nil
 	}
 	if path == "" {
-		if (keylessCodex || keylessClaude) && emptyIsPermanent {
+		if sweepMissIsFinal(family, keyless, emptyIsPermanent) {
 			// Clean, PERMANENT miss: the keyless codex workdir fallback found nothing
-			// (ambiguity / out-of-window / TZ), or the claude lookup REFUSED a shared
-			// workdir it cannot disambiguate. Neither is resolved by a retry, so settle
+			// (ambiguity / out-of-window / TZ), a keyed codex rollout is duplicated or
+			// names another conversation, or the keyless claude lookup REFUSED a shared
+			// workdir it cannot disambiguate. None is resolved by a retry, so settle
 			// so compute can commit and the recently-closed window is not re-swept
-			// every tick. (A keyed miss below stays transient, and so does a keyless
+			// every tick. (An absent keyed rollout below stays transient, and so does a
 			// claude session that is unambiguous but whose transcript is merely not
 			// written yet: both may simply not be flushed.)
-			slog.Debug("model-usage sweep: keyless transcript miss is permanent; settling",
+			slog.Debug("model-usage sweep: transcript miss is permanent; settling",
 				slog.String("session_id", id), slog.String("provider", family))
 			return 0, true, nil
 		}
@@ -737,8 +741,9 @@ func (f *Factory) sweepSessionModelUsage(
 // it, so a caller that memoizes discovery can distinguish the two kinds: true
 // means there is definitively nothing to find (an unregistered provider family;
 // a keyless codex session whose bounded workdir+window fallback came up empty
-// on a CLEAN scan; or a keyless claude session whose transcript lookup cleanly
-// refused an ambiguous shared workdir) and re-running discovery is pure waste;
+// on a CLEAN scan; a keyed codex session whose rollout is duplicated or whose first
+// line contradicts the key; or a keyless claude session whose transcript lookup
+// cleanly refused an ambiguous shared workdir) and re-running discovery is pure waste;
 // false means the miss is transient (a keyed rollout not flushed yet, a keyless
 // codex scan clouded by an I/O fault, which leaves both an empty result and a
 // lone hit non-definitive, a keyless claude lookup that failed to read the store,
@@ -761,11 +766,13 @@ func (f *Factory) DiscoverSweepTranscript(id string, meta map[string]string, now
 		return "", false
 	}
 	if path == "" {
-		// Match SweepSessionModelUsage settle: only a clean keyless miss that no retry
-		// can resolve (codex out-of-window/ambiguity, or the claude shared-workdir
-		// ambiguity refusal) memoizes as settled. A claude transcript that is merely
-		// not written yet stays unsettled so the live lane rediscovers it.
-		return "", (keylessCodex || keylessClaude) && emptyIsPermanent
+		// Match SweepSessionModelUsage settle (sweepMissIsFinal): only a clean miss
+		// that no retry can resolve (a codex out-of-window or ambiguous fallback, a
+		// duplicated or contradicted keyed rollout, or the keyless claude
+		// shared-workdir ambiguity refusal) memoizes as settled. A claude transcript
+		// that is merely not written yet stays unsettled so the live lane
+		// rediscovers it.
+		return "", sweepMissIsFinal(family, keyless, emptyIsPermanent)
 	}
 	return path, true
 }
@@ -870,10 +877,10 @@ func (f *Factory) sweepResolvedTranscript(ctx context.Context, family, id string
 // session_key that names its mirrored export (keyed only; a miss is transient
 // and never falls back to the workdir). The codex lookup is
 // bounded to the awake interval's day window via
-// sessionlog.FindCodexSessionFileByID(notBefore=awake_started_at,
+// sessionlog.FindCodexSessionFileByIdentity(notBefore=awake_started_at,
 // notAfter=slept_at||now) — NOT the unbounded date-tree walk — because this runs
 // on the SYNCHRONOUS controller reconcile tick, where a full codex-history scan
-// per terminal session per tick could stall the tick. FindCodexSessionFileByID
+// per terminal session per tick could stall the tick. FindCodexSessionFileByIdentity
 // still resolves resumed sessions whose rollout predates this interval: the
 // keyed lookup also scans the session UUID's own creation day (UUIDv7 hint ±2
 // days), which is where a resumed rollout was first written.
@@ -901,8 +908,9 @@ func (f *Factory) sweepResolvedTranscript(ctx context.Context, family, id string
 // same-cwd rollout, making the singleton non-definitive), so the caller retries
 // rather than recording or settling either. For the claude manager lookup it is
 // false when the transcript lookup returned an error — a store read failure, which
-// says nothing about whether a transcript exists. The keyed codex and opencode
-// lookups always return scanClean true.
+// says nothing about whether a transcript exists. The keyed opencode lookup
+// always returns scanClean true; the keyed codex lookup returns false only when
+// its bounded directory scan or first-line read was uncertain.
 //
 // The returned emptyIsPermanent is meaningful only when path is empty on a CLEAN
 // lookup: it reports whether a retry could ever resolve the miss. It is true for
@@ -910,16 +918,19 @@ func (f *Factory) sweepResolvedTranscript(ctx context.Context, family, id string
 // clean zero is ambiguity/out-of-window/TZ) and for the claude manager's
 // shared-workdir ambiguity refusal and its no-workdir case — neither changes while
 // the pool shares that directory. It is FALSE for a claude session that is
-// unambiguous but whose transcript simply has not been written yet, and for a keyed
-// codex miss, both of which a later tick may resolve.
+// unambiguous but whose transcript simply has not been written yet, for an absent
+// keyed codex rollout, and for an invalid keyed lookup, all of which a later tick may
+// resolve. A keyed codex rollout that is duplicated (two distinct files carry the
+// key) or whose first line contradicts the key is a settled miss: emptyIsPermanent
+// is true and sweepMissIsFinal settles it, because no retry changes either.
 func (f *Factory) discoverSweepTranscript(family, id string, meta map[string]string, now time.Time) (path string, scanClean bool, emptyIsPermanent bool) {
 	switch family {
 	case "codex":
 		workDir := contract.WorkerDirFromMetadata(meta)
 		notBefore, notAfter := sweepIntervalWindow(meta, now)
 		if key := strings.TrimSpace(meta["session_key"]); key != "" {
-			return sessionlog.FindCodexSessionFileByID(
-				f.searchPaths, workDir, key, notBefore, notAfter), true, false
+			return discoverCodexKeyed(codexDiscoverySeamSweep, id,
+				f.searchPaths, workDir, key, notBefore, notAfter)
 		}
 		// Keyless fallback (Design B): resolve by cwd + wake window. Requires a
 		// workdir to key on and a non-zero interval start to anchor the window;
@@ -1002,7 +1013,7 @@ func sweepAgentName(meta map[string]string) string {
 // close marker bounds a session closed straight from a live state. When neither
 // lies after the start (a terminal exit that does not refresh slept_at, or a
 // value carried over from a prior awake interval), it falls back to now as the
-// interval end, so notAfter is always set and never reversed — FindCodexSessionFileByID requires
+// interval end, so notAfter is always set and never reversed — FindCodexSessionFileByIdentity requires
 // a non-zero notAfter and refuses a reversed range. The finder pads both ends by
 // a local day, so an off-by-seconds bound — including the tighter drain-ack
 // bound — cannot drop the rollout's day directory.

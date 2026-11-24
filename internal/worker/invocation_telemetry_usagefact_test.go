@@ -776,7 +776,7 @@ func TestMessageRecordsWrappedCodexModelFactViaLadder(t *testing.T) {
 
 	rollout := codexWorkerRolloutPathWithID(t, searchBase, time.Now(), sessionUUID)
 	writeWorkerTestJSONL(t, rollout, []map[string]any{
-		codexWorkerSessionMeta(workDir),
+		codexWorkerSessionMetaWithThread(workDir, sessionUUID),
 		codexWorkerTurnContext(),
 		codexWorkerTokenCount("2026-06-12T10:00:05.000Z", 15917, 15562, 10624, 355),
 	})
@@ -786,7 +786,7 @@ func TestMessageRecordsWrappedCodexModelFactViaLadder(t *testing.T) {
 
 	// A second invocation completes; the next prompt op records it.
 	writeWorkerTestJSONL(t, rollout, []map[string]any{
-		codexWorkerSessionMeta(workDir),
+		codexWorkerSessionMetaWithThread(workDir, sessionUUID),
 		codexWorkerTurnContext(),
 		codexWorkerTokenCount("2026-06-12T10:00:05.000Z", 15917, 15562, 10624, 355),
 		codexWorkerTokenCount("2026-06-12T10:00:10.000Z", 34114, 17888, 15232, 309),

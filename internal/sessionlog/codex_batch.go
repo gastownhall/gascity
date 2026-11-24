@@ -103,8 +103,27 @@ func findCodexSessionFilesByIDWithReaders(
 	if len(states) == 0 {
 		return make(map[string]string)
 	}
-	days := planCodexBatchDays(states)
+	if !scanCodexBatchStates(searchPaths, states, readDir, lookupEntry) {
+		// Matches collected before exhaustion are not authoritative: an
+		// unscanned root/day could contain a second physical candidate.
+		return make(map[string]string)
+	}
+	return resolveCodexBatchResults(states, readSessionCWD)
+}
 
+// scanCodexBatchStates plans and scans the shared day directories for every
+// admitted target and folds the exact filename matches onto states in place.
+// It returns false when the scan could not complete (a ReadDir fault other than
+// a missing path, or the request-wide ReadDir budget), in which case the
+// collected matches are not authoritative. The cwd-guarded resolver and the
+// keyed identity resolver both build on this one scan.
+func scanCodexBatchStates(
+	searchPaths []string,
+	states []codexBatchTarget,
+	readDir func(string) ([]os.DirEntry, error),
+	lookupEntry codexBatchEntryLookup,
+) bool {
+	days := planCodexBatchDays(states)
 	scanner := &codexBatchScanner{
 		readDir:     readDir,
 		lookupEntry: lookupEntry,
@@ -112,12 +131,10 @@ func findCodexSessionFilesByIDWithReaders(
 		seenRoots:   make(map[string]bool),
 	}
 	if !scanner.scan(searchPaths) {
-		// Matches collected before exhaustion are not authoritative: an
-		// unscanned root/day could contain a second physical candidate.
-		return make(map[string]string)
+		return false
 	}
 	collectCodexBatchMatches(states, days)
-	return resolveCodexBatchResults(states, readSessionCWD)
+	return true
 }
 
 // buildCodexBatchTargets validates and normalizes batch targets into per-target
