@@ -4,7 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -490,5 +493,38 @@ func TestDrainWorkflowServeWorkRepeatedPendingDoesNotPinBackoff(t *testing.T) {
 	}
 	if followSleepDuration(idleSweeps) <= followSleepDuration(0) {
 		t.Fatalf("idle backoff stayed at %s after repeated identical pending sweeps, want it to grow", followSleepDuration(idleSweeps))
+	}
+}
+
+// TestRunWorkflowServeFollowTracesPendingOnsetOnce pins the trace contract of
+// the repeat suppression: the first pending sweep writes "serve pending", and
+// every verbatim repeat after it writes "serve pending-repeat", so a long-lived
+// gate reads as one onset line in the trace instead of one line per second.
+func TestRunWorkflowServeFollowTracesPendingOnsetOnce(t *testing.T) {
+	clearGCEnv(t)
+	tracePath := filepath.Join(t.TempDir(), "serve-trace.log")
+	t.Setenv("GC_WORKFLOW_TRACE", tracePath)
+
+	blockedRow := hookBead{ID: "gc-blocked", Metadata: hookBeadMetadata{"gc.kind": "workflow-finalize"}}
+	_, stopErr := stubServeFollowLoop(t,
+		func(int) ([]hookBead, error) { return []hookBead{blockedRow}, nil },
+		func(int, string) error { return dispatch.ErrControlPending },
+		3)
+	if err := runWorkflowServeFollow(config.Agent{Name: "control-dispatcher"}, t.TempDir(), t.TempDir(), "bd ready", nil, io.Discard); !errors.Is(err, stopErr) {
+		t.Fatalf("runWorkflowServeFollow error = %v, want %v", err, stopErr)
+	}
+
+	traceRaw, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatalf("reading workflow trace: %v", err)
+	}
+	trace := string(traceRaw)
+	onsets := strings.Count(trace, "serve pending bead=gc-blocked kind=workflow-finalize")
+	repeats := strings.Count(trace, "serve pending-repeat bead=gc-blocked kind=workflow-finalize")
+	if onsets != 1 {
+		t.Fatalf("trace shows %d \"serve pending\" lines for one blocked bead, want 1 (the onset):\n%s", onsets, trace)
+	}
+	if repeats != 2 {
+		t.Fatalf("trace shows %d \"serve pending-repeat\" lines after the onset, want 2 (one per repeat sweep):\n%s", repeats, trace)
 	}
 }
