@@ -415,10 +415,26 @@ func TestFederatedSwapChangesOnlyTheReader(t *testing.T) {
 			bd105 := BeadsConfig{BDCompatibility: BeadsBDCompatibility105}
 			single := v.forTopo(shape.agent, QueryTopology{Beads: bd105})
 			federated := v.forTopo(shape.agent, QueryTopology{Beads: bd105, FederatedReady: true})
-			if n := singleStoreReadCount(single); n == 0 {
+			n := singleStoreReadCount(single)
+			if n == 0 {
 				t.Fatalf("%s/%s: single-store command contains no read to swap", shape.name, v.name)
-			} else if got := strings.Count(federated, gcReadyCommand); got != n {
-				t.Errorf("%s/%s: single-store command has %d swappable reads, federated has %d %q", shape.name, v.name, n, got, gcReadyCommand)
+			}
+			gotReads := strings.Count(federated, gcReadyCommand)
+			batchedAssigned := strings.Contains(federated, `--assignee-any=$gc_identity`)
+			if batchedAssigned {
+				if gotReads > n {
+					t.Errorf("%s/%s: assigned-identity batching increased federated reads: single=%d federated=%d", shape.name, v.name, n, gotReads)
+				}
+				if strings.Contains(federated, "gc_assigned_in_progress_all_json") && strings.Contains(federated, "gc_assigned_ready_all_json") && gotReads >= n {
+					t.Errorf("%s/%s: combined work query did not reduce federated reads: single=%d federated=%d", shape.name, v.name, n, gotReads)
+				}
+				for _, want := range []string{`for gc_identity in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"`, `--assignee-any=$gc_identity`, `--json --limit=0`} {
+					if !strings.Contains(federated, want) {
+						t.Errorf("%s/%s: batched federated query missing %q", shape.name, v.name, want)
+					}
+				}
+			} else if gotReads != n {
+				t.Errorf("%s/%s: single-store command has %d swappable reads, federated has %d %q", shape.name, v.name, n, gotReads, gcReadyCommand)
 			}
 			if strings.Contains(federated, bdReadyCommand) {
 				t.Errorf("%s/%s: federated command still shells %q, so that tier stays blind on a split city: %q", shape.name, v.name, bdReadyCommand, federated)
@@ -429,8 +445,10 @@ func TestFederatedSwapChangesOnlyTheReader(t *testing.T) {
 			// Everything outside the reader words, their failure handling, and the
 			// crash-recovery presence key must be untouched. Normalizing the
 			// federated form back onto the single-store one is what proves it.
-			if renormalized := renormalizeFederatedCommand(federated); renormalized != single {
-				t.Errorf("%s/%s: the federated command differs from the single-store one by more than the reader, its failure clause, and the crash-recovery presence key\n federated(normalized)=%q\n      single-store=%q", shape.name, v.name, renormalized, single)
+			if !batchedAssigned {
+				if renormalized := renormalizeFederatedCommand(federated); renormalized != single {
+					t.Errorf("%s/%s: the federated command differs from the single-store one by more than the reader, its failure clause, and the crash-recovery presence key\n federated(normalized)=%q\n      single-store=%q", shape.name, v.name, renormalized, single)
+				}
 			}
 		}
 	}
@@ -488,6 +506,24 @@ func TestWorkQueryGolden(t *testing.T) {
 					t.Errorf("golden mismatch for %s\n got=%q\nwant=%q", name, got, string(want))
 				}
 			}
+		}
+	}
+}
+
+func TestFederatedAssignedQueriesBatchRuntimeIdentitiesOnce(t *testing.T) {
+	topo := QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}, FederatedReady: true}
+	for name, query := range map[string]string{
+		"assigned-in-progress": (&Agent{Name: "worker"}).EffectiveAssignedInProgressQueryFor(topo),
+		"assigned-ready":       (&Agent{Name: "worker"}).EffectiveAssignedReadyQueryFor(topo),
+	} {
+		if got := strings.Count(query, `--assignee-any=$gc_identity`); got != 1 {
+			t.Errorf("%s session-id batch flags = %d, want 1 in one gc ready read", name, got)
+		}
+		if strings.Contains(query, `--assignee="$id"`) {
+			t.Errorf("%s still scans once per identity: %q", name, query)
+		}
+		if !strings.Contains(query, `select((.assignee // "") == $id)`) {
+			t.Errorf("%s does not preserve per-identity selection after the batch read", name)
 		}
 	}
 }
