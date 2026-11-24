@@ -17,7 +17,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
-	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -631,8 +630,11 @@ func TestCmdSessionReset_RequestsFreshRestartWithController(t *testing.T) {
 			cmd := string(buf[:n])
 			commands <- cmd
 			reply := "ok\n"
-			if cmd == "ping\n" {
+			switch {
+			case cmd == "ping\n":
 				reply = "123\n"
+			case strings.HasPrefix(cmd, sessionSyncCommandPrefix):
+				reply = `{"outcome":"ok","generation":"1"}` + "\n"
 			}
 			if _, err := conn.Write([]byte(reply)); err != nil {
 				conn.Close() //nolint:errcheck
@@ -659,7 +661,7 @@ func TestCmdSessionReset_RequestsFreshRestartWithController(t *testing.T) {
 		case cmd, ok := <-commands:
 			if !ok {
 				if len(gotCommands) != 3 {
-					t.Fatalf("controller commands = %v, want ping, poke, poke", gotCommands)
+					t.Fatalf("controller commands = %v, want ping, poke, session-sync", gotCommands)
 				}
 				break
 			}
@@ -668,9 +670,8 @@ func TestCmdSessionReset_RequestsFreshRestartWithController(t *testing.T) {
 			t.Fatalf("timed out waiting for controller pokes, got %v", gotCommands)
 		}
 	}
-	// The probe poke is key-less; the post-reset enqueue carries the
-	// session key.
-	wantExact := []string{"ping\n", "poke\n", keyedPokeCommand(reconcilekey.Session(bead.ID)) + "\n"}
+	// The probe poke is key-less; the post-reset barrier names the session.
+	wantExact := []string{"ping\n", "poke\n", mustSessionSyncCommand(t, bead.ID) + "\n"}
 	for i, want := range wantExact {
 		if gotCommands[i] != want {
 			t.Fatalf("controller command %d = %q, want %q", i, gotCommands[i], want)
