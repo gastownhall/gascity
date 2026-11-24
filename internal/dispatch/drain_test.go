@@ -633,7 +633,8 @@ func TestProcessDrainExclusiveReservationConflictFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Members: %v", err)
 	}
-	if err := store.SetMetadata(members[1].ID, "gc.exclusive_drain_reservation", "other-drain"); err != nil {
+	otherDrain := createExclusiveDrainControl(t, store, "other drain")
+	if err := store.SetMetadata(members[1].ID, "gc.exclusive_drain_reservation", otherDrain.ID); err != nil {
 		t.Fatalf("SetMetadata(reservation): %v", err)
 	}
 
@@ -647,6 +648,12 @@ func TestProcessDrainExclusiveReservationConflictFailsClosed(t *testing.T) {
 	drain = mustGetBead(t, store, drain.ID)
 	if drain.Status != "closed" || drain.Metadata["gc.failure_reason"] != "exclusive_reservation_conflict" {
 		t.Fatalf("drain = %+v, want closed reservation conflict", drain)
+	}
+	if got := drain.Metadata["gc.failure_subject"]; got != members[1].ID {
+		t.Fatalf("gc.failure_subject = %q, want %s", got, members[1].ID)
+	}
+	if got := drain.Metadata["gc.failure_owner"]; got != otherDrain.ID {
+		t.Fatalf("gc.failure_owner = %q, want the open drain %s", got, otherDrain.ID)
 	}
 	firstMember := mustGetBead(t, store, members[0].ID)
 	if got := strings.TrimSpace(firstMember.Metadata["gc.exclusive_drain_reservation"]); got != "" {
@@ -663,9 +670,27 @@ func TestProcessDrainExclusiveReservationConflictFailsClosed(t *testing.T) {
 		}
 	}
 	secondMember := mustGetBead(t, store, members[1].ID)
-	if got := secondMember.Metadata["gc.exclusive_drain_reservation"]; got != "other-drain" {
-		t.Fatalf("second member reservation = %q, want other-drain", got)
+	if got := secondMember.Metadata["gc.exclusive_drain_reservation"]; got != otherDrain.ID {
+		t.Fatalf("second member reservation = %q, want the open drain %s", got, otherDrain.ID)
 	}
+}
+
+// createExclusiveDrainControl persists an open exclusive drain control, the
+// only kind of bead a live reservation can name.
+func createExclusiveDrainControl(t *testing.T, store beads.Store, title string) beads.Bead {
+	t.Helper()
+	control, err := store.Create(beads.Bead{
+		Title: title,
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":                "drain",
+			"gc.drain_member_access": beadmeta.DrainMemberAccessExclusive,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create drain control %q: %v", title, err)
+	}
+	return control
 }
 
 func TestProcessDrainSeparateCompletesAfterItemRootsClose(t *testing.T) {

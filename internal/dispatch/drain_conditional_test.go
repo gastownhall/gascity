@@ -100,9 +100,11 @@ func TestReserveDrainMemberCASContention(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create member: %v", err)
 	}
+	// Both controls are persisted open drains: the loser's reservation read
+	// may already see the winner's value, and only an open owner conflicts.
 	controls := []beads.Bead{
-		{ID: "drain-a", Metadata: map[string]string{beadmeta.DrainMemberAccessMetadataKey: beadmeta.DrainMemberAccessExclusive}},
-		{ID: "drain-b", Metadata: map[string]string{beadmeta.DrainMemberAccessMetadataKey: beadmeta.DrainMemberAccessExclusive}},
+		createExclusiveDrainControl(t, store, "drain-a"),
+		createExclusiveDrainControl(t, store, "drain-b"),
 	}
 	results := make([]error, len(controls))
 	var wg sync.WaitGroup
@@ -116,7 +118,7 @@ func TestReserveDrainMemberCASContention(t *testing.T) {
 	wg.Wait()
 
 	owner := reservationOwner(t, store, member.ID)
-	if owner != "drain-a" && owner != "drain-b" {
+	if owner != controls[0].ID && owner != controls[1].ID {
 		t.Fatalf("owner = %q, want exactly one of the racing drains", owner)
 	}
 	var wins, skips int
