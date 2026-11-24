@@ -839,12 +839,39 @@ func TestRalphFinalizeRecoveredAfterTwoFailedIterations(t *testing.T) {
 	ralphAssertOutcome(t, "iteration 3 m1", res.get(t, "loop.iteration.3.m1"), "pass")
 }
 
-// TestRalphFinalizeOuterExhaustsInnerPasses is skipped on purpose: a ralph with
-// children nested inside a ralph body does not run today. The compile stamps the
-// inner iteration scope and its members with the OUTER iteration's scope_ref,
-// ralph_step_id and attempt, so the inner member's scope check evaluates the
-// outer scope and answers "continue", the inner scope never closes, and the
-// workflow makes no progress.
+// TestRalphFinalizeOuterExhaustsInnerPasses (issue #9412 AC-7): the outer
+// check never passes (max_attempts 2) while the inner passes its iteration 1,
+// so outer iteration 2 spawns with a seeded inner loop that also passes, both
+// inner controls close pass, the outer control closes fail, and the root
+// fails with the outer control as the source bead's failure subject. The
+// compile of a nested check-with-children used to deadlock before the
+// finalizer: the inner scope carried the outer iteration's identity, so the
+// inner member's scope-check answered "continue" forever.
 func TestRalphFinalizeOuterExhaustsInnerPasses(t *testing.T) {
-	t.Skip("nested ralph-with-children deadlocks before the finalizer: the inner scope carries the outer iteration's identity")
+	res := runWiringWorkflow(t, wiringScenario{
+		formula:       wiringNestedCheckTOML(true),
+		checkPassIter: map[string]int{"outer": 0, "inner": 1},
+	})
+
+	// Outer iteration 2 spawned with a seeded inner loop that passes.
+	i1Iter2 := res.get(t, "outer.iteration.2.inner.iteration.1.i1")
+	ralphAssertOutcome(t, "outer iteration 2 seeded inner i1", i1Iter2, "pass")
+	innerScope2 := res.get(t, "outer.iteration.2.inner.iteration.1")
+	ralphAssertOutcome(t, "outer iteration 2 seeded inner scope", innerScope2, "pass")
+
+	// Both inner controls close pass, one per outer iteration.
+	ralphAssertOutcome(t, "iteration 1 inner control", res.get(t, "outer.iteration.1.inner"), "pass")
+	ralphAssertOutcome(t, "iteration 2 inner control", res.get(t, "outer.iteration.2.inner"), "pass")
+
+	// The outer control exhausts and fails; the root fails with the outer
+	// control as the source bead's failure subject.
+	control := res.get(t, "outer")
+	ralphAssertOutcome(t, "outer control", control, "fail")
+	ralphAssertOutcome(t, "workflow root", res.root(t), "fail")
+	if got := res.sourceSubjectRef(t); got != res.ref("outer") {
+		t.Errorf("source gc.failure_subject ref = %q, want the outer control %q", got, res.ref("outer"))
+	}
+	if st := res.source(t).Status; st == "closed" {
+		t.Errorf("source bead status = %q, want open", st)
+	}
 }
