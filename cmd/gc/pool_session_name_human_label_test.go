@@ -176,3 +176,17 @@ func TestReleaseOrphanedPoolAssignments_KeepsOperatorAssignedClaims(t *testing.T
 	assertSweepKept(t, workStore, released, handoff, padded)
 	assertSweepReleased(t, workStore, released, control)
 }
+
+// An operator-assigned bead that was never started is the operator's to pick
+// up: the sweep leaves it open and assigned rather than unassigning it back to
+// the pool.
+func TestReleaseOrphanedPoolAssignments_KeepsOperatorAssignedOpenWork(t *testing.T) {
+	workStore := beads.NewMemStore()
+	handoff := seedHumanLabelSweepWork(t, workStore, "open pool work assigned to the operator", "human", "open")
+	control := seedHumanLabelSweepWork(t, workStore, "pool work held by a dead holder", "worker-1", "in_progress")
+
+	released := runOperatorSweep(t, workStore, handoff, control)
+
+	assertSweepKept(t, workStore, released, handoff)
+	assertSweepReleased(t, workStore, released, control)
+}
