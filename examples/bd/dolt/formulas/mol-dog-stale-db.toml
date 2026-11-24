@@ -22,6 +22,20 @@ trends. The full JSON report is recorded in the work bead's metadata
 (`gc.dolt_cleanup.scan_report`, `gc.dolt_cleanup.apply_report`) so a
 follow-up reader can `gc bd show <id>` to see details.
 
+## Store-call bound
+
+Every call that reaches the bead store (report, outcome and close
+writes, escalation mail or escalate.sh hook, maintenance nudge) runs
+under `timeout --kill-after=5 $DOG_BD_TIMEOUT` (default 60 seconds; a
+value that is not a positive whole number of seconds means 60), so a
+hung store fails the call instead of blocking the step. A report the
+store did not take is named in the close reason
+(`reports_omitted=<stage>`) and a `mol-dog-stale-db.escalate` event; a
+hung outcome write or close leaves the work bead open with no outcome.
+The step drain-acks either way. Event emits and `gc dolt-cleanup` are
+not wrapped. Without `timeout` or `gtimeout` on PATH the step warns
+once and runs the calls unbounded.
+
 ## Dog Contract
 
 This is infrastructure work. You:
@@ -104,6 +118,11 @@ REPORTS_OMITTED=""
 # passthrough `gc bd` spawned dies with it. A host with neither timeout nor
 # gtimeout runs the calls unbounded, as before, rather than failing them.
 STORE_TIMEOUT="${DOG_BD_TIMEOUT:-60}"
+case "$STORE_TIMEOUT" in
+  ''|*[!0-9]*) STORE_TIMEOUT=60 ;;
+  *[1-9]*) ;;
+  *) STORE_TIMEOUT=60 ;;
+esac
 TIMEOUT_BIN=$(command -v gtimeout || command -v timeout || true)
 [ -n "$TIMEOUT_BIN" ] || echo "mol-dog-stale-db: no timeout or gtimeout; bead-store calls run unbounded" >&2
 store_bounded() {

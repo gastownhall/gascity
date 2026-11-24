@@ -1921,6 +1921,85 @@ func TestStaleDBFormulaRunsUnboundedWithoutTimeout(t *testing.T) {
 	)
 }
 
+// staleDBLoggingGtimeout is a gtimeout that logs its bound and the first three
+// words of the command it runs, then runs the command unbounded.
+const staleDBLoggingGtimeout = `#!/usr/bin/env bash
+echo "$2 $3 $4 $5" >> "$GC_TEST_TIMEOUT_LOG"
+shift 2
+exec "$@"
+`
+
+// staleDBStoreCalls lists the first three words of each logged gc call that
+// touches the bead store, in the order the step made them.
+func staleDBStoreCalls(log string) []string {
+	var calls []string
+	for _, line := range strings.Split(log, "\n") {
+		for _, prefix := range []string{"gc bd ", "gc mail send ", "gc session nudge "} {
+			if strings.HasPrefix(line, prefix) {
+				calls = append(calls, strings.Join(strings.Fields(line)[:3], " "))
+			}
+		}
+	}
+	return calls
+}
+
+// TestStaleDBFormulaStoreCallTimeoutKnob: DOG_BD_TIMEOUT sets the bound on
+// every store call (report and outcome writes, close, escalation mail and
+// maintenance nudges), and a value that is not a positive whole number of
+// seconds falls back to 60. Event emits are not bounded.
+func TestStaleDBFormulaStoreCallTimeoutKnob(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash not found: %v", err)
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skipf("jq not found: %v", err)
+	}
+
+	type knob struct {
+		name string
+		env  []string
+		want string
+	}
+	knobs := []knob{
+		{"7", []string{"DOG_BD_TIMEOUT=7"}, "7"},
+		{"unset", nil, "60"},
+	}
+	for _, v := range []string{"", "0", "00", "-5", "abc"} {
+		knobs = append(knobs, knob{fmt.Sprintf("%q", v), []string{"DOG_BD_TIMEOUT=" + v}, "60"})
+	}
+	for _, tc := range knobs {
+		t.Run(tc.name, func(t *testing.T) {
+			run := runStaleDBFormulaHungStoreCase(t, staleDBHungStoreCase{
+				scanJSON: staleDBOverThresholdScan,
+				bins:     map[string]string{"gtimeout": staleDBLoggingGtimeout},
+				env: append([]string{
+					"GC_SYSTEM_PACKS_DIR=" + t.TempDir(),
+					"GC_MAINTENANCE_DONE_TARGET=ops",
+				}, tc.env...),
+			})
+			if run.timedOut || run.err != nil {
+				t.Fatalf("step did not finish cleanly\n%s", run)
+			}
+			calls := staleDBStoreCalls(run.log)
+			// The scan report, the escalation mail, two nudges, the outcome and the close.
+			if len(calls) != 6 {
+				t.Fatalf("%d store calls, want 6: %q\n%s", len(calls), calls, run)
+			}
+			var bounded []string
+			for _, line := range strings.Split(strings.TrimSuffix(run.timeouts, "\n"), "\n") {
+				bound, call, _ := strings.Cut(line, " ")
+				if bound != tc.want {
+					t.Errorf("%q bounded at %q, want %q", call, bound, tc.want)
+				}
+				bounded = append(bounded, call)
+			}
+			if strings.Join(bounded, "\n") != strings.Join(calls, "\n") {
+				t.Fatalf("bounded calls:\n%s\nwant every store call:\n%s\n%s", strings.Join(bounded, "\n"), strings.Join(calls, "\n"), run)
+			}
+		})
+	}
+}
+
 func runStaleDBFormulaFailureCase(t *testing.T, tc staleDBFailureCase) (string, []byte, error) {
 	t.Helper()
 	script := renderStaleDBFormulaShell(t)
