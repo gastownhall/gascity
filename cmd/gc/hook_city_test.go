@@ -325,3 +325,69 @@ dir = "fed-canary"
 		t.Fatalf("stderr = %q, want the row and the counting store named", stderr.String())
 	}
 }
+
+// AC-6 for gastownhall/gascity#5858: sessionTriggerBeadVia, unit-level. Both
+// demand stamps — the trigger bead id and the store it was counted in — come
+// off the ONE row read the front door already makes, trimmed, with an empty
+// store ref for an id-only row, a zero trigger for an unstamped one, and an
+// error for a row the seat cannot read (never a silent empty stamp that would
+// pass for "no trigger recorded").
+func TestSessionTriggerBeadViaReadsBothStampsOffOneRow(t *testing.T) {
+	newFront := func(id, triggerID, storeRef string) sessionFrontGetter {
+		meta := map[string]string{"state": string(session.StateActive)}
+		if triggerID != "" {
+			meta[beadmeta.TriggerBeadIDMetadataKey] = triggerID
+		}
+		if storeRef != "" {
+			meta[beadmeta.TriggerBeadStoreRefMetadataKey] = storeRef
+		}
+		bead := beads.Bead{
+			ID: id, Type: session.BeadType, Status: "open", Title: "session",
+			Labels: []string{session.LabelSession}, Metadata: meta,
+		}
+		store := session.NewStore(beads.SessionStore{Store: beads.NewMemStoreFrom(1, []beads.Bead{bead}, nil)})
+		return func() (*session.Store, error) { return store, nil }
+	}
+
+	t.Run("both stamps off one row, trimmed", func(t *testing.T) {
+		got, err := sessionTriggerBeadVia(newFront("mc-sess1", " wb-1 ", " city:test-city "), " mc-sess1 ")
+		if err != nil {
+			t.Fatalf("sessionTriggerBeadVia: %v", err)
+		}
+		if got != (demandTrigger{ID: "wb-1", StoreRef: "city:test-city"}) {
+			t.Fatalf("got %+v, want both stamps trimmed off the one row", got)
+		}
+	})
+	t.Run("an id-only row carries no store stamp", func(t *testing.T) {
+		got, err := sessionTriggerBeadVia(newFront("mc-sess1", "wb-1", ""), "mc-sess1")
+		if err != nil {
+			t.Fatalf("sessionTriggerBeadVia: %v", err)
+		}
+		if got.ID != "wb-1" || got.StoreRef != "" {
+			t.Fatalf("got %+v, want the id and an empty store ref", got)
+		}
+	})
+	t.Run("an unstamped row reads as zero, not an error", func(t *testing.T) {
+		got, err := sessionTriggerBeadVia(newFront("mc-sess1", "", ""), "mc-sess1")
+		if err != nil {
+			t.Fatalf("sessionTriggerBeadVia: %v", err)
+		}
+		if got != (demandTrigger{}) {
+			t.Fatalf("got %+v, want a zero trigger for an unstamped row", got)
+		}
+	})
+	t.Run("a row the seat cannot read is an error, never a silent empty stamp", func(t *testing.T) {
+		got, err := sessionTriggerBeadVia(func() (*session.Store, error) {
+			return nil, errors.New("front door failed")
+		}, "mc-sess1")
+		if err == nil {
+			t.Fatalf("got %+v, nil; want an error", got)
+		}
+	})
+	t.Run("a missing row is an error", func(t *testing.T) {
+		got, err := sessionTriggerBeadVia(newFront("mc-sess1", "wb-1", "city"), "mc-sess2")
+		if err == nil {
+			t.Fatalf("got %+v, nil; want an error for a row that does not exist", got)
+		}
+	})
+}
