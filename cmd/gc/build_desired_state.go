@@ -1639,6 +1639,7 @@ func retargetScaleCheckTargetsToRoutedWorkPlane(
 	type templateTarget struct {
 		template string
 		healthy  bool
+		targets  []defaultScaleCheckTarget
 	}
 	byTemplate := make(map[string]*templateTarget)
 	order := make([]string, 0, len(targets))
@@ -1659,8 +1660,12 @@ func retargetScaleCheckTargetsToRoutedWorkPlane(
 			continue
 		}
 		state.healthy = true
+		state.targets = append(state.targets, target)
 	}
-	legs, resolveErr := routedWorkStoreCandidates(cityPath, cfg, workStore, rigStores, suspendedRigPaths, censusRefScoped)
+	// routedWorkCityDemandLegs is the claim-side plan: the retained work ledger
+	// plus every relocated class binding. The runtime-plane-only candidate list
+	// would leave ledger rows claimable by gc ready but counted by nobody.
+	legs, resolveErr := routedWorkCityDemandLegs(cityPath, cfg, workStore, rigStores, suspendedRigPaths)
 	out := append([]defaultScaleCheckTarget(nil), preservedErrors...)
 	for _, template := range order {
 		state := byTemplate[template]
@@ -1668,6 +1673,9 @@ func retargetScaleCheckTargetsToRoutedWorkPlane(
 			continue
 		}
 		if resolveErr != nil {
+			// A topology that cannot be resolved keeps the provisional targets
+			// (fail closed on partial, not blind) and carries the resolver fault.
+			out = append(out, state.targets...)
 			out = append(out, defaultScaleCheckTarget{
 				template: template,
 				err:      fmt.Errorf("default scale_check %s: resolving routed-work stores: %w", template, resolveErr),
@@ -1675,10 +1683,9 @@ func retargetScaleCheckTargetsToRoutedWorkPlane(
 			continue
 		}
 		if len(legs) == 0 {
-			out = append(out, defaultScaleCheckTarget{
-				template: template,
-				err:      fmt.Errorf("default scale_check %s: routed-work store unavailable", template),
-			})
+			// A city that relocates nothing has no runtime-plane class legs; keep
+			// the provisional single-store targets rather than refusing the probe.
+			out = append(out, state.targets...)
 			continue
 		}
 		for _, leg := range legs {
