@@ -310,3 +310,65 @@ func TestHerdrWaitForIdleCanceledDuringTheStatusReadIsCanceled(t *testing.T) {
 		t.Fatalf("WaitForIdle canceled during its status read = %v, want context.Canceled", err)
 	}
 }
+
+// TestHerdrStopReportsUnreachableWhenTheCloseCannotAnswer is #6055's Stop
+// arm: a pane lookup the herdr server never answered is an unreachable
+// runtime, not a stopped session. Stop wraps runtime.ErrRuntimeUnavailable
+// alongside the context error, and the sidecar binding stays in place (as
+// every close failure already keeps it) so a retried Stop still finds the
+// pane.
+func TestHerdrStopReportsUnreachableWhenTheCloseCannotAnswer(t *testing.T) {
+	p := newLiveContractProvider(t, "busy_get_blocks")
+	p.c.cliTimeout, p.c.cliWaitDelay = testBound, testWaitDlay
+	const name = "gastown__worker"
+	bindTestPane(t, p, name, bindModeShell)
+
+	start := time.Now()
+	err := p.Stop(name)
+	elapsed := time.Since(start)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Stop = %v; want the lookup's deadline as the cause", err)
+	}
+	if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("Stop = %v; want runtime.ErrRuntimeUnavailable wrapped: an unanswered lookup is not a stopped session", err)
+	}
+	if runtime.IsSessionGone(err) {
+		t.Fatalf("Stop = %v; an unanswered lookup must not read as session gone", err)
+	}
+	if elapsed > testBound+testWaitDlay+boundSlack {
+		t.Fatalf("Stop took %v; want it to return at the lookup's bound", elapsed)
+	}
+	if err := runtime.StopForCleanup(p, name); err == nil {
+		t.Fatal("StopForCleanup with an unanswered lookup = nil, want the failure propagated")
+	}
+	if pane, _ := p.GetMeta(name, metaBoundPane); pane != "%5" {
+		t.Errorf("bound pane after a failed Stop = %q, want %%5 kept for the retry", pane)
+	}
+}
+
+// TestHerdrStopIsCleanWhenTheServerIsConfirmedDead is the other side of
+// #6055's Stop arm: a pane close that never answers is a clean stop once the
+// herdr server is confirmed dead (its socket refuses the dial and nothing
+// listens), because a dead server took its panes with it. Stop returns nil
+// and the sidecar is removed.
+func TestHerdrStopIsCleanWhenTheServerIsConfirmedDead(t *testing.T) {
+	const name = "gastown__worker"
+	p, dir := lookupProvider(t)
+	touchFile(t, dir, "get_running")
+	touchFile(t, dir, "hang_pane_close")
+	p.c.dialUnix = func(context.Context, string) (net.Conn, error) {
+		return nil, &net.OpError{Op: "dial", Net: "unix", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}
+	}
+	p.c.unixListening = func(string) (bool, error) { return false, nil }
+	if err := p.SetMeta(name, metaBoundPane, "%5"); err != nil {
+		t.Fatal(err)
+	}
+	sidecar := filepath.Join(p.metaDir, sanitize(name))
+
+	if err := p.Stop(name); err != nil {
+		t.Fatalf("Stop = %v; want nil once the server is confirmed dead", err)
+	}
+	if _, statErr := os.Stat(sidecar); !os.IsNotExist(statErr) {
+		t.Fatalf("sidecar %s kept after a clean stop (stat err %v)", sidecar, statErr)
+	}
+}

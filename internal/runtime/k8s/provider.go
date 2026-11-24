@@ -512,6 +512,11 @@ func k8sRequiresPostStartLiveness(cfg runtime.Config) bool {
 // tracking while pods and their PVCs keep running untracked, leaking the most
 // expensive runtime. Delete errors are joined for the same reason; only a
 // genuine Kubernetes NotFound (the pod raced to gone) is treated as idempotent.
+// A failure carrying no Kubernetes API status never reached the API server
+// (the verb's own bound, a cancel, a dial failure): the session's state is
+// unknown, not stopped, so it is wrapped in runtime.ErrRuntimeUnavailable for
+// callers that defer on an unreachable runtime. An API status the server did
+// answer with (403, 500) keeps today's shape: it is an answer, wrong or not.
 // This mirrors the ssh provider's Stop discrimination.
 func (p *Provider) Stop(name string) error {
 	ctx, cancel := p.verbCtx(p.requestTimeout())
@@ -523,18 +528,30 @@ func (p *Provider) Stop(name string) error {
 		if apierrors.IsNotFound(err) {
 			return nil // session genuinely gone
 		}
-		return fmt.Errorf("k8s stop %q: listing pods: %w", name, err)
+		return fmt.Errorf("k8s stop %q: listing pods: %w", name, unanswered(err))
 	}
 	var errs []error
 	for i := range pods {
 		if delErr := p.ops.deletePod(ctx, pods[i].Name, 5); delErr != nil && !apierrors.IsNotFound(delErr) {
-			errs = append(errs, fmt.Errorf("deleting pod %q: %w", pods[i].Name, delErr))
+			errs = append(errs, fmt.Errorf("deleting pod %q: %w", pods[i].Name, unanswered(delErr)))
 		}
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("k8s stop %q: %w", name, errors.Join(errs...))
 	}
 	return nil
+}
+
+// unanswered marks an API error the API server never answered (a deadline, a
+// cancel, a dial or transport failure: anything without a Kubernetes API
+// status) as runtime.ErrRuntimeUnavailable, keeping the cause. Such a call
+// cannot tell whether the pod is gone. An error carrying an API status is the
+// server's own answer and is returned as is.
+func unanswered(err error) error {
+	if errors.As(err, new(apierrors.APIStatus)) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", runtime.ErrRuntimeUnavailable, err)
 }
 
 // Interrupt sends Ctrl-C to the tmux session inside the pod.
