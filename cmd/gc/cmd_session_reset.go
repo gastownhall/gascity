@@ -142,6 +142,12 @@ func cmdSessionReset(args []string, key string, stdout, stderr io.Writer, asJSON
 	case cliOpRefused:
 		return 1
 	case cliOpReplayed:
+		// A replay's reset is already durably recorded; the barrier still
+		// confirms the controller sees the row, so the reply a script reads
+		// says the same thing the first run's did.
+		if err := syncSessionOnController(cityPath, sessionID); err != nil {
+			return sessionResetUnconfirmed(stderr, sessionID, err)
+		}
 		return emitSessionResetResult(stdout, stderr, asJSON, sessionID, identity, op.outcome().Result.Via == legacyop.ViaLegacyRollback, op)
 	}
 	defer op.end()
@@ -182,8 +188,24 @@ func cmdSessionReset(args []string, key string, stdout, stderr io.Writer, asJSON
 		op.noteReplayByID(args[0])
 	}
 
-	_ = enqueueController(cityPath, reconcilekey.Session(sessionID))
+	// The barrier: the controller confirms it sees the recorded reset before
+	// success is reported (#5843). The markers were written through the CLI's
+	// one-shot store, around the controller's session cache, so a keyed poke
+	// alone would wake a pass that decides on a stale cached row; session-sync
+	// installs the row into that cache first, and its ok (or missing, for a
+	// rolled-back row) is what makes the printed success true.
+	if err := syncSessionOnController(cityPath, sessionID); err != nil {
+		return sessionResetUnconfirmed(stderr, sessionID, err)
+	}
 	return emitSessionResetResult(stdout, stderr, asJSON, sessionID, identity, rolledBack, op)
+}
+
+// sessionResetUnconfirmed reports a reset whose markers the store holds but
+// which the controller did not confirm seeing: the command exits non-zero
+// with the reason and the remedy, and prints no success text or JSON.
+func sessionResetUnconfirmed(stderr io.Writer, sessionID string, err error) int {
+	fmt.Fprintf(stderr, "gc session reset: reset is durably recorded on %s, but the controller did not confirm it: %v. The controller applies the reset when it next reads the row; gc session kill %s forces it now.\n", sessionID, err, sessionID) //nolint:errcheck // best-effort stderr
+	return 1
 }
 
 // emitSessionResetResult prints a reset's success output, a replay's included.

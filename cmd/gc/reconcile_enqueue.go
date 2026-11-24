@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -181,4 +182,74 @@ func pokeControllerForRestart(cityPath string, key reconcilekey.Key) error {
 		return fmt.Errorf("signaling controller: %w (restart request remains durably set for the next reconcile tick)", err)
 	}
 	return nil
+}
+
+// sessionSyncClientAttempts bounds syncSessionOnController's retries of a
+// busy answer: each attempt already waits out the controller's own refresh
+// budget, so a second and third cover a row another writer still holds.
+const sessionSyncClientAttempts = 3
+
+// errSessionSyncUnsupported reports a controller that predates the
+// session-sync verb: it closed the connection without replying. The keyed
+// poke sent in its place still wakes that controller, so the reset applies
+// at its next tick — the caller just cannot call it confirmed.
+var errSessionSyncUnsupported = errors.New("the controller predates session-sync and closed the connection without replying; a keyed poke was sent so its next tick still applies the reset")
+
+// syncSessionOnController runs the session-sync barrier for sessionID: the
+// controller installs the row the caller just wrote into its session-class
+// cache, enqueues that session's wake, and answers only then, so a nil
+// return means the next pass it runs sees the write (ok) or the row is gone
+// (missing). A busy answer is retried, each attempt waiting out the
+// controller's own refresh budget; a failed or unknown outcome is the
+// reply's own error. An older controller closes without replying to a verb
+// it does not know: the client sends the keyed poke the barrier replaces,
+// so the wake is not lost, and reports errSessionSyncUnsupported. On a
+// worker site it returns errWorkerSiteNoController without dialing.
+func syncSessionOnController(cityPath, sessionID string) error {
+	if onWorkerSite(cityPath) {
+		return errWorkerSiteNoController
+	}
+	payload, err := json.Marshal(sessionSyncRequest{SessionID: sessionID})
+	if err != nil {
+		return fmt.Errorf("encoding session-sync request: %w", err)
+	}
+	command := sessionSyncCommandPrefix + string(payload)
+	send := func() ([]byte, error) {
+		return sendControllerCommandWithTimeouts(cityPath, command, 2*time.Second, 2*time.Second, 5*time.Second)
+	}
+	var busy error
+	for attempt := 1; attempt <= sessionSyncClientAttempts; attempt++ {
+		resp, err := send()
+		if err != nil {
+			if keyedPokeUnsupported(err) {
+				poke := func(command string) ([]byte, error) {
+					return sendControllerCommandWithTimeouts(cityPath, command, 2*time.Second, 2*time.Second, 5*time.Second)
+				}
+				_ = sendKeyedPoke(reconcilekey.Session(sessionID), poke)
+				return fmt.Errorf("%w: %w", errSessionSyncUnsupported, err)
+			}
+			return err
+		}
+		var reply sessionSyncReply
+		if err := json.Unmarshal(resp, &reply); err != nil {
+			return fmt.Errorf("decoding session-sync reply %q: %w", resp, err)
+		}
+		switch reply.Outcome {
+		case sessionSyncOK, sessionSyncMissing:
+			return nil
+		case sessionSyncBusy:
+			if reason := strings.TrimSpace(reply.Error); reason != "" {
+				busy = fmt.Errorf("%w: %s", errSessionSyncBusy, reason)
+			} else {
+				busy = errSessionSyncBusy
+			}
+			continue
+		default:
+			if reason := strings.TrimSpace(reply.Error); reason != "" {
+				return fmt.Errorf("controller session-sync answered %q: %s", reply.Outcome, reason)
+			}
+			return fmt.Errorf("controller session-sync answered %q", reply.Outcome)
+		}
+	}
+	return fmt.Errorf("session-sync still busy after %d attempts: %w", sessionSyncClientAttempts, busy)
 }

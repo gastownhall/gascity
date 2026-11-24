@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -621,7 +622,7 @@ func TestCmdSessionReset_RequestsFreshRestartWithController(t *testing.T) {
 				errCh <- err
 				return
 			}
-			buf := make([]byte, 64)
+			buf := make([]byte, 512)
 			n, err := conn.Read(buf)
 			if err != nil {
 				conn.Close() //nolint:errcheck
@@ -631,8 +632,11 @@ func TestCmdSessionReset_RequestsFreshRestartWithController(t *testing.T) {
 			cmd := string(buf[:n])
 			commands <- cmd
 			reply := "ok\n"
-			if cmd == "ping\n" {
+			switch {
+			case cmd == "ping\n":
 				reply = "123\n"
+			case strings.HasPrefix(cmd, sessionSyncCommandPrefix):
+				reply = `{"outcome":"ok"}` + "\n"
 			}
 			if _, err := conn.Write([]byte(reply)); err != nil {
 				conn.Close() //nolint:errcheck
@@ -668,9 +672,14 @@ func TestCmdSessionReset_RequestsFreshRestartWithController(t *testing.T) {
 			t.Fatalf("timed out waiting for controller pokes, got %v", gotCommands)
 		}
 	}
-	// The probe poke is key-less; the post-reset enqueue carries the
-	// session key.
-	wantExact := []string{"ping\n", "poke\n", keyedPokeCommand(reconcilekey.Session(bead.ID)) + "\n"}
+	// The probe poke is key-less; the recorded reset's barrier is the
+	// session-sync verb: the controller confirms it sees the markers before
+	// the command reports success.
+	wantSync, err := json.Marshal(sessionSyncRequest{SessionID: bead.ID})
+	if err != nil {
+		t.Fatalf("marshaling the expected session-sync command: %v", err)
+	}
+	wantExact := []string{"ping\n", "poke\n", sessionSyncCommandPrefix + string(wantSync) + "\n"}
 	for i, want := range wantExact {
 		if gotCommands[i] != want {
 			t.Fatalf("controller command %d = %q, want %q", i, gotCommands[i], want)
@@ -1093,5 +1102,325 @@ func TestCmdSessionReset_ClosedRowIsAnsweredClosedWhateverItsCloseCode(t *testin
 	}
 	if !strings.Contains(stderr.String(), "session is closed") || strings.Contains(stderr.String(), "skips it") {
 		t.Fatalf("stderr = %q, want the closed answer, not the skipped-state refusal", stderr.String())
+	}
+}
+
+// serveResetSyncController accepts connections until its listener closes,
+// answering each single-line command through reply; reply's second value
+// closes the connection without writing anything, an older controller's
+// answer to a verb it does not know. Every command read is recorded, in
+// order.
+func serveResetSyncController(lis net.Listener, reply func(cmd string) (string, bool)) chan string {
+	commands := make(chan string, 16)
+	go func() {
+		for {
+			conn, err := lis.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close() //nolint:errcheck
+				_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+				buf := make([]byte, 512)
+				n, err := conn.Read(buf)
+				if err != nil {
+					return
+				}
+				cmd := string(buf[:n])
+				commands <- cmd
+				if out, closeInstead := reply(cmd); !closeInstead {
+					_, _ = conn.Write([]byte(out))
+				}
+			}(conn)
+		}
+	}()
+	return commands
+}
+
+// resetSyncCommands drains commands until want have arrived or a short
+// deadline passes, failing the test on the socket error or the timeout.
+func resetSyncCommands(t *testing.T, commands chan string, want int) []string {
+	t.Helper()
+	got := make([]string, 0, want)
+	deadline := time.After(2 * time.Second)
+	for len(got) < want {
+		select {
+		case cmd := <-commands:
+			got = append(got, cmd)
+		case <-deadline:
+			t.Fatalf("timed out waiting for controller commands, got %q", got)
+		}
+	}
+	return got
+}
+
+// TestCmdSessionReset_SessionSyncNonOKReplyFailsClosed (ga-45119r AC-6,
+// #5843): the recorded reset's barrier is the session-sync verb, so the
+// command's success means the controller confirmed seeing the markers. A
+// reply that does not confirm — a refresh that keeps losing its fence
+// (busy), a refresh that failed, or an outcome the client does not know —
+// makes the command fail closed: exit non-zero, no success text or JSON,
+// the reason and the `gc session kill` remedy on stderr, and the markers
+// still durably recorded for the next pass.
+func TestCmdSessionReset_SessionSyncNonOKReplyFailsClosed(t *testing.T) {
+	cases := []struct {
+		name  string
+		reply func(cmd string) (string, bool)
+		// syncs is how many session-sync attempts the client must make
+		// before giving up: a busy answer is retried, everything else is
+		// final on its first reply.
+		syncs  int
+		wantIn []string
+	}{
+		{
+			name: "busy thrice",
+			reply: func(cmd string) (string, bool) {
+				switch {
+				case cmd == "ping\n":
+					return "123\n", false
+				case strings.HasPrefix(cmd, sessionSyncCommandPrefix):
+					return `{"outcome":"busy","error":"the row is fenced"}` + "\n", false
+				default:
+					return "ok\n", false
+				}
+			},
+			syncs: 3,
+			wantIn: []string{
+				"still busy after 3 attempts",
+				"the row is fenced",
+				"gc session kill",
+			},
+		},
+		{
+			name: "failed with a reason",
+			reply: func(cmd string) (string, bool) {
+				switch {
+				case cmd == "ping\n":
+					return "123\n", false
+				case strings.HasPrefix(cmd, sessionSyncCommandPrefix):
+					return `{"outcome":"failed","error":"store boom"}` + "\n", false
+				default:
+					return "ok\n", false
+				}
+			},
+			syncs: 1,
+			wantIn: []string{
+				`answered "failed"`,
+				"store boom",
+				"gc session kill",
+			},
+		},
+		{
+			name: "unknown outcome",
+			reply: func(cmd string) (string, bool) {
+				switch {
+				case cmd == "ping\n":
+					return "123\n", false
+				case strings.HasPrefix(cmd, sessionSyncCommandPrefix):
+					return `{"outcome":"weird"}` + "\n", false
+				default:
+					return "ok\n", false
+				}
+			},
+			syncs: 1,
+			wantIn: []string{
+				`answered "weird"`,
+				"gc session kill",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_BEADS", "file")
+			t.Setenv("GC_SESSION", "fake")
+
+			cityDir := shortSocketTempDir(t, "gc-session-reset-sync-")
+			t.Setenv("GC_CITY", cityDir)
+			writeGenericNamedSessionCityTOML(t, cityDir)
+			if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+				t.Fatalf("MkdirAll(.gc): %v", err)
+			}
+			store, err := openCityStoreAt(cityDir)
+			if err != nil {
+				t.Fatalf("openCityStoreAt: %v", err)
+			}
+			bead, err := store.Create(beads.Bead{
+				Title:  "manual session",
+				Type:   session.BeadType,
+				Labels: []string{session.LabelSession, "template:worker"},
+				Metadata: map[string]string{
+					"alias":        "sky",
+					"template":     "worker",
+					"session_name": "s-gc-reset-sync",
+					"state":        "awake",
+				},
+			})
+			if err != nil {
+				t.Fatalf("store.Create(session bead): %v", err)
+			}
+
+			sockPath := controllerSocketPath(cityDir)
+			lis, err := net.Listen("unix", sockPath)
+			if err != nil {
+				t.Fatalf("Listen(%q): %v", sockPath, err)
+			}
+			defer func() { lis.Close(); os.Remove(sockPath) }() //nolint:errcheck
+			commands := serveResetSyncController(lis, tc.reply)
+
+			var stdout, stderr bytes.Buffer
+			if code := cmdSessionReset([]string{"sky"}, "", &stdout, &stderr, false); code != 1 {
+				t.Fatalf("cmdSessionReset(non-confirming controller) = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout = %q, want no success text for an unconfirmed reset", stdout.String())
+			}
+			for _, want := range tc.wantIn {
+				if !strings.Contains(stderr.String(), want) {
+					t.Fatalf("stderr = %q, want it to mention %q", stderr.String(), want)
+				}
+			}
+			if !strings.Contains(stderr.String(), "gc session kill "+bead.ID) {
+				t.Fatalf("stderr = %q, want the kill remedy naming the session", stderr.String())
+			}
+
+			// The probes and exactly the retries the client owes: one ping,
+			// the key-less probe poke, then the barrier's sync attempts.
+			got := resetSyncCommands(t, commands, 2+tc.syncs)
+			wantSync, err := json.Marshal(sessionSyncRequest{SessionID: bead.ID})
+			if err != nil {
+				t.Fatalf("marshaling the expected session-sync command: %v", err)
+			}
+			syncCmd := sessionSyncCommandPrefix + string(wantSync) + "\n"
+			wantPrefix := []string{"ping\n", "poke\n"}
+			for i, want := range append(wantPrefix, repeatString(syncCmd, tc.syncs)...) {
+				if got[i] != want {
+					t.Fatalf("controller command %d = %q, want %q (all: %q)", i, got[i], want, got)
+				}
+			}
+
+			// The record survives the refused confirmation: the next pass
+			// still answers the request.
+			reloaded, err := openCityStoreAt(cityDir)
+			if err != nil {
+				t.Fatalf("openCityStoreAt(reload): %v", err)
+			}
+			row, err := reloaded.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("store.Get(%s): %v", bead.ID, err)
+			}
+			if row.Metadata["restart_requested"] != "true" || row.Metadata["continuation_reset_pending"] != "true" {
+				t.Fatalf("row after the unconfirmed reset: restart_requested=%q continuation_reset_pending=%q, want the pair still recorded", row.Metadata["restart_requested"], row.Metadata["continuation_reset_pending"])
+			}
+		})
+	}
+}
+
+// repeatString returns s repeated n times.
+func repeatString(s string, n int) []string {
+	out := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, s)
+	}
+	return out
+}
+
+// TestCmdSessionReset_SessionSyncUnsupportedControllerStillPokes
+// (ga-45119r AC-6, #5843): a controller that predates the session-sync verb
+// closes the connection without replying to it. The reset cannot call
+// itself confirmed — exit non-zero, the reason and the kill remedy on
+// stderr — but the wake is not lost: the client sends the keyed poke the
+// barrier replaced, so that controller's next tick still applies the
+// recorded markers.
+func TestCmdSessionReset_SessionSyncUnsupportedControllerStillPokes(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := shortSocketTempDir(t, "gc-session-reset-sync-old-")
+	t.Setenv("GC_CITY", cityDir)
+	writeGenericNamedSessionCityTOML(t, cityDir)
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:  "manual session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession, "template:worker"},
+		Metadata: map[string]string{
+			"alias":        "sky",
+			"template":     "worker",
+			"session_name": "s-gc-reset-sync-old",
+			"state":        "awake",
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(session bead): %v", err)
+	}
+
+	sockPath := controllerSocketPath(cityDir)
+	lis, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("Listen(%q): %v", sockPath, err)
+	}
+	defer func() { lis.Close(); os.Remove(sockPath) }() //nolint:errcheck
+	commands := serveResetSyncController(lis, func(cmd string) (string, bool) {
+		switch {
+		case cmd == "ping\n":
+			return "123\n", false
+		case strings.HasPrefix(cmd, sessionSyncCommandPrefix), strings.HasPrefix(cmd, pokeKeyedCommandPrefix):
+			// An older controller closes on verbs it does not know.
+			return "", true
+		default:
+			return "ok\n", false
+		}
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionReset([]string{"sky"}, "", &stdout, &stderr, false); code != 1 {
+		t.Fatalf("cmdSessionReset(older controller) = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want no success text for an unconfirmed reset", stdout.String())
+	}
+	for _, want := range []string{"predates session-sync", "gc session kill " + bead.ID} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want it to mention %q", stderr.String(), want)
+		}
+	}
+
+	// ping, the probe poke, the refused sync, then the keyed poke the
+	// barrier replaces — and its own plain-poke fallback, since an older
+	// controller does not know the keyed form either.
+	got := resetSyncCommands(t, commands, 5)
+	wantSync, err := json.Marshal(sessionSyncRequest{SessionID: bead.ID})
+	if err != nil {
+		t.Fatalf("marshaling the expected session-sync command: %v", err)
+	}
+	want := []string{
+		"ping\n",
+		"poke\n",
+		sessionSyncCommandPrefix + string(wantSync) + "\n",
+		keyedPokeCommand(reconcilekey.Session(bead.ID)) + "\n",
+		"poke\n",
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("controller command %d = %q, want %q (all: %q)", i, got[i], want[i], got)
+		}
+	}
+
+	reloaded, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt(reload): %v", err)
+	}
+	row, err := reloaded.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", bead.ID, err)
+	}
+	if row.Metadata["restart_requested"] != "true" || row.Metadata["continuation_reset_pending"] != "true" {
+		t.Fatalf("row after the unconfirmed reset: restart_requested=%q continuation_reset_pending=%q, want the pair still recorded", row.Metadata["restart_requested"], row.Metadata["continuation_reset_pending"])
 	}
 }
