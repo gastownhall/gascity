@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -279,5 +281,134 @@ func TestOrdersLanePassDoesNotWaitForRetentionSweep(t *testing.T) {
 	}
 	if !od.called.Load() {
 		t.Fatal("the orders-lane pass did not reach the order dispatcher")
+	}
+}
+
+// retentionLaneRuntime is a directly-constructed runtime for driving the
+// retention lane: a scratch city whose last backup is backupAge old, city as
+// its standalone city store and, when binding is non-nil, a split storage
+// binding that holds the orders class. FS pressure is pinned off.
+func retentionLaneRuntime(t *testing.T, now time.Time, backupAge time.Duration, city, binding beads.Store) (*CityRuntime, *syncWriter) {
+	t.Helper()
+	t.Setenv(fsPressureThresholdEnv, "100")
+	cityPath := t.TempDir()
+	writeFreshRetentionBackup(t, cityPath, now.Add(time.Hour-backupAge))
+	stderr := &syncWriter{}
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cityPath:            cityPath,
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		standaloneCityStore: city,
+		standaloneRigStores: map[string]beads.Store{},
+		rec:                 events.Discard,
+		stdout:              io.Discard,
+		stderr:              stderr,
+		logPrefix:           "gc test",
+	}
+	if binding != nil {
+		cr.storageRoutes = messagingSplitRoutes(binding)
+	}
+	return cr, stderr
+}
+
+func (w *syncWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
+}
+
+// runRetentionLaneUntil starts the retention lane, waits until stderr carries
+// want, then stops the lane and waits for it, so the caller reads the lane's
+// state after its goroutine has exited.
+func runRetentionLaneUntil(t *testing.T, cr *CityRuntime, stderr *syncWriter, want string) {
+	t.Helper()
+	stop := cr.startOrderTrackingRetentionLane(context.Background())
+	awaitCond(t, func() bool { return strings.Contains(stderr.String(), want) },
+		fmt.Sprintf("the retention lane's first pass logging %q", want))
+	stop()
+}
+
+// assertBeadsGone and assertBeadsKept check a store's surviving set.
+func assertBeadsGone(t *testing.T, store beads.Store, ids ...string) {
+	t.Helper()
+	for _, id := range ids {
+		if _, err := store.Get(id); !errors.Is(err, beads.ErrNotFound) {
+			t.Fatalf("Get(%s) err = %v, want ErrNotFound (pruned)", id, err)
+		}
+	}
+}
+
+func assertBeadsKept(t *testing.T, store beads.Store, ids ...string) {
+	t.Helper()
+	for _, id := range ids {
+		if _, err := store.Get(id); err != nil {
+			t.Fatalf("Get(%s) = %v, want it retained", id, err)
+		}
+	}
+}
+
+func seedIDs(seed []beads.Bead) []string {
+	ids := make([]string, 0, len(seed))
+	for _, b := range seed {
+		ids = append(ids, b.ID)
+	}
+	return ids
+}
+
+// The retention lane's first pass runs as soon as the lane starts, with no
+// interval wait, and prunes what the watchdog prunes: past the TTL, beyond
+// the keep-10 floor of each order, in the city store and the orders binding.
+func TestOrderTrackingRetentionLaneFirstPassPrunesCityAndOrdersBinding(t *testing.T) {
+	now := time.Now()
+	citySeed := retentionEligibleSeed("city", minClosedOrderTrackingRetained+2, now)
+	bindSeed := retentionEligibleSeed("bind", minClosedOrderTrackingRetained+2, now)
+	city := beads.NewMemStoreFrom(100, citySeed, nil)
+	binding := beads.NewMemStoreFrom(100, bindSeed, nil)
+	cr, stderr := retentionLaneRuntime(t, now, time.Hour, city, binding)
+
+	runRetentionLaneUntil(t, cr, stderr, "pruned 4 closed bead(s)")
+
+	assertBeadsGone(t, city, "city-00", "city-01")
+	assertBeadsKept(t, city, seedIDs(citySeed[2:])...)
+	assertBeadsGone(t, binding, "bind-00", "bind-01")
+	assertBeadsKept(t, binding, seedIDs(bindSeed[2:])...)
+}
+
+// One pass deletes at most orderTrackingRetentionWatchdogDeleteBudget beads,
+// and never one inside an order's keep-10 floor.
+func TestOrderTrackingRetentionLaneFirstPassHonorsDeleteBudget(t *testing.T) {
+	now := time.Now()
+	n := orderTrackingRetentionWatchdogDeleteBudget + minClosedOrderTrackingRetained + 5
+	seed := retentionEligibleSeed("budget", n, now)
+	city := beads.NewMemStoreFrom(1000, seed, nil)
+	cr, stderr := retentionLaneRuntime(t, now, time.Hour, city, nil)
+
+	runRetentionLaneUntil(t, cr, stderr, fmt.Sprintf("pruned %d closed bead(s)", orderTrackingRetentionWatchdogDeleteBudget))
+
+	assertBeadsKept(t, city, seedIDs(seed[n-minClosedOrderTrackingRetained:])...)
+	remaining := 0
+	for _, id := range seedIDs(seed) {
+		if _, err := city.Get(id); err == nil {
+			remaining++
+		}
+	}
+	if want := n - orderTrackingRetentionWatchdogDeleteBudget; remaining != want {
+		t.Fatalf("closed tracking beads remaining = %d, want %d after one budgeted pass", remaining, want)
+	}
+}
+
+// A stale backup still blocks the lane's bulk delete, and the pass still
+// consumes the interval stamp, as the watchdog does.
+func TestOrderTrackingRetentionLaneFirstPassSkipsOnStaleBackup(t *testing.T) {
+	now := time.Now()
+	seed := retentionEligibleSeed("stale", minClosedOrderTrackingRetained+2, now)
+	city := beads.NewMemStoreFrom(100, seed, nil)
+	cr, stderr := retentionLaneRuntime(t, now, 48*time.Hour, city, nil)
+
+	runRetentionLaneUntil(t, cr, stderr, "skipping bulk delete")
+
+	assertBeadsKept(t, city, seedIDs(seed)...)
+	if cr.orderTrackingRetentionWatchdogLast.IsZero() {
+		t.Fatal("orderTrackingRetentionWatchdogLast is zero, want the skipped pass to consume the interval")
 	}
 }
