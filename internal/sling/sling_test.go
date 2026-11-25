@@ -2525,7 +2525,7 @@ func TestDoSlingCrossRigOffersForceOnlyWhereItRoutes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			deps, _, target := crossStoreSlingDeps(t) // rig prefix RW, bead store city:test-city
 			target.SlingQuery = tt.query
-			deps.Store = seededStore("DE-1")
+			deps.Store = beadstest.Work(seededStore("DE-1"))
 
 			_, err := DoSling(testOpts(target, "DE-1"), deps, deps.Store)
 			var crossRig *CrossRigError
@@ -2539,9 +2539,50 @@ func TestDoSlingCrossRigOffersForceOnlyWhereItRoutes(t *testing.T) {
 			forced := testOpts(target, "DE-1")
 			forced.Force = true
 			_, err = DoSling(forced, deps, deps.Store)
+			if tt.wantForce {
+				if err != nil {
+					t.Fatalf("forced sling: %v, want routed", err)
+				}
+				return
+			}
 			var crossStore *CrossStoreRouteError
-			if refused := errors.As(err, &crossStore); refused == tt.wantForce {
-				t.Fatalf("forced sling refused cross-store = %t (%v), want %t", refused, err, !tt.wantForce)
+			if !errors.As(err, &crossStore) {
+				t.Fatalf("forced sling error = %T %[1]v, want CrossStoreRouteError", err)
+			}
+		})
+	}
+}
+
+// The batch container refusal follows the same rule as a single bead: it
+// offers --force only where --force would route the children (#3707).
+func TestDoSlingBatchCrossRigOffersForceOnlyWhereItRoutes(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		query     string
+		wantForce bool
+	}{
+		{name: "built-in sling query", wantForce: false},
+		{name: "custom sling query", query: "bd update {} --set-metadata gc.routed_to=target --set-metadata owner=ops", wantForce: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			deps, _, target := crossStoreSlingDeps(t) // rig prefix RW, bead store city:test-city
+			target.SlingQuery = tt.query
+			store := deps.Store
+			convoy, err := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
+			if err != nil {
+				t.Fatalf("create convoy: %v", err)
+			}
+			if _, err := store.Create(beads.Bead{Title: "one", Type: "task", ParentID: convoy.ID, Status: "open"}); err != nil {
+				t.Fatalf("create child: %v", err)
+			}
+
+			_, err = DoSlingBatch(SlingOpts{Target: target, BeadOrFormula: convoy.ID}, deps, store)
+			var crossRig *CrossRigError
+			if !errors.As(err, &crossRig) {
+				t.Fatalf("error = %T %[1]v, want CrossRigError", err)
+			}
+			if got := strings.Contains(err.Error(), "--force to override"); got != tt.wantForce {
+				t.Fatalf("refusal offers --force = %t, want %t: %v", got, tt.wantForce, err)
 			}
 		})
 	}
