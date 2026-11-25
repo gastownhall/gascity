@@ -111,6 +111,61 @@ schedule = "*/5 * * * *"
 	}
 }
 
+func TestScanRootsReturnsFileDisabledOrders(t *testing.T) {
+	const enabledOrder = `
+[order]
+formula = "health-check"
+trigger = "cron"
+schedule = "*/5 * * * *"
+`
+	const disabledOrder = enabledOrder + "enabled = false\n"
+
+	tests := []struct {
+		name        string
+		lower       string // content at the lower layer; "" for none
+		upper       string
+		skip        []string
+		wantPresent bool
+		wantEnabled bool
+	}{
+		{name: "file-disabled order is returned", upper: disabledOrder, wantPresent: true, wantEnabled: false},
+		{name: "file-disabled order on skip list is excluded", upper: disabledOrder, skip: []string{"health-check"}},
+		{name: "higher disabled layer beats lower enabled layer", lower: enabledOrder, upper: disabledOrder, wantPresent: true, wantEnabled: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := fsys.NewFake()
+			if tt.lower != "" {
+				fs.Files["/lower/orders/health-check.toml"] = []byte(tt.lower)
+			}
+			fs.Files["/upper/orders/health-check.toml"] = []byte(tt.upper)
+
+			got, err := ScanRoots(fs, []ScanRoot{
+				{Dir: "/lower/orders", FormulaLayer: "/lower/formulas"},
+				{Dir: "/upper/orders", FormulaLayer: "/upper/formulas"},
+			}, tt.skip)
+			if err != nil {
+				t.Fatalf("ScanRoots: %v", err)
+			}
+			if !tt.wantPresent {
+				if len(got) != 0 {
+					t.Fatalf("got %d orders, want none: %#v", len(got), got)
+				}
+				return
+			}
+			if len(got) != 1 {
+				t.Fatalf("got %d orders, want 1: %#v", len(got), got)
+			}
+			if got[0].IsEnabled() != tt.wantEnabled {
+				t.Fatalf("IsEnabled = %v, want %v", got[0].IsEnabled(), tt.wantEnabled)
+			}
+			if got[0].Source != "/upper/orders/health-check.toml" {
+				t.Fatalf("Source = %q, want the higher layer's copy", got[0].Source)
+			}
+		})
+	}
+}
+
 func TestScanRootsAggregatesLegacyOrderLayoutGuidance(t *testing.T) {
 	fs := fsys.NewFake()
 	for _, dir := range []string{

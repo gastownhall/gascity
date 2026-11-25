@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/agent"
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -27,7 +28,7 @@ func TestZeroSessionStoreReadsNoStore(t *testing.T) {
 	if resolved {
 		t.Error("the direct-session resolver ran over the zero handle; an absent store resolves nothing")
 	}
-	if got, want := lookupSessionName(beads.SessionStore{}, "city", "rig/worker", ""), agent.SessionNameFor("city", "rig/worker", ""); got != want {
-		t.Errorf("lookupSessionName over the zero handle = %q, want the configured name %q", got, want)
+	if got, want := agentutil.LookupSessionName(beads.SessionStore{}, "city", "rig/worker", ""), agent.SessionNameFor("city", "rig/worker", ""); got != want {
+		t.Errorf("LookupSessionName over the zero handle = %q, want the configured name %q", got, want)
 	}
 }

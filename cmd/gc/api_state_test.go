@@ -2420,6 +2420,41 @@ func TestControllerStateUpdateClosesReplacedRigStores(t *testing.T) {
 	waitForCloseStoreSpy(t, oldStore)
 }
 
+func TestReplacedBeadStoreCloseRequestsKeepPhysicalHandleOwnership(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		retiredKey uintptr
+		keptKey    uintptr
+		wantClosed int
+	}{
+		{name: "shared retired handle closes once", retiredKey: 1, wantClosed: 1},
+		{name: "kept handle stays open", retiredKey: 1, keptKey: 1},
+		{name: "distinct kept handle", retiredKey: 1, keptKey: 2, wantClosed: 1},
+		{name: "unkeyed handles stay distinct", wantClosed: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			closed := 0
+			closeHandle := func() error {
+				closed++
+				return nil
+			}
+			retired := map[string]beadStoreCloseRequest{
+				"frontend": newBeadStoreCloseRequest("frontend", closeHandle, nil, tc.retiredKey),
+				"backend":  newBeadStoreCloseRequest("backend", closeHandle, nil, tc.retiredKey),
+			}
+			kept := map[string]beadStoreCloseRequest{
+				"current": newBeadStoreCloseRequest("current", closeHandle, nil, tc.keptKey),
+			}
+			for _, request := range replacedBeadStoreCloseRequests(nil, retired, kept) {
+				request.run("previous")
+			}
+			if closed != tc.wantClosed {
+				t.Fatalf("CloseStore calls = %d, want %d", closed, tc.wantClosed)
+			}
+		})
+	}
+}
+
 func TestCloseBeadStoreHandleUnwrapsPolicyWrappedCachingStore(t *testing.T) {
 	backing := &closeStoreSpy{Store: beads.NewMemStore()}
 	cache := beads.NewCachingStore(backing, nil)
@@ -4826,7 +4861,7 @@ func TestBeadEventStoresIgnoreReservedPrefixesWithoutARelocation(t *testing.T) {
 		beadStores:    map[string]beads.Store{},
 		storageRoutes: nil, // no [storage] section
 	}
-	if store, known := cs.beadEventConfiguredStoreLocked("gcg-1"); known {
+	if store, _, _, known := cs.beadEventConfiguredStoreLocked("gcg-1"); known {
 		t.Errorf("a city that relocates nothing claimed to own %q (store=%v); the reserved-prefix arm must be gated on an actual relocation", "gcg-1", store)
 	}
 }
