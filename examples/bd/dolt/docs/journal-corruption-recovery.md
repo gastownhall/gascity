@@ -134,7 +134,7 @@ ls -l <archive>/<sql_name>/issues.jsonl   # stop and escalate if it is missing
 mv <data_dir>/<dbname> <somewhere-safe>
 cd /path/to/city
 # for a rig scope, add --rig <rig> to each gc bd command below
-gc bd init --reinit-local -p <prefix> --skip-hooks --skip-agents
+gc bd init --recreate-missing -p <prefix> --skip-hooks --skip-agents
 gc bd import <archive>/<sql_name>/issues.jsonl
 # if the import fails, stop before the backup lines and Step 5: move the
 #          re-created <data_dir>/<dbname> aside too, move <somewhere-safe>
@@ -329,9 +329,8 @@ Run it after Step 3, from the city directory, and only for a database with no us
 backup. For a rig scope, add `--rig <rig>` to every `gc bd` command below.
 
 On a **split-store city**, stop here and escalate, before you move the store: `gc bd`
-refuses `--reinit-local` there, and the one re-create flag it admits, `--recreate-missing`,
-is not in the pinned bd. This runbook has no tested split-city rebuild for a bd that has it
-(see "gc bd on split cities" in `docs/runbooks/split-storage-classes.md`).
+refuses `--reinit-local` there, and this runbook has no tested split-city rebuild with the
+one re-create flag it admits, `--recreate-missing`, which the pinned bd now has (see "gc bd on split cities" in `docs/runbooks/split-storage-classes.md`).
 
 ```bash
 # SPLIT-STORE CITY: stop here, before the move (see above)
@@ -343,7 +342,7 @@ mv <data_dir>/<dbname> <somewhere-safe>
 
 # Re-create only this scope's database, empty, under the scope's own identity
 cd /path/to/city
-gc bd init --reinit-local -p <prefix> --skip-hooks --skip-agents
+gc bd init --recreate-missing -p <prefix> --skip-hooks --skip-agents
 
 # Import the scope's last JSONL export (bd export format)
 gc bd import <archive>/<sql_name>/issues.jsonl
@@ -358,15 +357,15 @@ gc bd backup init <backup_url>
 gc bd list --status in_progress --json | jq '.[] | {id, title, status}'
 ```
 
-- `--reinit-local` is how the pinned bd release (v1.3.4) re-creates the database of a scope
-  that is already initialized; a plain `gc bd init` refuses. It acts on this scope's
-  database only (`dolt_database` in `.beads/metadata.json`) and keeps the project id that
-  file records, which `gc start` checks against `.beads/identity.toml`. Run it only after
-  the move above: against a database that still exists it is bd's destructive reinit.
-  A bd whose `bd init --help` lists `--recreate-missing` refuses `--reinit-local` for a
-  missing database; pass `--recreate-missing` in its place there. No release through the
-  pinned one has that flag, but a build from newer beads source can, whatever version it
-  reports, so check the help before the move.
+- `--recreate-missing` is how the pinned bd release (v1.4.0-rc.1) re-creates the database
+  of a scope that is already initialized once that database is gone; a plain `gc bd init`
+  refuses, and so does `--reinit-local`, which on this release re-initializes local
+  `.beads/` data only and does not authorize recreating a missing server-mode database.
+  It acts on this scope's database only (`dolt_database` in `.beads/metadata.json`) and
+  keeps the project id that file records, which `gc start` checks against
+  `.beads/identity.toml`. Run it only after the move above. A bd through v1.3.4 has no
+  `--recreate-missing` and re-creates the database with `--reinit-local` in its place;
+  check `bd init --help` before the move.
 - `<prefix>` is the scope's issue prefix as `gc rig list --json` shows it (the city scope
   is the entry with `"hq": true`). Without `-p`, bd names the prefix after the directory;
   without `--skip-hooks --skip-agents`, it writes hooks and agent instruction files into

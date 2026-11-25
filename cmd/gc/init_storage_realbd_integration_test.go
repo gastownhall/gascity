@@ -28,8 +28,8 @@ func TestInitJudgeSplitBDMatchesGcBdVerdictOnRealBinaries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("judging the pinned bd %s: %v", bd, err)
 	}
-	if inv == nil || inv.Name != "bd-1.3.4" {
-		t.Fatalf("the pinned bd %s judged as %v, want inventory bd-1.3.4", bd, inv)
+	if inv == nil || inv.Name != "bd-1.4.0-rc.1" {
+		t.Fatalf("the pinned bd %s judged as %v, want inventory bd-1.4.0-rc.1", bd, inv)
 	}
 
 	wrapper := filepath.Join(t.TempDir(), "bd")
