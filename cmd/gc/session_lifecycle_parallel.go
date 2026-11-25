@@ -5160,7 +5160,7 @@ func executePlannedStartsTraced(
 					if identity != "" {
 						cb.restoreEntrySnapshot(sessFront, candidate.info.ID, identity, cbBefore, cbNow, stderr)
 					}
-					drop(reason, nil)
+					drop("capacity_deferred", sessionpkg.CapacityAdmissionError(reason))
 					continue
 				}
 				prepareSpend.begin()

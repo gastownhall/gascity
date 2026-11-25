@@ -647,7 +647,7 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 	// rewrites gc.routed_to on open ready work, so it uses its own cache; the
 	// scale-check and named-session probes read after those writes and share a
 	// second cache created below. See readyDemandCache.
-	assignedReadyCache := newTracedReadyDemandCache(pass, demandReadPointAssigned).withCrossStoreGate(cityPath, cfg, store, rigStores, suspendedRigPaths)
+	assignedReadyCache := newTracedReadyDemandCache(pass, demandReadPointAssigned).withSessionsStore(scopeStores("", nil, sessionStore).Sessions()).withCrossStoreGate(cityPath, cfg, store, rigStores, suspendedRigPaths)
 	if store != nil {
 		subPhaseStart = trace.demandNow()
 		assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, readyAssigned, storePartial = collectAssignedWorkBeadsWithStores(cityPath, cfg, store, rigStores, suspendedRigPaths, sessionBeads, assignedReadyCache)

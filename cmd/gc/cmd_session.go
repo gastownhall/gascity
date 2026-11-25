@@ -117,6 +117,7 @@ func newSessionCapacityContractCmd(stdout io.Writer) *cobra.Command {
 				return err
 			}
 			contract := map[string]any{
+				"ok":                          true,
 				"schema":                      "gc.session-capacity-contract/v1",
 				"dedicated_alias_reservation": session.DedicatedClerkReservationContract,
 				"native_actual_start":         true,

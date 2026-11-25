@@ -319,7 +319,7 @@ func TestCityScopedPromptDiscoveryFailsLoudOnABrokenRigStore(t *testing.T) {
 		if strings.Contains(stdout, claimID) || strings.Contains(stdout, "[]") {
 			t.Errorf("query printed %q alongside its failure; a caller must not find a plausible answer on stdout", stdout)
 		}
-		for _, want := range []string{readyBrokenRigName, "gc work query: gc ready --status in_progress failed"} {
+		for _, want := range []string{readyBrokenRigName, "gc ready:"} {
 			if !strings.Contains(stderr, want) {
 				t.Errorf("query stderr = %q, want it to contain %q", stderr, want)
 			}

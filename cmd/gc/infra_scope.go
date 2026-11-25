@@ -38,6 +38,9 @@ const (
 	// session (one of execenv.SessionScopedEnvKeys); a gc process carrying
 	// it was started from inside that session.
 	infraSessionIdentityEnv = "GC_SESSION_ID"
+	// infraSessionOriginEnv preserves only infrastructure launch provenance,
+	// without passing a parent session ownership tuple to the provider.
+	infraSessionOriginEnv = "GC_INFRA_SESSION_ORIGIN"
 )
 
 // infraScope decides once per process whether infrastructure spawns from a
@@ -223,7 +226,7 @@ func infraUnitName() string {
 // otherwise argv unchanged and "".
 func infraArgv(description string, argv []string) ([]string, string) {
 	slice, _ := infraSlice()
-	if slice == "" || strings.TrimSpace(os.Getenv(infraSessionIdentityEnv)) == "" {
+	if slice == "" || (strings.TrimSpace(os.Getenv(infraSessionIdentityEnv)) == "" && os.Getenv(infraSessionOriginEnv) != "1") {
 		return argv, ""
 	}
 	scope := userscope.Scope{Slice: slice, Unit: infraUnitName(), Description: description}

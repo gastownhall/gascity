@@ -3767,15 +3767,15 @@ func providerLifecycleProcessEnvWithError(cityPath, provider string) ([]string, 
 	if _, _, err := providerScopeOwnership(cityPath, cityPath); err != nil {
 		return nil, err
 	}
-	// The base env passes this process's GC_SESSION_ID through. City
-	// infrastructure scoping depends on it: an agent's gc autostarts the store
-	// via the provider script (gc-beads-bd.sh start -> gc dolt-state
-	// start-managed), and that inner gc knows it was started from a session,
-	// and so scopes the Dolt server, only through this variable. Pinned by
-	// TestProviderLifecycleEnvCarriesSessionIdentity.
+	// Provider children must not inherit the caller's session ownership tuple.
+	// Preserve only the fact that infrastructure was requested from a session,
+	// so an inner gc can still move the store outside the agent's cgroup.
 	env, err := cityRuntimeProcessEnvWithError(cityPath)
 	if err != nil {
 		return nil, err
+	}
+	if strings.TrimSpace(os.Getenv(infraSessionIdentityEnv)) != "" || os.Getenv(infraSessionOriginEnv) == "1" {
+		env = mergeRuntimeEnv(env, map[string]string{infraSessionOriginEnv: "1"})
 	}
 	return providerLifecycleProcessEnvFromBase(cityPath, provider, env)
 }
