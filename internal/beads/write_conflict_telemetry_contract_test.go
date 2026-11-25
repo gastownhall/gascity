@@ -11,7 +11,6 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	otellog "go.opentelemetry.io/otel/log"
-	otellogglobal "go.opentelemetry.io/otel/log/global"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -87,10 +86,10 @@ func captureWriteConflictLogs(t *testing.T) *writeConflictLogExporter {
 	t.Helper()
 	exporter := &writeConflictLogExporter{}
 	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(exporter)))
-	previous := otellogglobal.GetLoggerProvider()
-	otellogglobal.SetLoggerProvider(provider)
+	previous := otel.GetLoggerProvider()
+	otel.SetLoggerProvider(provider)
 	t.Cleanup(func() {
-		otellogglobal.SetLoggerProvider(previous)
+		otel.SetLoggerProvider(previous)
 		_ = provider.Shutdown(context.Background())
 	})
 	return exporter

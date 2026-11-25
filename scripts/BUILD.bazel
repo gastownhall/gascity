@@ -156,6 +156,7 @@ go_test(
         "native_doltlite_target_test.go",
         "oasdiff_pin_test.go",
         "openapi_breaking_gate_test.go",
+        "otel_advisory_floor_test.go",
         "pr_static_scope_contract_test.go",
         "precommit_contract_test.go",
         "pull_request_target_checkout_test.go",
