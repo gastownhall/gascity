@@ -105,3 +105,18 @@ Full execution.json retained: 6065 lines; /home/jaword/projects/gc-management/.g
 Full skip site/reach proof retained: 19 lines; /home/jaword/projects/gc-management/.gc/artifacts/gascity/ga-79jgod68/gate-pass-20261125-_1q6s_5u/skip-proof-summary.json; SHA256 b8bb021e9b3632e7feabd90d3551742a50adc6579e1ee93cdef15dd9a2b4ff0f.
 Full native skip comparison retained: 37 lines; /home/jaword/projects/gc-management/.gc/artifacts/gascity/ga-79jgod68/gate-pass-20261125-_1q6s_5u/native-skip-baselines/group-0-compare.txt; SHA256 20718ca174b4326e6dd20863f0f9837d3b040471accf063729bc34d9f9935a52.
 Full CI commands retained: 19 lines; /home/jaword/projects/gc-management/.gc/artifacts/gascity/ga-79jgod68/gate-pass-20261125-_1q6s_5u/ci-required/windows-lane-commands.json; SHA256 b1674ced3d2305bfa90ce537b7cf6565f15239e3f8bf9b4035a2f1b1969df8a9.
+
+
+## Publication-stage source snapshot
+
+The normal pre-push hook at `ffd3e5820b8e41951978cf070e2338e173af8f0f` selected fork-cache/local because the bare reviewed source pins an older worker image. It finished with297 targets PASS and3 failed targets: the dated-waiver policy and the scripts/dispatch five-minute package budgets. These are publication-hook results, not a replacement for the fresh merged-tree criterion3 evidence above.
+
+prepush_failure_attribution:
+
+- TestDatedWaiversAgainstToday -> ga-5550q2dx, predating stale-source waiver tracker. Clauses1/4: test/site41 unchanged, no path overlap. Clause3(a): actual-head unit and integration test-binary closures contain no changed formula package; waiver inputs are untouched. Fresh merged gate target PASS.
+- scripts_test shards3/6 and4/6 -> ga-vg3wto5, predating package-budget-under-load tracker. Clauses1/4: scripts and last-running test bodies unchanged, no path overlap. Clause3(a): both actual-head closures exclude formula; the diagnostic and worker-env fixture commands consume unchanged inputs. Aggregate300s ceiling fired with the last tests only1s/25s old. Fresh merged gate scripts shards PASS.
+- dispatch_test -> ga-pxiuas5, closed with its repair LANDED. Clauses1/4: dispatch and the last-running test unchanged; no path overlap. Clause3(d): the independent build record ga-tnirrt reproduced300.4s without the diff at its original base `f518cf2538a6e54b839457d538577f48683396f9`, load68/76/80. That object and its exact merge-base relation were revalidated. Repair `67617358b143bbd00be000d615133fa1aea42da6` is absent from the bare source but present in this run's tested merge, where all five dispatch results PASS. The gate already tested the refreshed merge; the reviewed SHA was not rebased.
+
+All trackers were opened and predate this run; each new sighting was appended and read back by comment ID. This is the first hit for this deploy, not a rerun of a previously attributed signature. The standing pre-push exception permits publishing the specifically attributed, code-identical head with ownership/ancestry/source/size guards retained. No criterion3 waiver, operator waiver_ref, or success claim for the failed hook is used. This publication record edits no application or test input.
+
+Full publication attribution, original hook logs, source/reach/site proofs and independently recorded base proof: /home/jaword/projects/gc-management/.gc/artifacts/gascity/ga-79jgod68/publication-20261125-rhd47u01; manifest SHA256 e5a4697abe6e56a51ca55a3458276c8a886173f7b52f4394ff7ea5721099537a. Canonical release evidence and its original manifest are unchanged.
