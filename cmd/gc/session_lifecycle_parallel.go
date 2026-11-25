@@ -2046,7 +2046,7 @@ func runPreparedStartCandidate(
 	defer cancel()
 	var phases startPhaseTimings
 	startCallBegin := time.Now()
-	startedFresh, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter, warmClaim)
+	startedFresh, err := startPreparedStartCandidate(startCtx, ctx, item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter, warmClaim)
 	startCtxErr := startCtx.Err()
 	// A startup nudge the runtime handed back (one held behind a dialog
 	// under program_status = "on", row A20, or an un-welded exec launch's
@@ -2768,8 +2768,20 @@ func clonePreparedStartForAsync(item preparedStart) preparedStart {
 	return item
 }
 
+// startPreparedStartCandidate runs the start of item and reports whether it
+// reached provider.Start. ctx is the start's own context (it carries
+// startupTimeout) and governs provider.Start and the warm nudge's idle wait.
+// observeCtx is the controller's context, the parent of ctx: every wait on the
+// runtime or the store before provider.Start is held to a fixed bound derived
+// from it, never from what is left of startupTimeout, so a call that hangs on a
+// wedged runtime cannot hold the start goroutine, and with it the async start
+// slot, forever. A wait that does not answer is unknown, never confirmed
+// absence: the start returns an error wrapping runtime.ErrRuntimeUnavailable
+// and defers (SESSION-RUNTIME-009), with no provider.Start. The one exception
+// is the warm-reuse nudge, which is best-effort and is skipped.
 func startPreparedStartCandidate(
 	ctx context.Context,
+	observeCtx context.Context,
 	item preparedStart,
 	cityPath string,
 	store beads.Store,
@@ -2781,14 +2793,27 @@ func startPreparedStartCandidate(
 ) (bool, error) {
 	name := item.candidate.name()
 	if sp != nil {
-		running, alive, err := observeRuntimeProviderLiveness(sp, name, item.cfg.ProcessNames)
+		running, alive, err := observeRuntimeProviderLivenessBounded(observeCtx, cityPath, sp, name, item.cfg.ProcessNames)
 		if err != nil {
 			return false, err
 		}
 		if running {
 			if alive {
-				if shouldRollbackPendingCreateInfo(item.candidate.info) && attributePendingCreateRuntime(item.candidate.info, name, sp) != pendingCreateRuntimeOurs {
-					return false, fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
+				if shouldRollbackPendingCreateInfo(item.candidate.info) {
+					// One shared budget for the identity reads. An identity
+					// that cannot be read leaves the attribution unknown:
+					// defer here, instead of reporting a collision that the
+					// failure path would re-probe on the same runtime.
+					identityCtx, cancelIdentity := context.WithTimeout(observeCtx, postStartObservationBound)
+					identity := readPendingCreateIdentityBounded(identityCtx, cityPath, item.candidate.info, name, sp)
+					cancelIdentity()
+					switch identity.attribution() {
+					case pendingCreateRuntimeOurs:
+					case pendingCreateRuntimeUnknown:
+						return false, fmt.Errorf("%w: session %q (attribution_unknown: %s)", runtime.ErrRuntimeUnavailable, name, strings.Join(identity.failed, "; "))
+					default:
+						return false, fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
+					}
 				}
 				// Warm reuse: the slot is already up, so cold Start's startup nudge
 				// never fires. If on-demand work was bound to it since it last Started
@@ -2799,10 +2824,21 @@ func startPreparedStartCandidate(
 				// item.cfg.Nudge: that can carry the startup prompt ahead of it, to
 				// re-prime a resumed or prompt-less launch, which a running slot
 				// already has.
+				//
+				// The store read and the nudge are one wait of
+				// preStartWarmNudgeBound. One that does not answer skips the
+				// nudge and does not defer: the warm start already succeeded.
+				// A read that answers after the wait was abandoned delivers
+				// nothing.
 				if store != nil {
-					if raw, err := store.Get(item.candidate.info.ID); err == nil {
+					_, _ = observeSessionBoundedFor(observeCtx, cityPath, name, preStartWarmNudgeBound, func(boundCtx context.Context) (struct{}, error) {
+						raw, err := store.Get(item.candidate.info.ID)
+						if err != nil || boundCtx.Err() != nil {
+							return struct{}{}, err
+						}
 						deliverWarmBindClaimNudge(ctx, sp, store, cfg, &raw, warmBindClaimText(cfg, raw), warmClaim)
-					}
+						return struct{}{}, nil
+					})
 				}
 				return false, nil
 			}
@@ -2826,9 +2862,20 @@ func startPreparedStartCandidate(
 			// deliberately shut down, gc is discovering and clearing wreckage
 			// left by the agent process's own exit. Like that detector, a
 			// provider rate-limit screen in the pane is not counted as a crash.
-			crashOutput, peekErr := sp.Peek(name, rateLimitPeekLines)
+			//
+			// The pane read and the Stop share the session's one bounded
+			// observation. A read that does not answer leaves it outstanding,
+			// so the Stop below is refused at once: a runtime that cannot
+			// answer a peek is not stopped blind. An abandoned Stop is not a
+			// success (the zombie is still there): the start defers and the
+			// next tick retries.
+			crashOutput, peekErr := observeSessionBoundedFor(observeCtx, cityPath, name, postStartObservationBound, func(context.Context) (string, error) {
+				return sp.Peek(name, rateLimitPeekLines)
+			})
 			recycleBegin := time.Now()
-			stopErr := sp.Stop(name)
+			_, stopErr := observeSessionBoundedFor(observeCtx, cityPath, name, postStartObservationBound, func(context.Context) (struct{}, error) {
+				return struct{}{}, sp.Stop(name)
+			})
 			if phases != nil {
 				phases.ZombieRecycle = time.Since(recycleBegin)
 			}
@@ -2881,9 +2928,16 @@ func startPreparedStartCandidate(
 		}
 		return true, handle.StartResolved(ctx, by, sessionpkg.Incarnation{}, item.cfg.Command, item.cfg)
 	}
-	handle, err := workerHandleForSessionWithStaleKeyDetectionWaiter(cityPath, store, sp, cfg, item.candidate.info.ID, staleKeyDetectionWaiter)
+	// The handle build reads the store and overlays live provider state. The
+	// handle is the result of the bounded call: one built after the wait was
+	// abandoned is dropped, never used.
+	handle, err := observeSessionBoundedFor(observeCtx, cityPath, name, postStartObservationBound, func(context.Context) (worker.Handle, error) {
+		return workerHandleForSessionWithStaleKeyDetectionWaiter(cityPath, store, sp, cfg, item.candidate.info.ID, staleKeyDetectionWaiter)
+	})
 	if err != nil {
-		return true, err
+		// provider.Start has not run for an unanswered build, so
+		// startedFresh stays false for it.
+		return !errors.Is(err, runtime.ErrRuntimeUnavailable), err
 	}
 	return true, handle.StartResolved(ctx, by, item.candidate.inc, item.cfg.Command, item.cfg)
 }

@@ -109,6 +109,7 @@ func TestStartPreparedStartCandidateUsesWorkerBoundaryForRuntimeOnlyTarget(t *te
 
 	usedWorker, err := startPreparedStartCandidate(
 		context.Background(),
+		context.Background(),
 		preparedStart{
 			candidate: startCandidate{
 				info: sessionpkg.Info{SessionName: "legacy-runtime-only", SessionNameMetadata: "legacy-runtime-only"},
@@ -164,7 +165,7 @@ func TestStartPreparedStartCandidateRefusesRigSuspendedBeforeSpawn(t *testing.T)
 	}
 	sp := runtime.NewFake()
 	rig := config.Rig{Name: "aoa", Path: "/rig/aoa"}
-	_, err := startPreparedStartCandidate(context.Background(), preparedStart{
+	_, err := startPreparedStartCandidate(context.Background(), context.Background(), preparedStart{
 		candidate: startCandidate{
 			info: sessionpkg.Info{SessionName: "aoa--worker-1", SessionNameMetadata: "aoa--worker-1"},
 			tp:   TemplateParams{TemplateName: "worker", RigName: "aoa"},
@@ -186,7 +187,7 @@ func TestStartPreparedStartCandidateDoesNotKillSessionSuspendedDuringSpawn(t *te
 	rig := config.Rig{Name: "aoa", Path: "/rig/aoa"}
 	done := make(chan error, 1)
 	go func() {
-		_, err := startPreparedStartCandidate(context.Background(), preparedStart{
+		_, err := startPreparedStartCandidate(context.Background(), context.Background(), preparedStart{
 			candidate: startCandidate{
 				info: sessionpkg.Info{SessionName: "aoa--worker-1", SessionNameMetadata: "aoa--worker-1"},
 				tp:   TemplateParams{TemplateName: "worker", RigName: "aoa"},
@@ -217,6 +218,7 @@ func TestStartPreparedStartCandidateDefersWhenLivenessUnavailable(t *testing.T) 
 	sp := &startUnavailableLivenessProvider{Fake: runtime.NewFake()}
 
 	started, err := startPreparedStartCandidate(
+		context.Background(),
 		context.Background(),
 		preparedStart{
 			candidate: startCandidate{
@@ -251,6 +253,7 @@ func TestStartPreparedStartCandidateConvergesFromConfirmedAbsence(t *testing.T) 
 	city := t.TempDir()
 	sp := &startConfirmedAbsentProvider{Fake: runtime.NewFake()}
 	started, err := startPreparedStartCandidate(
+		context.Background(),
 		context.Background(),
 		preparedStart{
 			candidate: startCandidate{
@@ -372,7 +375,7 @@ func TestStartPreparedStartCandidateRuntimeOnlyBorrowsTheCandidateLease(t *testi
 	}
 	sp := runtime.NewFake()
 	began := time.Now()
-	if _, err := startPreparedStartCandidate(context.Background(), item(lease), cityPath, nil, sp, &config.City{}, nil, nil, nil); err != nil {
+	if _, err := startPreparedStartCandidate(context.Background(), context.Background(), item(lease), cityPath, nil, sp, &config.City{}, nil, nil, nil); err != nil {
 		t.Fatalf("start under the candidate's lease = %v, want started", err)
 	}
 	if sp.CountCalls("Start", name) != 1 || time.Since(began) > 2*time.Second {
@@ -382,7 +385,7 @@ func TestStartPreparedStartCandidateRuntimeOnlyBorrowsTheCandidateLease(t *testi
 		t.Fatal(err)
 	}
 	began = time.Now()
-	_, err = startPreparedStartCandidate(context.Background(), item(nil), cityPath, nil, sp, &config.City{}, nil, nil, nil)
+	_, err = startPreparedStartCandidate(context.Background(), context.Background(), item(nil), cityPath, nil, sp, &config.City{}, nil, nil, nil)
 	if !errors.Is(err, sessionpkg.ErrRuntimeLeaseBusy) || errors.Is(err, sessionpkg.ErrSessionStarting) || time.Since(began) > 2*time.Second {
 		t.Fatalf("start without the lease under another holder's flock = %v after %v, want ErrRuntimeLeaseBusy at once", err, time.Since(began))
 	}

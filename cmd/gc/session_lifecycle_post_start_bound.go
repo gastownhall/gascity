@@ -67,6 +67,30 @@ func observeSessionBounded[T any](ctx context.Context, cityPath, sessionName str
 	})
 }
 
+// preStartWarmNudgeBound is the longest startPreparedStartCandidate waits for
+// the warm-reuse store read and claim nudge together: the nudge's own idle wait
+// (warmBindNudgeIdleTimeout, by design) plus postStartObservationBound for the
+// store and nudge legs around it.
+const preStartWarmNudgeBound = warmBindNudgeIdleTimeout + postStartObservationBound
+
+// observeSessionBoundedFor is observeSessionBounded held to bound. It is the
+// wait startPreparedStartCandidate puts on each runtime or store call it makes
+// before provider.Start (the zombie's pane read and Stop, the handle build, the
+// warm-reuse nudge). observe receives the bounded context, so a body that
+// finishes after the wait was abandoned can see that nobody is waiting
+// (ctx.Err() != nil) and skip its side effects. An unanswered wait is an error
+// wrapping runtime.ErrRuntimeUnavailable: no answer, never confirmed absence.
+// The wait is serial with every other bounded call for the session: observe
+// must not call another bounded helper for the same session, because
+// worker.ObserveBounded refuses nesting under one key.
+func observeSessionBoundedFor[T any](ctx context.Context, cityPath, sessionName string, bound time.Duration, observe func(ctx context.Context) (T, error)) (T, error) {
+	ctx, cancel := context.WithTimeout(ctx, bound)
+	defer cancel()
+	return observeSessionBounded(ctx, cityPath, sessionName, func() (T, error) {
+		return observe(ctx)
+	})
+}
+
 // workerObserveSessionTargetBounded is
 // workerObserveSessionTargetWithRuntimeHintsWithConfig held to
 // postStartObservationBound. The bound is derived from ctx, so it also ends

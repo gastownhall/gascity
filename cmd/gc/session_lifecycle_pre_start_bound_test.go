@@ -32,17 +32,13 @@ const (
 )
 
 // preStartProvider is postStartProvider with the switches the pre-Start calls
-// need: a zombie runtime (up, agent process gone) and a hung IsRunning, the
-// call the handle build's provider overlay makes. A hung call ignores its
+// need: a zombie runtime (up, agent process gone). A hung call ignores its
 // context and returns only when release is called, like a wedged tmux
 // subprocess.
 type preStartProvider struct {
 	*postStartProvider
 	// zombie makes the runtime read running but not alive until Stop.
 	zombie atomic.Bool
-	// hangIsRunning hangs every IsRunning call. Liveness observations do not
-	// go through it, so a scenario wedges the handle build alone.
-	hangIsRunning atomic.Bool
 }
 
 func newPreStartProvider(t *testing.T) *preStartProvider {
@@ -60,13 +56,6 @@ func (p *preStartProvider) ObserveLivenessWithError(name string, processNames []
 		obs.Alive = false
 	}
 	return obs, err
-}
-
-func (p *preStartProvider) IsRunning(name string) bool {
-	if p.hangIsRunning.Load() {
-		p.hang("IsRunning")
-	}
-	return p.Fake.IsRunning(name)
 }
 
 // Stop ends the runtime, zombie included.
@@ -361,8 +350,10 @@ func TestRunPreparedStartCandidateDefersAZombieWhoseRateLimitPeekHangs(t *testin
 		}
 		requirePlainDeferral(t, result)
 		requireNoRuntimeChange(t, sp, startsBefore)
-		if got := sp.CountCalls("Peek", "worker"); got != 1 {
-			t.Fatalf("Peek calls = %d, want 1", got)
+		// A hung call reaches the Fake's call log only once it is released, so
+		// the one Peek is read off the hung-call list: one hang, in the Peek.
+		if got := sp.hungIn(); got != "Peek" {
+			t.Fatalf("hung calls = %q, want the one Peek", got)
 		}
 		releaseAndSettle(t, sp.postStartProvider)
 	})
@@ -391,7 +382,7 @@ func TestStartPreparedStartCandidateDefersAZombieWhoseStopHangs(t *testing.T) {
 		done := make(chan outcome, 1)
 		begin := time.Now()
 		go func() {
-			started, err := startPreparedStartCandidate(context.Background(), item, sp.city, store, sp, nil, &startPhaseTimings{}, immediateSessionStaleKeyDetectionWaiter, nil)
+			started, err := startPreparedStartCandidate(context.Background(), context.Background(), item, sp.city, store, sp, nil, &startPhaseTimings{}, immediateSessionStaleKeyDetectionWaiter, nil)
 			done <- outcome{started, err}
 		}()
 		var got outcome
@@ -416,30 +407,30 @@ func TestStartPreparedStartCandidateDefersAZombieWhoseStopHangs(t *testing.T) {
 		if n := sp.CountCalls("Start", "worker"); n != startsBefore {
 			t.Fatalf("Start calls = %d, want %d", n, startsBefore)
 		}
-		if n := sp.CountCalls("Stop", "worker"); n != 1 {
-			t.Fatalf("Stop calls = %d, want the one that hung", n)
+		if got := sp.hungIn(); got != "Stop" {
+			t.Fatalf("hung calls = %q, want the one Stop (a hung call reaches the call log only once released)", got)
 		}
 		releaseAndSettle(t, sp.postStartProvider)
 	})
 }
 
-// Test 6: a provider call inside the handle build wedges (the live overlay's
-// IsRunning). The handle is the result of a bounded call and provider.Start is
-// never reached.
+// Test 6: the store read inside the handle build wedges. The handle is the
+// result of a bounded call and provider.Start is never reached.
 func TestRunPreparedStartCandidateDefersWhenTheHandleBuildHangs(t *testing.T) {
 	workDir := t.TempDir()
 	synctest.Test(t, func(t *testing.T) {
 		clk := preStartClock()
 		sp := newPreStartProvider(t)
-		sp.hangIsRunning.Store(true)
 		defer sp.release()
-		store := beads.NewMemStore()
-		bead := preStartBead(t, store, clk, workDir, "worker", nil)
+		mem := beads.NewMemStore()
+		bead := preStartBead(t, mem, clk, workDir, "worker", nil)
+		store := &preStartWedgedStore{Store: mem, sp: sp, id: bead.ID}
+		store.armed.Store(true)
 
 		result, elapsed := runPreStartAttempt(t, preStartItem(t, bead, "worker", workDir), sp, store, nil, nil)
 
 		if got := sp.hangs.Load(); got != 1 {
-			t.Fatalf("%d provider calls hung, want exactly the one in the handle build: %s", got, sp.hungIn())
+			t.Fatalf("%d provider calls hung, want exactly the store read in the handle build: %s", got, sp.hungIn())
 		}
 		if elapsed > postStartBound {
 			t.Fatalf("the attempt took %v, want it back within the %v bound", elapsed, postStartBound)

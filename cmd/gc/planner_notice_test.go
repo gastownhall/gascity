@@ -2034,7 +2034,7 @@ func TestWarmReuseRemindsWithTheClaimInstructionNotTheReprimePayload(t *testing.
 				},
 				cfg: runtime.Config{Nudge: restartPromptNudge("Read the startup prompt first.", tc.nudge)},
 			}
-			started, err := startPreparedStartCandidate(context.Background(), item, f.dir, f.store, f.sp, f.cfg, nil, nil, alwaysUnclaimed)
+			started, err := startPreparedStartCandidate(context.Background(), context.Background(), item, f.dir, f.store, f.sp, f.cfg, nil, nil, alwaysUnclaimed)
 			if err != nil || started {
 				t.Fatalf("warm reuse = %v, %v; want the running slot reused", started, err)
 			}

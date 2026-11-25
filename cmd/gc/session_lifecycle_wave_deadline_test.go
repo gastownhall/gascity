@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -20,7 +21,10 @@ import (
 // wedgedLivenessProvider blocks the liveness probe startPreparedStartCandidate
 // makes first, a call that takes no ctx and that nothing can cancel, for the
 // named sessions until unblock. It stands in for a runtime whose tmux
-// subprocess or store has hung. Every other call is the Fake's.
+// subprocess or store has hung. Every other call is the Fake's. That probe is
+// bounded at postStartObservationBound (SESSION-RUNTIME-036), so a test that
+// wedges it must finish inside that bound and must not rely on the probe
+// holding the start past a ctx that ends: wedge provider.Start for that.
 type wedgedLivenessProvider struct {
 	*runtime.Fake
 	wedged map[string]bool
@@ -91,6 +95,10 @@ func (p *wedgedLivenessProvider) Start(ctx context.Context, name string, cfg run
 		p.mu.Lock()
 		p.inProbe++
 		p.mu.Unlock()
+		select {
+		case p.entered <- name:
+		default:
+		}
 		<-p.release
 		p.mu.Lock()
 		p.inProbe--
@@ -276,7 +284,11 @@ func TestExecutePreparedStartWave_AbandonedStartCompletingLateDoesNotRaceTheCall
 // ctx ends the wait on its own, with the deadline an hour away.
 func TestExecutePreparedStartWave_CtxEndsTheWaitBeforeTheDeadline(t *testing.T) {
 	setWaveDeadlineSlack(t, time.Hour)
-	sp := newWedgedLivenessProvider(t, "wedged")
+	// The wedge is in provider.Start: the liveness read before it is bounded
+	// (SESSION-RUNTIME-036) and returns once the ctx ends, so only a call after
+	// the pre-Start waits is still one the wave has to abandon.
+	sp := newWedgedLivenessProvider(t)
+	sp.wedgedStart = map[string]bool{"wedged": true}
 	items := []preparedStart{waveTestStart("healthy"), waveTestStart("wedged")}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -459,5 +471,68 @@ func TestWaveDeadlineSlackOutgrowsEveryStartPathBound(t *testing.T) {
 	}
 	if waveDeadlineSlack <= total {
 		t.Fatalf("waveDeadlineSlack = %v, want more than the serial chain of waits after Start (%v)", waveDeadlineSlack, total)
+	}
+}
+
+// TestPreStartWaitChainsFitTheDefaultStartupTimeout fails when the serial waits
+// startPreparedStartCandidate makes before provider.Start outgrow the default
+// startup timeout. Those waits run on the controller context and are not
+// counted against startupTimeout, but the start's own deadline began before
+// them, so a chain longer than the timeout leaves provider.Start none of it,
+// and the wave deadline (startupTimeout plus waveDeadlineSlack) must still
+// clear the chain and the waits that follow Start. If a chain does not fit, the
+// bounds are the thing to revisit (and the mayor to tell), not the slack to
+// widen silently.
+func TestPreStartWaitChainsFitTheDefaultStartupTimeout(t *testing.T) {
+	startupTimeout := (&config.SessionConfig{}).StartupTimeoutDuration()
+	postStart := postStartObservationBound + startFailureProbeBudget + postStartObservationBound
+	chains := []struct {
+		name string
+		// reachesStart is whether the chain ends in provider.Start, so the
+		// waits after Start follow it and it must leave Start some budget.
+		reachesStart bool
+		waits        []time.Duration
+	}{
+		{
+			// Zombie recycle: liveness read, pane read, Stop, then the handle
+			// build, and then provider.Start.
+			name:         "zombie recycle",
+			reachesStart: true,
+			waits: []time.Duration{
+				postStartObservationBound, // pre-Start liveness read (A1)
+				postStartObservationBound, // rate-limit pane peek (A5)
+				postStartObservationBound, // Stop of the zombie (A6)
+				postStartObservationBound, // handle build (A8)
+			},
+		},
+		{
+			// Warm reuse: liveness read, the pending-create identity reads, then
+			// the store read and claim nudge as one wait. No provider.Start.
+			name: "warm reuse",
+			waits: []time.Duration{
+				postStartObservationBound, // pre-Start liveness read (A1)
+				postStartObservationBound, // pending-create identity reads (A2)
+				preStartWarmNudgeBound,    // store read and claim nudge (A3, A4)
+			},
+		},
+	}
+	for _, chain := range chains {
+		var total time.Duration
+		for _, w := range chain.waits {
+			total += w
+		}
+		if total > startupTimeout {
+			t.Errorf("%s: pre-Start waits total %v, want at most the default startup timeout %v", chain.name, total, startupTimeout)
+		}
+		if chain.reachesStart && total >= startupTimeout {
+			t.Errorf("%s: pre-Start waits total %v leave provider.Start no part of the %v startup timeout", chain.name, total, startupTimeout)
+		}
+		end := total
+		if chain.reachesStart {
+			end = startupTimeout + postStart
+		}
+		if end >= startupTimeout+waveDeadlineSlack {
+			t.Errorf("%s: the start path can run %v, want less than the wave deadline %v", chain.name, end, startupTimeout+waveDeadlineSlack)
+		}
 	}
 }
