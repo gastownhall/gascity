@@ -1633,6 +1633,7 @@ func doSupervisorInstall(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc supervisor install: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	reportSupervisorEnvSources(stderr, data.envSources)
 	return installSupervisorService(goruntime.GOOS, data, stdout, stderr)
 }
 
@@ -1723,6 +1724,9 @@ type supervisorServiceData struct {
 	// API-port collision; the systemd unit lists it in RestartPreventExitStatus
 	// so a duplicate install does not crash-loop on the shared port.
 	PortInUseExitCode int
+	// envSources names the tier that supplied each ExtraEnv key at build time
+	// (#9257). It is reported at install, not rendered into the service file.
+	envSources map[string]string
 }
 
 type supervisorServiceEnvVar struct {
@@ -1742,11 +1746,13 @@ func buildSupervisorServiceData() (*supervisorServiceData, error) {
 	if supervisor.UsesIsolatedGCHomeOverride() {
 		xdgRuntimeDir = ""
 	}
-	extraEnv, err := withRecordedTmuxTmpdir(supervisorServiceExtraEnv())
+	extraEnvEntries, envSources := supervisorServiceExtraEnvWithSources()
+	extraEnv, err := withRecordedTmuxTmpdir(extraEnvEntries)
 	if err != nil {
 		return nil, err
 	}
 	return &supervisorServiceData{
+		envSources:        envSources,
 		GCPath:            gcPath,
 		LogPath:           supervisorLogPath(),
 		GCHome:            home,
@@ -1877,7 +1883,16 @@ var supervisorServiceFixedEnvKeys = map[string]bool{
 }
 
 func supervisorServiceExtraEnv() []supervisorServiceEnvVar {
+	out, _ := supervisorServiceExtraEnvWithSources()
+	return out
+}
+
+// supervisorServiceExtraEnvWithSources is supervisorServiceExtraEnv plus the
+// tier that supplied each admitted name: shell, GC_SUPERVISOR_ENV, secrets.env
+// or launchctl (#9257). Only names are recorded, never values.
+func supervisorServiceExtraEnvWithSources() ([]supervisorServiceEnvVar, map[string]string) {
 	env := make(map[string]string)
+	sources := make(map[string]string)
 	explicitEnvKeys := supervisorServiceExplicitEnvKeys(os.Getenv("GC_SUPERVISOR_ENV"))
 	explicitEnvKeySet := make(map[string]bool, len(explicitEnvKeys))
 	for _, key := range explicitEnvKeys {
@@ -1888,11 +1903,19 @@ func supervisorServiceExtraEnv() []supervisorServiceEnvVar {
 		if !ok || val == "" || !shouldPersistSupervisorEnv(key) {
 			continue
 		}
+		// A routing name (base URL or model selector) only persists from the
+		// shell when explicitly opted in; routing must travel with the
+		// credential it accompanies, not with whatever shell ran install.
+		if isProviderRoutingEnv(key) && !explicitEnvKeySet[key] {
+			continue
+		}
 		env[key] = val
+		sources[key] = "shell"
 	}
 	for _, key := range explicitEnvKeys {
 		if val := os.Getenv(key); val != "" {
 			env[key] = val
+			sources[key] = "GC_SUPERVISOR_ENV"
 		}
 	}
 	// Merge a persistent machine-local secrets file (${GC_HOME}/secrets.env)
@@ -1917,6 +1940,7 @@ func supervisorServiceExtraEnv() []supervisorServiceEnvVar {
 			continue
 		}
 		env[key] = val
+		sources[key] = "secrets.env"
 	}
 	// Fall back to `launchctl getenv` for known-allowlisted keys and
 	// for GC_SUPERVISOR_ENV opt-ins. Without this, launchctl-set
@@ -1944,6 +1968,7 @@ func supervisorServiceExtraEnv() []supervisorServiceEnvVar {
 		}
 		if val := supervisorLaunchctlGetenv(key); val != "" {
 			env[key] = val
+			sources[key] = "launchctl"
 		}
 	}
 	// This process is a Gas City-owned recursive child. Assign the canonical
@@ -1960,7 +1985,21 @@ func supervisorServiceExtraEnv() []supervisorServiceEnvVar {
 	for _, key := range keys {
 		out = append(out, supervisorServiceEnvVar{Name: key, Value: env[key]})
 	}
-	return out
+	return out, sources
+}
+
+// reportSupervisorEnvSources prints, for each admitted name, the tier that
+// supplied it. Names and tiers only, never values, so the merge decision is
+// observable at install time (#9257).
+func reportSupervisorEnvSources(w io.Writer, sources map[string]string) {
+	keys := make([]string, 0, len(sources))
+	for key := range sources {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		fmt.Fprintf(w, "gc supervisor install: service env %s from %s\n", key, sources[key]) //nolint:errcheck // best-effort stderr
+	}
 }
 
 func shouldPersistSupervisorEnv(key string) bool {
@@ -1978,6 +2017,17 @@ func shouldPersistSupervisorEnv(key string) bool {
 
 func isProviderCredentialEnv(key string) bool {
 	return processenv.IsProviderCredentialEnv(key)
+}
+
+// isProviderRoutingEnv reports whether key is a provider-scoped routing name:
+// where the credential is sent (*_BASE_URL) or which model it asks for
+// (*_MODEL). Such names are not credentials and are refused from the shell
+// unless explicitly opted in (gastownhall/gascity#9257).
+func isProviderRoutingEnv(key string) bool {
+	if !isProviderCredentialEnv(key) {
+		return false
+	}
+	return strings.HasSuffix(key, "_BASE_URL") || strings.HasSuffix(key, "_MODEL")
 }
 
 // supervisorSecretsEnvFileName is the dotenv-style file under GC_HOME that
