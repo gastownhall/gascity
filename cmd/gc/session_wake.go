@@ -833,6 +833,13 @@ func advanceSessionDrainsWithSessionsTraced(
 		// process-running probe (by info.ID). Nothing reads the raw bead.
 		name := info.SessionNameMetadata
 
+		// A session whose runtime did not answer this tick keeps its drain
+		// entry untouched: every step below reads or writes its runtime, and the
+		// next tick resumes the drain.
+		if !dt.tickGate.mayReconcile(name) {
+			continue
+		}
+
 		// Stale check: if session was re-woken (generation changed), cancel drain.
 		gen, _ := strconv.Atoi(info.Generation)
 		if gen != ds.generation {

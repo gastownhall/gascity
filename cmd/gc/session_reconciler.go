@@ -2241,6 +2241,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 		return batch
 	}
+	// The tick's runtime-contact gate: the first contact with each session's
+	// runtime below is one bounded probe, and a runtime that does not answer
+	// defers its session for the tick instead of holding the tick (the drain
+	// advance after the loop takes the same gate through dt).
+	tickGate := newTickProbeGate(ctx, cityPath, sp)
+	if dt != nil {
+		dt.tickGate = tickGate
+		defer func() { dt.tickGate = nil }()
+	}
 	phaseStart = time.Now()
 	for i := range orderedRows {
 		if ctx != nil && ctx.Err() != nil {
@@ -2271,6 +2280,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// fence clears as soon as the Stop returns (or ages out if the CLI died
 		// mid-kill), and the next tick applies the ordinary lifecycle rules.
 		if sessionpkg.IsKillPendingInfo(info, clk.Now()) {
+			continue
+		}
+
+		// A session whose runtime does not answer is deferred for the tick:
+		// unavailable means deferred, never dead (SESSION-RUNTIME-009). Nothing
+		// below runs for it, so no later step reads the silence as a death.
+		if !tickGate.mayReconcile(name) {
+			fmt.Fprintf(stderr, "session reconciler: runtime of %s did not answer; deferring it this tick (%s)\n", name, tickGate.skipNote(name)) //nolint:errcheck // best-effort stderr
 			continue
 		}
 
@@ -3736,7 +3753,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					continue
 				}
 				if runtimeRunning {
-					if err := controllerKillSessionRow(cityPath, store, sp, cfg, infoByID[id]); err != nil {
+					if err := tickGate.boundedKill(name, func() error {
+						return controllerKillSessionRow(cityPath, store, sp, cfg, infoByID[id])
+					}); err != nil {
 						fmt.Fprintf(stderr, "session reconciler: stopping restart-requested %s: %v\n", name, err) //nolint:errcheck
 						continue
 					}
@@ -4428,10 +4447,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					reason, outcome := timerTraceCodes(dec)
 					trace.RecordDecision(TraceSiteReconcilerMaxSessionAge, reason, outcome, tp.TemplateName, name, nil)
 				}
-				if err := controllerKillSessionRow(cityPath, store, sp, cfg, infoByID[id]); err != nil {
+				if err := tickGate.boundedKill(name, func() error {
+					if err := controllerKillSessionRow(cityPath, store, sp, cfg, infoByID[id]); err != nil {
+						return err
+					}
+					_ = sp.ClearScrollback(name)
+					return nil
+				}); err != nil {
 					fmt.Fprintf(stderr, "session reconciler: stopping aged %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
 				} else {
-					_ = sp.ClearScrollback(name)
 					rec.Record(events.Event{
 						Type:    events.SessionMaxAgeKilled,
 						Actor:   "gc",
@@ -4586,10 +4610,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						continue
 					}
 				}
-				if err := controllerKillSessionRow(cityPath, store, sp, cfg, infoByID[id]); err != nil {
+				if err := tickGate.boundedKill(name, func() error {
+					if err := controllerKillSessionRow(cityPath, store, sp, cfg, infoByID[id]); err != nil {
+						return err
+					}
+					_ = sp.ClearScrollback(name)
+					return nil
+				}); err != nil {
 					fmt.Fprintf(stderr, "session reconciler: stopping idle %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
 				} else {
-					_ = sp.ClearScrollback(name)
 					rec.Record(events.Event{
 						Type:    events.SessionIdleKilled,
 						Actor:   "gc",

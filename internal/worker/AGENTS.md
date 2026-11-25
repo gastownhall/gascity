@@ -98,6 +98,15 @@ a kill on the reconciler tick or a start on its async slot before the operation
 ran (`SESSION-RUNTIME-034`). Do not add a provider call to
 `populateOperationEventIdentity`.
 
+The legacy reconciler tick bounds its own first contact with each session's
+runtime the same way (`tickProbeGate`, `SESSION-RUNTIME-036`): one
+`IsRunning` probe per session under a key of the tick's own (`tickObservationKey`,
+so a hung async commit's start key never defers the repair of its session), a stop after
+three consecutive expired waits, and each tick kill (restart-requested,
+max-age, idle) with its scrollback clear as one observation. An unanswered
+probe defers the session for the tick and an unanswered kill is a failed kill;
+neither reads the silence as a stopped session.
+
 ## Turn sources
 
 A session's turns come from the routed runtime's protocol, else from the

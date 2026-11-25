@@ -148,7 +148,7 @@ func (p *tickGateProvider) ClearScrollback(name string) error {
 	return p.Fake.ClearScrollback(name)
 }
 
-// drainObservationKey waits until the lifecycle observation key of name in city
+// drainObservationKey waits until the tick observation key of name in city
 // is free: the abandoned call under it has returned.
 func drainObservationKey(t *testing.T, city, name string) {
 	t.Helper()
@@ -158,7 +158,7 @@ func drainObservationKey(t *testing.T, city, name string) {
 	defer tick.Stop()
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		_, err := worker.ObserveBounded(ctx, postStartObservationKey(city, name), func(context.Context) (struct{}, error) {
+		_, err := worker.ObserveBounded(ctx, tickObservationKey(city, name), func(context.Context) (struct{}, error) {
 			return struct{}{}, nil
 		})
 		cancel()
@@ -301,6 +301,10 @@ func TestReconcileTickGate_WedgedSessionSkippedOthersReconciled(t *testing.T) {
 	c := env.addDown("sess-c")
 	sp.wedge("IsRunning", "sess-b")
 	beforeB := env.metadataOf(t, b.ID)
+	before := map[string]int{}
+	for _, method := range []string{"Start", "Stop", "Kill"} {
+		before[method] = sp.CountCalls(method, "sess-b")
+	}
 
 	woken, elapsed := env.tickWith(t, sp, nil, nil, a, b, c)
 
@@ -319,8 +323,8 @@ func TestReconcileTickGate_WedgedSessionSkippedOthersReconciled(t *testing.T) {
 		t.Errorf("wedged sess-b's bead was written: before=%#v after=%#v", beforeB, after)
 	}
 	for _, method := range []string{"Start", "Stop", "Kill"} {
-		if got := sp.CountCalls(method, "sess-b"); got != 0 {
-			t.Errorf("%s(sess-b) calls = %d, want 0: unavailable means deferred, never dead (SESSION-RUNTIME-009)", method, got)
+		if got := sp.CountCalls(method, "sess-b"); got != before[method] {
+			t.Errorf("%s(sess-b) calls = %d, want %d: unavailable means deferred, never dead (SESSION-RUNTIME-009)", method, got, before[method])
 		}
 	}
 	lines := unansweredLines(env.stderr.String())
@@ -365,12 +369,16 @@ func TestReconcileTickGate_AbandonBudgetSkipsRemainingSessions(t *testing.T) {
 	env, sp := tickGateEnv(t)
 	names := []string{"sess-1", "sess-2", "sess-3", "sess-4", "sess-5"}
 	var sessions []beads.Bead
-	before := map[string]map[string]string{}
+	beforeMeta := map[string]map[string]string{}
+	before := map[string]int{}
 	for _, name := range names {
 		b := env.addRunning(t, sp, name)
 		sp.wedge("IsRunning", name)
 		sessions = append(sessions, b)
-		before[b.ID] = env.metadataOf(t, b.ID)
+		beforeMeta[b.ID] = env.metadataOf(t, b.ID)
+		for _, method := range []string{"Start", "Stop", "Kill"} {
+			before[method+name] = sp.CountCalls(method, name)
+		}
 	}
 
 	_, elapsed := env.tickWith(t, sp, nil, nil, sessions...)
@@ -393,14 +401,14 @@ func TestReconcileTickGate_AbandonBudgetSkipsRemainingSessions(t *testing.T) {
 		t.Errorf("sessions probed = %d, skipped without a call = %d; want 3 and 2: the budget is three consecutive abandoned waits", called, untouched)
 	}
 	for _, b := range sessions {
-		if after := env.metadataOf(t, b.ID); !maps.Equal(after, before[b.ID]) {
-			t.Errorf("bead %s was written: before=%#v after=%#v", b.ID, before[b.ID], after)
+		if after := env.metadataOf(t, b.ID); !maps.Equal(after, beforeMeta[b.ID]) {
+			t.Errorf("bead %s was written: before=%#v after=%#v", b.ID, beforeMeta[b.ID], after)
 		}
 	}
 	for _, name := range names {
 		for _, method := range []string{"Start", "Stop", "Kill"} {
-			if got := sp.CountCalls(method, name); got != 0 {
-				t.Errorf("%s(%s) calls = %d, want 0", method, name, got)
+			if got := sp.CountCalls(method, name); got != before[method+name] {
+				t.Errorf("%s(%s) calls = %d, want %d", method, name, got, before[method+name])
 			}
 		}
 	}
