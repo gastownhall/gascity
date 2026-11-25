@@ -80,6 +80,7 @@ func TestFreshCycleRepro_LiveAnchorOwnershipControlsCycle(t *testing.T) {
 		{name: "reassigned away", assignee: "another-session"},
 		{name: "blank assignee", assignee: " \t "},
 		{name: "named identity still owns", assignee: "witness", cycle: true},
+		{name: "padded named identity still owns", assignee: "  witness\t", cycle: true},
 		{name: "session ID still owns", assignee: "$id", cycle: true},
 		{name: "runtime name still owns", assignee: "$name", cycle: true},
 		{name: "named identity fallback", assignee: "witness", meta: map[string]string{namedSessionIdentityMetadata: ""}, cycle: true},
@@ -246,4 +247,33 @@ func TestFreshCycleRepro_LiveAnchorReadErrorStillCycles(t *testing.T) {
 		t.Fatal("the guard never attempted the failing live anchor read")
 	}
 	assertCycled(t, env, session, "legacy anchor-read errors retain the pre-existing cycle behavior")
+}
+
+// The guard's skip decision, apart from the reconciler: closed, released,
+// blank and foreign anchors skip the cycle, an anchor the session owns does not
+// (padding is not a different owner), and an unreadable anchor never skips.
+func TestFreshAnchorCycleSkippable(t *testing.T) {
+	ids := []string{"witness", "gc-sess-1"}
+	for _, tc := range []struct {
+		name     string
+		terminal bool
+		assignee string
+		err      error
+		want     bool
+	}{
+		{name: "closed anchor", terminal: true, assignee: "witness", want: true},
+		{name: "released anchor", assignee: "", want: true},
+		{name: "blank assignee", assignee: "", want: true},
+		{name: "foreign owner", assignee: "another-session", want: true},
+		{name: "own identity", assignee: "witness"},
+		{name: "own session ID", assignee: "gc-sess-1"},
+		{name: "unreadable anchor", err: errors.New("no such bead")},
+		{name: "unreadable closed foreign anchor", terminal: true, assignee: "another-session", err: errors.New("no such bead")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := freshAnchorCycleSkippable(tc.terminal, tc.assignee, tc.err, ids); got != tc.want {
+				t.Errorf("freshAnchorCycleSkippable(%v, %q, %v) = %v, want %v", tc.terminal, tc.assignee, tc.err, got, tc.want)
+			}
+		})
+	}
 }

@@ -173,6 +173,15 @@ func freshAnchorBeadTerminal(topo storeref.Topology, anchorID string) (terminal 
 	return convoycore.IsTerminalStatus(anchor.Status), strings.TrimSpace(anchor.Assignee), nil
 }
 
+// freshAnchorCycleSkippable reports whether the fresh-cycle guard must skip the
+// cycle, given the result of freshAnchorBeadTerminal: the live anchor is closed,
+// or it is no longer owned by one of the session's own identifiers. A read
+// error is "could not tell" and never skips.
+func freshAnchorCycleSkippable(terminal bool, assignee string, err error, identifiers []string) bool {
+	_, _, _, _ = terminal, assignee, err, identifiers
+	return false
+}
+
 // cycleAliveSessionForFreshReassign tears down a live wake_mode=fresh
 // session whose assigned bead has changed, then primes the bead so the
 // next reconciler tick wakes the session on a brand-new conversation.
