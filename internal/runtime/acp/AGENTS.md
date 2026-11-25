@@ -4,13 +4,25 @@
   Seed ownership through `runtime.SplitEnvForMetaSeed` before publishing the
   sentinel, not after handshake. Child environment alone cannot satisfy
   `GetMeta`, which reads private sidecars.
-- A cancelled startup owns its reservation until its process and writes drain.
-  `Stop` cancels and waits for that completion. Releasing the name early lets
-  old socket or metadata cleanup destroy a retry's state.
+- A canceled startup owns its reservation until its process and writes drain.
+  `Stop` cancels and waits for that completion, for at most stop grace +
+  `ManagedProcessReapGrace`. Releasing the name early lets old socket or
+  metadata cleanup destroy a retry's state. Every post-SIGKILL wait in `Start`
+  is bounded by `ManagedProcessReapGrace`; if one expires, ownership of the
+  sentinel, the lifecycle lock, `startupDone` and the cleanup moves, once, to a
+  single drain goroutine (Start's deferred release is disarmed) that releases
+  them, sentinel first and lock last, only after the process is confirmed dead.
+  Meanwhile the name reads as running, a retry gets `ErrSessionExists`, and
+  `Start` and `Stop` report `runtime.ErrProcessNotConfirmedDead`. The drain
+  takes no context and lives until the process is confirmed dead or gc exits.
+  Never read `cmd.ProcessState` before `<-sc.done` on the expiry path.
 - The per-name lifecycle file is a kernel-held coordination lock, not a process
   status record. Keep its inode across starts; unlinking it splits contenders
   across different locks. It also fences different Provider instances while a
-  failed startup has no live socket but still has cleanup pending.
+  failed startup has no live socket but still has cleanup pending. `Stop` polls
+  it non-blocking up to stop grace + `ManagedProcessReapGrace` rather than
+  blocking in the kernel, because another process's wedged holder would block it
+  forever; expiry is `ErrProcessNotConfirmedDead`, not `ErrSessionExists`.
 - Closing the Unix listener unlinks its socket. Do not unlink the socket again
   after Close: another provider may already have bound a replacement.
 - A dead in-memory connection can coexist with a live replacement owned by

@@ -20,11 +20,14 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
-// reapWait is how long a test waits for something that must happen within the
-// injected (tens of milliseconds) bounds; it only ever expires on a failure.
-const reapWait = 5 * time.Second
+// reapWait is a hang detector for something that must happen within the injected
+// (tens of milliseconds) bounds; it only ever expires on a failure, and the
+// deadline rule in TESTING.md puts its floor at testutil.ExecRaceTimeout. The
+// injected bounds themselves are the subject under test.
+const reapWait = testutil.ExecRaceTimeout
 
 var errReapCause = errors.New("injected startup failure")
 

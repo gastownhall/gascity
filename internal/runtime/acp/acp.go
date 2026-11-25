@@ -207,7 +207,11 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return err
 	}
 	var startupDone chan struct{}
-	releaseStartup := func() {
+	// handedOver is true once the drain goroutine owns the reservation. Only the
+	// Start goroutine reads or writes it, and it is set before the drain starts,
+	// so exactly one owner runs the release: Start's deferred calls, or the drain.
+	handedOver := false
+	releaseReservation := func() {
 		if lock != nil {
 			_ = lock.Close()
 			lock = nil
@@ -215,6 +219,11 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		if startupDone != nil {
 			close(startupDone)
 			startupDone = nil
+		}
+	}
+	releaseStartup := func() {
+		if !handedOver {
+			releaseReservation()
 		}
 	}
 	defer releaseStartup()
@@ -274,7 +283,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	p.mu.Unlock()
 
 	// clearSentinel removes the reservation on failure.
-	clearSentinel := func() {
+	clearSentinelEntry := func() {
 		p.mu.Lock()
 		if p.conns[name] == sentinel {
 			delete(p.conns, name)
@@ -283,7 +292,42 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		}
 		p.mu.Unlock()
 	}
+	clearSentinel := func() {
+		if !handedOver {
+			clearSentinelEntry()
+		}
+	}
 	defer clearSentinel()
+
+	// confirmDead waits for exited, the channel that closes once the SIGKILLed
+	// process and its writes have drained, for at most the reap bound. It returns
+	// true when the process was confirmed dead in time; the caller then clears the
+	// reservation itself. On expiry the process may still be alive, so the
+	// reservation stays: the sentinel (its done channel stays open, so IsRunning
+	// is true and a retry gets ErrSessionExists), the lifecycle lock and the
+	// metadata all move to one drain goroutine that waits for the same channel,
+	// clears the sentinel and then releases the lock and startupDone, the order
+	// the synchronous paths use. Releasing early would let this attempt's late
+	// socket and metadata cleanup destroy a retry's state. The drain takes no ctx
+	// (it must outlive a canceled Start) and lives until the process is confirmed
+	// dead or gc exits, when the kernel releases the lock. It returns false.
+	confirmDead := func(exited <-chan struct{}) bool {
+		gated := p.gateReap(exited)
+		timer := time.NewTimer(p.reapWaitBound())
+		defer timer.Stop()
+		select {
+		case <-gated:
+			return true
+		case <-timer.C:
+		}
+		handedOver = true
+		go func() {
+			<-gated
+			clearSentinelEntry()
+			releaseReservation()
+		}()
+		return false
+	}
 
 	if err := runtime.StageSessionWorkDir(cfg); err != nil {
 		clearSentinel()
@@ -384,9 +428,19 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	lis, err := p.startControlSocket(name, cmd, pgid, processDone, p.ownedControlCommands(name, &owned))
 	if err != nil {
 		_ = processgroup.KillCommandGroup(cmd, pgid, processgroup.Options{})
-		_ = cmd.Wait()
+		// No monitor goroutine exists yet, so reap the process here; the drain
+		// waits on the same channel if the bounded wait expires.
+		waited := make(chan struct{})
+		go func() {
+			_ = cmd.Wait()
+			close(waited)
+		}()
+		err = fmt.Errorf("creating control socket for %q: %w", name, err)
+		if !confirmDead(waited) {
+			return p.startNotConfirmedDead(name, err)
+		}
 		clearSentinel()
-		return fmt.Errorf("creating control socket for %q: %w", name, err)
+		return err
 	}
 
 	sc := newSessionConn(cmd, stdinPipe, lis, p.cfg.outputBufferLines(), processDone)
@@ -465,7 +519,12 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		// handles listener/socket cleanup when the process exits.
 		_ = stdinPipe.Close()
 		_ = processgroup.KillCommandGroup(cmd, pgid, processgroup.Options{})
-		<-sc.done
+		if !confirmDead(sc.done) {
+			// Not confirmed dead: ProcessState is written inside cmd.Wait, so no
+			// exit status is read (-1 is "unknown"); the stderr buffer is
+			// mutex-protected.
+			return p.startNotConfirmedDead(name, acpHandshakeStartError(name, err, -1, stderrBuf.String()))
+		}
 		clearSentinel()
 		// The monitor closed done after cmd.Wait returned, so ProcessState is
 		// safe to read. An agent that already exited on its own keeps its exit
@@ -477,12 +536,18 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// Before committing the real conn, check whether Stop was called
 	// during the handshake (which cancels hsCtx). If so, kill the process
 	// and clean up — the caller of Stop expects the session to be gone.
+	if p.afterHandshake != nil {
+		p.afterHandshake(name)
+	}
 	if err := hsCtx.Err(); err != nil {
 		_ = stdinPipe.Close()
 		_ = processgroup.KillCommandGroup(cmd, pgid, processgroup.Options{})
-		<-sc.done
+		err = fmt.Errorf("session %q was stopped during startup", name)
+		if !confirmDead(sc.done) {
+			return p.startNotConfirmedDead(name, err)
+		}
 		clearSentinel()
-		return fmt.Errorf("session %q was stopped during startup", name)
+		return err
 	}
 
 	// Seed the sidecar synchronously at handshake completion. Start must not
@@ -492,9 +557,12 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if err := p.publishActivity(name, seed); err != nil {
 		_ = stdinPipe.Close()
 		_ = processgroup.KillCommandGroup(cmd, pgid, processgroup.Options{})
-		<-sc.done
+		err = fmt.Errorf("publishing initial activity for %q: %w", name, err)
+		if !confirmDead(sc.done) {
+			return p.startNotConfirmedDead(name, err)
+		}
 		clearSentinel()
-		return fmt.Errorf("publishing initial activity for %q: %w", name, err)
+		return err
 	}
 	publisher := newActivityPublisher(
 		activityPublishInterval,
@@ -507,9 +575,12 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if err := sc.installActivityPublisher(publisher, seed); err != nil {
 		_ = stdinPipe.Close()
 		_ = processgroup.KillCommandGroup(cmd, pgid, processgroup.Options{})
-		<-sc.done
+		err = fmt.Errorf("starting activity publication for %q: %w", name, err)
+		if !confirmDead(sc.done) {
+			return p.startNotConfirmedDead(name, err)
+		}
 		clearSentinel()
-		return fmt.Errorf("starting activity publication for %q: %w", name, err)
+		return err
 	}
 
 	// Recheck cancellation under the same lock as Stop before committing.
@@ -519,9 +590,12 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		p.mu.Unlock()
 		_ = stdinPipe.Close()
 		_ = processgroup.KillCommandGroup(cmd, pgid, processgroup.Options{})
-		<-sc.done
+		err := fmt.Errorf("session %q was stopped during startup", name)
+		if !confirmDead(sc.done) {
+			return p.startNotConfirmedDead(name, err)
+		}
 		clearSentinel()
-		return fmt.Errorf("session %q was stopped during startup", name)
+		return err
 	}
 	// Attach before publishing the connection so Stop, which finds it only
 	// through p.conns, always reports closed after the attached exit.
@@ -548,6 +622,79 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	}
 
 	return nil
+}
+
+// gateReap returns the channel a bounded post-SIGKILL wait selects on: exited
+// itself, unless a test holds the process "not yet dead" through reapGate.
+func (p *Provider) gateReap(exited <-chan struct{}) <-chan struct{} {
+	if p.reapGate != nil {
+		return p.reapGate(exited)
+	}
+	return exited
+}
+
+// reapWaitBound is how long Start waits, after SIGKILL, for the process to be
+// confirmed dead before it hands the reservation to a drain.
+func (p *Provider) reapWaitBound() time.Duration {
+	if p.reapBound > 0 {
+		return p.reapBound
+	}
+	return runtime.ManagedProcessReapGrace
+}
+
+// startupStopWaitBound is how long Stop waits for a still-starting session to
+// release its reservation: Start may be inside a call no context interrupts
+// (the work-directory staging or the fork) and then needs its own reap bound
+// after SIGKILL.
+func (p *Provider) startupStopWaitBound() time.Duration {
+	if p.startupStopBound > 0 {
+		return p.startupStopBound
+	}
+	return runtime.ManagedProcessStopGrace + runtime.ManagedProcessReapGrace
+}
+
+// lifecycleLockPollInterval is how often Stop retries a held lifecycle lock.
+const lifecycleLockPollInterval = 50 * time.Millisecond
+
+// startNotConfirmedDead is the error Start returns when its post-SIGKILL wait
+// expired and a drain now owns the reservation. It wraps both the sentinel and
+// cause, so errors.Is sees each, and [runtime.IsSessionGone] stays false for it
+// whatever text cause carries.
+func (p *Provider) startNotConfirmedDead(name string, cause error) error {
+	return fmt.Errorf("acp start for %q: the agent was not confirmed dead within %v of SIGKILL, so the name stays reserved until it is (%w): %w",
+		name, p.reapWaitBound(), runtime.ErrProcessNotConfirmedDead, cause)
+}
+
+// lockLifecycleBounded takes the lifecycle lock for Stop. The lock is held
+// across providers and processes, so a wedged holder elsewhere would block a
+// kernel-blocking acquire forever; this polls the non-blocking form instead.
+// Expiry reports [runtime.ErrProcessNotConfirmedDead], not ErrSessionExists:
+// Stop's callers branch only on [runtime.IsSessionGone], and the stop is
+// unconfirmed and retryable. Any other lock error returns at once.
+func (p *Provider) lockLifecycleBounded(name string) (*os.File, error) {
+	bound := p.stopLockBound
+	if bound <= 0 {
+		bound = runtime.ManagedProcessStopGrace + runtime.ManagedProcessReapGrace
+	}
+	poll := p.stopLockPoll
+	if poll <= 0 {
+		poll = lifecycleLockPollInterval
+	}
+	deadline := time.Now().Add(bound)
+	for {
+		lock, err := p.lockLifecycle(name, true)
+		if err == nil {
+			return lock, nil
+		}
+		if !errors.Is(err, runtime.ErrSessionExists) {
+			return nil, err
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, fmt.Errorf("stopping %q: the lifecycle lock is still held after %v: %w", name, bound, runtime.ErrProcessNotConfirmedDead)
+		}
+		time.Sleep(min(poll, remaining))
+	}
 }
 
 // abandonStartup ends sc, the connection Start committed for name, when Start
@@ -738,11 +885,23 @@ func (p *Provider) Stop(name string) error {
 			sc.cancel()
 		}
 		p.mu.Unlock()
-		<-sc.done
-		return nil
+		// Start owns the reservation until its process and writes drain; wait
+		// for that, but not forever: Start may be inside a call no context
+		// interrupts, or its drain may be waiting on an unkillable process. Stop
+		// leaves the reservation and the metadata to the owner, and a retry
+		// cancels again and waits again with a fresh bound.
+		bound := p.startupStopWaitBound()
+		timer := time.NewTimer(bound)
+		defer timer.Stop()
+		select {
+		case <-sc.done:
+			return nil
+		case <-timer.C:
+			return fmt.Errorf("stopping %q: its startup still holds the reservation after %v: %w", name, bound, runtime.ErrProcessNotConfirmedDead)
+		}
 	}
 	p.mu.Unlock()
-	lock, err := p.lockLifecycle(name, false)
+	lock, err := p.lockLifecycleBounded(name)
 	if err != nil {
 		return err
 	}
