@@ -90,6 +90,23 @@ func TestFindBareHookEntries_RequiresNeitherKey(t *testing.T) {
 	}
 }
 
+// forEachHookEntry visits the categories in sorted order and skips one whose
+// value is not an array: the scan goes on with the later categories, it does not
+// stop at the first skipped one. "PreToolUse" sorts before "Stop", so the
+// non-array category is visited first here and the bare entry after it must
+// still be found.
+func TestFindBareHookEntries_NonArrayCategoryDoesNotStopTheScan(t *testing.T) {
+	doc := `{"hooks":{"PreToolUse":"x","Stop":[{"type":"command","command":"bare"}]}}`
+	got, err := FindBareHookEntries([]byte(doc))
+	if err != nil {
+		t.Fatalf("FindBareHookEntries: %v", err)
+	}
+	want := []BareHookEntry{{Category: "Stop", Index: 0}}
+	if !slices.Equal(got, want) {
+		t.Errorf("bare entries = %+v, want %+v", got, want)
+	}
+}
+
 func TestFindBareHookEntries_InvalidJSON(t *testing.T) {
 	if _, err := FindBareHookEntries([]byte(`not json`)); err == nil {
 		t.Error("expected error for invalid JSON")
