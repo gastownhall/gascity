@@ -5031,8 +5031,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// (blank assignee included) or owned outside this session's
 					// own identifiers was released or handed off since the stale
 					// snapshot, so there is nothing to cycle this session onto.
-					if terminal, anchorAssignee, err := freshAnchorBeadTerminal(topo, decision.AssignedWorkBeadID); err == nil &&
-						(terminal || !slices.Contains(sessionAssignmentIdentifiersForConfigInfo(info, cfg), anchorAssignee)) {
+					terminal, anchorAssignee, anchorErr := freshAnchorBeadTerminal(topo, decision.AssignedWorkBeadID)
+					if freshAnchorCycleSkippable(terminal, anchorAssignee, anchorErr, sessionAssignmentIdentifiersForConfigInfo(info, cfg)) {
 						continue
 					}
 					if ran, fold := cycleAliveSessionForFreshReassign(cityPath, infoByID[target.info.ID], target.tp, sp, store, cfg, cb, name, decision.AssignedWorkBeadID, clk.Now(), stdout, stderr, trace); ran {

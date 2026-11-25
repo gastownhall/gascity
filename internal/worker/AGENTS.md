@@ -236,8 +236,11 @@ reads first. Keep every gate before the kill or the stamp:
   aliases, `alias_history` and pool templates, was released or handed off, so
   the session is not cycled onto it. Status and assignee come from that one
   row: a second read, or the owner probe's row, can disagree with it.
-- Q3: the previous bead is not still open and owned by the session, nor closed
-  during this incarnation.
+- Q3: the cycle is deferred while the previous bead is still open and owned by
+  the session, or when it closed before this incarnation started
+  (`awake_started_at` is after its `closed_at`, so the session is already
+  fresh). A previous bead handed to another owner, or closed since this
+  incarnation woke, does not defer it.
 
 A failed anchor read is "could not tell", and the cycle proceeds, since Q1
 already ruled out a claim a kill could cost. Do not turn that into a skip.

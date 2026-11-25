@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -178,8 +179,7 @@ func freshAnchorBeadTerminal(topo storeref.Topology, anchorID string) (terminal 
 // or it is no longer owned by one of the session's own identifiers. A read
 // error is "could not tell" and never skips.
 func freshAnchorCycleSkippable(terminal bool, assignee string, err error, identifiers []string) bool {
-	_, _, _, _ = terminal, assignee, err, identifiers
-	return false
+	return err == nil && (terminal || !slices.Contains(identifiers, assignee))
 }
 
 // cycleAliveSessionForFreshReassign tears down a live wake_mode=fresh
