@@ -531,6 +531,27 @@ teardown = ["body"]
 `,
 			want: []string{`scope "worktree"`, `"body"`, "teardown"},
 		},
+		{
+			name: "member_and_teardown",
+			child: `
+[[scope]]
+name = "worktree"
+body = "body"
+members = ["setup"]
+teardown = ["setup"]
+`,
+			want: []string{`scope "worktree": step "setup" is listed as both member and teardown`},
+		},
+		{
+			name: "member_listed_twice",
+			child: `
+[[scope]]
+name = "worktree"
+body = "body"
+members = ["setup", "setup"]
+`,
+			want: []string{`scope "worktree": step "setup" is listed twice as member`},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -578,4 +599,97 @@ needs = ["a", "b"]
 		"a": {"gc.scope_ref": "body", "gc.scope_role": "member"},
 		"b": {},
 	})
+}
+
+func TestResolveScopeDeclDoesNotLeakThroughAnEmptyMetadataMap(t *testing.T) {
+	// cloneStep keeps a step's metadata map when it is empty, so a step written
+	// with metadata = {} must still be stamped on a fresh map, or the stamps land
+	// on the parser's cached step and leak into later resolves.
+	enableV2ForTest(t)
+	dir := t.TempDir()
+	base := strings.Replace(scopeDeclBase, "id = \"setup\"\ntitle = \"Set up\"\n",
+		"id = \"setup\"\ntitle = \"Set up\"\nmetadata = {}\n", 1)
+	if base == scopeDeclBase {
+		t.Fatal("fixture rewrite did not add metadata = {} to setup")
+	}
+	writeNamedFormula(t, dir, "decl-base", base)
+	writeNamedFormula(t, dir, "decl-child", scopeDeclChildHeader+`
+[[scope]]
+name = "worktree"
+body = "body"
+members = ["implement"]
+`)
+	p := NewParser(dir)
+	child, err := p.LoadByName("decl-child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedChild, err := p.Resolve(child)
+	if err != nil {
+		t.Fatalf("Resolve child: %v", err)
+	}
+	requireScopeMetadata(t, resolvedChild, map[string]map[string]string{
+		"setup":     {},
+		"implement": {"gc.scope_ref": "body", "gc.scope_role": "member"},
+	})
+
+	baseF, err := p.LoadByName("decl-base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedBase, err := p.Resolve(baseF)
+	if err != nil {
+		t.Fatalf("Resolve base: %v", err)
+	}
+	requireScopeMetadata(t, resolvedBase, map[string]map[string]string{"setup": declMember()})
+
+	again, err := p.Resolve(child)
+	if err != nil {
+		t.Fatalf("Resolve child again: %v", err)
+	}
+	requireScopeMetadata(t, again, map[string]map[string]string{"setup": {}})
+}
+
+func TestResolveScopeDeclStampsAnOverriddenBody(t *testing.T) {
+	f, err := resolveScopeDecl(t, `
+[[steps]]
+id = "body"
+title = "Scope body, the variant way"
+needs = ["setup", "implement", "review"]
+`)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	requireScopeMetadata(t, f, map[string]map[string]string{
+		"body":      {"gc.kind": "scope", "gc.scope_name": "worktree", "gc.scope_role": "body"},
+		"implement": declMember(),
+	})
+}
+
+func TestCompileScopeDeclOverriddenBodyWithAHandWrittenMemberRef(t *testing.T) {
+	// The child overrides the body with no metadata and keeps a hand-written
+	// member ref on implement. The body only becomes a scope once the
+	// declaration is stamped, so the dangling-ref check must not run first.
+	enableV2ForTest(t)
+	dir := t.TempDir()
+	writeNamedFormula(t, dir, "decl-base", scopeDeclBase)
+	writeNamedFormula(t, dir, "decl-child", scopeDeclChildHeader+`
+[[steps]]
+id = "body"
+title = "Scope body, the variant way"
+needs = ["setup", "implement", "review"]
+
+[[steps]]
+id = "implement"
+title = "Implement, the variant way"
+needs = ["setup"]
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
+`)
+	recipe, err := Compile(context.Background(), "decl-child", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if recipe.StepByID("decl-child.implement-scope-check") == nil {
+		t.Fatal("implement-scope-check missing")
+	}
 }

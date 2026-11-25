@@ -101,12 +101,16 @@ func applyScopeDecls(f *Formula) (*Formula, error) {
 			continue
 		}
 		clone := cloneStep(step)
-		if clone.Metadata == nil {
-			clone.Metadata = make(map[string]string, len(stamps))
+		// Always build a fresh map: cloneStep keeps the original map when it is
+		// empty but non-nil, and stamping that would leak into shared steps.
+		md := make(map[string]string, len(step.Metadata)+len(stamps))
+		for k, v := range step.Metadata {
+			md[k] = v
 		}
 		for k, v := range stamps {
-			clone.Metadata[k] = v
+			md[k] = v
 		}
+		clone.Metadata = md
 		out.Steps[i] = clone
 	}
 	return &out, nil
@@ -115,121 +119,171 @@ func applyScopeDecls(f *Formula) (*Formula, error) {
 // planScopeDecls validates every declaration and returns the metadata to stamp,
 // keyed by step id. It reports every problem at once, sorted.
 func planScopeDecls(f *Formula) (map[string]map[string]string, error) {
-	byID := make(map[string]*Step, len(f.Steps))
+	sp := &scopePlanner{
+		byID:  make(map[string]*Step, len(f.Steps)),
+		plan:  make(map[string]map[string]string),
+		owner: make(map[string]string),
+	}
 	for _, step := range f.Steps {
-		byID[step.ID] = step
+		sp.byID[step.ID] = step
 	}
 
-	var problems []string
-	plan := make(map[string]map[string]string)
-	owner := make(map[string]string) // step id -> scope that claimed it
 	seenName := make(map[string]bool)
-
-	stamp := func(scope, id string, kv map[string]string) {
-		step := byID[id]
-		if step == nil {
-			return
-		}
-		for k, v := range kv {
-			if cur, ok := step.Metadata[k]; ok && cur != v {
-				problems = append(problems, fmt.Sprintf(
-					"scope %q: step %q sets %s = %q, which conflicts with the declaration (%q); remove it from the step",
-					scope, id, k, cur, v))
-			}
-		}
-		if plan[id] == nil {
-			plan[id] = make(map[string]string, len(kv))
-		}
-		for k, v := range kv {
-			plan[id][k] = v
-		}
-	}
-	claim := func(scope, id string) {
-		if prev, ok := owner[id]; ok && prev != scope {
-			problems = append(problems, fmt.Sprintf(
-				"step %q is listed in both scope %q and scope %q; a step belongs to one scope", id, prev, scope))
-			return
-		}
-		owner[id] = scope
-	}
-	exists := func(scope, role, id string) bool {
-		if byID[id] != nil {
-			return true
-		}
-		problems = append(problems, fmt.Sprintf(
-			"scope %q: %s %q: no step with that id in the resolved formula", scope, role, id))
-		return false
-	}
-
 	for _, d := range f.Scopes {
 		switch {
 		case d.Name == "":
-			problems = append(problems, "a [[scope]] declaration has no name")
+			sp.problems = append(sp.problems, "a [[scope]] declaration has no name")
 			continue
 		case seenName[d.Name]:
-			problems = append(problems, fmt.Sprintf("scope %q is declared twice in one formula", d.Name))
+			sp.problems = append(sp.problems, fmt.Sprintf("scope %q is declared twice in one formula", d.Name))
 			continue
 		}
 		seenName[d.Name] = true
-
-		if d.Body == "" {
-			problems = append(problems, fmt.Sprintf("scope %q: no body step id declared (body = \"...\")", d.Name))
-		}
-		if len(d.Members) == 0 {
-			problems = append(problems, fmt.Sprintf("scope %q: no members declared (members = [...])", d.Name))
-		}
-		if d.OnFail != "" && d.OnFail != ScopeOnFailAbort {
-			problems = append(problems, fmt.Sprintf(
-				"scope %q: on_fail %q is not supported; the only value is %q", d.Name, d.OnFail, ScopeOnFailAbort))
-		}
-
-		if d.Body != "" && exists(d.Name, "body", d.Body) {
-			claim(d.Name, d.Body)
-			stamp(d.Name, d.Body, map[string]string{
-				beadmeta.KindMetadataKey:      beadmeta.KindScope,
-				beadmeta.ScopeNameMetadataKey: d.Name,
-				beadmeta.ScopeRoleMetadataKey: beadmeta.ScopeRoleBody,
-			})
-		}
-		for _, id := range d.Members {
-			if id == d.Body {
-				problems = append(problems, fmt.Sprintf(
-					"scope %q: step %q is the body and cannot also be a member", d.Name, id))
-				continue
-			}
-			if !exists(d.Name, "member", id) {
-				continue
-			}
-			claim(d.Name, id)
-			kv := map[string]string{
-				beadmeta.ScopeRefMetadataKey:  d.Body,
-				beadmeta.ScopeRoleMetadataKey: beadmeta.ScopeRoleMember,
-			}
-			if d.OnFail != "" {
-				kv[beadmeta.OnFailMetadataKey] = d.OnFail
-			}
-			stamp(d.Name, id, kv)
-		}
-		for _, id := range d.Teardown {
-			if id == d.Body {
-				problems = append(problems, fmt.Sprintf(
-					"scope %q: step %q is the body and cannot also be teardown", d.Name, id))
-				continue
-			}
-			if !exists(d.Name, "teardown", id) {
-				continue
-			}
-			claim(d.Name, id)
-			stamp(d.Name, id, map[string]string{
-				beadmeta.ScopeRefMetadataKey:  d.Body,
-				beadmeta.ScopeRoleMetadataKey: beadmeta.ScopeRoleTeardown,
-			})
-		}
+		sp.declare(d)
 	}
 
-	if len(problems) > 0 {
-		sort.Strings(problems)
-		return nil, fmt.Errorf("formula %q: scope declaration:\n  - %s", f.Formula, strings.Join(problems, "\n  - "))
+	if len(sp.problems) > 0 {
+		sort.Strings(sp.problems)
+		return nil, fmt.Errorf("formula %q: scope declaration:\n  - %s", f.Formula, strings.Join(sp.problems, "\n  - "))
 	}
-	return plan, nil
+	return sp.plan, nil
+}
+
+// scopePlanner accumulates the stamps and problems of planScopeDecls.
+type scopePlanner struct {
+	byID     map[string]*Step
+	problems []string
+	plan     map[string]map[string]string
+	owner    map[string]string // step id -> scope that claimed it
+}
+
+// declare validates one named declaration and plans its stamps.
+func (sp *scopePlanner) declare(d *ScopeDecl) {
+	if d.Body == "" {
+		sp.problems = append(sp.problems, fmt.Sprintf("scope %q: no body step id declared (body = \"...\")", d.Name))
+	}
+	if len(d.Members) == 0 {
+		sp.problems = append(sp.problems, fmt.Sprintf("scope %q: no members declared (members = [...])", d.Name))
+	}
+	if d.OnFail != "" && d.OnFail != ScopeOnFailAbort {
+		sp.problems = append(sp.problems, fmt.Sprintf(
+			"scope %q: on_fail %q is not supported; the only value is %q", d.Name, d.OnFail, ScopeOnFailAbort))
+	}
+
+	if d.Body != "" && sp.exists(d.Name, "body", d.Body) {
+		sp.claim(d.Name, d.Body)
+		sp.stamp(d.Name, d.Body, map[string]string{
+			beadmeta.KindMetadataKey:      beadmeta.KindScope,
+			beadmeta.ScopeNameMetadataKey: d.Name,
+			beadmeta.ScopeRoleMetadataKey: beadmeta.ScopeRoleBody,
+		})
+	}
+	// role records the role each step id has taken within this declaration, so
+	// a step listed twice, or as both member and teardown, is rejected.
+	role := make(map[string]string)
+	for _, id := range d.Members {
+		if !sp.admit(d, role, beadmeta.ScopeRoleMember, id) {
+			continue
+		}
+		kv := map[string]string{
+			beadmeta.ScopeRefMetadataKey:  d.Body,
+			beadmeta.ScopeRoleMetadataKey: beadmeta.ScopeRoleMember,
+		}
+		if d.OnFail != "" {
+			kv[beadmeta.OnFailMetadataKey] = d.OnFail
+		}
+		sp.stamp(d.Name, id, kv)
+	}
+	for _, id := range d.Teardown {
+		if !sp.admit(d, role, beadmeta.ScopeRoleTeardown, id) {
+			continue
+		}
+		sp.stamp(d.Name, id, map[string]string{
+			beadmeta.ScopeRefMetadataKey:  d.Body,
+			beadmeta.ScopeRoleMetadataKey: beadmeta.ScopeRoleTeardown,
+		})
+	}
+}
+
+// admit reports whether id may take kind (member or teardown) in d, and claims
+// it for d's scope when it may. It records a problem when id is the body, names
+// no step, or already took a role in d.
+func (sp *scopePlanner) admit(d *ScopeDecl, role map[string]string, kind, id string) bool {
+	if id == d.Body {
+		article := "a "
+		if kind == beadmeta.ScopeRoleTeardown {
+			article = ""
+		}
+		sp.problems = append(sp.problems, fmt.Sprintf(
+			"scope %q: step %q is the body and cannot also be %s%s", d.Name, id, article, kind))
+		return false
+	}
+	if !sp.exists(d.Name, kind, id) {
+		return false
+	}
+	if prev, ok := role[id]; ok {
+		if prev == kind {
+			sp.problems = append(sp.problems, fmt.Sprintf(
+				"scope %q: step %q is listed twice as %s", d.Name, id, kind))
+		} else {
+			sp.problems = append(sp.problems, fmt.Sprintf(
+				"scope %q: step %q is listed as both %s and %s", d.Name, id, prev, kind))
+		}
+		return false
+	}
+	role[id] = kind
+	sp.claim(d.Name, id)
+	return true
+}
+
+// stamp plans kv onto step id, recording a problem for each key the step
+// already sets to a different value.
+func (sp *scopePlanner) stamp(scope, id string, kv map[string]string) {
+	step := sp.byID[id]
+	if step == nil {
+		return
+	}
+	for k, v := range kv {
+		if cur, ok := step.Metadata[k]; ok && cur != v {
+			sp.problems = append(sp.problems, fmt.Sprintf(
+				"scope %q: step %q sets %s = %q, which conflicts with the declaration (%q); remove it from the step",
+				scope, id, k, cur, v))
+		}
+	}
+	if sp.plan[id] == nil {
+		sp.plan[id] = make(map[string]string, len(kv))
+	}
+	for k, v := range kv {
+		sp.plan[id][k] = v
+	}
+}
+
+// claim records that scope owns id, or a problem when another scope does.
+func (sp *scopePlanner) claim(scope, id string) {
+	if prev, ok := sp.owner[id]; ok && prev != scope {
+		sp.problems = append(sp.problems, fmt.Sprintf(
+			"step %q is listed in both scope %q and scope %q; a step belongs to one scope", id, prev, scope))
+		return
+	}
+	sp.owner[id] = scope
+}
+
+// exists reports whether id names a step, recording a problem when it does not.
+func (sp *scopePlanner) exists(scope, role, id string) bool {
+	if sp.byID[id] != nil {
+		return true
+	}
+	sp.problems = append(sp.problems, fmt.Sprintf(
+		"scope %q: %s %q: no step with that id in the resolved formula", scope, role, id))
+	return false
+}
+
+// validateUnstampedScopeMembership checks a merge for dangling scope refs
+// unless it carries [[scope]] declarations: Resolve checks those once stamped,
+// because a declared body is not a scope body until then.
+func validateUnstampedScopeMembership(f *Formula) error {
+	if len(f.Scopes) > 0 {
+		return nil
+	}
+	return validateScopeMembership(f)
 }

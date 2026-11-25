@@ -250,7 +250,18 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 	// Scope declarations resolve against the final step list, so only the
 	// outermost call stamps: a parent's stamps would otherwise outlive a child
 	// declaration that replaces its own.
-	return applyScopeDecls(resolved)
+	stamped, err := applyScopeDecls(resolved)
+	if err != nil {
+		return nil, err
+	}
+	// A formula with declarations is checked for dangling scope refs only once
+	// stamped, since a declared body becomes a scope body only then.
+	if len(stamped.Scopes) > 0 {
+		if err := validateScopeMembership(stamped); err != nil {
+			return nil, err
+		}
+	}
+	return stamped, nil
 }
 
 // resolve merges a formula with its parents, recursively, without stamping
@@ -391,7 +402,7 @@ func (p *Parser) resolve(formula *Formula) (*Formula, error) {
 	if err := merged.Validate(); err != nil {
 		return nil, err
 	}
-	if err := validateScopeMembership(merged); err != nil {
+	if err := validateUnstampedScopeMembership(merged); err != nil {
 		return nil, err
 	}
 	if err := validateResolvedGraphV2DescriptionFiles(merged); err != nil {

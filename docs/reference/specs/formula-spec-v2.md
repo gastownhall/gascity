@@ -1178,7 +1178,7 @@ on_fail  = "abort_scope"
 Resolution runs after `extends` has produced the final step list, and before
 the compiler mints scope-checks. It stamps each member with
 `gc.scope_ref = <body>` and `gc.scope_role = member`, each teardown step with
-`gc.scope_role = teardown`, each member with `gc.on_fail` when `on_fail` is
+`gc.scope_ref = <body>` and `gc.scope_role = teardown`, each member with `gc.on_fail` when `on_fail` is
 set (teardown steps never get it), and the body with `gc.kind = "scope"`,
 `gc.scope_name = <name>` and `gc.scope_role = "body"`. Because it reads the
 final list, an overridden member and a terminal step the child lists both land
@@ -1191,7 +1191,8 @@ in the scope, with no per-step metadata to redeclare (rules 2 and 3 above).
 - `body`, `members` and `teardown` name top-level steps. An id that matches no
   step in the final list is a compile-time error, and so is an unknown
   `on_fail` (the only value is `abort_scope`), a missing body or member list, a
-  step listed in two scopes, and a step that is both body and member.
+  step listed in two scopes, a step that is both body and member or both body
+  and teardown, a step that is both member and teardown, and a step listed twice.
   Resolution reports every problem at once.
 - A step that already sets a key the declaration stamps to a different value
   (including `gc.scope_ref = ""`) is an error, so a declaration is never
