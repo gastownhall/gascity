@@ -3,7 +3,6 @@ package session
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -180,14 +179,14 @@ func nativeCapacityPath(city string) string {
 	return filepath.Join(city, ".gc", "runtime", "pool-capacity-admission", "native-managed.json")
 }
 
-// nativeCapacityUnit derives a bounded systemd name from public admission identity.
-// The random attempt identifies a launch; this digest is not a password verifier.
-func nativeCapacityUnit(city, sid, attempt string) string {
-	h := sha256.Sum256([]byte(city + "\x00" + sid + "\x00" + attempt))
-	return "gc-managed-" + hex.EncodeToString(h[:16]) + ".scope"
+// nativeCapacityUnit names the scope by its independent 128-bit launch identity.
+// City and session ownership are checked against the locked ledger, not inferred
+// from the unit name. No credentials or user-provided strings belong in this name.
+func nativeCapacityUnit(attempt string) string {
+	return "gc-managed-" + attempt + ".scope"
 }
 
-func validNativeSeat(sid string, seat nativeCapacitySeat, city string, c nativeCapacityConfig) bool {
+func validNativeSeat(sid string, seat nativeCapacitySeat, c nativeCapacityConfig) bool {
 	if sid == "" || seat.Handle == "" || !managedCapacityRoute(seat.Route, c.Queue.Exact, c.Queue.Prefixes) || strings.ContainsAny(sid+seat.Handle, "\x00\r\n\t") {
 		return false
 	}
@@ -197,7 +196,7 @@ func validNativeSeat(sid string, seat nativeCapacitySeat, city string, c nativeC
 	if seat.Kind == "legacy" {
 		return seat.State == "legacy" && seat.LaunchFinalized && seat.Unit == "" && seat.CgroupPath == "" && seat.Attempt != ""
 	}
-	if seat.Kind != "scope" || len(seat.Attempt) != 32 || seat.Unit != nativeCapacityUnit(city, sid, seat.Attempt) {
+	if seat.Kind != "scope" || len(seat.Attempt) != 32 || seat.Unit != nativeCapacityUnit(seat.Attempt) {
 		return false
 	}
 	if _, err := hex.DecodeString(seat.Attempt); err != nil {
@@ -268,7 +267,7 @@ func withNativeCapacityLedgerWriter(ctx context.Context, city string, c nativeCa
 		return fmt.Errorf("native capacity kernel identity unavailable")
 	}
 	for sid, seat := range ledger.Seats {
-		if !validNativeSeat(sid, seat, city, c) {
+		if !validNativeSeat(sid, seat, c) {
 			return fmt.Errorf("native capacity seat invalid")
 		}
 	}
@@ -410,10 +409,10 @@ func claimNativeCapacityStart(ctx context.Context, city, route, sid string, now 
 		if err := host.Resources(c); err != nil {
 			return fmt.Errorf("native capacity resources unavailable")
 		}
-		if _, err := host.Command(nativeCapacityUnit(city, sid, attempt)); err != nil {
+		if _, err := host.Command(nativeCapacityUnit(attempt)); err != nil {
 			return fmt.Errorf("native capacity scope unavailable")
 		}
-		ledger.Seats[sid] = nativeCapacitySeat{Route: route, Handle: info.SessionName, Kind: "scope", Attempt: attempt, Unit: nativeCapacityUnit(city, sid, attempt), State: "reserved", CreatedAt: now.UTC().Format(time.RFC3339Nano)}
+		ledger.Seats[sid] = nativeCapacitySeat{Route: route, Handle: info.SessionName, Kind: "scope", Attempt: attempt, Unit: nativeCapacityUnit(attempt), State: "reserved", CreatedAt: now.UTC().Format(time.RFC3339Nano)}
 		return nil
 	})
 	return proof, err

@@ -121,7 +121,7 @@ func (p *nativeTestProvider) Start(ctx context.Context, name string, cfg runtime
 	}
 	if !p.skipEntry {
 		if proof, ok := ctx.Value(capacityAdmissionKey{}).(*capacityAdmissionProof); ok && proof.native != nil {
-			if err := enterNativeCapacityScope(ctx, proof.city, proof.id, proof.native.attempt, nativeCapacityUnit(proof.city, proof.id, proof.native.attempt), proof.native.host); err != nil {
+			if err := enterNativeCapacityScope(ctx, proof.city, proof.id, proof.native.attempt, nativeCapacityUnit(proof.native.attempt), proof.native.host); err != nil {
 				return err
 			}
 		}
@@ -614,7 +614,7 @@ func TestNativeProviderSuccessWithoutCommandEntryIsNotSuccessfulStart(t *testing
 	if len(retired) != 1 || retired[0].Reason != "command_entry_revoked_before_model" {
 		t.Fatal("missing honest revocation retirement")
 	}
-	if err := enterNativeCapacityScope(context.Background(), city, b.ID, proof.native.attempt, nativeCapacityUnit(city, b.ID, proof.native.attempt), host); err == nil {
+	if err := enterNativeCapacityScope(context.Background(), city, b.ID, proof.native.attempt, nativeCapacityUnit(proof.native.attempt), host); err == nil {
 		t.Fatal("late model entered after cancellation")
 	}
 }
@@ -863,5 +863,33 @@ func TestNativeResumeDoesNotConvergeOnUnacknowledgedExistingRuntime(t *testing.T
 	}
 	if _, present := readNativeTestLedger(t, city).Seats[b.ID]; present {
 		t.Fatal("unentered attempt was not sealed and retired")
+	}
+}
+
+func TestNativeCommandEntryRejectsAnotherSessionsAttempt(t *testing.T) {
+	city, _, host, sp, store := nativeTestFixture(t, 0)
+	var sessions []beads.Bead
+	for range 2 {
+		b := nativeTestSession(t, store)
+		ctx, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, NewStore(beads.SessionStore{Store: store}), host)
+		if !allowed {
+			t.Fatal(reason)
+		}
+		proof := ctx.Value(capacityAdmissionKey{}).(*capacityAdmissionProof)
+		if _, err := beginNativeCapacityStart(ctx, proof, b.Metadata["session_name"], runtime.Config{Command: "true"}); err != nil {
+			t.Fatal(err)
+		}
+		sessions = append(sessions, b)
+	}
+	ledger := readNativeTestLedger(t, city)
+	first, second := ledger.Seats[sessions[0].ID], ledger.Seats[sessions[1].ID]
+	if first.Unit == second.Unit {
+		t.Fatal("independent admission attempts share a scope")
+	}
+	if err := enterNativeCapacityScope(context.Background(), city, sessions[1].ID, first.Attempt, first.Unit, host); err == nil {
+		t.Fatal("another session's attempt entered the scope")
+	}
+	if err := enterNativeCapacityScope(context.Background(), city, sessions[1].ID, second.Attempt, second.Unit, host); err != nil {
+		t.Fatalf("rejected foreign attempt prevented the owner from entering: %v", err)
 	}
 }
