@@ -84,6 +84,10 @@ type drainTracker struct {
 	liveClaimVetoes  map[string]string               // session bead ID -> claimed work bead ID whose live claim last vetoed a demand-class drain (log-once dedupe)
 	drainSkips       map[drainSkipKey]*drainSkipMark // session bead ID + condition kind -> last printed line (log-on-transition dedupe; session_drain_skip_log.go)
 	idleProbeCursor  int
+	// tickGate is the current tick's runtime-contact gate, set by the tick
+	// goroutine around the drain advance and nil otherwise. Only that goroutine
+	// reads or writes it.
+	tickGate *tickProbeGate
 }
 
 func newDrainTracker() *drainTracker {
