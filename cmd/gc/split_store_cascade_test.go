@@ -53,7 +53,7 @@ func TestSplitStoreCascade_DeadRuntimeReleasesTheGatesLegs(t *testing.T) {
 
 			var stderr bytes.Buffer
 			rigs := map[string]beads.Store{"riga": rig, "rigb": suspended}
-			if got := cleanupDeadRuntimeSessionCorpses(cityPath, sessions, testSeatWork(cityPath, cfg, sessions, rigs), snapshot, nil, sp, nil, nil, &stderr); got != 1 {
+			if got := cleanupDeadRuntimeSessionCorpses(cityPath, sessions, testSeatWork(cityPath, cfg, sessions, rigs), snapshot, nil, sp, nil, nil, nil, &stderr); got != 1 {
 				t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
 			}
 

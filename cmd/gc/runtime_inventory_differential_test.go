@@ -564,7 +564,7 @@ func runReapers(t *testing.T, st reaperState, w reaperEnv, inv *runtimeInventory
 	log := w.callLog()
 	from := len(log.recorded())
 	log.setPhase("corpse")
-	cleanupDeadRuntimeSessionCorpses(testCity, store, testSeatWork(testCity, nil, store, nil), snapshot, dt, w, inv, clock.Real{}, io.Discard)
+	cleanupDeadRuntimeSessionCorpses(testCity, store, testSeatWork(testCity, nil, store, nil), snapshot, dt, w, inv, clock.Real{}, nil, io.Discard)
 	log.setPhase("closed")
 	reapRuntimesBoundToClosedBeads(store, snapshot, dt, w, inv, testCity, io.Discard)
 	log.setPhase("")
@@ -847,7 +847,9 @@ func reaperFixtures(boot time.Time) []reaperFixture {
 				st.drains = []string{"draining"}
 				return st
 			},
-			stops: []string{"ordinary-worker"}, closes: map[string]string{"ordinary": "dead-runtime"},
+			// A confirmed-dead named pane is stopped and its row kept open: the
+			// named row is the durable identity (gastownhall/gascity#6298).
+			stops: []string{"named-worker", "ordinary-worker"}, closes: map[string]string{"ordinary": "dead-runtime"},
 		},
 		{
 			name: "killed asleep and dormant rows keep their row",
