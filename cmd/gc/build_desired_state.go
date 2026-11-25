@@ -565,28 +565,6 @@ func buildDesiredStateWithSessionBeadsAt(
 	)
 }
 
-// buildDesiredStateWithClassStoresAt keeps the two city-level roles explicit:
-// sessionStore owns session-bead mutations and occupancy reads, while store
-// (the work class) supplies ordinary routed work and pool demand. They are
-// identical on a single-store city, but a split city must not ask its
-// relocated sessions binding whether business work exists.
-func buildDesiredStateWithClassStoresAt(
-	cityName, cityPath string,
-	beaconTime, poolDecisionTime time.Time,
-	cfg *config.City,
-	sp runtime.Provider,
-	sessionStore, store beads.Store,
-	rigStores map[string]beads.Store,
-	sessionBeads *sessionBeadSnapshot,
-	trace *sessionReconcilerTraceCycle,
-	stderr io.Writer,
-) DesiredStateResult {
-	return buildDesiredStateWithClassStoresAtOpts(
-		cityName, cityPath, beaconTime, poolDecisionTime, cfg, sp, sessionStore, store,
-		rigStores, sessionBeads, trace, stderr, desiredStateOptions{},
-	)
-}
-
 func buildDesiredStateWithSessionBeadsAtOpts(
 	cityName, cityPath string,
 	beaconTime, poolDecisionTime time.Time,
@@ -599,24 +577,9 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 	stderr io.Writer,
 	opts desiredStateOptions,
 ) DesiredStateResult {
-	return buildDesiredStateWithClassStoresAtOpts(
-		cityName, cityPath, beaconTime, poolDecisionTime, cfg, sp, store, store,
-		rigStores, sessionBeads, trace, stderr, opts,
-	)
-}
-
-func buildDesiredStateWithClassStoresAtOpts(
-	cityName, cityPath string,
-	beaconTime, poolDecisionTime time.Time,
-	cfg *config.City,
-	sp runtime.Provider,
-	sessionStore, store beads.Store,
-	rigStores map[string]beads.Store,
-	sessionBeads *sessionBeadSnapshot,
-	trace *sessionReconcilerTraceCycle,
-	stderr io.Writer,
-	opts desiredStateOptions,
-) DesiredStateResult {
+	// The runtime registration owns the work leg; the supplied store owns sessions.
+	sessionStore := store
+	store = censusWorkLeg(cityPath, store)
 	citySt, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
 	if effectiveCitySuspended(cfg, citySt) {
 		return DesiredStateResult{}
@@ -841,7 +804,7 @@ func buildDesiredStateWithClassStoresAtOpts(
 			fmt.Fprintf(stderr, "buildDesiredState: pool %q trigger bead %s: %v (naming no seat for it)\n", refused.Template, refused.WorkBeadID, refused.err()) //nolint:errcheck
 		}
 		subPhaseStart = trace.demandNow()
-		poolWorkBeads, poolWorkRefs := filterReadyAssignedWorkBeadsForPoolDemand(cfg, cityPath, store, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs, readyAssigned)
+		poolWorkBeads, poolWorkRefs := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, store, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs, readyAssigned)
 		bp.assignedWorkBeads = poolWorkBeads
 		bp.poolScaleCheckPartialTemplates = poolScaleCheckPartialTemplates
 		bp.providerHealthSnapshot = loadProviderHealthSnapshot(cityPath)
@@ -1601,16 +1564,7 @@ func buildDemandTargets(
 		}
 		pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir, env: env, newDemand: store != nil})
 	}
-	// The eligibility pass above decided WHICH templates need a default
-	// routed-work probe. Resolve WHERE those probes read through the runtime
-	// plane used by the broad open snapshot: on a converged split city routed
-	// work lives in the infra binding, not in the retained work ledger.
-	defaultScaleTargets = retargetScaleCheckTargetsToRoutedWorkPlane(
-		cityPath, cfg, store, rigStores, suspendedRigPaths, defaultScaleTargets,
-	)
-	defaultNamedScaleTargets = retargetScaleCheckTargetsToRoutedWorkPlane(
-		cityPath, cfg, store, rigStores, suspendedRigPaths, defaultNamedScaleTargets,
-	)
+
 	return demandTargets{
 		pendingPools:             pendingPools,
 		defaultScaleTargets:      defaultScaleTargets,
@@ -1619,80 +1573,6 @@ func buildDemandTargets(
 		namedOnDemandTemplates:   namedOnDemandTemplates,
 		nameOnlyTemplates:        nameOnlyTemplates,
 	}
-}
-
-// retargetScaleCheckTargetsToRoutedWorkPlane keeps the template eligibility
-// decisions made by the agent loop, but replaces its provisional physical
-// stores with the authoritative runtime-plane RoutedWork leg set. Error targets
-// stay intact so a rig whose work store is unavailable remains partial.
-func retargetScaleCheckTargetsToRoutedWorkPlane(
-	cityPath string,
-	cfg *config.City,
-	workStore beads.Store,
-	rigStores map[string]beads.Store,
-	suspendedRigPaths map[string]bool,
-	targets []defaultScaleCheckTarget,
-) []defaultScaleCheckTarget {
-	if len(targets) == 0 {
-		return nil
-	}
-	type templateTarget struct {
-		template string
-		healthy  bool
-		targets  []defaultScaleCheckTarget
-	}
-	byTemplate := make(map[string]*templateTarget)
-	order := make([]string, 0, len(targets))
-	var preservedErrors []defaultScaleCheckTarget
-	for _, target := range targets {
-		template := strings.TrimSpace(target.template)
-		if template == "" {
-			continue
-		}
-		state := byTemplate[template]
-		if state == nil {
-			state = &templateTarget{template: template}
-			byTemplate[template] = state
-			order = append(order, template)
-		}
-		if target.err != nil || target.store == nil {
-			preservedErrors = append(preservedErrors, target)
-			continue
-		}
-		state.healthy = true
-		state.targets = append(state.targets, target)
-	}
-	// routedWorkCityDemandLegs is the claim-side plan: the retained work ledger
-	// plus every relocated class binding. The runtime-plane-only candidate list
-	// would leave ledger rows claimable by gc ready but counted by nobody.
-	legs, resolveErr := routedWorkCityDemandLegs(cityPath, cfg, workStore, rigStores, suspendedRigPaths)
-	out := append([]defaultScaleCheckTarget(nil), preservedErrors...)
-	for _, template := range order {
-		state := byTemplate[template]
-		if state == nil || !state.healthy {
-			continue
-		}
-		if resolveErr != nil {
-			// A topology that cannot be resolved keeps the provisional targets
-			// (fail closed on partial, not blind) and carries the resolver fault.
-			out = append(out, state.targets...)
-			out = append(out, defaultScaleCheckTarget{
-				template: template,
-				err:      fmt.Errorf("default scale_check %s: resolving routed-work stores: %w", template, resolveErr),
-			})
-			continue
-		}
-		if len(legs) == 0 {
-			// A city that relocates nothing has no runtime-plane class legs; keep
-			// the provisional single-store targets rather than refusing the probe.
-			out = append(out, state.targets...)
-			continue
-		}
-		for _, leg := range legs {
-			out = append(out, defaultScaleCheckTarget{template: template, storeKey: leg.ref, store: leg.store})
-		}
-	}
-	return out
 }
 
 func buildSuspendedRigPathsForCity(cfg *config.City, cityPath string) map[string]bool {
@@ -2053,8 +1933,12 @@ func collectAssignedWorkBeadsWithStores(
 			// across every store before any ready handoff probes, so already
 			// active work never waits behind unrelated ready scans.
 			start := pass.now()
-			inProgress, err := reads.Fresh(source.store, beads.ListQuery{Status: "in_progress"})
-			pass.read(read("list_in_progress", demandReadTierLive), start, len(inProgress), err)
+			inProgress, err := reads.Cached(source.store, beads.ListQuery{Status: "in_progress"})
+			tier := demandReadTierCached
+			if _, legacy := reads.(legacyDemandReads); legacy {
+				tier = demandReadTierLive
+			}
+			pass.read(read("list_in_progress", tier), start, len(inProgress), err)
 			if err == nil {
 				appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, readyIDs, inProgress, seen, source.store, source.ref)
 			} else {
@@ -2644,10 +2528,7 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			if entry.StoreRefs == nil {
 				entry.StoreRefs = make(map[string]string)
 			}
-			// The probe keeps the physical class ref so it reads the relocated
-			// binding, while a spawned session records the binding's logical city
-			// scope. Claim-side snapshots retain their physical refs separately.
-			entry.StoreRefs[b.ID] = normalizeDemandStoreRef(storeKey)
+			entry.StoreRefs[b.ID] = storeKey
 			if rowBindingResident[b.ID] {
 				if entry.BindingResident == nil {
 					entry.BindingResident = make(map[string]bool)
@@ -3239,36 +3120,34 @@ func sortedStringSet(values map[string]struct{}) []string {
 
 func listBothTiersForControllerDemand(store beads.Store, query beads.ListQuery) ([]beads.Bead, error) {
 	handles := beads.HandlesFor(store)
+	if query.Status == "in_progress" {
+		// Claims are written by agent processes, outside the controller's cache
+		// coordinator. A cached-first read can miss the exact open -> in_progress
+		// transition that keeps the claimant alive: the ready row disappears, no
+		// assigned-work row replaces it, and the reconciler drains the live worker.
+		liveRows, liveErr := handles.Live.List(query)
+		if liveErr == nil {
+			return liveRows, nil
+		}
+		if !beads.IsPartialResult(liveErr) {
+			liveRows = nil
+		}
+		cachedRows, cachedErr := handles.Cached.List(query)
+		if cachedErr != nil && !beads.IsPartialResult(cachedErr) {
+			cachedRows = nil
+		}
+		rows := mergeReadyRowsByID(cachedRows, liveRows)
+		joined := errors.Join(liveErr, cachedErr)
+		if joined != nil && len(rows) > 0 && !beads.IsPartialResult(joined) {
+			joined = &beads.PartialResultError{Op: "controller assigned-work demand", Err: joined}
+		}
+		return rows, joined
+	}
 	rows, err := handles.Cached.List(query)
 	if errors.Is(err, beads.ErrCacheUnavailable) {
 		return handles.Live.List(query)
 	}
 	return rows, err
-}
-
-func listFreshBothTiersForControllerDemand(store beads.Store, query beads.ListQuery) ([]beads.Bead, error) {
-	handles := beads.HandlesFor(store)
-	// Claims are written by agent processes, outside the controller's cache
-	// coordinator. A cached-first read can miss the exact open -> in_progress
-	// transition that keeps the claimant alive: the ready row disappears, no
-	// assigned-work row replaces it, and the reconciler drains the live worker.
-	liveRows, liveErr := handles.Live.List(query)
-	if liveErr == nil {
-		return liveRows, nil
-	}
-	if !beads.IsPartialResult(liveErr) {
-		liveRows = nil
-	}
-	cachedRows, cachedErr := handles.Cached.List(query)
-	if cachedErr != nil && !beads.IsPartialResult(cachedErr) {
-		cachedRows = nil
-	}
-	rows := mergeReadyRowsByID(cachedRows, liveRows)
-	joined := errors.Join(liveErr, cachedErr)
-	if joined != nil && len(rows) > 0 && !beads.IsPartialResult(joined) {
-		joined = &beads.PartialResultError{Op: "controller assigned-work demand", Err: joined}
-	}
-	return rows, joined
 }
 
 // listOpenForControllerDemandLive reads open work for the controller-demand and

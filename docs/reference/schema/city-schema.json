@@ -1038,6 +1038,10 @@
           "type": "string",
           "description": "ScaleCheck overrides the command template whose output reports new\nunassigned session demand for bead-backed reconciliation. Supports the\nsame Go template placeholders as Agent.scale_check."
         },
+        "work_query_federated": {
+          "type": "boolean",
+          "description": "WorkQueryFederated overrides the custom work-query coverage declaration."
+        },
         "scale_check_authoritative": {
           "type": "boolean",
           "description": "ScaleCheckAuthoritative overrides whether this pool's ScaleCheck is the\nlast word on new demand, its zeros included. See Agent."

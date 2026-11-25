@@ -282,6 +282,7 @@ AgentPatch modifies existing agents identified by rig scope and Name.
 | `max_active_sessions` | integer |  |  | MaxActiveSessions overrides the agent-level cap on concurrent sessions. |
 | `min_active_sessions` | integer |  |  | MinActiveSessions overrides the minimum number of sessions to keep alive. |
 | `scale_check` | string |  |  | ScaleCheck overrides the command template whose output reports new unassigned session demand for bead-backed reconciliation. Supports the same Go template placeholders as Agent.scale_check. |
+| `work_query_federated` | boolean |  |  | WorkQueryFederated overrides the custom work-query coverage declaration. |
 | `scale_check_authoritative` | boolean |  |  | ScaleCheckAuthoritative overrides whether this pool's ScaleCheck is the last word on new demand, its zeros included. See Agent. |
 | `option_defaults` | map[string]string |  |  | OptionDefaults adds or overrides provider option defaults for this agent. Keys are option keys, values are choice values. Merges additively (patch keys win over existing agent keys). Example: option_defaults = &#123; model = "sonnet" &#125; |
 

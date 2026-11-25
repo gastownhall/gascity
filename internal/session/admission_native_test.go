@@ -224,7 +224,7 @@ func TestNativeConcurrentLastSeatIsAtomic(t *testing.T) {
 		wg.Add(1)
 		go func(sid string) {
 			defer wg.Done()
-			_, err := claimNativeCapacityStart(context.Background(), city, "worker", sid, time.Now(), c, host, sp, store)
+			_, err := claimNativeCapacityStart(context.Background(), city, "worker", sid, time.Now(), c, host, sp, NewStore(beads.SessionStore{Store: store}))
 			results <- err
 		}(sid)
 	}
@@ -247,7 +247,7 @@ func TestNativeLedgerAdmissionDoesNotDependOnProviderRegistry(t *testing.T) {
 	// failure cannot override the authoritative durable seats or erase them.
 	sp.registryErr = errors.New("isolated tmux server does not exist yet")
 	b := nativeTestSession(t, store)
-	ctx, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, store, host)
+	ctx, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, NewStore(beads.SessionStore{Store: store}), host)
 	if !allowed {
 		t.Fatalf("registry diagnostic blocked the free durable seat: %s", reason)
 	}
@@ -260,7 +260,7 @@ func TestNativeLedgerAdmissionDoesNotDependOnProviderRegistry(t *testing.T) {
 		t.Fatal("free durable seat did not produce one accounted scoped start")
 	}
 	other := nativeTestSession(t, store)
-	if _, err := claimNativeCapacityStart(context.Background(), city, "worker", other.ID, time.Now(), c, host, sp, store); err == nil {
+	if _, err := claimNativeCapacityStart(context.Background(), city, "worker", other.ID, time.Now(), c, host, sp, NewStore(beads.SessionStore{Store: store})); err == nil {
 		t.Fatal("registry failure disabled the shared cap")
 	}
 	if sp.registryReads != 0 || len(readNativeTestLedger(t, city).Seats) != 3 {
@@ -286,7 +286,7 @@ func TestNativeLedgerAdmissionStillValidatesTargetIdentity(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := claimNativeCapacityStart(context.Background(), city, "worker", sid, time.Now(), c, host, sp, store); err == nil {
+			if _, err := claimNativeCapacityStart(context.Background(), city, "worker", sid, time.Now(), c, host, sp, NewStore(beads.SessionStore{Store: store})); err == nil {
 				t.Fatal("invalid target identity admitted")
 			}
 			if len(readNativeTestLedger(t, city).Seats) != 2 || len(sp.started) != 0 || sp.registryReads != 0 {
@@ -301,7 +301,7 @@ func TestNativeProofStartsExactlyOnceWithoutSnapshotOrScanner(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			city, _, host, sp, store := nativeTestFixture(t, 2)
 			b := nativeTestSession(t, store)
-			ctx, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, store, host)
+			ctx, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, NewStore(beads.SessionStore{Store: store}), host)
 			if !allowed {
 				t.Fatalf("admit: %s", reason)
 			}
@@ -327,7 +327,7 @@ func TestNativeProofStartsExactlyOnceWithoutSnapshotOrScanner(t *testing.T) {
 			if seat.State != "active" || !seat.LaunchFinalized || seat.CgroupPath == "" {
 				t.Fatalf("seat not witnessed active: %+v", seat)
 			}
-			_, allowed, _ = admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, store, host)
+			_, allowed, _ = admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, NewStore(beads.SessionStore{Store: store}), host)
 			if allowed {
 				t.Fatal("same SID admitted a second process")
 			}
@@ -343,7 +343,7 @@ func TestNativeFailedOrNeverWitnessedStartRetainsSeatAcrossRestart(t *testing.T)
 		t.Run(map[bool]string{false: "fast-exit-before-witness", true: "failed-and-late-launch"}[failed], func(t *testing.T) {
 			city, c, host, sp, store := nativeTestFixture(t, 2)
 			b := nativeTestSession(t, store)
-			ctx, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, store, host)
+			ctx, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, NewStore(beads.SessionStore{Store: store}), host)
 			if !allowed {
 				t.Fatal(reason)
 			}
@@ -377,7 +377,7 @@ func TestNativeFailedOrNeverWitnessedStartRetainsSeatAcrossRestart(t *testing.T)
 			}
 			// A new Manager/claim has no invocation-local proof from the old process.
 			other := nativeTestSession(t, store)
-			_, err := claimNativeCapacityStart(context.Background(), city, "worker", other.ID, time.Now().Add(24*time.Hour), c, host, sp, store)
+			_, err := claimNativeCapacityStart(context.Background(), city, "worker", other.ID, time.Now().Add(24*time.Hour), c, host, sp, NewStore(beads.SessionStore{Store: store}))
 			if err == nil || len(readNativeTestLedger(t, city).Seats) != 3 {
 				t.Fatal("unknown seat expired into free capacity")
 			}
@@ -388,7 +388,7 @@ func TestNativeFailedOrNeverWitnessedStartRetainsSeatAcrossRestart(t *testing.T)
 func TestNativeKnownEmptyScopeReleasesButDescendantAndUnknownDoNot(t *testing.T) {
 	city, c, host, sp, store := nativeTestFixture(t, 2)
 	b := nativeTestSession(t, store)
-	ctx, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, store, host)
+	ctx, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, NewStore(beads.SessionStore{Store: store}), host)
 	if !allowed {
 		t.Fatal(reason)
 	}
@@ -402,17 +402,17 @@ func TestNativeKnownEmptyScopeReleasesButDescendantAndUnknownDoNot(t *testing.T)
 		t.Fatal(err)
 	}
 	other := nativeTestSession(t, store)
-	if _, err := claimNativeCapacityStart(context.Background(), city, "worker", other.ID, time.Now(), c, host, sp, store); err == nil {
+	if _, err := claimNativeCapacityStart(context.Background(), city, "worker", other.ID, time.Now(), c, host, sp, NewStore(beads.SessionStore{Store: store})); err == nil {
 		t.Fatal("lost provider freed live descendant")
 	}
 	host.observeErr = errors.New("manager unavailable")
-	if _, err := claimNativeCapacityStart(context.Background(), city, "worker", other.ID, time.Now(), c, host, sp, store); err == nil {
+	if _, err := claimNativeCapacityStart(context.Background(), city, "worker", other.ID, time.Now(), c, host, sp, NewStore(beads.SessionStore{Store: store})); err == nil {
 		t.Fatal("unknown scope freed capacity")
 	}
 	host.observeErr = nil
 	seat := readNativeTestLedger(t, city).Seats[b.ID]
 	host.observations[seat.Unit] = nativeScopeObservation{Empty: true}
-	if _, err := claimNativeCapacityStart(context.Background(), city, "worker", other.ID, time.Now(), c, host, sp, store); err != nil {
+	if _, err := claimNativeCapacityStart(context.Background(), city, "worker", other.ID, time.Now(), c, host, sp, NewStore(beads.SessionStore{Store: store})); err != nil {
 		t.Fatalf("positive kernel emptiness did not free seat: %v", err)
 	}
 	ledger := readNativeTestLedger(t, city)
@@ -453,7 +453,7 @@ func TestNativeMissingCorruptForeignOrUnsafeBaselineNeverInitializesEmpty(t *tes
 				}
 			}
 			b := nativeTestSession(t, store)
-			if _, err := claimNativeCapacityStart(context.Background(), city, "worker", b.ID, time.Now(), c, host, sp, store); err == nil {
+			if _, err := claimNativeCapacityStart(context.Background(), city, "worker", b.ID, time.Now(), c, host, sp, NewStore(beads.SessionStore{Store: store})); err == nil {
 				t.Fatal("unsafe baseline admitted")
 			}
 		})
@@ -464,7 +464,7 @@ func TestNativeResourceOrScopeUnknownRefusesWithoutSeatAndChecksAgainAtLaunch(t 
 	city, c, host, sp, store := nativeTestFixture(t, 2)
 	b := nativeTestSession(t, store)
 	host.resourcesErr = errors.New("memory unknown")
-	if _, err := claimNativeCapacityStart(context.Background(), city, "worker", b.ID, time.Now(), c, host, sp, store); err == nil {
+	if _, err := claimNativeCapacityStart(context.Background(), city, "worker", b.ID, time.Now(), c, host, sp, NewStore(beads.SessionStore{Store: store})); err == nil {
 		t.Fatal("unknown resource admitted")
 	}
 	if len(readNativeTestLedger(t, city).Seats) != 2 {
@@ -472,11 +472,11 @@ func TestNativeResourceOrScopeUnknownRefusesWithoutSeatAndChecksAgainAtLaunch(t 
 	}
 	host.resourcesErr = nil
 	host.commandErr = errors.New("no user manager")
-	if _, err := claimNativeCapacityStart(context.Background(), city, "worker", b.ID, time.Now(), c, host, sp, store); err == nil {
+	if _, err := claimNativeCapacityStart(context.Background(), city, "worker", b.ID, time.Now(), c, host, sp, NewStore(beads.SessionStore{Store: store})); err == nil {
 		t.Fatal("scope unavailable admitted")
 	}
 	host.commandErr = nil
-	ctx, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, store, host)
+	ctx, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, NewStore(beads.SessionStore{Store: store}), host)
 	if !allowed {
 		t.Fatal(reason)
 	}
@@ -496,7 +496,7 @@ func TestNativeResourceOrScopeUnknownRefusesWithoutSeatAndChecksAgainAtLaunch(t 
 func TestNativeAbandonOnlyCancelsUnlaunchedPrivateProof(t *testing.T) {
 	city, _, host, sp, store := nativeTestFixture(t, 2)
 	b := nativeTestSession(t, store)
-	ctx, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, store, host)
+	ctx, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, NewStore(beads.SessionStore{Store: store}), host)
 	if !allowed {
 		t.Fatal(reason)
 	}
@@ -510,7 +510,7 @@ func TestNativeAbandonOnlyCancelsUnlaunchedPrivateProof(t *testing.T) {
 	if err := mgr.startRuntime(ctx, b.Metadata["session_name"], runtime.Config{Command: "fake-command", Env: map[string]string{"GC_SESSION_ID": b.ID, "GC_TEMPLATE": "worker"}}); err == nil {
 		t.Fatal("canceled proof later launched")
 	}
-	ctx, allowed, reason = admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, store, host)
+	ctx, allowed, reason = admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, NewStore(beads.SessionStore{Store: store}), host)
 	if !allowed {
 		t.Fatal(reason)
 	}
@@ -528,7 +528,7 @@ func TestNativeAbandonOnlyCancelsUnlaunchedPrivateProof(t *testing.T) {
 func TestNativeUnknownOwnedSeatConsumesOneSeatWithoutVetoingOtherHeadroom(t *testing.T) {
 	city, c, host, sp, store := nativeTestFixture(t, 1)
 	b := nativeTestSession(t, store)
-	ctx, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, store, host)
+	ctx, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, NewStore(beads.SessionStore{Store: store}), host)
 	if !allowed {
 		t.Fatal(reason)
 	}
@@ -547,7 +547,7 @@ func TestNativeUnknownOwnedSeatConsumesOneSeatWithoutVetoingOtherHeadroom(t *tes
 	}
 	host.observeErr = errors.New("diagnostic unavailable for prior owned scope")
 	other := nativeTestSession(t, store)
-	if _, err := claimNativeCapacityStart(context.Background(), city, "worker", other.ID, time.Now(), c, host, sp, store); err != nil {
+	if _, err := claimNativeCapacityStart(context.Background(), city, "worker", other.ID, time.Now(), c, host, sp, NewStore(beads.SessionStore{Store: store})); err != nil {
 		t.Fatalf("one unknown seat vetoed spare independent capacity: %v", err)
 	}
 	if len(readNativeTestLedger(t, city).Seats) != 3 {
@@ -559,7 +559,7 @@ func TestNativeOpaqueProviderCannotRunOutsideScope(t *testing.T) {
 	city, c, host, _, store := nativeTestFixture(t, 2)
 	b := nativeTestSession(t, store)
 	sp := runtime.NewFake() // No explicit local-shell containment capability.
-	if _, err := claimNativeCapacityStart(context.Background(), city, "worker", b.ID, time.Now(), c, host, sp, store); err == nil {
+	if _, err := claimNativeCapacityStart(context.Background(), city, "worker", b.ID, time.Now(), c, host, sp, NewStore(beads.SessionStore{Store: store})); err == nil {
 		t.Fatal("opaque provider admitted")
 	}
 	if len(readNativeTestLedger(t, city).Seats) != 2 {
@@ -590,7 +590,7 @@ func TestNativeProviderSuccessWithoutCommandEntryIsNotSuccessfulStart(t *testing
 	city, _, host, sp, store := nativeTestFixture(t, 0)
 	b := nativeTestSession(t, store)
 	sp.skipEntry = true
-	ctx, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, store, host)
+	ctx, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, NewStore(beads.SessionStore{Store: store}), host)
 	if !allowed {
 		t.Fatal(reason)
 	}
@@ -645,7 +645,7 @@ func TestNativeTeardownSerializesTerminalWriteAgainstClaim(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				if _, err := claimNativeCapacityStart(context.Background(), city, "worker", b.ID, time.Now(), c, host, sp, claimStore); err == nil {
+				if _, err := claimNativeCapacityStart(context.Background(), city, "worker", b.ID, time.Now(), c, host, sp, NewStore(beads.SessionStore{Store: claimStore})); err == nil {
 					t.Fatal("claim launched the stale target after completed teardown")
 				}
 				if len(readNativeTestLedger(t, city).Seats) != 0 {
@@ -695,7 +695,7 @@ func TestNativeBrokenLedgerDoesNotPreventRuntimeStop(t *testing.T) {
 func TestNativeCommandEntryIsDurableOneShotAndFastExitRetires(t *testing.T) {
 	city, c, host, sp, store := nativeTestFixture(t, 0)
 	b := nativeTestSession(t, store)
-	ctx, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, store, host)
+	ctx, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, NewStore(beads.SessionStore{Store: store}), host)
 	if !allowed {
 		t.Fatal(reason)
 	}
@@ -745,7 +745,7 @@ func TestNativeCommandEntryIsDurableOneShotAndFastExitRetires(t *testing.T) {
 	if err := enterNativeCapacityScope(context.Background(), city, b.ID, seat.Attempt, seat.Unit, host); err == nil {
 		t.Fatal("retired attempt re-entered")
 	}
-	if _, err := claimNativeCapacityStart(context.Background(), city, "worker", b.ID, time.Now(), c, host, sp, store); err != nil {
+	if _, err := claimNativeCapacityStart(context.Background(), city, "worker", b.ID, time.Now(), c, host, sp, NewStore(beads.SessionStore{Store: store})); err != nil {
 		t.Fatal(err)
 	}
 	if err := enterNativeCapacityScope(context.Background(), city, b.ID, seat.Attempt, seat.Unit, host); err == nil {
@@ -758,7 +758,7 @@ func TestNativeCommandEntryRequiresOwnScopeAndResourceEvidence(t *testing.T) {
 		t.Run(failure, func(t *testing.T) {
 			city, _, host, sp, store := nativeTestFixture(t, 0)
 			b := nativeTestSession(t, store)
-			ctx, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, store, host)
+			ctx, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, NewStore(beads.SessionStore{Store: store}), host)
 			if !allowed {
 				t.Fatal(reason)
 			}
@@ -785,7 +785,7 @@ func TestNativeCommandEntryRequiresOwnScopeAndResourceEvidence(t *testing.T) {
 func TestNativeEnteredAttemptSurvivesProviderErrorAndReleasesWithoutDemand(t *testing.T) {
 	city, c, host, sp, store := nativeTestFixture(t, 0)
 	b := nativeTestSession(t, store)
-	ctx, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, store, host)
+	ctx, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, NewStore(beads.SessionStore{Store: store}), host)
 	if !allowed {
 		t.Fatal(reason)
 	}
@@ -823,7 +823,7 @@ func TestNativeEnteredAttemptSurvivesProviderErrorAndReleasesWithoutDemand(t *te
 func TestNativeTeardownReleasesOnlyUnenteredNewProtocol(t *testing.T) {
 	city, c, host, sp, store := nativeTestFixture(t, 0)
 	b := nativeTestSession(t, store)
-	ctx, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, store, host)
+	ctx, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, NewStore(beads.SessionStore{Store: store}), host)
 	if !allowed {
 		t.Fatal(reason)
 	}
@@ -849,7 +849,7 @@ func TestNativeTeardownReleasesOnlyUnenteredNewProtocol(t *testing.T) {
 func TestNativeResumeDoesNotConvergeOnUnacknowledgedExistingRuntime(t *testing.T) {
 	city, _, host, sp, store := nativeTestFixture(t, 0)
 	b := nativeTestSession(t, store)
-	ctx, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, store, host)
+	ctx, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, NewStore(beads.SessionStore{Store: store}), host)
 	if !allowed {
 		t.Fatal(reason)
 	}

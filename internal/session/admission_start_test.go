@@ -316,7 +316,7 @@ func TestCapacityAdmissionProofIsBoundedAndOneShot(t *testing.T) {
 			sp := runtime.NewFake()
 			clk := &clock.Fake{Time: now}
 			mgr := NewManagerWithOptions(beadstest.Sessions(store), sp, WithCityPath(city), WithClock(clk))
-			ctx, allowed, reason := AdmitCapacityStart(context.Background(), city, "worker", "SID-a", now, sp, store)
+			ctx, allowed, reason := AdmitCapacityStart(context.Background(), city, "worker", "SID-a", now, sp, NewStore(beads.SessionStore{Store: store}))
 			if !allowed {
 				t.Fatalf("initial admission denied: %s", reason)
 			}
@@ -430,7 +430,7 @@ func TestCapacityAdmissionCooldownContract(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			allowed, reason := ClaimCapacityStart(city, "worker", "SID-a", now, runtime.NewFake(), beads.NewMemStore())
+			allowed, reason := ClaimCapacityStart(city, "worker", "SID-a", now, runtime.NewFake(), NewStore(beads.SessionStore{Store: beads.NewMemStore()}))
 			if allowed != tc.allowed {
 				t.Fatalf("admitted=%v want=%v reason=%s", allowed, tc.allowed, reason)
 			}
@@ -442,7 +442,7 @@ func TestCapacityAdmissionCooldownContract(t *testing.T) {
 				t.Fatal("refusal spent or rewrote reservation")
 			}
 			if allowed {
-				duplicate, why := ClaimCapacityStart(city, "worker", "SID-b", now, runtime.NewFake(), beads.NewMemStore())
+				duplicate, why := ClaimCapacityStart(city, "worker", "SID-b", now, runtime.NewFake(), NewStore(beads.SessionStore{Store: beads.NewMemStore()}))
 				if duplicate {
 					t.Fatalf("second SID reused capacity grant: %s", why)
 				}

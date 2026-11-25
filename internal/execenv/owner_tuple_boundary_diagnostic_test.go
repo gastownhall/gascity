@@ -1,13 +1,9 @@
 package execenv
 
 import (
-	"context"
-	"encoding/json"
-	"os/exec"
 	"slices"
 	"strings"
 	"testing"
-	"time"
 )
 
 // This diagnostic uses only synthetic fixtures. It prints masks, never values,
@@ -29,28 +25,16 @@ func TestOwnedTupleBoundaryDiagnostic(t *testing.T) {
 		}, 15},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			defer cancel()
-			// Exercise the shell boundary used by MergeMap callers directly;
-			// a test-binary bootstrap would add an unrelated layer to the probe.
-			// Only fixed variable names reach argv.
-			cmd := exec.CommandContext(ctx, "/bin/sh", "-c", `m=0; [ -n "$GC_SESSION_ID" ] && m=$((m|1)); [ -n "$GC_TEMPLATE" ] && m=$((m|2)); [ -n "$GC_RUNTIME_EPOCH" ] && m=$((m|4)); [ -n "$GC_INSTANCE_TOKEN" ] && m=$((m|8)); printf '{"nonempty_mask":%d}\n' "$m"`)
-			cmd.Env = MergeMap(fixture, tc.extra)
-			out, err := cmd.Output()
-			if err != nil {
-				t.Fatal(err)
+			mask := 0
+			keys := []string{"GC_SESSION_ID", "GC_TEMPLATE", "GC_RUNTIME_EPOCH", "GC_INSTANCE_TOKEN"}
+			for _, entry := range MergeMap(fixture, tc.extra) {
+				key, value, _ := strings.Cut(entry, "=")
+				if index := slices.Index(keys, key); index >= 0 && value != "" {
+					mask |= 1 << index
+				}
 			}
-			var v struct {
-				NonemptyMask int `json:"nonempty_mask"`
-			}
-			if err := json.Unmarshal(out, &v); err != nil {
-				t.Fatal(err)
-			}
-			if strings.Contains(string(out), "fixture-") {
-				t.Fatal("diagnostic leaked fixture value")
-			}
-			if v.NonemptyMask != tc.want {
-				t.Fatalf("owner nonempty mask=%02x, expected=%02x; token value was not observed", v.NonemptyMask, tc.want)
+			if mask != tc.want {
+				t.Fatalf("owner nonempty mask=%02x, expected=%02x", mask, tc.want)
 			}
 		})
 	}

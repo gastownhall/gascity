@@ -30,6 +30,10 @@ func (c *Client) ReadyWork(ctx context.Context, q readywork.Query) ([]readywork.
 	if q.Assignee != "" {
 		params.Assignee = &q.Assignee
 	}
+	if len(q.AssigneesAny) > 0 {
+		identities := slices.Clone(q.AssigneesAny)
+		params.AssigneeAny = &identities
+	}
 	if q.Unassigned {
 		params.Unassigned = &q.Unassigned
 	}

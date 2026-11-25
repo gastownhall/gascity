@@ -366,11 +366,11 @@ func refreshNativeSeats(ledger *nativeCapacityLedger, host nativeCapacityHost, n
 	}
 }
 
-func claimNativeCapacityStart(ctx context.Context, city, route, sid string, now time.Time, c nativeCapacityConfig, host nativeCapacityHost, sp runtime.Provider, store beads.Store) (*nativeCapacityProof, error) {
+func claimNativeCapacityStart(ctx context.Context, city, route, sid string, now time.Time, c nativeCapacityConfig, host nativeCapacityHost, sp runtime.Provider, store *Store) (*nativeCapacityProof, error) {
 	if store == nil || sp == nil || sid == "" {
 		return nil, fmt.Errorf("native capacity identity unavailable")
 	}
-	info, err := NewStore(beads.SessionStore{Store: store}).Get(sid)
+	info, err := store.Get(sid)
 	if err != nil || info.Closed || info.Template != route || info.SessionName == "" {
 		return nil, fmt.Errorf("native capacity identity unavailable")
 	}
@@ -383,7 +383,7 @@ func claimNativeCapacityStart(ctx context.Context, city, route, sid string, now 
 	err = withNativeCapacityLedger(ctx, city, c, host, func(ledger *nativeCapacityLedger) error {
 		// Teardown holds this same flock through its terminal write. Bypass
 		// the eventual cache so an independent CLI close cannot be resurrected.
-		persisted, err := beads.HandlesFor(store).Live.Get(sid)
+		persisted, err := beads.HandlesFor(store.store).Live.Get(sid)
 		current := infoFromPersistedBead(persisted)
 		if err != nil || current.Closed || current.Template != route || current.SessionName != info.SessionName || current.MetadataState != info.MetadataState || current.Generation != info.Generation || current.InstanceToken != info.InstanceToken {
 			return fmt.Errorf("native capacity target changed before reservation")

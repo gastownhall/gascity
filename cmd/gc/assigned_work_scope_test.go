@@ -1230,7 +1230,7 @@ func TestPoolDemandRequiresStoreScopedReadyAssigned(t *testing.T) {
 				cfg := &config.City{Agents: []config.Agent{agent}}
 				infos := sessionInfosFromBeads([]beads.Bead{poolSessionBeadWithState("owner", state, "")})
 				work := []beads.Bead{workBead("w1", "claude", "owner", tc.status, 2)}
-				kept, _ := filterReadyAssignedWorkBeadsForPoolDemand(cfg, "", nil, infos, work, tc.refs, tc.ready)
+				kept, _ := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, infos, work, tc.refs, tc.ready)
 				if len(kept) != tc.want {
 					t.Fatalf("pool candidates=%d, want %d", len(kept), tc.want)
 				}
@@ -1251,14 +1251,14 @@ func TestPoolDemandRequiresStoreScopedReadyAssigned(t *testing.T) {
 }
 
 func TestPoolDemandReadinessPreservesOriginalRefAlignment(t *testing.T) {
-	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", WakeMode: "fresh"}}}
 	work := []beads.Bead{
 		workBead("not-ready", "worker", "worker-dead", "open", 2),
 		workBead("ready", "worker", "worker-dead", "open", 2),
 	}
 	refs := []string{"other-store", ""}
 	ready := map[storeScopedBeadKey]bool{{StoreRef: "", ID: "ready"}: true}
-	kept, keptRefs := filterReadyAssignedWorkBeadsForPoolDemand(cfg, "", nil, nil, work, refs, ready)
+	kept, keptRefs := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, nil, work, refs, ready)
 	if len(kept) != 1 || kept[0].ID != "ready" || len(keptRefs) != 1 || keptRefs[0] != "" {
 		t.Fatalf("kept=%#v refs=%#v, want ready with aligned empty ref", kept, keptRefs)
 	}

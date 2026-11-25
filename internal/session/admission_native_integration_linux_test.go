@@ -95,7 +95,7 @@ func TestOwnedNativeScopeLinuxIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	admitted, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", info.ID, time.Now(), sp, store, host)
+	admitted, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", info.ID, time.Now(), sp, NewStore(beads.SessionStore{Store: store}), host)
 	if !allowed {
 		t.Fatal(reason)
 	}

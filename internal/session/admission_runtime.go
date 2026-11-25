@@ -7,7 +7,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -27,11 +26,11 @@ type capacityAdmissionProof struct {
 // AdmitCapacityStart spends at most one SID grant before start preparation.
 // The returned context carries an opaque one-shot proof for that same attempt.
 // Unmanaged targets and cities with no scheduler retain existing behavior.
-func AdmitCapacityStart(ctx context.Context, city, route, id string, now time.Time, sp runtime.Provider, store beads.Store) (context.Context, bool, string) {
+func AdmitCapacityStart(ctx context.Context, city, route, id string, now time.Time, sp runtime.Provider, store *Store) (context.Context, bool, string) {
 	return admitCapacityStartWithHost(ctx, city, route, id, now, sp, store, newNativeCapacityHost())
 }
 
-func admitCapacityStartWithHost(ctx context.Context, city, route, id string, now time.Time, sp runtime.Provider, store beads.Store, host nativeCapacityHost) (context.Context, bool, string) {
+func admitCapacityStartWithHost(ctx context.Context, city, route, id string, now time.Time, sp runtime.Provider, store *Store, host nativeCapacityHost) (context.Context, bool, string) {
 	if proof, ok := ctx.Value(capacityAdmissionKey{}).(*capacityAdmissionProof); ok {
 		if !pathutil.SamePath(city, proof.city) || route != proof.route || id != proof.id {
 			return ctx, false, "capacity_claim_identity_mismatch"
@@ -78,7 +77,7 @@ func WithCapacityAdmission(ctx, admitted context.Context) context.Context {
 }
 
 func (m *Manager) admitRuntime(ctx context.Context, id, route string) (context.Context, error) {
-	admitted, allowed, reason := AdmitCapacityStart(ctx, m.cityPath, route, id, m.now().UTC(), m.sp, m.store)
+	admitted, allowed, reason := AdmitCapacityStart(ctx, m.cityPath, route, id, m.now().UTC(), m.sp, NewStore(m.store))
 	if !allowed {
 		return ctx, CapacityAdmissionError(reason)
 	}

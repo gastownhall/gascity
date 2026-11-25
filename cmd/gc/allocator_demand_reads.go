@@ -50,10 +50,6 @@ type demandReads interface {
 	RawOpen(store beads.Store) ([]beads.Bead, error)
 	// Cached is the cached-tier List (listBothTiersForControllerDemand).
 	Cached(store beads.Store, query beads.ListQuery) ([]beads.Bead, error)
-	// Fresh is the live-first List for controller assigned-work demand
-	// (listFreshBothTiersForControllerDemand). Claims are written outside the
-	// controller's cache, so an in_progress read must prefer authoritative state.
-	Fresh(store beads.Store, query beads.ListQuery) ([]beads.Bead, error)
 	// ReadyAll is the unfiltered live Ready, both tiers.
 	ReadyAll(store beads.Store) ([]beads.Bead, error)
 	// CachedReady is the unfiltered cached Ready, both tiers, that
@@ -99,10 +95,6 @@ func (legacyDemandReads) RawOpen(store beads.Store) ([]beads.Bead, error) {
 
 func (legacyDemandReads) Cached(store beads.Store, query beads.ListQuery) ([]beads.Bead, error) {
 	return listBothTiersForControllerDemand(store, query)
-}
-
-func (legacyDemandReads) Fresh(store beads.Store, query beads.ListQuery) ([]beads.Bead, error) {
-	return listFreshBothTiersForControllerDemand(store, query)
 }
 
 func (legacyDemandReads) ReadyAll(store beads.Store) ([]beads.Bead, error) {
@@ -242,18 +234,6 @@ func (r *v2DemandReads) Cached(store beads.Store, query beads.ListQuery) ([]bead
 			return rows, nil
 		}
 		return nil, &beads.PartialResultError{Op: "v2 demand " + shape, Err: beads.ErrCacheUnavailable}
-	})
-}
-
-// Fresh reads in_progress live-first; a non-exact leg falls back to its
-// recorded cached read so the v2 pass keeps its external-reads contract.
-func (r *v2DemandReads) Fresh(store beads.Store, query beads.ListQuery) ([]beads.Bead, error) {
-	cache, exact := demandLegCache(store)
-	if cache == nil || !exact {
-		return r.Cached(store, query)
-	}
-	return r.once(demandLegRead{leg: cache, shape: "fresh:" + query.Status}, func() ([]beads.Bead, error) {
-		return listFreshBothTiersForControllerDemand(store, query)
 	})
 }
 

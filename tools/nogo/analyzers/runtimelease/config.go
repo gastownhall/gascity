@@ -93,12 +93,10 @@ var allowed = map[string]Allowance{
 	cmdGC + ":statusProvider.Start":               {Reason: "the status wrapper forwarding to its base provider; its callers hold the lease"},
 	cmdGC + ":statusProvider.Stop":                {Reason: "the status wrapper forwarding to its base provider; its callers hold the lease"},
 	// internal/session: the Manager.
-	session + ":Manager.ensureRunningOn": {Reason: "takes the runtime lease (leaseRuntime) before its start, or runs under its caller's (ensureRunning and ensureDeliverable delegate to it)"},
-	session + ":Manager.retryFreshStartAfterStaleKey": {
-		Reason:  "a start's stale-key retry, under the start's lease",
-		Callers: []string{"Manager.ensureRunningOn", "Manager.ensureRunningRuntimeOnly"},
+	session + ":Manager.startRuntime": {
+		Reason:  "the admission wrapper starts under its caller's runtime lease: createStarted takes leaseCreatedRuntime, ensureRunningOn takes leaseRuntime, ensureRunningRuntimeOnly checks the borrowed lease, and retryFreshStartAfterStaleKey retains the start's lease",
+		Callers: []string{"Manager.createStarted", "Manager.ensureRunningOn", "Manager.ensureRunningRuntimeOnly", "Manager.retryFreshStartAfterStaleKey"},
 	},
-	session + ":Manager.ensureRunningRuntimeOnly": {Reason: "the legacy start's runtime bring-up, under the candidate's lease", Callers: []string{"Manager.StartRuntimeOnly"}},
 	session + ":Manager.killExistingOrphans": {
 		Reason:  "a start's pre-start orphan kill, under the start's lease",
 		Callers: []string{"Manager.createStarted", "Manager.ensureRunningOn", "Manager.ensureRunningRuntimeOnly", "Manager.retryFreshStartAfterStaleKey"},

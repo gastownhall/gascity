@@ -8,7 +8,7 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
-// claimPoolStartAdmission is the CLI adapter for the common session start fence.
+// claimPoolStartAdmission adapts raw test fixtures to the session front door.
 func claimPoolStartAdmission(cityPath, route, sessionID string, now time.Time, sp runtime.Provider, store beads.Store) (bool, string) {
-	return session.ClaimCapacityStart(cityPath, route, sessionID, now, sp, store)
+	return session.ClaimCapacityStart(cityPath, route, sessionID, now, sp, sessionFrontDoor(store))
 }

@@ -258,10 +258,10 @@ func TestFullBuildReadsPoolDemandFromRoutedWorkBindingOnSplitCity(t *testing.T) 
 	registerResidencyRoutes(cityPath, routes, func() beads.Store { return workStore })
 	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
 	if _, err := bindingStore.Create(beads.Bead{
-		ID:     "gcg-work-1",
-		Title:  "routed business work",
-		Status: "open",
-		Type:   "task",
+		ID:       "gcg-work-1",
+		Title:    "routed business work",
+		Status:   "open",
+		Type:     "task",
 		Metadata: map[string]string{"gc.routed_to": "accountant"},
 	}); err != nil {
 		t.Fatalf("seed work demand: %v", err)
@@ -290,7 +290,7 @@ func TestFullBuildReadsPoolDemandFromRoutedWorkBindingOnSplitCity(t *testing.T) 
 		stderr:        io.Discard,
 		storageRoutes: routes,
 	}
-	cr.buildFnWithClassStores = supervisorBuildAgentsFnWithClassStores(cityPath, "demo", io.Discard)
+	cr.buildFnWithSessionBeads = supervisorBuildAgentsFnWithSessionBeads(cityPath, "demo", io.Discard)
 
 	result := cr.buildDesiredState(cr.loadSessionBeadSnapshot(), nil)
 	if got := result.ScaleCheckCounts["accountant"]; got != 1 {

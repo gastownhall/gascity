@@ -9,7 +9,6 @@ import (
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/log/global"
 	"go.opentelemetry.io/otel/sdk/resource"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 )
@@ -90,10 +89,10 @@ func TestInit_WiresResourceWithInstanceID(t *testing.T) {
 	// Init mutates the process-global meter and logger providers; restore
 	// them so later tests never observe these shut-down providers.
 	prevMeter := otel.GetMeterProvider()
-	prevLogger := global.GetLoggerProvider()
+	prevLogger := otel.GetLoggerProvider()
 	t.Cleanup(func() {
 		otel.SetMeterProvider(prevMeter)
-		global.SetLoggerProvider(prevLogger)
+		otel.SetLoggerProvider(prevLogger)
 	})
 
 	p, err := Init(context.Background(), "test-svc", "0.0.1")

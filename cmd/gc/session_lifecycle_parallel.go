@@ -5155,7 +5155,7 @@ func executePlannedStartsTraced(
 						continue
 					}
 				}
-				admittedCtx, allowed, reason := sessionpkg.AdmitCapacityStart(ctx, cityPath, candidate.logicalTemplate(cfg), candidate.info.ID, clk.Now().UTC(), sp, store)
+				admittedCtx, allowed, reason := sessionpkg.AdmitCapacityStart(ctx, cityPath, candidate.logicalTemplate(cfg), candidate.info.ID, clk.Now().UTC(), sp, sessFront)
 				if !allowed {
 					if identity != "" {
 						cb.restoreEntrySnapshot(sessFront, candidate.info.ID, identity, cbBefore, cbNow, stderr)

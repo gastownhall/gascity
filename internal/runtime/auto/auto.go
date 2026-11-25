@@ -200,13 +200,13 @@ func (p *Provider) DetectTransport(name string) string {
 	return ""
 }
 
-// Start delegates to the routed backend.
 // SupportsCommandScope reports the routed backend's local command containment.
 func (p *Provider) SupportsCommandScope(name string) bool {
 	sp, ok := p.route(name).(runtime.CommandScopeProvider)
 	return ok && sp.SupportsCommandScope(name)
 }
 
+// Start delegates to the routed backend.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	return p.route(name).Start(ctx, name, cfg)
 }

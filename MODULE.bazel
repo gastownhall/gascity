@@ -344,6 +344,18 @@ go_deps.module(
 )
 go_deps.module(
     indirect = True,
+    path = "github.com/mailru/easyjson",
+    sum = "h1:UGYAvKxe3sBsEDzO8ZeWOSlIQfWFlxbzLZe7hwFURr0=",
+    version = "v0.7.7",
+)
+go_deps.module(
+    indirect = True,
+    path = "github.com/josharian/intern",
+    sum = "h1:vlS4z54oSdjm0bgjRigI+G1HpF+tI+9rE5LLzOg8HmY=",
+    version = "v1.0.0",
+)
+go_deps.module(
+    indirect = True,
     path = "github.com/speakeasy-api/jsonpath",
     sum = "h1:IhtFOV9EbXplhyRqsVhHoBmmYjblIRh5D1/g8DHMXJ8=",
     version = "v0.6.0",

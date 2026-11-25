@@ -700,7 +700,6 @@ func selectAssignedIdentityFromBatch(src string, limit int) string {
 	filter := `[.[] | select((.assignee // "") == $id)] | .[:` + strconv.Itoa(limit) + `]`
 	return `r=$(printf "%s" "$` + src + `" | jq --arg id "$id" ` + shellquote.Quote(filter) + ` 2>/dev/null); ` +
 		`[ -z "$r" ] && r="$` + src + `"; ` // unparseable batch output is served unchanged, as the per-identity read did
-
 }
 
 func standardAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo QueryTopology) string {
@@ -1592,6 +1591,12 @@ const (
 	scaleCheckOverrideKey = "scale_check"
 )
 
+// HasFederatedWorkQuery reports whether a custom query explicitly owns
+// discovery across all reachable stores. Generated queries keep topology scope.
+func (a *Agent) HasFederatedWorkQuery() bool {
+	return a.WorkQueryFederated && strings.TrimSpace(a.WorkQuery) != ""
+}
+
 // FederationBlindOverrides names the user-supplied query overrides that will not
 // see a relocated coordination class on this topology.
 //
@@ -1605,12 +1610,6 @@ const (
 //
 // So the fact is returned instead of guessed at. Callers that hold a real city
 // print it; a single-store city returns nil and nothing is printed anywhere.
-// HasFederatedWorkQuery reports whether a custom query explicitly owns
-// discovery across all reachable stores. Generated queries keep topology scope.
-func (a *Agent) HasFederatedWorkQuery() bool {
-	return a.WorkQueryFederated && strings.TrimSpace(a.WorkQuery) != ""
-}
-
 func (a *Agent) FederationBlindOverrides(topo QueryTopology) []string {
 	if !topo.FederatedReady {
 		return nil

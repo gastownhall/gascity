@@ -583,6 +583,12 @@
               "string",
               "null"
             ]
+          },
+          "WorkQueryFederated": {
+            "type": [
+              "boolean",
+              "null"
+            ]
           }
         },
         "required": [
@@ -636,6 +642,7 @@
           "MaxActiveSessions",
           "MinActiveSessions",
           "ScaleCheck",
+          "WorkQueryFederated",
           "ScaleCheckAuthoritative"
         ],
         "type": "object"
@@ -59009,6 +59016,22 @@
             "schema": {
               "description": "Only work whose assignee is exactly this identity.",
               "type": "string"
+            }
+          },
+          {
+            "description": "Only work assigned to any of these exact identities. Repeatable; cannot be combined with assignee or unassigned.",
+            "explode": true,
+            "in": "query",
+            "name": "assignee_any",
+            "schema": {
+              "description": "Only work assigned to any of these exact identities. Repeatable; cannot be combined with assignee or unassigned.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
             }
           },
           {

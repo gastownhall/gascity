@@ -101,10 +101,8 @@ func TestAllocator_ClaimAheadOfTheDemandRecordingMintsNoSecondSeat(t *testing.T)
 	}
 }
 
-// Legacy reads take no cut: its probe is a live read taken after its claim
-// read, so where the two disagree the live probe is the newer one. Here the
-// leg's cache still shows gc-1's claim on w-1 after the backing released it;
-// the live Ready lists w-1 again, and that row stays demand.
+// Legacy reads take no cut. Their live-first claim read observes a release
+// behind the cache, and the live Ready lists the row as new demand.
 func TestGatherDemandCutsClaimedWorkOnlyUnderV2Reads(t *testing.T) {
 	cache, backing := newDemandCache(t, false, claimedByGC1("w-1"))
 	open, unassigned := "open", ""
@@ -118,8 +116,8 @@ func TestGatherDemandCutsClaimedWorkOnlyUnderV2Reads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gatherDemand: %v", err)
 	}
-	if got := ids(v.AssignedWork); !slices.Equal(got, []string{"w-1"}) {
-		t.Fatalf("assigned work = %v, want the cache's stale claim on w-1", got)
+	if got := ids(v.AssignedWork); len(got) != 0 {
+		t.Fatalf("assigned work = %v, want no stale claim after the authoritative release", got)
 	}
 	if v.ClaimedDemand != nil || v.Collected.DefaultCounts["worker"] != 1 {
 		t.Fatalf("legacy reads: claimed demand %v, worker demand %d; want no cut and the live read's w-1", v.ClaimedDemand, v.Collected.DefaultCounts["worker"])

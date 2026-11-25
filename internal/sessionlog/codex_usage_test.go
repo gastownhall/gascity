@@ -1630,7 +1630,7 @@ func TestCodexAliasLookupRetainsExtractablePath(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, find := range map[string]func() string{
-		"latest":    func() string { return FindCodexSessionFile([]string{root, accountRoot}, workDir) },
+		"latest": func() string { return FindCodexSessionFile([]string{root, accountRoot}, workDir) },
 		"no-window": func() string {
 			return FindCodexSessionFileByIDNoWindow([]string{root, accountRoot}, workDir, sessionID)
 		},

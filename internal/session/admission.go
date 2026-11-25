@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -25,14 +24,14 @@ const DedicatedClerkReservationContract = "clerk@<mail-24hex-crm>"
 
 var dedicatedClerkAlias = regexp.MustCompile(`^(mail-[0-9a-f]{24}-crm)$`)
 
-func capacityReservationKey(route, sessionID string, store beads.Store) (string, string) {
+func capacityReservationKey(route, sessionID string, store *Store) (string, string) {
 	if route != "clerk" {
 		return route, ""
 	}
 	if store == nil {
 		return "", "capacity_identity_unavailable"
 	}
-	info, err := NewStore(beads.SessionStore{Store: store}).Get(sessionID)
+	info, err := store.Get(sessionID)
 	if err != nil || info.Template != route || info.Closed {
 		return "", "capacity_identity_unavailable"
 	}
@@ -49,7 +48,7 @@ func capacityReservationKey(route, sessionID string, store beads.Store) (string,
 // prepare/start intentionally keeps its claim until the reader's three-minute
 // reservation expiry: retrying too early could produce a second process from
 // one admission after an ambiguous provider start.
-func ClaimCapacityStart(cityPath, route, sessionID string, now time.Time, sp runtime.Provider, store beads.Store) (bool, string) {
+func ClaimCapacityStart(cityPath, route, sessionID string, now time.Time, sp runtime.Provider, store *Store) (bool, string) {
 	if enabled, err := NativeManagedAdmission(cityPath, route); err != nil {
 		return false, "capacity_scope_invalid"
 	} else if enabled {
@@ -58,7 +57,7 @@ func ClaimCapacityStart(cityPath, route, sessionID string, now time.Time, sp run
 	return claimCapacityStart(cityPath, route, sessionID, now, sp, store, nil)
 }
 
-func claimCapacityStart(cityPath, route, sessionID string, now time.Time, sp runtime.Provider, store beads.Store, evidenceDeadline *time.Time) (bool, string) {
+func claimCapacityStart(cityPath, route, sessionID string, now time.Time, sp runtime.Provider, store *Store, evidenceDeadline *time.Time) (bool, string) {
 	if cityPath == "" {
 		return true, "not_configured"
 	}
@@ -195,7 +194,7 @@ func claimCapacityStart(cityPath, route, sessionID string, now time.Time, sp run
 		if sp == nil || store == nil {
 			return false, "capacity_live_census_unavailable"
 		}
-		infos, err := NewStore(beads.SessionStore{Store: store}).ListAll(ListAllOptions{})
+		infos, err := store.ListAll(ListAllOptions{})
 		if err != nil {
 			return false, "capacity_live_census_unavailable"
 		}

@@ -330,7 +330,6 @@ go_test(
         "//internal/runtime/auto",
         "//internal/runtime/exec",
         "//internal/runtime/hybrid",
-        "//internal/runtime/herdr/herdrtest",
         "//internal/runtime/proctable",
         "//internal/runtime/tmux",
         "//internal/sessionlog",
@@ -349,6 +348,7 @@ go_test(
         ],
         "@rules_go//go/platform:android": [
             "//internal/pidutil",
+            "//internal/runtime/herdr/herdrtest",
             "//internal/runtime/runtimecontract/reference",
         ],
         "@rules_go//go/platform:darwin": [
@@ -368,6 +368,7 @@ go_test(
         ],
         "@rules_go//go/platform:linux": [
             "//internal/pidutil",
+            "//internal/runtime/herdr/herdrtest",
             "//internal/runtime/runtimecontract/reference",
         ],
         "@rules_go//go/platform:netbsd": [

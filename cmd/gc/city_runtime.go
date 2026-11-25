@@ -156,7 +156,6 @@ type CityRuntime struct {
 	publication             supervisor.PublicationConfig
 	buildFn                 func(*config.City, runtime.Provider, beads.Store) DesiredStateResult
 	buildFnWithSessionBeads func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult
-	buildFnWithClassStores  func(*config.City, runtime.Provider, beads.Store, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult
 
 	processScanState
 
@@ -460,7 +459,6 @@ type CityRuntimeParams struct {
 	Publication             supervisor.PublicationConfig
 	BuildFn                 func(*config.City, runtime.Provider, beads.Store) DesiredStateResult
 	BuildFnWithSessionBeads func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult
-	BuildFnWithClassStores  func(*config.City, runtime.Provider, beads.Store, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult
 	Dops                    drainOps
 
 	Rec events.Recorder
@@ -601,7 +599,6 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		publication:             p.Publication,
 		buildFn:                 p.BuildFn,
 		buildFnWithSessionBeads: p.BuildFnWithSessionBeads,
-		buildFnWithClassStores:  p.BuildFnWithClassStores,
 		dops:                    p.Dops,
 		ct:                      ct,
 		it:                      it,
@@ -3504,7 +3501,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 	if poolDesired == nil {
 		phaseStart = time.Now()
 		openInfos := sessionBeads.OpenInfos()
-		poolWorkBeads, poolWorkRefs := filterReadyAssignedWorkBeadsForPoolDemand(cr.cfg, cr.cityPath, store, openInfos, assignedWorkBeads, assignedWorkStoreRefs, result.ReadyAssigned)
+		poolWorkBeads, poolWorkRefs := filterAssignedWorkBeadsForPoolDemand(cr.cfg, cr.cityPath, store, openInfos, assignedWorkBeads, assignedWorkStoreRefs, result.ReadyAssigned)
 		poolDecisionTime := time.Now()
 		parked = parkSeatsForResult(cr.cfg, openInfos, result, poolDecisionTime.UTC())
 		poolDesired = retainScaleCheckPartialPoolDesired(
@@ -4411,7 +4408,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 
 	sessionBeads := cr.loadSessionBeadSnapshot()
 	tickTime := time.Now()
-	wfcResult := buildDesiredStateWithClassStoresAt(
+	wfcResult := buildDesiredStateWithSessionBeadsAt(
 		cr.cityName,
 		cr.cityPath,
 		tickTime,
@@ -4419,7 +4416,6 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		filteredCfg,
 		cr.sp,
 		sessionsStore.Store,
-		cr.cityWorkStore().Store,
 		cr.rigBeadStores(), // residency:allow — the open rig frame the demand build and session reconciler plan their census and demand legs over; resolves no bead
 		sessionBeads,
 		nil,
@@ -4455,7 +4451,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	filteredRows := filterReconcileRowsByName(updated, reconcileNames)
 	filteredSnap := newSessionBeadSnapshotFromReconcileRows(filteredRows)
 	openInfos := filterSessionInfosByName(updated, reconcileNames)
-	poolWorkBeads, poolWorkRefs := filterReadyAssignedWorkBeadsForPoolDemand(filteredCfg, cr.cityPath, cr.cityBeadStore(), openInfos, wfcResult.AssignedWorkBeads, wfcResult.AssignedWorkStoreRefs, wfcResult.ReadyAssigned)
+	poolWorkBeads, poolWorkRefs := filterAssignedWorkBeadsForPoolDemand(filteredCfg, cr.cityPath, cr.cityBeadStore(), openInfos, wfcResult.AssignedWorkBeads, wfcResult.AssignedWorkStoreRefs, wfcResult.ReadyAssigned)
 	poolDecisionTime := time.Now()
 	// The pass's park verdicts, decided once: the pool counts and the
 	// reconciler's hold read the same set.
@@ -4816,11 +4812,8 @@ func (cr *CityRuntime) buildDesiredState(sessionBeads *sessionBeadSnapshot, trac
 	// single city store into the class accessors so a future per-class backend
 	// routes each role independently; both collapse to the same store today.
 	sessionsStore := cr.sessionsBeadStore()
-	workStore := cr.cityWorkStore()
 	var result DesiredStateResult
-	if cr.buildFnWithClassStores != nil {
-		result = cr.buildFnWithClassStores(cr.cfg, cr.sp, sessionsStore.Store, workStore.Store, cr.rigBeadStores(), sessionBeads, trace) // residency:allow — the open rig frame the demand build and session reconciler plan their census and demand legs over; resolves no bead
-	} else if cr.buildFnWithSessionBeads != nil {
+	if cr.buildFnWithSessionBeads != nil {
 		result = cr.buildFnWithSessionBeads(cr.cfg, cr.sp, sessionsStore.Store, cr.rigBeadStores(), sessionBeads, trace) // residency:allow — the open rig frame the demand build and session reconciler plan their census and demand legs over; resolves no bead
 	} else {
 		result = cr.buildFn(cr.cfg, cr.sp, sessionsStore.Store)
@@ -4884,7 +4877,7 @@ func (cr *CityRuntime) loadDemandSnapshot(
 			openSessionInfos = sessionBeads.OpenInfos()
 		}
 		subPhaseStart := trace.demandNow()
-		poolWorkBeads, poolWorkRefs := filterReadyAssignedWorkBeadsForPoolDemand(cr.cfg, cr.cityPath, cr.cityBeadStore(), openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStoreRefs, result.ReadyAssigned)
+		poolWorkBeads, poolWorkRefs := filterAssignedWorkBeadsForPoolDemand(cr.cfg, cr.cityPath, cr.cityBeadStore(), openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStoreRefs, result.ReadyAssigned)
 		poolDecisionTime := time.Now()
 		result.PoolDesiredCounts = retainScaleCheckPartialPoolDesired(
 			cr.cfg,

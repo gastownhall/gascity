@@ -66,26 +66,6 @@ func standaloneBuildAgentsFnWithSessionBeads(
 	}
 }
 
-func standaloneBuildAgentsFnWithClassStores(
-	cityName, cityPath string,
-	beaconTime time.Time,
-	stderr io.Writer,
-) func(*config.City, runtime.Provider, beads.Store, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
-	return func(
-		c *config.City,
-		currentSP runtime.Provider,
-		sessionStore, workStore beads.Store,
-		rigStores map[string]beads.Store,
-		sessionBeads *sessionBeadSnapshot,
-		trace *sessionReconcilerTraceCycle,
-	) DesiredStateResult {
-		return buildDesiredStateWithClassStoresAt(
-			cityName, cityPath, beaconTime, time.Now(), c, currentSP,
-			sessionStore, workStore, rigStores, sessionBeads, trace, stderr,
-		)
-	}
-}
-
 // computeSuspendedNames builds a set of session names for agents marked
 // suspended in the config or runtime state, or belonging to suspended
 // rigs. Also includes all agents when the city itself is suspended.
@@ -1220,7 +1200,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	dt := newDrainTracker()
 	openInfos := sessionBeads.OpenInfos()
-	poolWorkBeads, poolWorkRefs := filterReadyAssignedWorkBeadsForPoolDemand(cfg, cityPath, oneShotStore, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs, dsResult.ReadyAssigned)
+	poolWorkBeads, poolWorkRefs := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, oneShotStore, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs, dsResult.ReadyAssigned)
 	poolDecisionTime := time.Now()
 	// The pass's park verdicts, decided once: the pool counts and the
 	// reconciler's hold read the same set.
