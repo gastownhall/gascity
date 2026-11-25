@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -32,7 +33,7 @@ func TestOperatorStartedRuntimeReadsCurrentInV2(t *testing.T) {
 	id := fieldRow(t, m, "state", "asleep", "provider", "claude")
 	city := t.TempDir()
 	sp := runtime.NewFake()
-	mgr := session.NewManagerWithOptions(m, sp, session.WithCityPath(city))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(m), sp, session.WithCityPath(city))
 	if err := mgr.Attach(context.Background(), testActorIn(t, session.ActorOperator, city), id, "claude", runtime.Config{}); err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
@@ -72,7 +73,7 @@ func TestLegacyWakesAnOperatorMintedRowLikeAnyPreWakedRow(t *testing.T) {
 					t.Fatalf("first wake = %d, want 1; log %q", got, f.log.String())
 				}
 			} else {
-				mgr := session.NewManagerWithOptions(store, f.sp.Fake, session.WithCityPath(f.city))
+				mgr := session.NewManagerWithOptions(beadstest.Sessions(store), f.sp.Fake, session.WithCityPath(f.city))
 				if err := mgr.Start(context.Background(), testActorIn(t, session.ActorOperator, f.city), id, "worker", runtime.Config{}); err != nil {
 					t.Fatalf("operator Start: %v", err)
 				}

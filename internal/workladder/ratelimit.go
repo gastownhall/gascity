@@ -55,7 +55,7 @@ type RateLimitCause string
 const (
 	RateLimitCauseAttached            RateLimitCause = "attached"             // held: a person is attached
 	RateLimitCauseAwaitingHuman       RateLimitCause = "awaiting_human"       // held: work awaits a person
-	RateLimitCauseBlocked             RateLimitCause = "blocked"              // held: the provider gap, a pending notice or release, or an unread claim, past FreshConfirm + Cap
+	RateLimitCauseBlocked             RateLimitCause = "blocked"              // held: the provider gap, a pending notice or release, or work unread or unlisted, past FreshConfirm + Cap
 	RateLimitCauseFreshRefused        RateLimitCause = "fresh_refused"        // exhausted: the fresh conversation was refused too
 	RateLimitCauseRestartLost         RateLimitCause = "restart_lost"         // exhausted: refused after the restart, in the conversation it left
 	RateLimitCauseAgain               RateLimitCause = "again"                // exhausted: refused within SeatFreshGap of the last fresh restart
@@ -206,7 +206,7 @@ func (p Policy) confirmed(d *Decision, obs Observation, alert func(string) bool,
 	rl := &d.Next.RateLimit
 	providerFresh := minTime(obs.ProviderFreshAt, now)
 	blocked := (!providerFresh.IsZero() && now.Sub(providerFresh) < p.ProviderFreshGap) ||
-		anyMarked(d.Next) || d.Next.Release != nil || len(obs.Hold) > 0
+		anyMarked(d.Next) || d.Next.Release != nil || len(obs.Hold) > 0 || obs.Partial
 	switch {
 	case obs.Turns.Quota:
 		rl.Phase = RateLimitExhausted

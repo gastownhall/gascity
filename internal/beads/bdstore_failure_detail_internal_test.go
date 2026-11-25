@@ -93,3 +93,62 @@ func TestBdFailureDetailIsUnchangedWithoutNoise(t *testing.T) {
 		})
 	}
 }
+
+// bdGTRootEnvFileNotice is bd v1.3.3's stderr line for the GT_ROOT key that
+// `gc rig add` writes to a rig's .beads/.env. A bd command that opens the
+// store prints it twice.
+const bdGTRootEnvFileNotice = "beads: ignoring GT_ROOT from .beads/.env (only BEADS_*, BD_*, and the Dolt remote credential variables (DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD) are allowed in .beads/.env)"
+
+// TestBdFailureDetailEnvFileNoticesDoNotHideTheStdoutEnvelope: in a rig, bd
+// v1.3.3 prints its .beads/.env notice for GT_ROOT on every command. A --json
+// failure that bd reports only on stdout (bd dep list, close, label add)
+// therefore arrives with stderr holding nothing but notices. The envelope must
+// still reach the error text, ahead of the notices, or the classifiers that read
+// that text stop recognizing the failure.
+func TestBdFailureDetailEnvFileNoticesDoNotHideTheStdoutEnvelope(t *testing.T) {
+	stderr := bdGTRootEnvFileNotice + "\n" + bdGTRootEnvFileNotice + "\n"
+	cases := []struct {
+		name     string
+		out      string
+		classify func(error) bool
+	}{
+		{"not found", `{"error":"resolving rt-zzz: no issue found matching \"rt-zzz\"","schema_version":1}`, isBdNotFound},
+		{"serialization failure", `{"error":"failed to commit: Error 1213 (40001): serialization failure","schema_version":1}`, isBdTransientWriteError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := classifyForTest(t, "bd", []byte(tc.out), stderr)
+			if !tc.classify(err) {
+				t.Fatalf("the classifier no longer recognizes the wrapped error: %v", err)
+			}
+			first, rest, _ := strings.Cut(err.Error(), "\n")
+			if strings.Contains(first, "beads: ignoring") {
+				t.Errorf("first line of the wrapped error = %q, want bd's own error", first)
+			}
+			if strings.Count(rest, bdGTRootEnvFileNotice) != 2 {
+				t.Errorf("both notices must follow the error; nothing bd wrote is dropped: %v", err)
+			}
+		})
+	}
+}
+
+// TestBdFailureDetailEnvFileNoticesFollowBdsError: when bd writes its error to
+// stderr, the notices printed before it move behind it, so a single-line
+// render of the wrapped error says why the command failed.
+func TestBdFailureDetailEnvFileNoticesFollowBdsError(t *testing.T) {
+	stderr := bdGTRootEnvFileNotice + "\n" + bdGTRootEnvFileNotice + "\nError resolving rt-zzz: no issue found matching \"rt-zzz\"\n"
+	err := classifyForTest(t, "bd", nil, stderr)
+	want := "exit status 1: Error resolving rt-zzz: no issue found matching \"rt-zzz\"\n" + bdGTRootEnvFileNotice + "\n" + bdGTRootEnvFileNotice
+	if err.Error() != want {
+		t.Fatalf("wrapped error =\n%q\nwant\n%q", err.Error(), want)
+	}
+}
+
+// TestBdFailureDetailOnlyEnvFileNotices: notices and no envelope on stdout is
+// all bd said, so the detail is the notices.
+func TestBdFailureDetailOnlyEnvFileNotices(t *testing.T) {
+	err := classifyForTest(t, "bd", nil, bdGTRootEnvFileNotice+"\n")
+	if want := "exit status 1: " + bdGTRootEnvFileNotice; err.Error() != want {
+		t.Fatalf("wrapped error = %q, want %q", err.Error(), want)
+	}
+}

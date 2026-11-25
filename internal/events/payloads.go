@@ -12,8 +12,10 @@ import (
 // loop and its CLI/API projections (beads ga-e3s, ga-zn8, ga-p5n).
 
 // StoreMaintenanceDonePayload is the typed payload for
-// gc.store.maintenance.done events. Emitted after a successful
-// maintenance cycle (backup snapshot + CALL DOLT_GC + smoke test).
+// gc.store.maintenance.done events. Emitted when a maintenance cycle
+// finishes without error, including a cycle the disk pre-flight skipped.
+// The production loop is observe-only for now (no backup snapshot, no
+// CALL DOLT_GC), so the event does not mean the store was compacted.
 type StoreMaintenanceDonePayload struct {
 	DurationSeconds float64 `json:"duration_s"`
 	BeforeBytes     int64   `json:"before_bytes"`
@@ -218,10 +220,12 @@ const (
 	// serve; this is the agreement invariant breaking.
 	DemandClaimDivergence = "divergence"
 	// DemandClaimBlocked: the trigger row is still open, unassigned and
-	// route-matching, and the only thing marking it non-claimable is a blocking
-	// dependency — re-derived from the row's LIVE deps, not read off bd's
-	// denormalized is_blocked projection, which can lag a just-closed blocker and
-	// is absent from the payloads these reads actually return. No worker could
+	// route-matching, and the only thing marking it non-claimable is bd's own
+	// blocked status or a blocking dependency. A dependency block is re-derived
+	// from the row's LIVE deps, not read off bd's denormalized is_blocked
+	// projection, which can lag a just-closed blocker and is absent from the
+	// payloads these reads actually return; the blocked status is read directly
+	// off the row and needs no dependency read. No worker could
 	// have claimed the row, so it is NOT counted as a clean divergence (that
 	// metric must stay the agreement signal) — but it is not folded into benign
 	// either: a routed row the controller keeps counting while nobody can take it

@@ -401,6 +401,37 @@ func TestNudgeStalledPoolClaims_DrainsAWedgedSlotAtCap(t *testing.T) {
 	}
 }
 
+// Kills a wedged-slot drain inside the last nudge's backoff (ga-uns4sw): a
+// quiet slot at the cap whose trigger is still open and unassigned gets the
+// full backoff after its last nudge to claim it, as every earlier nudge did,
+// and is drained once on the first pass after it.
+func TestNudgeStalledPoolClaims_WaitsOutTheLastBackoffBeforeDraining(t *testing.T) {
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s := atCapSession(base, "tok-1")
+	store := beads.NewMemStoreFrom(0, []beads.Bead{s, {ID: "work-a", Status: "open"}}, nil)
+	open := []beads.Bead{{ID: "work-a", Status: "open"}}
+	drains := &drainRecorder{}
+	var out bytes.Buffer
+	sp := quietClaimFake(t, base)
+	run := func(at time.Time) {
+		sp.SetActivity("session-a", at.Add(-time.Hour))
+		nudgeStalledPoolClaims(sp, idleClaimTestCfg(), store, []beads.Bead{mustGetTestBead(t, store, s.ID)}, open, nil, at, liveClaimDrain(store, drains.request), &out)
+	}
+	for _, after := range []time.Duration{10 * time.Second, idleClaimNudgeBackoff - time.Second} {
+		run(base.Add(after))
+		got := mustGetTestBead(t, store, s.ID)
+		if len(drains.ids) != 0 || sp.CountCalls("Nudge", "session-a") != 0 || got.Metadata[idleClaimNudgeStalledKey] != "" {
+			t.Fatalf("%s after the last nudge: drains %v nudges %d latch %q, want none inside its backoff; log %q",
+				after, drains.ids, sp.CountCalls("Nudge", "session-a"), got.Metadata[idleClaimNudgeStalledKey], out.String())
+		}
+	}
+	run(base.Add(idleClaimNudgeBackoff))
+	if len(drains.ids) != 1 || drains.ids[0] != s.ID || sp.CountCalls("Nudge", "session-a") != 0 {
+		t.Fatalf("once the last backoff passed: drains %v nudges %d, want exactly one drain and no nudge; log %q",
+			drains.ids, sp.CountCalls("Nudge", "session-a"), out.String())
+	}
+}
+
 // Kills a re-woken incarnation drained on sight (#7752 review, probe P1): a
 // slot restarted at a new incarnation for the same trigger, its marker at the
 // cap and the old latch on it, gets its own grace and nudges before its own
@@ -1001,13 +1032,25 @@ type liveTurnProvider struct {
 	*runtime.Fake
 	running bool
 	err     error
+	// turnLooks counts TurnRunning reads, so a test can assert a pass took
+	// exactly one look, or none.
+	turnLooks int
+	// script, when set, answers the looks in order in place of running, its
+	// last answer repeating: a turn that starts or ends between two looks.
+	script []bool
 }
 
 // SnapshotIdle is the capture scan's reading: busy.
 func (p *liveTurnProvider) SnapshotIdle(string) (bool, error) { return false, nil }
 
 // TurnRunning is the live screen's reading.
-func (p *liveTurnProvider) TurnRunning(string) (bool, error) { return p.running, p.err }
+func (p *liveTurnProvider) TurnRunning(string) (bool, error) {
+	p.turnLooks++
+	if len(p.script) > 0 {
+		return p.script[min(p.turnLooks, len(p.script))-1], p.err
+	}
+	return p.running, p.err
+}
 
 // Kills the claim backstop holding a stalled slot for good on an earlier
 // turn's busy row (PR #7944 review): its busy hold read the idle snapshot,
@@ -1169,5 +1212,64 @@ func TestNudgeStalledPoolClaims_DrainReadsTheLiveTurn(t *testing.T) {
 				t.Fatalf("drains %v, want %d (log %q)", drains.ids, want, out.String())
 			}
 		})
+	}
+}
+
+// Under [daemon] work_ladder = "off" the claim backstop paces work instead
+// of the ladder, and it must also keep rescuing a canonical-singleton pool
+// seat that the configured named session took over (collapsedSingletonRow):
+// the takeover clears pool_managed, but the seat still wears its pool name.
+func TestNudgeStalledPoolClaims_NudgesCollapsedSingletonPoolSeat(t *testing.T) {
+	cfg := collapsedSingletonCfg()
+	store := beads.NewMemStore()
+	session := collapsedSingletonRow(t, cfg, store)
+	trigger, err := store.Create(beads.Bead{Title: "routed work", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMetadata(session.ID, testTriggerBeadIDKey, trigger.ID); err != nil {
+		t.Fatal(err)
+	}
+	session = mustGetTestBead(t, store, session.ID)
+	name := session.Metadata["session_name"]
+	sp := runningIdleClaimFake(t, name)
+	work := []beads.Bead{trigger}
+	live := liveClaimDrain(store, nil)
+	clk := &clock.Fake{Time: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	var out bytes.Buffer
+
+	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, clk.Now(), live, &out)
+	session = mustGetTestBead(t, store, session.ID)
+	if got := session.Metadata[idleClaimNudgeTriggerKey]; got != trigger.ID {
+		t.Fatalf("idle claim marker trigger = %q, want %s", got, trigger.ID)
+	}
+	clk.Advance(idleClaimNudgeGrace + time.Second)
+	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, clk.Now(), live, &out)
+	if got := sp.CountCalls("Nudge", name); got != 1 {
+		t.Fatalf("Nudge calls = %d, want 1 after grace", got)
+	}
+}
+
+// A named session that was never a pool seat wears its reserved name and
+// stays out of the pool claim backstop.
+func TestNudgeStalledPoolClaims_IgnoresPlainNamedSession(t *testing.T) {
+	cfg := collapsedSingletonCfg()
+	name := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, "poller")
+	session := beads.Bead{ID: "gc-9", Status: "open", Type: "session", Metadata: map[string]string{
+		"session_name": name, "session_origin": "named", "configured_named_session": "true",
+		"template": "poller", testTriggerBeadIDKey: "work-a",
+	}}
+	sp := runningIdleClaimFake(t, name)
+	work := []beads.Bead{{ID: "work-a", Status: "open"}}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{session, work[0]}, nil)
+	live := liveClaimDrain(store, nil)
+	clk := &clock.Fake{Time: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	var out bytes.Buffer
+
+	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, clk.Now(), live, &out)
+	clk.Advance(idleClaimNudgeGrace + time.Second)
+	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, clk.Now(), live, &out)
+	if got := sp.CountCalls("Nudge", name); got != 0 {
+		t.Fatalf("Nudge calls = %d, want 0 for a plain named session", got)
 	}
 }

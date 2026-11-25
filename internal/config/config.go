@@ -655,6 +655,23 @@ type Rig struct {
 	// resolved the same way as DefaultSlingTarget. Example:
 	//   default_sling_targets = ["rig/polecat-a", "rig/polecat-b"]
 	DefaultSlingTargets []string `toml:"default_sling_targets,omitempty"`
+	// Federation selects which of this city's agents may act on the rig's bead
+	// store. "city" (the default) keeps today's behavior: city-scoped agents
+	// read every rig, and any agent whose identity matches a row may serve,
+	// claim or release it. "rig" restricts this city to identities inside the
+	// rig's namespace ("<name>/...", compared under the bead store's actor
+	// fold) and to this city's own pool sessions of the rig's agents; rows
+	// owned by anything else are left alone. Set it on a rig whose bead store
+	// another city also attaches. It is deliberately not patchable. NOT YET
+	// ENFORCED: this build validates the setting and warns at start and
+	// reload, but still acts on every row of the rig's store, so a rig with
+	// federation = "rig" is not protected yet.
+	Federation string `toml:"federation,omitempty" jsonschema:"enum=city,enum=rig"`
+	// Namespace declares whether another city may serve this rig's namespace
+	// on the same bead store: "shared" (the default) or "exclusive".
+	// "exclusive" requires federation = "rig". It is a declaration that
+	// cross-city checks read; it changes nothing in this city on its own.
+	Namespace string `toml:"namespace,omitempty" jsonschema:"enum=shared,enum=exclusive"`
 	// SessionSleep overrides workspace-level idle sleep defaults for agents in
 	// this rig.
 	SessionSleep SessionSleepConfig `toml:"session_sleep,omitempty"`
@@ -818,6 +835,9 @@ type AgentOverride struct {
 	// ScaleCheck overrides the shell command whose output reports new
 	// unassigned session demand for bead-backed reconciliation.
 	ScaleCheck *string `toml:"scale_check,omitempty"`
+	// ScaleCheckAuthoritative overrides whether this pool's ScaleCheck is the
+	// last word on new demand, its zeros included. See Agent.
+	ScaleCheckAuthoritative *bool `toml:"scale_check_authoritative,omitempty"`
 	// OptionDefaults adds or overrides provider option defaults for this agent.
 	// Keys are option keys, values are choice values. Merges additively
 	// (override keys win over existing agent keys).
@@ -852,6 +872,10 @@ type Import struct {
 	// Version is an optional semver constraint for git-backed imports (e.g.,
 	// "^1.2"). Empty for local paths. "sha:<hex>" pins a specific commit.
 	Version string `toml:"version,omitempty"`
+	// AgentsExclude removes named agent templates from this import edge.
+	// Selectors are matched against each agent's local name before the import
+	// binding is applied; other imported resources remain visible.
+	AgentsExclude []string `toml:"agents_exclude,omitempty"`
 	// Export is a compatibility-only loader knob retained for older
 	// configs. It is intentionally omitted from generated public schemas.
 	Export bool `toml:"export,omitempty" jsonschema:"-"`
@@ -897,12 +921,15 @@ func (imp *Import) ImportIsTransitive() bool {
 
 // HasDefaultOptionSemantics reports whether the import carries the
 // default option semantics: not exported, transitive resolution enabled,
-// and shadow handling empty or "warn". This is the option half of the
+// shadow handling empty or "warn", and no agent narrowing. This is the option half of the
 // reuse policy composition applies when deciding whether an existing
 // same-source binding can stand in for a converted legacy include
 // (existingDefaultImportBindingForSource); the doctor migration's
 // same-source dedup shares it so the two policies cannot drift.
 func (imp *Import) HasDefaultOptionSemantics() bool {
+	if len(imp.AgentsExclude) > 0 {
+		return false
+	}
 	if imp.Export {
 		return false
 	}
@@ -1172,6 +1199,12 @@ type PackCommandEntry struct {
 	// Script is the path to the script (relative to pack dir).
 	// Supports Go text/template variables: {{.CityRoot}}, {{.ConfigDir}}, etc.
 	Script string `toml:"script" jsonschema:"required"`
+	// NativeHelp opts the command into delegated help: when true,
+	// gc <pack> <command> --help runs the script with exactly "--help" and
+	// shows its stdout, instead of rendering Description and LongDescription.
+	// Set it only when the script's own --help is a safe, side-effect-free
+	// query that exits 0. Default false keeps the static rendering.
+	NativeHelp bool `toml:"native_help,omitempty"`
 }
 
 // PackGlobal defines commands a pack applies to all agents in scope.
@@ -1464,6 +1497,22 @@ type BeadsConfig struct {
 	// value through internal/rollout.Flags.AllowSchemaBehindMigrate, never
 	// this field directly.
 	AllowSchemaBehindMigrate *bool `toml:"allow_schema_behind_migrate,omitempty" jsonschema:"default=false"`
+	// MigrateCommand is the command gc's notices name for migrating an existing
+	// bd database whose schema is behind the beads library linked into gc (gc
+	// start, gc reload and gc doctor's bd-schema check). gc never runs it:
+	// migrating an existing database is the operator's consent. It is a
+	// one-line Go text/template rendered per database with the fields
+	// {{.City}}, {{.Rig}}, {{.ScopeDir}}, {{.BeadsDir}}, {{.Database}},
+	// {{.Host}}, {{.Port}}, {{.Socket}} and {{.Bd}}, and a shq function that
+	// quotes a value for a POSIX shell. Set it when the city's pinned bd is not
+	// the binary to migrate with, so the notice names the migrator the operator
+	// trusts. Its bd must migrate to the schema of the bd the city pins and no
+	// further: the pinned bd refuses a database migrated past its own schema.
+	// Empty uses gc's default: gc bd ... migrate schema, or the pinned bd with
+	// BEADS_DIR in a city whose gc bd refuses migrate. A template that does not
+	// parse, or that does not render a single line for sample databases, fails
+	// config load.
+	MigrateCommand string `toml:"migrate_command,omitempty"`
 	// ProxiedIdleTimeout is how long a bd-owned proxied scope's proxy and Dolt
 	// child stay up with no connections before bd retires them; the next bd
 	// command restarts them. Go duration; "0" means never. A finite value
@@ -1758,10 +1807,13 @@ type SessionConfig struct {
 	// replaces it.
 	ClaimHolderStallTimeout string `toml:"claim_holder_stall_timeout,omitempty"`
 	// Socket specifies the tmux socket name for per-city isolation.
-	// When set, all tmux commands use "tmux -L <socket>" to connect to
-	// a dedicated server. When empty, defaults to the city name
-	// (workspace.name) — giving every city its own tmux server
-	// automatically. Set explicitly to override.
+	// When set, tmux commands connect to a dedicated server: "tmux -L
+	// <socket>" normally, or "tmux -S <path>" with the path pinned from
+	// $TMUX when gc runs in a pane of that same server, so a pane whose
+	// TMUX_TMPDIR differs from the controller's still reaches the server
+	// hosting it. When empty, defaults to the city name (workspace.name) —
+	// giving every city its own tmux server automatically. Set explicitly
+	// to override.
 	Socket string `toml:"socket,omitempty"`
 	// RemoteMatch is a substring pattern for the hybrid provider to route
 	// sessions to the remote (K8s) backend. Sessions whose names contain
@@ -2508,6 +2560,20 @@ func (c OrdersConfig) MaxTimeoutDuration() time.Duration {
 	return durationOr(c.MaxTimeout, 0)
 }
 
+// DefaultMaxOrderDispatchesPerTick is the per-pass dispatch budget used when
+// orders.max_dispatches_per_tick is unset or not positive.
+const DefaultMaxOrderDispatchesPerTick = 4
+
+// EffectiveMaxDispatchesPerTick returns the per-pass dispatch budget the order
+// dispatcher runs with: MaxDispatchesPerTick when positive, else
+// DefaultMaxOrderDispatchesPerTick.
+func (c OrdersConfig) EffectiveMaxDispatchesPerTick() int {
+	if c.MaxDispatchesPerTick != nil && *c.MaxDispatchesPerTick > 0 {
+		return *c.MaxDispatchesPerTick
+	}
+	return DefaultMaxOrderDispatchesPerTick
+}
+
 // DefaultAPIPort is the default TCP port for the API server.
 const DefaultAPIPort = 9443
 
@@ -2529,11 +2595,11 @@ type APIConfig struct {
 	// only config edits. City registry creation (POST /v0/city) is not covered:
 	// a grant binds a path-resident city name, which a not-yet-created city
 	// lacks, so creation stays governed by the supervisor-registry guards.
-	// Built-in callers (the bundled gc API client and dashboard SPA) send only
-	// the CSRF header and mint no grant, so enabling this gate turns their direct
-	// city mutations away with a clear 401; such deployments front mutations
-	// through the trusted authority that mints grants instead. The value is one
-	// or more "kid:base64-ed25519-pubkey" entries, comma separated.
+	// The in-city gc client and the dashboard SPA mint no grant and send only
+	// the CSRF header, so enabling this gate turns their direct city mutations
+	// away with a clear 401; a remote gc context with a grant_command does mint
+	// one per mutation. The value is one or more "kid:base64-ed25519-pubkey"
+	// entries, comma separated, read once at startup.
 	// The GC_CITY_WRITE_PUBKEY env var overrides this. Grant revocation via an
 	// epoch floor is an ops-plane control set only through the
 	// GC_CITY_WRITE_EPOCH_FLOOR env var; it has no config field. On hosted
@@ -2688,7 +2754,7 @@ type DoctorConfig struct {
 	// the operator runs `gc doctor --fix`. Actual removal still
 	// requires --fix; this flag does not auto-prune. Safety is
 	// enforced by mechanical checks (no uncommitted changes, no
-	// unpushed commits, no stashes) — never by role identity.
+	// unpushed commits) — never by role identity.
 	NestedWorktreePrune bool `toml:"nested_worktree_prune,omitempty" jsonschema:"default=false"`
 
 	// Checks holds city-local inline doctor checks declared via
@@ -2787,13 +2853,18 @@ func (c ConvergenceConfig) MaxTotalOrDefault() int {
 
 // MaintenanceConfig groups periodic store-maintenance subsections.
 type MaintenanceConfig struct {
-	// Dolt configures the weekly Dolt store maintenance loop
-	// (CALL DOLT_GC + backup snapshot).
+	// Dolt configures the periodic Dolt store maintenance loop. The loop
+	// is observe-only for now: it takes no backup snapshot and runs no
+	// CALL DOLT_GC.
 	Dolt DoltMaintenance `toml:"dolt,omitempty"`
 }
 
-// DoltMaintenance configures the periodic Dolt store maintenance loop.
-// Opt-in for v1: omission or enabled=false leaves the loop disabled.
+// DoltMaintenance configures the periodic Dolt store maintenance loop,
+// which is observe-only: each cycle runs the disk-space pre-flight and
+// records run history and events — it takes no backup snapshot and runs
+// no CALL DOLT_GC, so a completed run does not mean the store was
+// compacted. Opt-in for v1: omission or enabled=false leaves the loop
+// disabled.
 type DoltMaintenance struct {
 	// Enabled toggles the maintenance loop. Defaults to false (opt-in).
 	Enabled bool `toml:"enabled,omitempty"`
@@ -2801,10 +2872,13 @@ type DoltMaintenance struct {
 	// string (e.g., "168h"). Defaults to 168h (weekly).
 	Interval string `toml:"interval,omitempty" jsonschema:"default=168h"`
 	// AlertTo is the agent identity to mail on failure (e.g.,
-	// "gascity/mayor"). Empty disables alert mail.
+	// "gascity/mayor"). Empty disables alert mail. It has no effect while
+	// the loop is observe-only: an observe-only cycle cannot fail, so no
+	// alert mail is sent.
 	AlertTo string `toml:"alert_to,omitempty"`
-	// GCTimeout is the ceiling for CALL DOLT_GC() as a duration string.
-	// Defaults to 10m.
+	// GCTimeout is the intended ceiling for CALL DOLT_GC() as a duration
+	// string. Defaults to 10m. It has no effect while the loop is
+	// observe-only.
 	GCTimeout string `toml:"gc_timeout,omitempty" jsonschema:"default=10m"`
 }
 
@@ -2915,6 +2989,13 @@ type DaemonConfig struct {
 	// within this window, the controller force-kills and restarts it.
 	// Duration string (e.g., "2m", "5m"). Defaults to "2m".
 	DriftDrainTimeout string `toml:"drift_drain_timeout,omitempty" jsonschema:"default=2m"`
+	// DriftDeferralEscalateAfter is how long a config-drift restart may stay
+	// deferred behind a seat's held work before the controller emits one
+	// escalated session.config_drift_deferred event for the episode. The
+	// escalation is a signal only: it never drains, restarts or kills the
+	// session. Positive Go duration string (e.g., "30m", "4h"). Defaults to
+	// "1h".
+	DriftDeferralEscalateAfter string `toml:"drift_deferral_escalate_after,omitempty" jsonschema:"default=1h"`
 	// ObservePaths lists extra directories to search for Claude JSONL session
 	// files (e.g., aimux session paths). The default search path
 	// (~/.claude/projects/) is always included.
@@ -2957,9 +3038,29 @@ type DaemonConfig struct {
 	// 3 to 60 minutes and never stop, a started claim is recycled at most once
 	// and then escalated, and an unstarted claim is released after its third
 	// unanswered nudge (a nudge the seat could not take, such as one held at
-	// a permission prompt, does not count). "off" runs the three backstops it
-	// replaced (idle-claim, continuation, execution) instead: the rollback.
-	// Read on every pass, so a config reload applies. Legacy ignores it.
+	// a permission prompt, does not count). A claim whose metadata
+	// gc.awaiting_human names its seat (the seat asked a person and waits on
+	// their decision) is never recycled or released. While the seat's turns
+	// show its newest turn completed, it is nudged only daily, which takes
+	// up an answer that started no turn; any other reading (a turn open, a
+	// failed, canceled or status-less newest turn, no turn, turns that cannot
+	// be read) keeps it nudged hourly, so an answer whose turn died is
+	// redriven.
+	// A seat whose provider refuses its turns with a rate limit (two in a
+	// row, as its own transcript records them, the newest after a nudge it
+	// took) is paced as on a degraded provider, and once a nudge it took
+	// since is refused too, 10 minutes or more after the first refusal, it
+	// is restarted on a fresh conversation once, keeping its claims, at most
+	// one seat per provider per 30 minutes and once per seat per hour. While
+	// a person is attached or its work awaits a person, the restart waits and
+	// one alert says so. If the fresh conversation is refused too (or the
+	// refusal is a spent usage quota), one alert names the provider and the
+	// seat stays paced until its provider serves it. Every move is a
+	// work.rate_limited event, on which a pack may hold the provider through
+	// provider-health.json. Seats whose turns cannot be read are judged on
+	// their activity alone. "off" runs the three backstops it replaced
+	// (idle-claim, continuation, execution) instead: the rollback. Read on
+	// every pass, so a config reload applies. Legacy ignores it.
 	WorkLadder string `toml:"work_ladder,omitempty" jsonschema:"default=on,enum=on,enum=off"`
 	// AutoRestartOnDrift controls whether `gc start` automatically restarts
 	// the supervisor when it detects the running supervisor's binary or
@@ -2971,7 +3072,7 @@ type DaemonConfig struct {
 	// AutoReapClosedBeadWorktrees controls whether the reconciler patrol
 	// automatically removes per-bead git worktrees once their associated
 	// work bead reaches closed status. Only worktrees with a clean working
-	// tree, no stashes, and no commits that removal would orphan — commits
+	// tree and no commits that removal would orphan — commits
 	// reachable from no branch, tag, or remote-tracking ref — are removed;
 	// push state is deliberately not the test, since `git worktree remove`
 	// deletes the checkout and not refs/heads. Unsafe worktrees are logged
@@ -3029,8 +3130,9 @@ type DaemonConfig struct {
 	// AutoPruneWorkerDir controls whether the reconciler removes a
 	// pool-managed session's worker_dir (agent worktree) after the session
 	// bead is closed. Removal is gated on: path lives under the city's
-	// .gc/worktrees/ tree, clean working tree, no unpushed commits, no
-	// stashed work. Nil (unset) defaults to true so pool worktrees do not
+	// .gc/worktrees/ tree, not a managed worktree (one gc worktree ensure
+	// provisioned, which only its owner removes), clean working tree, no
+	// unpushed commits. Nil (unset) defaults to true so pool worktrees do not
 	// accumulate without bound across pool recycles. Set to false to
 	// retain worktrees for post-session diagnostics.
 	AutoPruneWorkerDir *bool `toml:"auto_prune_worker_dir,omitempty" jsonschema:"default=true"`
@@ -3091,7 +3193,7 @@ func (d *DaemonConfig) AutoReapClosedBeadWorktreesMinAge() time.Duration {
 // pool-managed session's worker_dir after the session bead is closed. The
 // default is true: pool worktrees are transient by design and accumulate
 // without bound otherwise. Removal is still gated on per-worktree safety
-// probes (clean tree, no unpushed commits, no stashes).
+// probes (not a managed worktree, clean tree, no unpushed commits).
 func (d *DaemonConfig) AutoPruneWorkerDirEnabled() bool {
 	if d.AutoPruneWorkerDir == nil {
 		return true
@@ -3331,6 +3433,20 @@ func (d *DaemonConfig) MaxWakesPerTickOrDefault() int {
 // Defaults to 2m if empty or unparseable.
 func (d *DaemonConfig) DriftDrainTimeoutDuration() time.Duration {
 	return durationOr(d.DriftDrainTimeout, 2*time.Minute)
+}
+
+// DefaultDriftDeferralEscalateAfter is the default age at which a deferred
+// config-drift episode over held work escalates.
+const DefaultDriftDeferralEscalateAfter = time.Hour
+
+// DriftDeferralEscalateAfterDuration returns the drift-deferral escalation
+// horizon. Defaults to DefaultDriftDeferralEscalateAfter if empty,
+// unparseable, or not positive.
+func (d *DaemonConfig) DriftDeferralEscalateAfterDuration() time.Duration {
+	if dur := durationOr(d.DriftDeferralEscalateAfter, DefaultDriftDeferralEscalateAfter); dur > 0 {
+		return dur
+	}
+	return DefaultDriftDeferralEscalateAfter
 }
 
 // DefaultStartReadyTimeout is the default wall-clock budget `gc start` and
@@ -3635,7 +3751,9 @@ type Agent struct {
 	Suspended bool `toml:"suspended,omitempty"`
 	// PreStart is a list of shell commands run before session creation.
 	// Commands run on the target filesystem: locally for tmux, inside the
-	// pod/container for exec providers. Template variables same as session_setup.
+	// pod/container for exec providers, and on gc's host for an exec runtime
+	// whose handshake declares fs.host with locality local. Template variables
+	// same as session_setup.
 	// On failure, the last 4 KiB of the command's stdout/stderr is included
 	// in the error and may appear in controller and reconciler logs; avoid
 	// set -x or echoing secrets in setup commands.
@@ -3720,6 +3838,28 @@ type Agent struct {
 	// session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName,
 	// DefaultBranch) before running the command.
 	ScaleCheck string `toml:"scale_check,omitempty"`
+	// ScaleCheckAuthoritative makes this pool's ScaleCheck the last word on
+	// new demand, its zeros included.
+	//
+	// By default a cold pool with a custom ScaleCheck is ALSO probed by gc's
+	// own Ready()/gc.routed_to count, merged with max(). That default exists
+	// for a real case: a rig-scoped check cannot see work routed to it that
+	// lives in the city store, so without the probe such a pool would never
+	// wake (TestBuildDesiredState_ScaleFromZero_CrossRig). But max() means a
+	// custom check can never answer "no demand" while cold — max(0,1) is 1 —
+	// so a pool whose check deliberately withholds demand is re-woken every
+	// tick, finds the work its own check already judged unactionable, and
+	// drains. Measured in production: 43 spawn/drain cycles in
+	// 40 minutes, one Claude cold start every ~30s, for as long as a review
+	// was outstanding.
+	//
+	// Set this only when the check reads the same store the routed work lives
+	// in — then the probe can discover nothing the check has not already
+	// weighed, and its disagreement is pure churn. A check that FAILS is
+	// still not a zero: it stays partial and falls through to the probe
+	// exactly as without this flag, so it adds no new way to strand routed
+	// work.
+	ScaleCheckAuthoritative bool `toml:"scale_check_authoritative,omitempty"`
 	// DrainTimeout is the maximum time to wait for a session to finish its
 	// current work before force-killing it during scale-down. Duration string
 	// (e.g., "5m", "30m", "1h"). Defaults to "5m".
@@ -4148,7 +4288,9 @@ type agentKey struct{ dir, name string }
 
 // InjectImplicitAgents adds implicit agent entries for configured providers
 // that lack an explicit [[agent]] entry, enabling auto-materialization of
-// sling targets without requiring manual agent declarations.
+// sling targets without requiring manual agent declarations. Implicit agents
+// carry no prompt_template: gc prime selects their builtin worker prompt as it
+// does for any agent without one.
 func InjectImplicitAgents(cfg *City) {
 	// Build set of existing agent keys (dir, name).
 	existing := make(map[agentKey]bool, len(cfg.Agents))
@@ -4165,15 +4307,6 @@ func InjectImplicitAgents(cfg *City) {
 	// then any custom providers in sorted order.
 	providers := configuredProviderOrder(configured)
 
-	// Implicit agents default to the core pack's pool-worker prompt when
-	// the core pack is composed (it resolves from the user-global cache,
-	// so the path is absolute). Without core the template stays empty and
-	// prompt rendering falls back to the embedded baseline.
-	promptTemplate := ""
-	if coreDir := cfg.PackDirByName("core"); coreDir != "" {
-		promptTemplate = filepath.Join(coreDir, "assets", "prompts", "pool-worker.template.md")
-	}
-
 	slingFormula := cfg.AgentDefaults.DefaultSlingFormula
 	if slingFormula == "" {
 		slingFormula = "mol-do-work"
@@ -4187,7 +4320,6 @@ func InjectImplicitAgents(cfg *City) {
 		cfg.Agents = append(cfg.Agents, Agent{
 			Name:                name,
 			Provider:            name,
-			PromptTemplate:      promptTemplate,
 			DefaultSlingFormula: &slingFormula,
 			Implicit:            true,
 		})
@@ -4203,7 +4335,6 @@ func InjectImplicitAgents(cfg *City) {
 				Name:                name,
 				Dir:                 rig.Name,
 				Provider:            name,
-				PromptTemplate:      promptTemplate,
 				DefaultSlingFormula: &slingFormula,
 				Implicit:            true,
 			})
@@ -5150,6 +5281,9 @@ func Parse(data []byte) (*City, error) {
 	if err := validateProgramStatus(&cfg); err != nil {
 		return nil, err
 	}
+	if err := ValidateRigFederation(cfg.Rigs); err != nil {
+		return nil, err
+	}
 	// Parse sees one layer. Cross-layer storage invariants (six-class
 	// completeness, binding resolution) are checked on the composed root in
 	// LoadWithIncludesOptions, because a fragment may supply either half.
@@ -5160,7 +5294,8 @@ func Parse(data []byte) (*City, error) {
 }
 
 // validateBeadsModes rejects an out-of-enum value in any [beads] mode field
-// (conditional_writes, guarded_release, native_transport, ledger_feed). Parse runs it on
+// (conditional_writes, guarded_release, native_transport, ledger_feed), and a
+// migrate_command template that does not render. Parse runs it on
 // its single layer and LoadWithIncludesOptions runs it again on the composed
 // root, because a fragment may supply any of these fields; one shared list
 // keeps the two load paths from drifting when a field is added.
@@ -5174,7 +5309,10 @@ func validateBeadsModes(b BeadsConfig) error {
 	if err := validateNativeTransport(b.NativeTransport); err != nil {
 		return err
 	}
-	return validateLedgerFeed(b.LedgerFeed)
+	if err := validateLedgerFeed(b.LedgerFeed); err != nil {
+		return err
+	}
+	return validateBeadsMigrateCommand(b.MigrateCommand)
 }
 
 // validateConditionalWrites rejects an out-of-enum beads.conditional_writes

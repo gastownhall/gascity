@@ -83,6 +83,9 @@ func withLogging(next http.Handler, audit requestAuditConfig) http.Handler {
 		// can tag what backend they used (memory, cache, sql, bd_subprocess).
 		var source string
 		ctx := context.WithValue(r.Context(), dataSourceKey{}, &source)
+		// And a principal slot the write-auth gate fills with the verified
+		// grant kid, so this line records who made a hardened mutation.
+		ctx, principal := withPrincipalSlot(ctx)
 		r = r.WithContext(ctx)
 
 		rw := &responseWriter{ResponseWriter: w, status: http.StatusOK}
@@ -94,11 +97,14 @@ func withLogging(next http.Handler, audit requestAuditConfig) http.Handler {
 			source = "memory"
 		}
 		reqID := rw.Header().Get("X-GC-Request-Id")
+		var suffix string
 		if reqID != "" {
-			log.Printf("api: %s %s %d %s [%s] req_id=%s", r.Method, r.URL.Path, rw.status, dur.Round(time.Microsecond), source, reqID)
-		} else {
-			log.Printf("api: %s %s %d %s [%s]", r.Method, r.URL.Path, rw.status, dur.Round(time.Microsecond), source)
+			suffix += " req_id=" + reqID
 		}
+		if *principal != "" {
+			suffix += " principal=" + *principal
+		}
+		log.Printf("api: %s %s %d %s [%s]%s", r.Method, r.URL.Path, rw.status, dur.Round(time.Microsecond), source, suffix)
 		telemetry.RecordHTTPRequest(r.Context(), r.Method, r.URL.Path, rw.status, durMs, source)
 		recordSupervisorRequest(audit, r, rw.status, dur, supervisorRequestPhaseComplete, reqID)
 	})

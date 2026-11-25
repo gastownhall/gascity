@@ -175,6 +175,11 @@ type TurnFailure struct {
 	// "rate_limit", Codex's "usage_limit_exceeded"). Each family classifies
 	// its own codes, so one family's class never reads as another's.
 	RateLimited bool
+	// Quota reports that the rate limit is the family's own class for a
+	// spent usage quota (Codex's "usage_limit_exceeded"): an allowance that
+	// comes back only when the account's period resets, which a new
+	// conversation draws on too. It implies RateLimited.
+	Quota bool
 	// Message is the error's text, cut on a rune boundary to at most
 	// MaxTurnFailureMessage bytes. It is for people: nothing classifies it.
 	Message string
@@ -182,12 +187,14 @@ type TurnFailure struct {
 
 // newTurnFailure is the failure a family's transcript recorded: its class,
 // its HTTP status, whether the class is the family's rate-limit class, and
-// its text, cut to MaxTurnFailureMessage.
-func newTurnFailure(code string, status int, rateLimitClass bool, message string) TurnFailure {
+// whether it is the family's spent-quota class (a rate limit too), and its
+// text, cut to MaxTurnFailureMessage.
+func newTurnFailure(code string, status int, rateLimitClass, quotaClass bool, message string) TurnFailure {
 	return TurnFailure{
 		Code:        code,
 		Status:      status,
-		RateLimited: rateLimitClass || status == http.StatusTooManyRequests,
+		RateLimited: rateLimitClass || quotaClass || status == http.StatusTooManyRequests,
+		Quota:       quotaClass,
 		Message:     cutTurnFailureMessage(message),
 	}
 }

@@ -36,6 +36,22 @@ builds:
     goarch:
       - amd64
       - arm64
+  # gc-write-mint is the reference grant_command minter (and keygen) for a
+  # write-auth-hardened city. It ships beside gc so a client machine gets a
+  # minter built from the same tag as the gc that invokes it.
+  - id: gc-write-mint
+    main: ./cmd/gc-write-mint
+    binary: gc-write-mint
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
 
 archives:
   - id: gc-archive

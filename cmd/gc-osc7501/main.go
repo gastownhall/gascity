@@ -24,7 +24,8 @@
 // status 127 when the program cannot be started.
 //
 // version prints "gc-osc7501 <version> codec=N relay=N"; gc arms a pane only
-// when the codec matches its own.
+// when the codec matches its own, and launches a program under the relay
+// only when the relay version does.
 package main
 
 import (
@@ -48,7 +49,7 @@ import (
 var version = "dev"
 
 // relayVersion is the relay protocol this build implements; 0: no relay.
-const relayVersion = 1
+const relayVersion = programstatus.RelayVersion
 
 // Exit codes.
 const (

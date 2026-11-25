@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -666,7 +667,7 @@ func TestWatchTurnsClosesWhileTheStoreStalls(t *testing.T) {
 				s.writeCompletedTurn(t, tc.provider)
 			}
 			store := newStallingTurnStore(t, s.store)
-			s.handle.manager = sessionpkg.NewManagerWithOptions(store, s.sp, sessionpkg.WithCityPath(t.TempDir()))
+			s.handle.manager = sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), s.sp, sessionpkg.WithCityPath(t.TempDir()))
 			clock := newManualTurnClock(time.Date(2026, 10, 13, 6, 0, 0, 0, time.UTC))
 			s.handle.turns.timing = clock.timing()
 			ctx, cancel := context.WithCancel(context.Background())

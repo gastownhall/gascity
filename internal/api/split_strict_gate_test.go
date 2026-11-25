@@ -86,15 +86,15 @@ func TestFakeStateHandsOutGateViewsOnlyUnderTheGate(t *testing.T) {
 		if fs.CityBeadStore() != p.WorkView() || fs.BeadStore("myrig") != p.WorkView() {
 			t.Fatal("work accessors do not hand out the gate's work view")
 		}
-		if fs.SessionsBeadStore().Store != p.ClassView() || fs.GraphBeadStore().Store != p.ClassView() {
+		if fs.Stores().Sessions().Store != p.ClassView() || fs.Stores().Graph().Store != p.ClassView() {
 			t.Fatal("class accessors do not hand out the gate's class view")
 		}
-	} else if fs.CityBeadStore() != fs.cityBeadStore || fs.SessionsBeadStore().Store != fs.cityBeadStore {
+	} else if fs.CityBeadStore() != fs.cityBeadStore || fs.Stores().Sessions().Store != fs.cityBeadStore {
 		t.Fatal("accessors wrap the store although the gate is off")
 	}
 	relocated := beads.NewMemStore()
 	fs.graphBeadStore = relocated
-	if fs.GraphBeadStore().Store != beads.Store(relocated) {
+	if fs.Stores().Graph().Store != beads.Store(relocated) {
 		t.Fatal("a store relocated to its own binding was wrapped")
 	}
 }

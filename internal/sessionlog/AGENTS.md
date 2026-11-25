@@ -29,6 +29,8 @@ A failed turn carries the error it ended on (`ScannedTurn.Failure`), as its
 family recorded it: Claude's API error entry (`error`, `apiErrorStatus`, its
 text) and Codex's `task_complete` error (`codex_error_info`, the HTTP status
 a variant carries, `message`). Each family classes its own rate limit
-(`TurnFailure.RateLimited`: its rate-limit class, or HTTP 429); the text is
+(`TurnFailure.RateLimited`: its rate-limit class, or HTTP 429) and its
+spent-usage-quota class (`TurnFailure.Quota`: Codex's `usage_limit_exceeded`);
+the text is
 cut to `MaxTurnFailureMessage` and never classified. Gemini transcripts record
 no failed turns.

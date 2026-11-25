@@ -65,6 +65,7 @@ func stopNeeds(w *World, it intent) needs {
 	if isIdleReason(it.Reason) {
 		n.Content = w.idleView().fired[it.Key]
 		n.Activity = !n.Content
+		n.IdleShadow = true
 	}
 	return n
 }
@@ -204,11 +205,17 @@ func stopDecide(v txView) txStep {
 	if !fv.Proceed {
 		return txStep{Refuse: fv.Reason}
 	}
-	if plan.idle && !idleReproved(v) {
-		return txStep{Refuse: causeIdleUnproven}
+	if !plan.idle {
+		plan.verdict = fv
+		return txStep{Pass: plan}
+	}
+	// The idle stop's proof decides alone; the step carries it so the
+	// transaction records it beside the record's sleep proof (IdleSleep).
+	if !idleReproved(v) {
+		return txStep{Refuse: causeIdleUnproven, IdleSleep: idleSleepUnproved}
 	}
 	plan.verdict = fv
-	return txStep{Pass: plan}
+	return txStep{Pass: plan, IdleSleep: idleSleepProved}
 }
 
 // dormantGone reports an operator-dormant stop whose fresh read finds
@@ -304,9 +311,9 @@ func releaseStalledClaim(r *closeReleases, c stalledClaim) {
 			fmt.Fprintf(r.stderr, "execution-stalled stop: %s keeps claim %s: the seat records that a turn began it\n", c.row.ID, c.beadID) //nolint:errcheck // best-effort
 			continue
 		}
-		// The stranded repair's policy: the claim's route kept, its release
-		// fenced on its status and assignee.
-		out := releaseListed([]seatWorkHit{hit}, releaseStrandedRepair, releaseSeatOfInfo(c.row), r.cfg, ReleaseOpts{})
+		// The stranded repair's rules without its detached hold: the claim's
+		// route kept, its release fenced on its status and assignee.
+		out := releaseListed([]seatWorkHit{hit}, releaseStalled, releaseSeatOfInfo(c.row), r.cfg, ReleaseOpts{})
 		logRelease(r.stderr, "execution-stalled", c.row.ID, out, nil)
 	}
 }

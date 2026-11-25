@@ -16,6 +16,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
+	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gorilla/websocket"
 )
 
@@ -1092,13 +1093,47 @@ type t3BridgeTestServer struct {
 	snapshotRawBody    string
 	wsAuthorization    []string
 	wsRequestCount     int
+
+	// stateful, projects, and threads back newStatefulT3BridgeTestServer:
+	// instead of returning the fixed snapshot field, orchestration.getSnapshot
+	// recomputes its response from state that orchestration.dispatchCommand
+	// calls actually mutate.
+	stateful bool
+	projects map[string]map[string]interface{}
+	threads  map[string]map[string]interface{}
 }
 
 func newT3BridgeTestServer(t *testing.T, snapshot map[string]interface{}) *t3BridgeTestServer {
 	t.Helper()
-	ts := &t3BridgeTestServer{t: t, snapshot: snapshot, released: make(chan struct{})}
+	return newT3BridgeTestServerCore(t, snapshot, false)
+}
+
+// newStatefulT3BridgeTestServer starts a hermetic T3 bridge fake whose
+// project/thread state is derived dynamically from dispatched commands
+// (project.create, thread.create, thread.session.stop, thread.meta.update,
+// thread.archive) rather than a fixed snapshot, so a conformance suite can
+// exercise the full create/reuse/observe/stop lifecycle against a real
+// provider without a live T3 Code process. It shares newT3BridgeTestServer's
+// connection handling (one WebSocket upgrade per RPC call, matching the
+// production client's dial-per-request behavior) and its single
+// httptest.NewServer call site.
+func newStatefulT3BridgeTestServer(t *testing.T) *t3BridgeTestServer {
+	t.Helper()
+	return newT3BridgeTestServerCore(t, nil, true)
+}
+
+func newT3BridgeTestServerCore(t *testing.T, snapshot map[string]interface{}, stateful bool) *t3BridgeTestServer {
+	t.Helper()
+	ts := &t3BridgeTestServer{
+		t:        t,
+		released: make(chan struct{}),
+		snapshot: snapshot,
+		stateful: stateful,
+		projects: make(map[string]map[string]interface{}),
+		threads:  make(map[string]map[string]interface{}),
+	}
 	upgrader := websocket.Upgrader{}
-	ts.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts.server = httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/auth/ws-token" || r.URL.Path == "/api/auth/bridge-ws-token" || r.URL.Path == "/api/auth/websocket-ticket" {
 			ts.mu.Lock()
 			ts.authRequestCount++
@@ -1252,6 +1287,9 @@ func newT3BridgeTestServer(t *testing.T, snapshot map[string]interface{}) *t3Bri
 				}
 				return // taken, but the connection closes without an answer
 			}
+			if ts.stateful {
+				ts.applyCommand(commandType(payload), payload)
+			}
 		}
 
 		exit := map[string]interface{}{
@@ -1272,7 +1310,7 @@ func newT3BridgeTestServer(t *testing.T, snapshot map[string]interface{}) *t3Bri
 		if err := conn.WriteJSON(resp); err != nil {
 			t.Errorf("write websocket response: %v", err)
 		}
-	}))
+	})))
 	return ts
 }
 
@@ -1346,6 +1384,9 @@ func (ts *t3BridgeTestServer) closeCommands(n int, closeMessage []byte) {
 
 // nextSnapshot is the snapshot the next read answers; false for an outage.
 func (ts *t3BridgeTestServer) nextSnapshot() (map[string]interface{}, bool) {
+	if ts.stateful {
+		return ts.dynamicSnapshot(), true
+	}
 	ts.mu.Lock()
 	next, ok := ts.snapshot, true
 	if len(ts.snapshots) > 0 {
@@ -1497,6 +1538,200 @@ func (ts *t3BridgeTestServer) wsCalls() int {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	return ts.wsRequestCount
+}
+
+// applyCommand mutates ts's dynamic project/thread state to reflect a
+// dispatched command. Only meaningful when stateful is true; the six
+// handle*Locked helpers below assume ts.mu is already held.
+func (ts *t3BridgeTestServer) applyCommand(typ string, payload map[string]interface{}) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	switch typ {
+	case "project.create":
+		ts.handleProjectCreateLocked(payload)
+	case "thread.create":
+		ts.handleThreadCreateLocked(payload)
+	case "thread.session.stop":
+		ts.setThreadSessionStatusLocked(payload, "stopped")
+	case "thread.meta.update":
+		ts.handleThreadMetaUpdateLocked(payload)
+	case "thread.archive":
+		ts.handleThreadArchiveLocked(payload)
+	case "thread.activity.append", "thread.turn.start", "thread.turn.interrupt":
+		// No state mutation needed: conformance assertions only cover
+		// project/thread/session/metadata shape, not activity/turn history.
+	}
+}
+
+// dynamicSnapshot computes the current orchestration.getSnapshot response
+// from ts's project/thread state. It returns deep copies built while ts.mu is
+// held, so the caller can encode the snapshot outside the lock while
+// applyCommand keeps mutating the live thread and project maps.
+func (ts *t3BridgeTestServer) dynamicSnapshot() map[string]interface{} {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	threads := make([]interface{}, 0, len(ts.threads))
+	for _, thread := range ts.threads {
+		threads = append(threads, cloneStatefulThread(thread))
+	}
+	projects := make([]interface{}, 0, len(ts.projects))
+	for _, project := range ts.projects {
+		projects = append(projects, cloneStringInterfaceMap(project))
+	}
+	return map[string]interface{}{"threads": threads, "projects": projects}
+}
+
+func (ts *t3BridgeTestServer) handleProjectCreateLocked(payload map[string]interface{}) {
+	projectID, _ := payload["projectId"].(string)
+	if projectID == "" {
+		return
+	}
+	ts.projects[projectID] = map[string]interface{}{
+		"id":            projectID,
+		"workspaceRoot": payload["workspaceRoot"],
+		"title":         payload["title"],
+		"deletedAt":     nil,
+	}
+}
+
+func (ts *t3BridgeTestServer) handleThreadCreateLocked(payload map[string]interface{}) {
+	threadID, _ := payload["threadId"].(string)
+	if threadID == "" {
+		return
+	}
+	provider, model := "", ""
+	if modelSelection, ok := payload["modelSelection"].(map[string]interface{}); ok {
+		provider, _ = modelSelection["provider"].(string)
+		model, _ = modelSelection["model"].(string)
+	}
+	customMetadata, ok := payload["customMetadata"].(map[string]interface{})
+	if !ok || customMetadata == nil {
+		customMetadata = map[string]interface{}{}
+	} else {
+		customMetadata = cloneStringInterfaceMap(customMetadata)
+	}
+	ts.threads[threadID] = map[string]interface{}{
+		"id":             threadID,
+		"projectId":      payload["projectId"],
+		"title":          payload["title"],
+		"provider":       provider,
+		"model":          model,
+		"customMetadata": customMetadata,
+		"session":        map[string]interface{}{"status": "running"},
+		"deletedAt":      nil,
+	}
+}
+
+func (ts *t3BridgeTestServer) setThreadSessionStatusLocked(payload map[string]interface{}, status string) {
+	threadID, _ := payload["threadId"].(string)
+	thread := ts.threads[threadID]
+	if thread == nil {
+		return
+	}
+	thread["session"] = map[string]interface{}{"status": status}
+}
+
+func (ts *t3BridgeTestServer) handleThreadMetaUpdateLocked(payload map[string]interface{}) {
+	threadID, _ := payload["threadId"].(string)
+	thread := ts.threads[threadID]
+	if thread == nil {
+		return
+	}
+	if customMetadata, ok := payload["customMetadata"].(map[string]interface{}); ok {
+		existing, _ := thread["customMetadata"].(map[string]interface{})
+		if existing == nil {
+			existing = map[string]interface{}{}
+		}
+		for k, v := range customMetadata {
+			existing[k] = v
+		}
+		thread["customMetadata"] = existing
+	}
+	if modelSelection, ok := payload["modelSelection"].(map[string]interface{}); ok {
+		if provider, ok := modelSelection["provider"].(string); ok && provider != "" {
+			thread["provider"] = provider
+		}
+		if model, ok := modelSelection["model"].(string); ok && model != "" {
+			thread["model"] = model
+		}
+	}
+}
+
+func (ts *t3BridgeTestServer) handleThreadArchiveLocked(payload map[string]interface{}) {
+	threadID, _ := payload["threadId"].(string)
+	thread := ts.threads[threadID]
+	if thread == nil {
+		return
+	}
+	thread["deletedAt"] = time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
+}
+
+// cloneStatefulThread copies a stateful-fake thread together with its nested
+// customMetadata and session maps, the values applyCommand mutates in place.
+func cloneStatefulThread(thread map[string]interface{}) map[string]interface{} {
+	out := cloneStringInterfaceMap(thread)
+	for _, key := range []string{"customMetadata", "session"} {
+		if nested, ok := out[key].(map[string]interface{}); ok {
+			out[key] = cloneStringInterfaceMap(nested)
+		}
+	}
+	return out
+}
+
+func cloneStringInterfaceMap(m map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// TestT3BridgeStatefulSnapshotIsolated pins that a snapshot taken from the
+// stateful fake is a deep copy: commands applied after it is taken must not
+// reach the captured thread, which the HTTP handler encodes outside ts.mu.
+func TestT3BridgeStatefulSnapshotIsolated(t *testing.T) {
+	ts := newStatefulT3BridgeTestServer(t)
+	t.Cleanup(ts.Close)
+
+	ts.applyCommand("project.create", map[string]interface{}{
+		"projectId":     "project-1",
+		"workspaceRoot": t.TempDir(),
+		"title":         "project",
+	})
+	ts.applyCommand("thread.create", map[string]interface{}{
+		"threadId":       "thread-1",
+		"projectId":      "project-1",
+		"title":          "thread",
+		"customMetadata": map[string]interface{}{"gc.session_name": "session-1"},
+	})
+	snapshot := ts.dynamicSnapshot()
+
+	ts.applyCommand("thread.session.stop", map[string]interface{}{"threadId": "thread-1"})
+	ts.applyCommand("thread.meta.update", map[string]interface{}{
+		"threadId":       "thread-1",
+		"customMetadata": map[string]interface{}{"gc.added_later": "yes"},
+	})
+	ts.applyCommand("thread.archive", map[string]interface{}{"threadId": "thread-1"})
+
+	threads, _ := snapshot["threads"].([]interface{})
+	if len(threads) != 1 {
+		t.Fatalf("snapshot threads = %d, want 1", len(threads))
+	}
+	thread, _ := threads[0].(map[string]interface{})
+	session, _ := thread["session"].(map[string]interface{})
+	if got := session["status"]; got != "running" {
+		t.Errorf("snapshot session status = %v, want running", got)
+	}
+	if got := thread["deletedAt"]; got != nil {
+		t.Errorf("snapshot deletedAt = %v, want nil", got)
+	}
+	metadata, _ := thread["customMetadata"].(map[string]interface{})
+	if _, ok := metadata["gc.added_later"]; ok {
+		t.Errorf("snapshot customMetadata = %v, want no gc.added_later key", metadata)
+	}
+	if got := metadata["gc.session_name"]; got != "session-1" {
+		t.Errorf("snapshot gc.session_name = %v, want session-1", got)
+	}
 }
 
 func resetBridgeAuthCacheForTest(t *testing.T) {

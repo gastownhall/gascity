@@ -551,7 +551,12 @@ test-herdr-live:
 
 # MAC_UNIT_PKGS excludes cmd/gc from the Mac unit sweep; cmd/gc runs
 # sharded via the mac-cmd-gc-process CI matrix job instead.
-MAC_UNIT_PKGS = $(shell go list ./... | grep -v '/cmd/gc$$')
+# go list runs outside TEST_ENV/env -i here, so a toolchain mismatch (e.g. a
+# pinned setup-go version older than go.mod's directive) makes go list fail;
+# $(shell ...) swallows that non-zero exit and yields an empty string, which
+# would otherwise make go test silently run zero packages. Guard it: an empty
+# result is always a go list failure, never an intentional "test nothing".
+MAC_UNIT_PKGS = $(or $(strip $(shell go list ./... | grep -v '/cmd/gc$$')),$(error MAC_UNIT_PKGS resolved to an empty package list -- go list failed (check the Go toolchain against go.mod) or matched no packages))
 
 ## test-mac-pkgs-guard: fail when MAC_UNIT_PKGS is empty. A failed go list
 ## expands it to nothing, and go test over no packages passes vacuously.
@@ -766,7 +771,7 @@ test-bd-cli-contract-home-isolation:
 ## is the only contract that needs a real CAS-capable bd. Every pinned bd
 ## (BD_PREV_VERSION, BD_VERSION and BD_CURRENT_REF) carries
 ## `--if-assignee`/`--if-status`, so the row's capability skip fires on none
-## of them. CI runs the row only against the BD_CURRENT_REF bd (v1.3.2):
+## of them. CI runs the row only against the BD_CURRENT_REF bd (v1.3.4):
 ## strictly in //internal/beads:bd_conditional_release_contract_test, and in
 ## the integration-packages lane. A BD_PREV_VERSION cell is ga-7ryjc6.
 ## GC_REQUIRE_BD_CONDITIONAL_RELEASE=1 turns the row's capability skip into a
@@ -977,7 +982,10 @@ check-docs-go:
 #   session/tmux: integration-test-only, not meaningful for unit coverage
 #   beadstest: conformance helper, runs under internal/beads coverage
 # cmd/gc excluded: it runs sharded below in test-cover to stay under per-package timeout
-UNIT_COVER_PKGS_NONCMDGC = $(shell go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... | grep -v -e /session/tmux -e /beadstest -e '/cmd/gc$$')
+# See MAC_UNIT_PKGS above: go list runs outside TEST_ENV/env -i, so a broken
+# toolchain silently yields an empty $(shell ...) result instead of failing;
+# guard against go test then running with zero package arguments.
+UNIT_COVER_PKGS_NONCMDGC = $(or $(strip $(shell go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... | grep -v -e /session/tmux -e /beadstest -e '/cmd/gc$$')),$(error UNIT_COVER_PKGS_NONCMDGC resolved to an empty package list -- go list failed (check the Go toolchain against go.mod) or matched no packages))
 
 ## test-cover: run fast unit-test coverage without the integration-tagged package sweep.
 ## cmd/gc is sharded CMD_GC_COVER_TOTAL (default 6) ways via test-go-test-shard so each
@@ -1034,12 +1042,28 @@ $(GOLANGCI_LINT):
 
 ## install-oapi-codegen: install pinned oapi-codegen so the spec→client drift
 ## test (TestGeneratedClientInSync) can regenerate client_gen.go without skipping.
+# Retries like $(GOLANGCI_LINT): spec-ci installs this on every CI run, and the
+# tool's own module graph (not gascity's go.sum) comes from the module proxy,
+# so one transient proxy stream error would otherwise fail the required Check.
 .PHONY: install-oapi-codegen
 install-oapi-codegen:
-	@if ! command -v oapi-codegen >/dev/null; then \
-		echo "Installing oapi-codegen..." >&2; \
-		go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.6.0; \
-	fi
+	@if command -v oapi-codegen >/dev/null; then exit 0; fi; \
+	echo "Installing oapi-codegen..." >&2; \
+	attempt=1; max_attempts=5; delay=2; \
+	while [ $$attempt -le $$max_attempts ]; do \
+		echo "oapi-codegen install attempt $$attempt/$$max_attempts" >&2; \
+		if go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.6.0; then \
+			exit 0; \
+		fi; \
+		if [ $$attempt -lt $$max_attempts ]; then \
+			echo "oapi-codegen install failed; retrying in $${delay}s..." >&2; \
+			sleep $$delay; \
+		fi; \
+		attempt=$$((attempt + 1)); \
+		delay=$$((delay * 2)); \
+	done; \
+	echo "ERROR: failed to install oapi-codegen after $$max_attempts attempts" >&2; \
+	exit 1
 
 ## install-oasdiff: install the pinned oasdiff used by openapi-breaking-check.
 ## Reinstalls when the binary on disk is a different version.
