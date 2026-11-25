@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -179,6 +180,8 @@ func nativeCapacityPath(city string) string {
 	return filepath.Join(city, ".gc", "runtime", "pool-capacity-admission", "native-managed.json")
 }
 
+// nativeCapacityUnit derives a bounded systemd name from public admission identity.
+// The random attempt identifies a launch; this digest is not a password verifier.
 func nativeCapacityUnit(city, sid, attempt string) string {
 	h := sha256.Sum256([]byte(city + "\x00" + sid + "\x00" + attempt))
 	return "gc-managed-" + hex.EncodeToString(h[:16]) + ".scope"
@@ -378,7 +381,13 @@ func claimNativeCapacityStart(ctx context.Context, city, route, sid string, now 
 	if !ok || !support.SupportsCommandScope(info.SessionName) {
 		return nil, fmt.Errorf("native capacity provider unsupported")
 	}
-	attempt := NewInstanceToken()[:32]
+	// Admission attempts have their own random identity; they are not session
+	// instance credentials and may appear in scope names and command arguments.
+	var attemptID [16]byte
+	if _, err := rand.Read(attemptID[:]); err != nil {
+		return nil, fmt.Errorf("native capacity attempt identity: %w", err)
+	}
+	attempt := hex.EncodeToString(attemptID[:])
 	proof := &nativeCapacityProof{c, host, attempt}
 	err = withNativeCapacityLedger(ctx, city, c, host, func(ledger *nativeCapacityLedger) error {
 		// Teardown holds this same flock through its terminal write. Bypass
