@@ -2804,7 +2804,7 @@ func conformanceAssignedTierClaimsTheGraphStep(t *testing.T, e splitEnv, assigne
 		{dir: e.cityPath, env: []string{"GC_HOOK_LEG=assigned"}},
 		{dir: e.cityPath, env: []string{"GC_HOOK_LEG=routed"}},
 	}
-	run := func(_, _ string, env []string) (string, error) {
+	run := func(_ context.Context, _, _ string, env []string) (string, error) {
 		if len(env) > 0 && env[0] == "GC_HOOK_LEG=assigned" {
 			return `[{"id":"` + assignedGraphBeadID + `","status":"open","assignee":"` + e.qualified + `"}]`, nil
 		}
@@ -2827,7 +2827,7 @@ func conformanceAssignedTierClaimsTheGraphStep(t *testing.T, e splitEnv, assigne
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := claimHookWorkWithRunner("gc ready --json", e.cityPath, stores[0].env, stores, opts, ops, run, func(string, error) {}, &stdout, &stderr)
+	code := claimHookWorkWithRunner(context.Background(), "gc ready --json", e.cityPath, stores[0].env, stores, opts, ops, run, func(string, error) {}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("gc hook --claim exited %d with the relocated assigned step %s ranked first (stdout=%q stderr=%q)", code, assignedGraphBeadID, stdout.String(), stderr.String())
 	}
@@ -2885,7 +2885,7 @@ func conformanceUnresolvableCandidateStillDoesNotStrandWork(t *testing.T, e spli
 		{dir: e.cityPath, env: []string{"GC_HOOK_LEG=assigned"}},
 		{dir: e.cityPath, env: []string{"GC_HOOK_LEG=routed"}},
 	}
-	run := func(_, _ string, env []string) (string, error) {
+	run := func(_ context.Context, _, _ string, env []string) (string, error) {
 		if len(env) > 0 && env[0] == "GC_HOOK_LEG=assigned" {
 			return `[{"id":"` + assignedGraphBeadID + `","status":"open","assignee":"` + e.qualified + `"}]`, nil
 		}
@@ -2908,7 +2908,7 @@ func conformanceUnresolvableCandidateStillDoesNotStrandWork(t *testing.T, e spli
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := claimHookWorkWithRunner("gc ready --json", e.cityPath, stores[0].env, stores, opts, ops, run, func(string, error) {}, &stdout, &stderr)
+	code := claimHookWorkWithRunner(context.Background(), "gc ready --json", e.cityPath, stores[0].env, stores, opts, ops, run, func(string, error) {}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("gc hook --claim exited %d with an unresolvable assigned candidate ranked first; one candidate no store holds must not strand the worker's other claimable work (stdout=%q stderr=%q)", code, stdout.String(), stderr.String())
 	}

@@ -41,7 +41,7 @@ func twoStoreFanOut() []hookStore {
 // and whose secondary store "riga" cannot be read.
 func primaryAnswersSecondaryFails(t *testing.T, primaryOut string) hookStoreRunner {
 	t.Helper()
-	return func(_, dir string, _ []string) (string, error) {
+	return func(_ context.Context, _, dir string, _ []string) (string, error) {
 		switch dir {
 		case "city":
 			return primaryOut, nil
@@ -58,7 +58,7 @@ const routedCityRow = `[{"id":"hw-city","status":"open","metadata":{"gc.routed_t
 
 func TestBestStoreWithWorkReportsAFailedSecondaryWhenNoStoreHasWork(t *testing.T) {
 	stores := twoStoreFanOut()
-	out, selected, err := bestStoreWithWork("q", stores, stores[0], primaryAnswersSecondaryFails(t, "[]"))
+	out, selected, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], primaryAnswersSecondaryFails(t, "[]"))
 	if err == nil {
 		t.Fatalf("bestStoreWithWork = (%q, %+v, nil); a fan-out with an unread store and no work anywhere must be an error, not \"no work\"", out, selected)
 	}
@@ -75,7 +75,7 @@ func TestBestStoreWithWorkReportsAFailedSecondaryWhenNoStoreHasWork(t *testing.T
 func TestHookDiscoveryReportsAFailedSecondaryStore(t *testing.T) {
 	stores := twoStoreFanOut()
 	var stdout, stderr bytes.Buffer
-	runner := hookDiscoveryRunner(stores, primaryAnswersSecondaryFails(t, "[]"), hookVisibility{}, func(string, error) {}, &stderr)
+	runner := hookDiscoveryRunner(context.Background(), stores, primaryAnswersSecondaryFails(t, "[]"), hookVisibility{}, func(string, error) {}, &stderr)
 	code := doHook("q", "", false, runner, &stdout, &stderr, hookVisibility{})
 	if code != hookExitWorkQueryFailed {
 		t.Fatalf("gc hook over a failed secondary store = exit %d, want %d; stdout=%q stderr=%s", code, hookExitWorkQueryFailed, stdout.String(), stderr.String())
@@ -93,7 +93,7 @@ func TestHookDiscoveryReportsAFailedSecondaryStore(t *testing.T) {
 func TestHookDiscoveryServesWorkAndLogsAFailedSecondaryStore(t *testing.T) {
 	stores := twoStoreFanOut()
 	var stdout, stderr bytes.Buffer
-	runner := hookDiscoveryRunner(stores, primaryAnswersSecondaryFails(t, routedCityRow), hookVisibility{}, func(string, error) {}, &stderr)
+	runner := hookDiscoveryRunner(context.Background(), stores, primaryAnswersSecondaryFails(t, routedCityRow), hookVisibility{}, func(string, error) {}, &stderr)
 	code := doHook("q", "", false, runner, &stdout, &stderr, hookVisibility{})
 	if code != 0 {
 		t.Fatalf("gc hook with work in the primary = exit %d, want 0; stderr=%s", code, stderr.String())
@@ -137,7 +137,7 @@ func TestClaimHookWorkDoesNotDrainWhenASecondaryStoreFails(t *testing.T) {
 		DrainAck: func(io.Writer) error { acked = true; return nil },
 	}
 	var stdout, stderr bytes.Buffer
-	code := claimHookWorkWithRunner("q", "city", stores[0].env, stores, secondaryFailureClaimOpts(), ops, primaryAnswersSecondaryFails(t, "[]"), func(string, error) {}, &stdout, &stderr)
+	code := claimHookWorkWithRunner(context.Background(), "q", "city", stores[0].env, stores, secondaryFailureClaimOpts(), ops, primaryAnswersSecondaryFails(t, "[]"), func(string, error) {}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("claim over a failed secondary store = %d, want 1; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
 	}
@@ -168,7 +168,7 @@ func TestClaimHookWorkServesWorkAndLogsAFailedSecondaryStore(t *testing.T) {
 		},
 	}
 	var stdout, stderr bytes.Buffer
-	code := claimHookWorkWithRunner("q", "city", stores[0].env, stores, secondaryFailureClaimOpts(), ops, primaryAnswersSecondaryFails(t, routedCityRow), func(string, error) {}, &stdout, &stderr)
+	code := claimHookWorkWithRunner(context.Background(), "q", "city", stores[0].env, stores, secondaryFailureClaimOpts(), ops, primaryAnswersSecondaryFails(t, routedCityRow), func(string, error) {}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("claim with work in the primary = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -213,14 +213,14 @@ func stubRigRuntimeDown(t *testing.T, down ...string) map[string]int {
 // still holds it (TestBestStoreWithWorkReportsAFailedSecondaryWhenNoStoreHasWork).
 func TestBestStoreWithWorkAnswersWithoutARigWhoseRuntimeIsDown(t *testing.T) {
 	stores := downRigFanOut()
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		if dir == "riga" {
 			return "", fmt.Errorf("%w: %w", errHookRigRuntimeUnavailable, errTestStoreTimeout)
 		}
 		return "[]", nil
 	}
 	var noted []*hookStoreReadError
-	out, selected, err := bestStoreWithWork("q", stores, stores[0], run, func(f *hookStoreReadError) { noted = append(noted, f) })
+	out, selected, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run, func(f *hookStoreReadError) { noted = append(noted, f) })
 	if err != nil {
 		t.Fatalf("bestStoreWithWork = %v; a rig whose runtime is down must not fail the fan-out", err)
 	}
@@ -246,7 +246,7 @@ func TestHookRigLegRunnerMarksOnlyARigWhoseRuntimeIsDown(t *testing.T) {
 		{dir: "rigb", env: []string{"GC_STORE=rigb"}, rig: "rigb"},
 		{dir: "rigc", env: []string{"GC_STORE=rigc"}, rig: "rigc"},
 	}
-	run := hookRigLegRunner("/city", nil, stores, func(_, dir string, _ []string) (string, error) {
+	run := hookRigLegRunner("/city", nil, stores, func(_ context.Context, _, dir string, _ []string) (string, error) {
 		if dir == "rigc" {
 			return "[]", nil
 		}
@@ -254,7 +254,7 @@ func TestHookRigLegRunnerMarksOnlyARigWhoseRuntimeIsDown(t *testing.T) {
 	})
 	for round := 0; round < 3; round++ {
 		for _, st := range stores {
-			_, err := run("q", st.dir, st.env)
+			_, err := run(nil, "q", st.dir, st.env)
 			marked := errors.Is(err, errHookRigRuntimeUnavailable)
 			switch st.dir {
 			case "riga":
@@ -289,7 +289,7 @@ func TestClaimHookWorkDrainsWhenTheOnlyFailedRigHasItsRuntimeDown(t *testing.T) 
 	var emitted []error
 	var stdout, stderr bytes.Buffer
 	run := hookRigLegRunner("/city", nil, stores, primaryAnswersSecondaryFails(t, "[]"))
-	code := claimHookWorkWithRunner("q", "city", stores[0].env, stores, secondaryFailureClaimOpts(), h.ops(), run, func(_ string, err error) { emitted = append(emitted, err) }, &stdout, &stderr)
+	code := claimHookWorkWithRunner(context.Background(), "q", "city", stores[0].env, stores, secondaryFailureClaimOpts(), h.ops(), run, func(_ string, err error) { emitted = append(emitted, err) }, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("claim with only a down rig unread = %d, want 0; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
 	}
@@ -315,6 +315,9 @@ func TestClaimHookWorkDrainsWhenTheOnlyFailedRigHasItsRuntimeDown(t *testing.T) 
 // failing the claim's bounded retries is one failed query, recorded as one
 // event naming that rig, with a bounded reason.
 func TestClaimHookWorkRecordsEachFailedRigOnceAcrossRetries(t *testing.T) {
+	// The runner counts reads per dir from a shared map, so this test judges the
+	// bounded retry, not the fan-out scheduling: pin to the serial width.
+	withHookStoreLegConcurrency(t, 1)
 	zeroClaimRetryPacing(t)
 	stubRigRuntimeDown(t)
 	stores := []hookStore{
@@ -323,7 +326,7 @@ func TestClaimHookWorkRecordsEachFailedRigOnceAcrossRetries(t *testing.T) {
 		{dir: "rigb", env: []string{"GC_STORE=rigb"}, rig: "rigb"},
 	}
 	reads := map[string]int{}
-	run := hookRigLegRunner("/city", nil, stores, func(_, dir string, _ []string) (string, error) {
+	run := hookRigLegRunner("/city", nil, stores, func(_ context.Context, _, dir string, _ []string) (string, error) {
 		reads[dir]++
 		if dir == "city" {
 			return "[]", nil
@@ -334,7 +337,7 @@ func TestClaimHookWorkRecordsEachFailedRigOnceAcrossRetries(t *testing.T) {
 	rec := events.NewFake()
 	emit := func(command string, err error) { emitWorkQueryFailure(rec, "gcs-1", "worker", command, err) }
 	var stdout, stderr bytes.Buffer
-	code := claimHookWorkWithRunner("q", "city", stores[0].env, stores, secondaryFailureClaimOpts(), ops, run, emit, &stdout, &stderr)
+	code := claimHookWorkWithRunner(context.Background(), "q", "city", stores[0].env, stores, secondaryFailureClaimOpts(), ops, run, emit, &stdout, &stderr)
 	if code != 1 || stdout.Len() != 0 {
 		t.Fatalf("claim over failing rigs = %d stdout=%q, want 1 with no result; stderr=%s", code, stdout.String(), stderr.String())
 	}

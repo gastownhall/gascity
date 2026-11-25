@@ -1073,7 +1073,7 @@ func TestClaimHookWorkRetriesLaterStoreWhenSelectedStoreLosesClaimRace(t *testin
 	// Both stores report ready routed work on every query, so the selected
 	// store's claim-time re-validation succeeds; the only reason the city claim
 	// fails is the lost race below, not an emptied store.
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		switch dir {
 		case "city":
 			return `[{"id":"hw-city","status":"open","metadata":{"gc.routed_to":"worker"}}]`, nil
@@ -1105,7 +1105,7 @@ func TestClaimHookWorkRetriesLaterStoreWhenSelectedStoreLosesClaimRace(t *testin
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := claimHookWorkWithRunner("bd ready --json", "city", stores[0].env, stores, opts, ops, run, func(string, error) {}, &stdout, &stderr)
+	code := claimHookWorkWithRunner(context.Background(), "bd ready --json", "city", stores[0].env, stores, opts, ops, run, func(string, error) {}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("claimHookWorkWithRunner = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -1142,7 +1142,7 @@ func TestClaimHookWorkReportsFederatedStoreErrorAfterPrimaryLosesRace(t *testing
 	}
 	// The primary store always reports ready work, so discovery and claim-time
 	// re-validation both select it; the federated store errors whenever queried.
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		switch dir {
 		case "city":
 			return `[{"id":"hw-city","status":"open","metadata":{"gc.routed_to":"worker"}}]`, nil
@@ -1172,7 +1172,7 @@ func TestClaimHookWorkReportsFederatedStoreErrorAfterPrimaryLosesRace(t *testing
 
 	var emitted []error
 	var stdout, stderr bytes.Buffer
-	code := claimHookWorkWithRunner("bd ready --json", "city", stores[0].env, stores, opts, ops, run, func(_ string, err error) { emitted = append(emitted, err) }, &stdout, &stderr)
+	code := claimHookWorkWithRunner(context.Background(), "bd ready --json", "city", stores[0].env, stores, opts, ops, run, func(_ string, err error) { emitted = append(emitted, err) }, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("claimHookWorkWithRunner = %d, want 1 (failed read, no drain); stdout=%q stderr=%s", code, stdout.String(), stderr.String())
 	}
@@ -1199,7 +1199,7 @@ func TestClaimHookWorkUsesFallbackStoreDirEnvAndOutput(t *testing.T) {
 		{dir: "riga", env: []string{"GC_STORE=riga"}},
 	}
 	cityCalls := 0
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		switch dir {
 		case "city":
 			cityCalls++
@@ -1233,7 +1233,7 @@ func TestClaimHookWorkUsesFallbackStoreDirEnvAndOutput(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := claimHookWorkWithRunner("bd ready --json", "city", stores[0].env, stores, opts, ops, run, func(string, error) {}, &stdout, &stderr)
+	code := claimHookWorkWithRunner(context.Background(), "bd ready --json", "city", stores[0].env, stores, opts, ops, run, func(string, error) {}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("claimHookWorkWithRunner = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -3199,7 +3199,7 @@ func TestClaimHookWorkDrainsClaimsErroredWhenEveryCandidateErrors(t *testing.T) 
 	stores := []hookStore{
 		{dir: "city", env: []string{"GC_STORE=city"}},
 	}
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		if dir != "city" {
 			t.Fatalf("unexpected store dir %q", dir)
 		}
@@ -3223,7 +3223,7 @@ func TestClaimHookWorkDrainsClaimsErroredWhenEveryCandidateErrors(t *testing.T) 
 
 	emitted := false
 	var stdout, stderr bytes.Buffer
-	code := claimHookWorkWithRunner("bd ready --json", "city", stores[0].env, stores, opts, ops, run, func(string, error) { emitted = true }, &stdout, &stderr)
+	code := claimHookWorkWithRunner(context.Background(), "bd ready --json", "city", stores[0].env, stores, opts, ops, run, func(string, error) { emitted = true }, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("claimHookWorkWithRunner(all candidates error) = %d, want 0; stderr=%s", code, stderr.String())
 	}

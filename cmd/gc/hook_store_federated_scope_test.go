@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"os"
 	"reflect"
@@ -139,11 +140,11 @@ func TestFederatedClaimTickIssuesOneWorkQueryRun(t *testing.T) {
 	// for a second read of it.
 	one := after
 	calls := 0
-	run := func(string, string, []string) (string, error) {
+	run := func(context.Context, string, string, []string) (string, error) {
 		calls++
 		return `[{"id":"gcg-1","status":"open"}]`, nil
 	}
-	out, store, err := claimStoreWithFallback(federated, one, one[0], one[0], `[{"id":"gcg-1","status":"open"}]`, run)
+	out, store, err := claimStoreWithFallback(context.Background(), federated, one, one[0], one[0], `[{"id":"gcg-1","status":"open"}]`, run)
 	if err != nil {
 		t.Fatalf("claimStoreWithFallback: %v", err)
 	}
@@ -159,7 +160,7 @@ func TestFederatedClaimTickIssuesOneWorkQueryRun(t *testing.T) {
 	// having removed the freshness read.
 	twoLegs := []hookStore{{dir: "city"}, {dir: "riga"}}
 	calls = 0
-	if _, _, err := claimStoreWithFallback("q", twoLegs, twoLegs[0], twoLegs[0], "stale", run); err != nil {
+	if _, _, err := claimStoreWithFallback(context.Background(), "q", twoLegs, twoLegs[0], twoLegs[0], "stale", run); err != nil {
 		t.Fatalf("claimStoreWithFallback (two legs): %v", err)
 	}
 	if calls != 1 {
@@ -216,11 +217,11 @@ func TestBestStoreWithWorkRunsEachStoresOwnCommand(t *testing.T) {
 		{dir: "riga", env: []string{"GC_STORE=riga"}, command: "single-store query"},
 	}
 	ran := map[string]string{}
-	run := func(command, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, command, dir string, _ []string) (string, error) {
 		ran[dir] = command
 		return `[]`, nil
 	}
-	if _, _, err := bestStoreWithWork("federated query", stores, stores[0], run); err != nil {
+	if _, _, err := bestStoreWithWork(context.Background(), "federated query", stores, stores[0], run); err != nil {
 		t.Fatalf("bestStoreWithWork: %v", err)
 	}
 	if ran["city"] != "federated query" {
@@ -240,14 +241,14 @@ func TestClaimStoreWithFallbackRunsTheSelectedStoresOwnCommand(t *testing.T) {
 		{dir: "riga", env: []string{"GC_STORE=riga"}, command: "single-store query"},
 	}
 	var revalidated string
-	run := func(command, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, command, dir string, _ []string) (string, error) {
 		if dir == "riga" {
 			revalidated = command
 			return `[{"id":"hw-riga","status":"open"}]`, nil
 		}
 		return `[]`, nil
 	}
-	if _, store, err := claimStoreWithFallback("federated query", stores, stores[1], stores[0], "", run); err != nil || store.dir != "riga" {
+	if _, store, err := claimStoreWithFallback(context.Background(), "federated query", stores, stores[1], stores[0], "", run); err != nil || store.dir != "riga" {
 		t.Fatalf("claimStoreWithFallback = (%q, %v), want riga", store.dir, err)
 	}
 	if revalidated != "single-store query" {

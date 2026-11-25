@@ -208,12 +208,12 @@ func TestClaimHookStoreUnavailableEmitsToken(t *testing.T) {
 	withFastClaimRetries(t)
 	var stdout, stderr bytes.Buffer
 
-	failing := func(string, string, []string) (string, error) {
+	failing := func(context.Context, string, string, []string) (string, error) {
 		return "", fmt.Errorf("running work query %q: %w", "bd ready --json",
 			errors.New("exit status 1: Error: dial tcp 127.0.0.1:3307: connection refused"))
 	}
 
-	code := claimHookWorkWithRunner(
+	code := claimHookWorkWithRunner(context.Background(),
 		"bd ready --json", "", nil,
 		[]hookStore{{dir: ""}},
 		hookClaimOptions{Assignee: "worker"},
@@ -250,7 +250,7 @@ func TestClaimHookStoreUnavailableEmitsTokenOnFederatedRevalidation(t *testing.T
 		{dir: "riga", env: []string{"GC_STORE=riga"}}, // federated leg, empty
 	}
 	cityCalls := 0
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		switch dir {
 		case "city":
 			cityCalls++
@@ -276,7 +276,7 @@ func TestClaimHookStoreUnavailableEmitsTokenOnFederatedRevalidation(t *testing.T
 	}
 	emitted := false
 	var stdout, stderr bytes.Buffer
-	code := claimHookWorkWithRunner("bd ready --json", "city", stores[0].env, stores, opts, hookClaimOps{}, run, func(string, error) { emitted = true }, &stdout, &stderr)
+	code := claimHookWorkWithRunner(context.Background(), "bd ready --json", "city", stores[0].env, stores, opts, hookClaimOps{}, run, func(string, error) { emitted = true }, &stdout, &stderr)
 
 	if cityCalls < 2 {
 		t.Fatalf("primary store queried %d times, want the claim-time re-validation to run (>= 2); the test never reached the path it pins", cityCalls)
@@ -307,7 +307,7 @@ func TestClaimHookApplicationErrorOnFederatedRevalidationStaysExitOne(t *testing
 		{dir: "riga", env: []string{"GC_STORE=riga"}},
 	}
 	cityCalls := 0
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		if dir == "riga" {
 			return "[]", nil
 		}
@@ -318,7 +318,7 @@ func TestClaimHookApplicationErrorOnFederatedRevalidationStaysExitOne(t *testing
 		return "", fmt.Errorf("running work query %q: %w", "bd ready --json", errors.New("exit status 1: unknown flag"))
 	}
 	var stdout, stderr bytes.Buffer
-	code := claimHookWorkWithRunner("bd ready --json", "city", stores[0].env, stores,
+	code := claimHookWorkWithRunner(context.Background(), "bd ready --json", "city", stores[0].env, stores,
 		hookClaimOptions{Assignee: "worker-1", IdentityCandidates: []string{"worker-1"}, RouteTargets: []string{"worker"}, JSON: true},
 		hookClaimOps{}, run, func(string, error) {}, &stdout, &stderr)
 	if code != 1 {

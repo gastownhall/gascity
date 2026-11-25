@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -108,9 +110,59 @@ func hookStoresScopeToPrimary(federatedCommand, singleStoreCommand string) bool 
 var hookStoreQueryEnv = hookQueryEnv
 
 // hookStoreRunner runs a work query against one federated store's dir and env.
-// Injectable so the cross-store selection and claim paths can be tested without
-// a real bd subprocess.
-type hookStoreRunner func(command, dir string, env []string) (string, error)
+// ctx bounds the leg: it is the invocation's read deadline on the hook paths and
+// is canceled when selection stops early. Injectable so the cross-store
+// selection and claim paths can be tested without a real bd subprocess.
+type hookStoreRunner func(ctx context.Context, command, dir string, env []string) (string, error)
+
+// hookStoreLegConcurrency caps how many store legs bestStoreWithWork runs at
+// once. A leg is one work query over one store, typically a chain of ~10 bd
+// processes on the default query; the stores have no obligation order between
+// them (selection ranks their answers after the fact), so they can overlap.
+// A package var so tests can pin it to 1: with 1, bestStoreWithWork is exactly
+// today's serial behavior, one store's query before the next starts.
+var hookStoreLegConcurrency = 8
+
+// hookStoreLegResult is one store leg's work-query answer, delivered on the
+// leg's own one-slot channel. The channel has the single buffer slot so a leg
+// that finishes after selection already answered — its store lost the race to
+// an early return — can deliver and exit without a consumer reading it.
+type hookStoreLegResult struct {
+	out string
+	err error
+}
+
+// launchHookStoreLegs starts one work-query leg per store and returns the
+// channel each leg's answer arrives on, in store order. At most
+// hookStoreLegConcurrency legs run at once; the rest wait for a slot, and a
+// waiting leg never starts its query — it sees ctx already canceled and fails
+// fast without launching a subprocess.
+//
+// bestStoreWithWork consumes the channels strictly in store order, so this
+// changes only WHEN a leg runs, never the order its answer is judged in. It
+// calls launchHookStoreLegs only when the fan-out actually overlaps (more than
+// one store and width above 1); otherwise the consuming loop runs each leg
+// inline, so a serial call still starts a store's query only once selection
+// asks for it, exactly as before.
+func launchHookStoreLegs(ctx context.Context, command string, stores []hookStore, run hookStoreRunner) []chan hookStoreLegResult {
+	legs := make([]chan hookStoreLegResult, len(stores))
+	for i := range stores {
+		legs[i] = make(chan hookStoreLegResult, 1)
+	}
+	slots := make(chan struct{}, min(hookStoreLegConcurrency, len(stores)))
+	var pending sync.WaitGroup
+	pending.Add(len(stores))
+	for i, st := range stores {
+		go func(i int, st hookStore) {
+			defer pending.Done()
+			slots <- struct{}{}
+			defer func() { <-slots }()
+			out, err := run(ctx, hookStoreCommand(st, command), st.dir, st.env)
+			legs[i] <- hookStoreLegResult{out: out, err: err}
+		}(i, st)
+	}
+	return legs
+}
 
 // hookWorkQueryStores is the whole fan-out `gc hook` queries, in probe order.
 //
@@ -433,7 +485,20 @@ func rigScopedHookRig(cfg *config.City, agentIdentity string) string {
 // When work IS served, each secondary store that failed is passed to noted (when
 // given) so the caller can report it; the answer is right, but a store was still
 // unreadable and someone should hear about it.
-func bestStoreWithWork(command string, stores []hookStore, primary hookStore, run hookStoreRunner, noted ...hookStoreFailureNote) (string, hookStore, error) {
+//
+// # The legs run concurrently, the answers are judged in store order
+//
+// The stores have no obligation order between them — ranking compares their
+// answers after the fact — but each leg is a serial chain of bd processes
+// (~0.3-0.9s each on a healthy store), so launching one store's query only
+// after the previous store answered made a five-store discovery cost the SUM of
+// its legs and overrun the managed hook budget with every store healthy
+// (#5533). The legs now overlap (launchHookStoreLegs) but each answer is
+// consumed strictly in store order, so every selection rule below is unchanged
+// by construction: same ranking, same tie rotation (hookTieBreakClock), same
+// primary short-circuit, same failure precedence. An early return cancels the
+// legs still in flight through ctx; their answers are never read.
+func bestStoreWithWork(ctx context.Context, command string, stores []hookStore, primary hookStore, run hookStoreRunner, noted ...hookStoreFailureNote) (string, hookStore, error) {
 	var lastOut string
 	var ownStoreOut string
 	var ownStoreErr error
@@ -450,7 +515,7 @@ func bestStoreWithWork(command string, stores []hookStore, primary hookStore, ru
 			}
 		}
 	}
-	served := func(out string, st hookStore) (string, hookStore, error) {
+	served := func(out string, st hookStore) (string, hookStore, error) { //nolint:unparam // the nil error is the contract every `return served(...)` tail call below passes through; unparam sees the closure solo once the consuming loop reads its answers from channels
 		note(secondaryFailures)
 		note(downFailures)
 		return out, st, nil
@@ -473,8 +538,28 @@ func bestStoreWithWork(command string, stores []hookStore, primary hookStore, ru
 	federatedPrimaryFailed := false
 
 	now := time.Now()
-	for _, st := range stores {
-		out, err := run(hookStoreCommand(st, command), st.dir, st.env)
+	// Canceling stops the legs still in flight — their process groups, via the
+	// ctx each leg's runner carries — the moment an early return answers. The
+	// legs deliver on one-slot channels, so a canceled leg never blocks its
+	// goroutine on the send. When the fan-out does not overlap (one store, or
+	// hookStoreLegConcurrency pinned to 1), no leg is ever pre-started: the
+	// loop below runs each store inline, so a leg past an early return is
+	// never started, exactly as today's serial call.
+	legCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var legs []chan hookStoreLegResult
+	if len(stores) > 1 && hookStoreLegConcurrency > 1 {
+		legs = launchHookStoreLegs(legCtx, command, stores, run)
+	}
+	for i, st := range stores {
+		var out string
+		var err error
+		if legs != nil {
+			leg := <-legs[i]
+			out, err = leg.out, leg.err
+		} else {
+			out, err = run(legCtx, hookStoreCommand(st, command), st.dir, st.env)
+		}
 		if err != nil {
 			if sameHookStore(st, primary) {
 				ownStoreOut, ownStoreErr = out, err
@@ -579,16 +664,20 @@ var hookRigRuntimeUnavailable = func(cityPath string, cfg *config.City, rig stri
 // Dolt runtime that is not running (hookRigRuntimeUnavailable), the error is
 // marked errHookRigRuntimeUnavailable. The runtime is asked only after a read
 // failed, and once per rig per invocation, since the claim loop reads its
-// stores more than once. The first store is the agent's own and is never
-// marked: its failure is this session's read failing, whatever the cause.
+// stores more than once; the legs now run concurrently, so the per-rig answer
+// is asked and memoized under a mutex and the probe itself runs under that
+// lock, still once per rig per invocation. The first store is the agent's own
+// and is never marked: its failure is this session's read failing, whatever
+// the cause.
 func hookRigLegRunner(cityPath string, cfg *config.City, stores []hookStore, run hookStoreRunner) hookStoreRunner {
 	if len(stores) < 2 {
 		return run
 	}
 	secondary := stores[1:]
 	down := make(map[string]bool, len(secondary))
-	return func(command, dir string, env []string) (string, error) {
-		out, err := run(command, dir, env)
+	var downMu sync.Mutex
+	return func(ctx context.Context, command, dir string, env []string) (string, error) {
+		out, err := run(ctx, command, dir, env)
 		if err == nil {
 			return out, nil
 		}
@@ -596,11 +685,13 @@ func hookRigLegRunner(cityPath string, cfg *config.City, stores []hookStore, run
 		if rig == "" {
 			return out, err
 		}
+		downMu.Lock()
 		unavailable, asked := down[rig]
 		if !asked {
 			unavailable = hookRigRuntimeUnavailable(cityPath, cfg, rig)
 			down[rig] = unavailable
 		}
+		downMu.Unlock()
 		if !unavailable {
 			return out, err
 		}
@@ -1050,22 +1141,22 @@ func hookRankCandidate(row map[string]any) hookCandidateRank {
 // discovered is the output selection already read from this store, moments ago.
 //
 // noted is forwarded to bestStoreWithWork for its failed-secondary reports.
-func claimStoreWithFallback(command string, stores []hookStore, selected, primary hookStore, discovered string, run hookStoreRunner, noted ...hookStoreFailureNote) (string, hookStore, error) {
+func claimStoreWithFallback(ctx context.Context, command string, stores []hookStore, selected, primary hookStore, discovered string, run hookStoreRunner, noted ...hookStoreFailureNote) (string, hookStore, error) {
 	if len(stores) == 1 {
 		return discovered, selected, nil
 	}
-	selectedOut, err := run(hookStoreCommand(selected, command), selected.dir, selected.env)
+	selectedOut, err := run(ctx, hookStoreCommand(selected, command), selected.dir, selected.env)
 	if err != nil {
 		if sameHookStore(selected, primary) {
 			return "", hookStore{}, err
 		}
-		return bestStoreWithWork(command, stores, primary, run, noted...)
+		return bestStoreWithWork(ctx, command, stores, primary, run, noted...)
 	}
 	ready := filterUnreadyHookCandidates(normalizeWorkQueryOutput(strings.TrimSpace(selectedOut)), time.Now())
 	if workQueryHasReadyWork(ready) {
 		return selectedOut, selected, nil
 	}
-	return bestStoreWithWork(command, stores, primary, run, noted...)
+	return bestStoreWithWork(ctx, command, stores, primary, run, noted...)
 }
 
 // hookClaimReadsPerTick counts the work-query runs one claim attempt performs
@@ -1074,9 +1165,11 @@ func claimStoreWithFallback(command string, stores []hookStore, selected, primar
 // rather than described (TestFederatedClaimTickIssuesOneWorkQueryRun).
 //
 // It is a CEILING, not a measurement. A tier-0 hit in the primary store
-// short-circuits bestStoreWithWork before the later legs run, and each RUN is
-// itself a tier ladder that exits on its first hit — so a real tick reads this
-// many times or fewer, never more. Do not quote it as an observed number.
+// short-circuits bestStoreWithWork — the legs now start concurrently, so a
+// short-circuit cancels the legs already in flight instead of never starting
+// them, and the ceiling is the same — and each RUN is itself a tier ladder
+// that exits on its first hit, so a real tick reads this many times or fewer,
+// never more. Do not quote it as an observed number.
 func hookClaimReadsPerTick(stores []hookStore) int {
 	if len(stores) == 1 {
 		return 1

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,6 +28,9 @@ type failureHookHarness struct {
 	// answer for that leg, repeating the last one forever after.
 	answers map[string][]hookRunnerAnswer
 	calls   map[string]int
+	// mu guards answers and calls: the runner can now be invoked from several
+	// store legs at once.
+	mu      sync.Mutex
 	drained bool
 	events  []events.Event
 }
@@ -41,10 +45,20 @@ func newFailureHookHarness() *failureHookHarness {
 }
 
 func (h *failureHookHarness) script(dir string, answers ...hookRunnerAnswer) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.answers[dir] = answers
 }
 
-func (h *failureHookHarness) run(_, dir string, _ []string) (string, error) {
+func (h *failureHookHarness) callCount(dir string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.calls[dir]
+}
+
+func (h *failureHookHarness) run(_ context.Context, _ string, dir string, _ []string) (string, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	n := h.calls[dir]
 	h.calls[dir]++
 	scripted := h.answers[dir]
@@ -120,7 +134,7 @@ func inProgressRowJSON(id string) string {
 func runFailureClaim(t *testing.T, h *failureHookHarness, stores []hookStore) (hookClaimJSONResult, int, string) {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
-	code := claimHookWorkWithRunner("work-query", stores[0].dir, stores[0].env, stores, failureClaimOptions(), h.ops(),
+	code := claimHookWorkWithRunner(context.Background(), "work-query", stores[0].dir, stores[0].env, stores, failureClaimOptions(), h.ops(),
 		h.run, h.emitFailure, &stdout, &stderr)
 	var result hookClaimJSONResult
 	if trimmed := strings.TrimSpace(stdout.String()); trimmed != "" {
@@ -160,7 +174,7 @@ func TestClaimQueryFailureIsRetriedThenReportedNotDrained(t *testing.T) {
 	if h.drained {
 		t.Fatal("drain was acknowledged for a failed read; the seat must be retained")
 	}
-	if want := 1 + hookClaimQueryRetryAttempts; h.calls["/rig"] != want {
+	if want := 1 + hookClaimQueryRetryAttempts; h.callCount("/rig") != want {
 		t.Fatalf("primary-leg reads = %d, want %d (one attempt plus %d bounded retries)", h.calls["/rig"], want, hookClaimQueryRetryAttempts)
 	}
 	if len(h.events) == 0 {
@@ -246,7 +260,7 @@ func TestClaimQueryEmptyStillDrainsWithoutAnEvent(t *testing.T) {
 	if len(h.events) != 0 {
 		t.Fatalf("events = %v, want none for a genuinely empty read", h.events)
 	}
-	if h.calls["/rig"] != 1 {
+	if h.callCount("/rig") != 1 {
 		t.Fatalf("reads = %d, want exactly 1 (emptiness is not retried)", h.calls["/rig"])
 	}
 }

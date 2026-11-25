@@ -206,7 +206,7 @@ func (c *hookClaimEventsCity) claim(t *testing.T) {
 		t.Fatalf("load city config: %v", err)
 	}
 	var stdout, stderr bytes.Buffer
-	code := claimHookWork(newHookCity(c.dir, cfg), workQuery, c.dir, env, []hookStore{{dir: c.dir, env: env}}, opts,
+	code := claimHookWork(context.Background(), newHookCity(c.dir, cfg), workQuery, c.dir, env, []hookStore{{dir: c.dir, env: env}}, opts,
 		func(string, error) {}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("claimHookWork = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
@@ -617,14 +617,14 @@ func claimWithClock(t *testing.T, city *hookClaimEventsCity, window, casAge time
 	env := []string{"BEADS_DIR=" + filepath.Join(city.dir, ".beads")}
 	ops := withHookClaimBeadEvents(hookClaimOps{Now: clock, InvokedAt: invokedAt, ClaimWindow: window}, city.dir)
 	var stdout, stderr bytes.Buffer
-	code := claimHookWorkWithRunner("printf '%s' '"+string(out)+"'", city.dir, env, []hookStore{{dir: city.dir, env: env}},
+	code := claimHookWorkWithRunner(context.Background(), "printf '%s' '"+string(out)+"'", city.dir, env, []hookStore{{dir: city.dir, env: env}},
 		hookClaimOptions{
 			Assignee:           "worker-1",
 			IdentityCandidates: []string{"worker-1"},
 			RouteTargets:       []string{"worker"},
 			Env:                env,
 			JSON:               true,
-		}, ops, shellWorkQueryWithEnv, func(string, error) {}, &stdout, &stderr)
+		}, ops, shellWorkQueryWithEnvContext, func(string, error) {}, &stdout, &stderr)
 	return ops, code, stdout.String(), stderr.String()
 }
 

@@ -60,7 +60,7 @@ func TestWorkflowServeControlReadyQueryRoutedReadyAppliesToAllRouteAliases(t *te
 }
 
 // TestWorkflowServeControlReadyQueryShellFallbackUnreachable proves
-// nextWorkflowServeBeads's raw shell fallback (shellWorkQueryWithEnv) can
+// nextWorkflowServeBeads's raw shell fallback (shellWorkQueryWithEnvContext) can
 // never execute a control-ready-shaped query. tryControlReadyScan
 // returns handled=false only when parseControlReadyQuery fails to recognize
 // the query (dispatch_control_ready.go), which happens only when its parsed

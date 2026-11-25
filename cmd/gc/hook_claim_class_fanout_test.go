@@ -98,7 +98,7 @@ func TestClassEscalationWaitsForEveryWorkLeg(t *testing.T) {
 	// Both work legs are served the same co-resident row; only the CITY leg's
 	// bd context can resolve it, exactly as appendCityHookStore documents.
 	row := `[{"id":"gcg-77","status":"open","assignee":"worker-1","metadata":{"gc.kind":"wisp"}}]`
-	run := func(_, _ string, _ []string) (string, error) { return row, nil }
+	run := func(_ context.Context, _, _ string, _ []string) (string, error) { return row, nil }
 
 	var claimDirs []string
 	base := hookFanoutBaseOps(func(_ context.Context, dir string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
@@ -119,7 +119,7 @@ func TestClassEscalationWaitsForEveryWorkLeg(t *testing.T) {
 
 	stores := hookFanoutRigFirstStores()
 	var stdout, stderr bytes.Buffer
-	code := claimHookWorkWithRunner("gc ready --json", "city", stores[0].env, stores, hookFanoutClaimOpts(),
+	code := claimHookWorkWithRunner(context.Background(), "gc ready --json", "city", stores[0].env, stores, hookFanoutClaimOpts(),
 		classRoutedHookClaimOps(base, route), run, func(string, error) {}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("claimHookWorkWithRunner = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
@@ -141,7 +141,7 @@ func TestClassEscalationStillReachesABindingOnlyBead(t *testing.T) {
 	route := newFanoutClassRoute(t, class)
 
 	row := `[{"id":"gcg-88","status":"open","assignee":"worker-1","metadata":{"gc.kind":"wisp"}}]`
-	run := func(_, _ string, _ []string) (string, error) { return row, nil }
+	run := func(_ context.Context, _, _ string, _ []string) (string, error) { return row, nil }
 	var claimDirs []string
 	base := hookFanoutBaseOps(func(_ context.Context, dir string, _ []string, beadID, _ string) (beads.Bead, bool, error) {
 		claimDirs = append(claimDirs, dir)
@@ -153,7 +153,7 @@ func TestClassEscalationStillReachesABindingOnlyBead(t *testing.T) {
 
 	stores := hookFanoutRigFirstStores()
 	var stdout, stderr bytes.Buffer
-	code := claimHookWorkWithRunner("gc ready --json", "city", stores[0].env, stores, hookFanoutClaimOpts(),
+	code := claimHookWorkWithRunner(context.Background(), "gc ready --json", "city", stores[0].env, stores, hookFanoutClaimOpts(),
 		classRoutedHookClaimOps(base, route), run, func(string, error) {}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("claimHookWorkWithRunner = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
@@ -227,7 +227,7 @@ func TestBindingClaimRefusalIsPerBeadNotPerTick(t *testing.T) {
 	// the refusal is reached before the healthy bead either way.
 	row := `[{"id":"gcg-6","status":"open","assignee":"worker-1","metadata":{"gc.kind":"wisp"}},` +
 		`{"id":"gc-77","status":"open","metadata":{"gc.routed_to":"worker"}}]`
-	run := func(_, _ string, _ []string) (string, error) { return row, nil } //nolint:unparam // the runner seam returns an error the healthy rows never produce
+	run := func(_ context.Context, _, _ string, _ []string) (string, error) { return row, nil } //nolint:unparam // the runner seam returns an error the healthy rows never produce
 	newBase := func() hookClaimOps {
 		return hookFanoutBaseOps(func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
 			if strings.HasPrefix(beadID, "gcg-") {
@@ -262,7 +262,7 @@ func TestBindingClaimRefusalIsPerBeadNotPerTick(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			stores := []hookStore{{dir: "city", env: []string{"GC_STORE_SCOPE=city"}}}
 			var stdout, stderr bytes.Buffer
-			code := claimHookWorkWithRunner("gc ready --json", "city", stores[0].env, stores, hookFanoutClaimOpts(),
+			code := claimHookWorkWithRunner(context.Background(), "gc ready --json", "city", stores[0].env, stores, hookFanoutClaimOpts(),
 				tt.ops(t), run, func(string, error) {}, &stdout, &stderr)
 			if code != 0 {
 				t.Fatalf("claimHookWorkWithRunner = %d, want 0: a bead this session provably does not own in the work store cannot make the tick terminal; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
@@ -283,7 +283,7 @@ func TestBindingClaimRefusalIsPerBeadNotPerTick(t *testing.T) {
 // --json caller can read, not a bare exit 1 with empty stdout.
 func TestBindingClaimRefusalAloneStillDrains(t *testing.T) {
 	row := `[{"id":"gcg-6","status":"open","assignee":"worker-1","metadata":{"gc.kind":"wisp"}}]`
-	run := func(_, _ string, _ []string) (string, error) { return row, nil }
+	run := func(_ context.Context, _, _ string, _ []string) (string, error) { return row, nil }
 	base := hookFanoutBaseOps(func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, bool, error) {
 		return beads.Bead{}, false, fmt.Errorf("claiming bead %q: %w", beadID, beads.ErrNotFound)
 	})
@@ -295,7 +295,7 @@ func TestBindingClaimRefusalAloneStillDrains(t *testing.T) {
 
 	stores := []hookStore{{dir: "city", env: []string{"GC_STORE_SCOPE=city"}}}
 	var stdout, stderr bytes.Buffer
-	code := claimHookWorkWithRunner("gc ready --json", "city", stores[0].env, stores, hookFanoutClaimOpts(),
+	code := claimHookWorkWithRunner(context.Background(), "gc ready --json", "city", stores[0].env, stores, hookFanoutClaimOpts(),
 		classRoutedHookClaimOps(base, newCapabilityRefusingRoute(t, "gcg-6")), run, func(string, error) {}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("claimHookWorkWithRunner = %d, want 0 (structured drain); stdout=%q stderr=%q", code, stdout.String(), stderr.String())

@@ -637,12 +637,12 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 				}
 			}
 		}
-		return claimHookWorkProvisioning(city, workQuery, workDir, queryEnv, stores, claimOpts, provisionWorktree, emitQueryFailure, stdout, stderr)
+		return claimHookWorkProvisioning(context.Background(), city, workQuery, workDir, queryEnv, stores, claimOpts, provisionWorktree, emitQueryFailure, stdout, stderr)
 	}
 	// The discovery door is fenced too: a draining seat must not be handed its
 	// preassigned continuation sibling by the packs' post-close `gc hook`.
 	visibility := hookDiscoveryVisibility(city, cityName, &a, identityCandidates, routeTargets, stderr)
-	runner := hookDiscoveryRunner(stores, hookRigLegRunner(cityPath, cfg, stores, shellWorkQueryWithEnv), visibility, emitQueryFailure, stderr)
+	runner := hookDiscoveryRunner(context.Background(), stores, hookRigLegRunner(cityPath, cfg, stores, shellWorkQueryWithEnvContext), visibility, emitQueryFailure, stderr)
 	return hookDiscover(workQuery, workDir, false, hookDiscoveryOptions(assignee, identityCandidates, queryEnv, opts, strictDrainAck), city.claimOps(), runner, stdout, stderr, visibility)
 }
 
@@ -920,14 +920,15 @@ func hookClaimSessionEligibility(info session.Info, instanceToken string) (hookC
 // one, so the binding is reached through the ops rather than through a leg. On a
 // city that relocates nothing the route is nil and the ops are the work-store
 // ops alone.
-func claimHookWork(city *hookCity, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
-	return claimHookWorkProvisioning(city, workQuery, workDir, queryEnv, stores, claimOpts, nil, emitFailure, stdout, stderr)
+func claimHookWork(ctx context.Context, city *hookCity, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
+	return claimHookWorkProvisioning(ctx, city, workQuery, workDir, queryEnv, stores, claimOpts, nil, emitFailure, stdout, stderr)
 }
 
 // claimHookWorkProvisioning is claimHookWork with the claimed bead's worktree
 // provisioned before its receipt is delivered (gc hook --claim --worktree).
-// A nil provisionWorktree is the plain claim.
-func claimHookWorkProvisioning(city *hookCity, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, provisionWorktree hookProvisionWorktreeFunc, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
+// A nil provisionWorktree is the plain claim. ctx bounds every store read the
+// claim loop makes.
+func claimHookWorkProvisioning(ctx context.Context, city *hookCity, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, provisionWorktree hookProvisionWorktreeFunc, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
 	// The city relocates a class and its front door could not be projected.
 	// Claiming through the work store anyway would write ownership into a
 	// ledger that does not hold the bead, which is the wrong-answer lane this
@@ -948,8 +949,8 @@ func claimHookWorkProvisioning(city *hookCity, workQuery, workDir string, queryE
 	// whatever is left on the way out (a release, a reclaim, a claim that
 	// stopped on an error).
 	defer ops.announceBeadEvents()
-	run := hookRigLegRunner(city.path, city.cfg, stores, shellWorkQueryWithEnv)
-	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, run, emitFailure, stdout, stderr)
+	run := hookRigLegRunner(city.path, city.cfg, stores, shellWorkQueryWithEnvContext)
+	return claimHookWorkWithRunner(ctx, workQuery, workDir, queryEnv, stores, claimOpts, ops, run, emitFailure, stdout, stderr)
 }
 
 // routedHookClaimOps is the claim ops one class-route resolution (opened, err)
@@ -993,8 +994,8 @@ func routedHookClaimOps(base hookClaimOps, opened *hookClaimClassRoute, err erro
 // says nothing about the work legs behind it. observeWorkLegs hands the route
 // the whole fan-out so it can prove "no WORK store holds this bead" before it
 // writes ownership into the binding (claim_class_route.go). Nil on a city that
-// relocates nothing.
-func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, ops hookClaimOps, run hookStoreRunner, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
+// relocates nothing. ctx bounds every store read this loop makes.
+func claimHookWorkWithRunner(ctx context.Context, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, ops hookClaimOps, run hookStoreRunner, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
 	ops.applyDefaults()
 	ops.ClassRoute.observeWorkLegs(stores)
 	// primary is the agent's own store (the first entry). It is captured once
@@ -1024,7 +1025,7 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 	// store's claim keeps the invocation quiet about it.
 	var left []beads.Bead
 	for len(remaining) > 0 {
-		discovered, selected, err := selectStoreWithWorkRetrying(workQuery, remaining, primary, run, &ops, noteStoreFailure)
+		discovered, selected, err := selectStoreWithWorkRetrying(ctx, workQuery, remaining, primary, run, &ops, noteStoreFailure)
 		if err != nil {
 			report.failed(workQuery, err)
 			return reportClaimWorkQueryFailure(err, stderr)
@@ -1036,7 +1037,7 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		// mutation, and a primary-leg failure there is surfaced exactly like a
 		// discovery failure: it is the same read of the same store, moments
 		// later, so it gets the same classification.
-		claimOutput, claimStore, err := claimStoreWithFallback(workQuery, remaining, selected, primary, discovered, run, noteStoreFailure)
+		claimOutput, claimStore, err := claimStoreWithFallback(ctx, workQuery, remaining, selected, primary, discovered, run, noteStoreFailure)
 		if err != nil {
 			report.failed(workQuery, err)
 			return reportClaimWorkQueryFailure(err, stderr)
@@ -1161,8 +1162,8 @@ var (
 // A failed secondary store with no work anywhere is an error here too
 // (hookSecondaryStoreFailure), so it gets the same bounded retry. noted is
 // forwarded to bestStoreWithWork.
-func selectStoreWithWorkRetrying(workQuery string, stores []hookStore, primary hookStore, run hookStoreRunner, ops *hookClaimOps, noted ...hookStoreFailureNote) (string, hookStore, error) {
-	out, selected, err := bestStoreWithWork(workQuery, stores, primary, run, noted...)
+func selectStoreWithWorkRetrying(ctx context.Context, workQuery string, stores []hookStore, primary hookStore, run hookStoreRunner, ops *hookClaimOps, noted ...hookStoreFailureNote) (string, hookStore, error) {
+	out, selected, err := bestStoreWithWork(ctx, workQuery, stores, primary, run, noted...)
 	for attempt := 0; err != nil && attempt < hookClaimQueryRetryAttempts; attempt++ {
 		if ops.claimWindowSpentAfter(hookClaimQueryRetryInterval) {
 			return out, selected, hookClaimRetryWindowClosed(err, ops)
@@ -1171,7 +1172,7 @@ func selectStoreWithWorkRetrying(workQuery string, stores []hookStore, primary h
 		if ops.claimWindowSpentAfter(0) {
 			return out, selected, hookClaimRetryWindowClosed(err, ops)
 		}
-		out, selected, err = bestStoreWithWork(workQuery, stores, primary, run, noted...)
+		out, selected, err = bestStoreWithWork(ctx, workQuery, stores, primary, run, noted...)
 	}
 	return out, selected, err
 }
@@ -1342,9 +1343,19 @@ type WorkQueryRunner func(command, dir string) (string, error)
 // the real cure remains ga-4qdfn (fewer round-trips, faster reader).
 var hookWorkQueryTimeout = 150 * time.Second
 
-// shellWorkQueryWithEnv runs a work query command through the platform's
+// shellWorkQueryWithEnv is shellWorkQueryWithEnvContext with no caller
+// deadline: the query is bounded by hookWorkQueryTimeout alone. Non-hook
+// callers (the dispatch paths, the workflow serve loop) have no invocation
+// budget to declare.
+func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
+	return shellWorkQueryWithEnvContext(context.Background(), command, dir, env)
+}
+
+// shellWorkQueryWithEnvContext runs a work query command through the platform's
 // command interpreter (runtime.ShellCommandContext: `sh -c` on Unix,
-// PowerShell on Windows) and returns stdout. A command the platform refuses
+// PowerShell on Windows) and returns stdout, bounded by ctx on top of the
+// per-query hookWorkQueryTimeout cap: whichever deadline comes first stops the
+// query and kills its process group. A command the platform refuses
 // (runtime.ShellCommandUnavailable) starts nothing, but on Windows a program
 // this process generated runs in gc's embedded interpreter instead
 // (generatedProgram). If env is non-nil it is used as the subprocess
@@ -1352,9 +1363,9 @@ var hookWorkQueryTimeout = 150 * time.Second
 // otherwise the child inherits the parent process environment. Times out after
 // a short bounded interval so startup hooks cannot strand sessions behind a
 // wedged data-plane command.
-func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
+func shellWorkQueryWithEnvContext(ctx context.Context, command, dir string, env []string) (string, error) {
 	if generated := generatedProgram(command); generated != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), hookWorkQueryTimeout)
+		ctx, cancel := context.WithTimeout(ctx, hookWorkQueryTimeout)
 		defer cancel()
 		var stderr bytes.Buffer
 		out, err := generated(ctx, dir, execenv.WithUsageMetricsDisabled(workQueryEnvForDir(env, dir)), &stderr)
@@ -1363,7 +1374,7 @@ func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
 	if reason := runtime.ShellCommandUnavailable(command); reason != "" {
 		return "", fmt.Errorf("work query refused: %s", reason)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), hookWorkQueryTimeout)
+	ctx, cancel := context.WithTimeout(ctx, hookWorkQueryTimeout)
 	defer cancel()
 	cmd, err := runtime.ShellCommandContext(ctx, command)
 	if err != nil {
@@ -1676,14 +1687,17 @@ func doHookDiscovery(workQuery, dir string, inject bool, opts hookClaimOptions, 
 // from a later store instead of reporting none. A failed query is returned as
 // its error and recorded through emitFailure, and a store whose failed read the
 // answer did not stop on is named on stderr (hookStoreFailureReport).
-func hookDiscoveryRunner(stores []hookStore, run hookStoreRunner, visibility hookVisibility, emitFailure func(command string, err error), stderr io.Writer) WorkQueryRunner {
+//
+// ctx bounds every store read; the discovery runner captures it once, like the
+// claim door's runners.
+func hookDiscoveryRunner(ctx context.Context, stores []hookStore, run hookStoreRunner, visibility hookVisibility, emitFailure func(command string, err error), stderr io.Writer) WorkQueryRunner {
 	report := newHookStoreFailureReport("gc hook", stderr, emitFailure)
 	return func(command, _ string) (string, error) {
 		// The primary is the agent's own store, matched by identity, so a later
 		// store never inherits its semantics once it is dropped.
 		remaining := stores
 		for {
-			out, selected, err := bestStoreWithWork(command, remaining, stores[0], run, report.note)
+			out, selected, err := bestStoreWithWork(ctx, command, remaining, stores[0], run, report.note)
 			report.failed(command, err)
 			if err != nil || isZeroHookStore(selected) || len(remaining) == 1 || workQueryHasReadyWork(hookListing(out, time.Now(), visibility)) {
 				return out, err

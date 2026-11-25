@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +12,18 @@ import (
 )
 
 var errTestStoreTimeout = errors.New("store timed out")
+
+// withHookStoreLegConcurrency pins the store-leg fan-out width for one test
+// and restores the production default on cleanup. Tests that assert read
+// order or count reads through a shared slice pin it to 1: at width 1 the
+// fan-out is exactly the pre-concurrency serial behavior, one store at a
+// time, so those assertions keep judging the selection, not the scheduling.
+func withHookStoreLegConcurrency(t *testing.T, n int) {
+	t.Helper()
+	prev := hookStoreLegConcurrency
+	hookStoreLegConcurrency = n
+	t.Cleanup(func() { hookStoreLegConcurrency = prev })
+}
 
 // TestRigScopedHookRig is the core of the rig-scope hook fix: a rig-scoped agent
 // ("<rig>/<name>") must resolve to its own rig so the hook also queries that
@@ -70,16 +84,17 @@ func TestAppendOneRigHookStoreSkipsUnknownInput(t *testing.T) {
 }
 
 func TestBestStoreWithWorkReturnsTheOnlyStoreThatHasWork(t *testing.T) {
+	withHookStoreLegConcurrency(t, 1)
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}, {dir: "rigb"}}
 	var calls []string
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		calls = append(calls, dir)
 		if dir == "riga" {
 			return `[{"id":"va-1"}]`, nil
 		}
 		return `[]`, nil
 	}
-	out, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
+	out, gotStore, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -101,13 +116,13 @@ func TestBestStoreWithWorkReturnsTheOnlyStoreThatHasWork(t *testing.T) {
 // unreachable no matter how urgent it was.
 func TestBestStoreWithWorkPrefersHigherPriorityInALaterStore(t *testing.T) {
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		if dir == "city" {
 			return `[{"id":"ci-1","priority":2}]`, nil
 		}
 		return `[{"id":"va-1","priority":0}]`, nil
 	}
-	out, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
+	out, gotStore, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -132,13 +147,13 @@ func TestBestStoreWithWorkPrefersHigherPriorityInALaterStore(t *testing.T) {
 // replacement.)
 func TestBestStoreWithWorkDoesNotInvertTheBug(t *testing.T) {
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		if dir == "city" {
 			return `[{"id":"ci-1","priority":1}]`, nil
 		}
 		return `[{"id":"va-1","priority":3}]`, nil
 	}
-	_, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
+	_, gotStore, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -166,7 +181,7 @@ func withHookTieBreakClock(t *testing.T, now time.Time) {
 // first store in the slice.
 func TestBestStoreWithWorkRotatesExactTies(t *testing.T) {
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		if dir == "city" {
 			return `[{"id":"ci-1","priority":1}]`, nil
 		}
@@ -174,7 +189,7 @@ func TestBestStoreWithWorkRotatesExactTies(t *testing.T) {
 	}
 
 	withHookTieBreakClock(t, time.Unix(0, 0))
-	_, gotCity, err := bestStoreWithWork("q", stores, stores[0], run)
+	_, gotCity, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -183,7 +198,7 @@ func TestBestStoreWithWorkRotatesExactTies(t *testing.T) {
 	}
 
 	withHookTieBreakClock(t, time.Unix(0, 1))
-	_, gotRiga, err := bestStoreWithWork("q", stores, stores[0], run)
+	_, gotRiga, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -199,7 +214,7 @@ func TestBestStoreWithWorkRotatesExactTies(t *testing.T) {
 // every tied store, not just the first one in the slice, forever.
 func TestBestStoreWithWorkRepeatedTiesVisitEveryStoreOverTime(t *testing.T) {
 	stores := []hookStore{{dir: "city"}, {dir: "gascity"}, {dir: "cairn"}, {dir: "beads"}}
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		return `[{"id":"tied-` + dir + `","priority":1}]`, nil
 	}
 
@@ -210,7 +225,7 @@ func TestBestStoreWithWorkRepeatedTiesVisitEveryStoreOverTime(t *testing.T) {
 	for i := 0; i < len(stores); i++ {
 		offset := int64(i)
 		hookTieBreakClock = func() time.Time { return time.Unix(0, offset) }
-		_, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
+		_, gotStore, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run)
 		if err != nil {
 			t.Fatalf("call %d: err: %v", i, err)
 		}
@@ -235,7 +250,7 @@ func TestBestStoreWithWorkRepeatedTiesVisitEveryStoreOverTime(t *testing.T) {
 // shared id must not.
 func TestBestStoreWithWorkDoesNotRotateOnACoResidentDuplicateID(t *testing.T) {
 	stores := []hookStore{{dir: "riga"}, {dir: "city"}}
-	run := func(_, _ string, _ []string) (string, error) {
+	run := func(_ context.Context, _, _ string, _ []string) (string, error) {
 		// Same id, same rank, from every store: a co-resident duplicate, not
 		// two different pieces of work.
 		return `[{"id":"dup-1","assignee":"worker-1"}]`, nil
@@ -245,7 +260,7 @@ func TestBestStoreWithWorkDoesNotRotateOnACoResidentDuplicateID(t *testing.T) {
 	// uses to prove rotation moves off the first store; here the tied
 	// candidates share an id, so it must NOT move off riga.
 	withHookTieBreakClock(t, time.Unix(0, 1))
-	_, got, err := bestStoreWithWork("q", stores, stores[0], run)
+	_, got, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -309,13 +324,13 @@ func TestBestStoreWithWorkRanksTierAheadOfPriority(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stores := []hookStore{{dir: "city"}, {dir: "riga"}}
-			run := func(_, dir string, _ []string) (string, error) {
+			run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 				if dir == "city" {
 					return tc.cityRow, nil
 				}
 				return tc.rigRow, nil
 			}
-			_, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
+			_, gotStore, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run)
 			if err != nil {
 				t.Fatalf("err: %v", err)
 			}
@@ -344,13 +359,13 @@ func TestBestStoreWithWorkRanksTierAheadOfPriority(t *testing.T) {
 // across stores.
 func TestBestStoreWithWorkTreatsAssignedTierAsRoutedAcrossStores(t *testing.T) {
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		if dir == "city" {
 			return `[{"id":"ci-1","priority":3,"assignee":"x"}]`, nil
 		}
 		return `[{"id":"va-1","priority":0}]`, nil
 	}
-	_, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
+	_, gotStore, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -363,16 +378,17 @@ func TestBestStoreWithWorkTreatsAssignedTierAsRoutedAcrossStores(t *testing.T) {
 // this session's own interrupted work is unconditional, so the primary store's
 // in_progress row is taken without consulting any federated store at all.
 func TestBestStoreWithWorkShortCircuitsOwnInProgress(t *testing.T) {
+	withHookStoreLegConcurrency(t, 1)
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
 	var calls []string
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		calls = append(calls, dir)
 		if dir == "city" {
 			return `[{"id":"ci-1","priority":3,"status":"in_progress","assignee":"me"}]`, nil
 		}
 		return `[{"id":"va-1","priority":0,"status":"in_progress","assignee":"me"}]`, nil
 	}
-	_, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
+	_, gotStore, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -390,13 +406,13 @@ func TestBestStoreWithWorkShortCircuitsOwnInProgress(t *testing.T) {
 // rather than reordering on a comparison that was never made.
 func TestBestStoreWithWorkDegradesToFirstHitOnUnrankableOutput(t *testing.T) {
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		if dir == "city" {
 			return "va-1 some plain-text row", nil
 		}
 		return `[{"id":"va-2","priority":0}]`, nil
 	}
-	_, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
+	_, gotStore, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -439,8 +455,8 @@ func TestBestHookCandidateRank(t *testing.T) {
 
 func TestBestStoreWithWorkReturnsLastWhenNoneHasWork(t *testing.T) {
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
-	run := func(_, _ string, _ []string) (string, error) { return `[]`, nil }
-	out, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
+	run := func(_ context.Context, _, _ string, _ []string) (string, error) { return `[]`, nil }
+	out, gotStore, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -457,13 +473,13 @@ func TestBestStoreWithWorkSurfacesOwnStoreErrorWhenNoWork(t *testing.T) {
 	// federated rig store returns no work — otherwise emitCityWorkQueryFailure
 	// never fires and a transient timeout is silently downgraded to "no work".
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		if dir == "city" {
 			return "", errTestStoreTimeout
 		}
 		return `[]`, nil
 	}
-	if _, _, err := bestStoreWithWork("q", stores, stores[0], run); !errors.Is(err, errTestStoreTimeout) {
+	if _, _, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run); !errors.Is(err, errTestStoreTimeout) {
 		t.Fatalf("own-store error must be surfaced when no store has work; got %v", err)
 	}
 }
@@ -476,13 +492,13 @@ func TestBestStoreWithWorkSurfacesRigStoreErrorWhenOwnStoreHasNoWork(t *testing.
 	// failure: a failed query to the caller, but not this session's own store
 	// failing (hookStoreFailureReport emits it under the rig store's name).
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		if dir == "city" {
 			return `[]`, nil
 		}
 		return "", errTestStoreTimeout
 	}
-	out, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
+	out, gotStore, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run)
 	var secondary *hookSecondaryStoreFailure
 	if !errors.As(err, &secondary) {
 		t.Fatalf("err = %v, want a *hookSecondaryStoreFailure", err)
@@ -503,13 +519,13 @@ func TestBestStoreWithWorkOwnStoreErrorTakesPrecedenceOverRigStoreError(t *testi
 	// itself, so emitCityWorkQueryFailure still classifies it.
 	errRig := errors.New("rig store down")
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		if dir == "city" {
 			return "", errTestStoreTimeout
 		}
 		return "", errRig
 	}
-	_, _, err := bestStoreWithWork("q", stores, stores[0], run)
+	_, _, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run)
 	if !errors.Is(err, errTestStoreTimeout) {
 		t.Fatalf("err = %v, want the own store's error", err)
 	}
@@ -559,13 +575,13 @@ func TestHookStoreFailureReportEmitsEachFailedStoreOnce(t *testing.T) {
 func TestBestStoreWithWorkSkipsStoreWithOnlyUnreadyRows(t *testing.T) {
 	// A store whose only row is dep-blocked is NOT a hit; federation moves on.
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		if dir == "city" {
 			return `[{"id":"x","blocked_by":[{"status":"open"}]}]`, nil
 		}
 		return `[{"id":"va-2"}]`, nil
 	}
-	out, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
+	out, gotStore, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -583,10 +599,11 @@ func TestBestStoreWithWorkSkipsStoreWithOnlyUnreadyRows(t *testing.T) {
 // must re-select across the federated stores instead of draining as "no work"
 // while a later store still has ready routed work.
 func TestClaimStoreWithFallbackFallsBackWhenSelectedStoreRerunsEmpty(t *testing.T) {
+	withHookStoreLegConcurrency(t, 1)
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
 	selected := stores[0]
 	var calls []string
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		calls = append(calls, dir)
 		switch len(calls) {
 		case 1: // claim-time re-validation of the selected store: now empty.
@@ -601,7 +618,7 @@ func TestClaimStoreWithFallbackFallsBackWhenSelectedStoreRerunsEmpty(t *testing.
 		}
 	}
 
-	out, gotStore, err := claimStoreWithFallback("q", stores, selected, stores[0], "", run)
+	out, gotStore, err := claimStoreWithFallback(context.Background(), "q", stores, selected, stores[0], "", run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -620,15 +637,16 @@ func TestClaimStoreWithFallbackFallsBackWhenSelectedStoreRerunsEmpty(t *testing.
 // path: when the selected store still reports ready work at claim time, the
 // claim acts on that store's fresh output without a redundant federated rescan.
 func TestClaimStoreWithFallbackUsesSelectedStoreWhenStillReady(t *testing.T) {
+	withHookStoreLegConcurrency(t, 1)
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
 	selected := stores[0]
 	var calls []string
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		calls = append(calls, dir)
 		return `[{"id":"va-1"}]`, nil
 	}
 
-	out, gotStore, err := claimStoreWithFallback("q", stores, selected, stores[0], "", run)
+	out, gotStore, err := claimStoreWithFallback(context.Background(), "q", stores, selected, stores[0], "", run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -640,5 +658,65 @@ func TestClaimStoreWithFallbackUsesSelectedStoreWhenStillReady(t *testing.T) {
 	}
 	if len(calls) != 1 || calls[0] != "city" {
 		t.Fatalf("calls = %v, want a single [city] re-validation", calls)
+	}
+}
+
+// TestBestStoreWithWorkOverlapsStoreLegs proves the fan-out actually overlaps:
+// every one of five store legs blocks until all five have entered, so the only
+// way the query can answer at all is for the legs to run concurrently. If they
+// are serial, the first leg's 5s barrier timeout fires and names the leg that
+// waited alone. The rows all tie so the winner is the tie-break clock's choice;
+// the assertion is the barrier, not the winner.
+func TestBestStoreWithWorkOverlapsStoreLegs(t *testing.T) {
+	// Pin the production width explicitly: this test asserts overlap AT the
+	// width the hook really runs at, not a wider-than-default accident.
+	withHookStoreLegConcurrency(t, 8)
+	const barrierTimeout = 5 * time.Second
+	stores := make([]hookStore, 5)
+	for i := range stores {
+		stores[i] = hookStore{dir: fmt.Sprintf("rig-%d", i)}
+	}
+	entered := make(chan string, len(stores))
+	release := make(chan struct{})
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
+		select {
+		case entered <- dir:
+		case <-time.After(barrierTimeout):
+			t.Errorf("leg %q waited alone for %s: store legs did not overlap", dir, barrierTimeout)
+			return "", nil
+		}
+		select {
+		case <-release:
+			return `[{"id":"tied-` + dir + `","priority":1}]`, nil
+		case <-time.After(barrierTimeout):
+			t.Errorf("leg %q never released: the barrier never assembled", dir)
+			return "", nil
+		}
+	}
+	go func() {
+		seen := make([]string, 0, len(stores))
+		for len(seen) < len(stores) {
+			select {
+			case d := <-entered:
+				seen = append(seen, d)
+			case <-time.After(barrierTimeout):
+				t.Errorf("only %d of %d store legs started (%v): the fan-out is serial, not overlapping", len(seen), len(stores), seen)
+				close(release)
+				return
+			}
+		}
+		close(release)
+	}()
+
+	started := time.Now()
+	out, _, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed >= barrierTimeout {
+		t.Fatalf("discovery took %s, at or over the %s barrier timeout: the legs did not overlap", elapsed.Round(time.Millisecond), barrierTimeout)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(out), `[{"id":"tied-`) {
+		t.Fatalf("out = %q, want one tied store row", out)
 	}
 }
