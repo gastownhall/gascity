@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -718,5 +720,349 @@ func TestBestStoreWithWorkOverlapsStoreLegs(t *testing.T) {
 	}
 	if !strings.HasPrefix(strings.TrimSpace(out), `[{"id":"tied-`) {
 		t.Fatalf("out = %q, want one tied store row", out)
+	}
+}
+
+// hookSelectionSchedule is one ordering of the store legs' per-store delays:
+// which leg is made slow, which fast. The answers are fixed; the schedule
+// decides only WHEN each answer is ready relative to the others, so a
+// selection that depends on completion order produces different answers
+// under different schedules.
+type hookSelectionSchedule struct {
+	name string
+	// delaysFor assigns a delay to leg i of stores, in sweep order.
+	delaysFor func(stores []hookStore) []time.Duration
+	width     int
+}
+
+// hookSelectionRow is one fixed set of store answers and the selection the
+// stores' ORDER alone must produce, whatever order the answers arrive in.
+type hookSelectionRow struct {
+	name    string
+	stores  func() []hookStore
+	answers map[string]hookStoreLegResult
+	wantOut string
+	wantDir string
+	// wantErrClass matches a rendered error class (see hookSelectionErrClass).
+	// "" wants a nil error.
+	wantErrClass string
+	wantNoted    []string
+}
+
+// hookSelectionErrClass renders err into a comparable value with no pointers
+// in it: nil errors are "ok", and a hookSecondaryStoreFailure is named as the
+// aggregate it is. The text is deterministic for a given set of failed stores in
+// consumption order, which is exactly the order under test.
+func hookSelectionErrClass(err error) string {
+	if err == nil {
+		return "ok"
+	}
+	var secondary *hookSecondaryStoreFailure
+	if errors.As(err, &secondary) {
+		return "secondary failure naming " + strconv.Itoa(len(secondary.failures)) + " store(s): " + err.Error()
+	}
+	return "err: " + err.Error()
+}
+
+// runHookSelectionRow runs one row's fixture under one schedule and returns
+// the selection's whole observable outcome, plus canceledLegs, which receives
+// one token per leg that was still in flight and observed the shared context
+// cancel (the early-return cancellation edge). The wakeups are asynchronous,
+// so a caller asserting on cancellation waits on the channel rather than
+// reading a counter at return time.
+func runHookSelectionRow(t *testing.T, row hookSelectionRow, schedule hookSelectionSchedule) (out string, dir string, errClass string, noted []string, canceledLegs <-chan struct{}) {
+	t.Helper()
+	withHookStoreLegConcurrency(t, schedule.width)
+	stores := row.stores()
+	delays := schedule.delaysFor(stores)
+	canceled := make(chan struct{}, len(stores))
+	run := func(ctx context.Context, _, dir string, _ []string) (string, error) {
+		select {
+		case <-time.After(delays[hookStoreIndex(stores, dir)]):
+		case <-ctx.Done():
+			canceled <- struct{}{}
+			res := row.answers[dir]
+			return res.out, res.err
+		}
+		res := row.answers[dir]
+		return res.out, res.err
+	}
+	out, selected, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run, func(failure *hookStoreReadError) {
+		noted = append(noted, failure.Error())
+	})
+	return out, selected.dir, hookSelectionErrClass(err), noted, canceled
+}
+
+func hookStoreIndex(stores []hookStore, dir string) int {
+	for i := range stores {
+		if stores[i].dir == dir {
+			return i
+		}
+	}
+	return 0
+}
+
+// TestBestStoreWithWorkSelectionIndependentOfCompletionOrder pins the whole
+// behavioral contract of the concurrent fan-out (#5533, AC-2): the stores have
+// no obligation order between them — ranking compares their answers after the
+// fact — so the legs overlap, but every answer is consumed strictly in store
+// order and the selection a set of store answers produces must not depend on
+// WHEN each answer was ready. Each row encodes today's serial answers (the
+// width-1 sweep IS the serial behavior), and every overlapping sweep of the
+// same fixture must reproduce them byte for byte: same output, same store,
+// same error class, same noted failures — however the legs' delays are
+// permuted.
+func TestBestStoreWithWorkSelectionIndependentOfCompletionOrder(t *testing.T) {
+	// Pin the tie-break clock: a rotating tie reads the clock, and this test
+	// compares one invocation's answer across several schedulings, so wall
+	// clock would vary between them for no reason.
+	prevClock := hookTieBreakClock
+	hookTieBreakClock = func() time.Time { return time.Unix(1800000000, 0) }
+	t.Cleanup(func() { hookTieBreakClock = prevClock })
+
+	const (
+		workCityInProg = `[{"id":"ci-1","priority":3,"status":"in_progress","assignee":"me"}]`
+		workRigaP0     = `[{"id":"va-1","priority":0}]`
+		workCityP2     = `[{"id":"ci-2","priority":2}]`
+		resumeRiga     = `[{"id":"res-1","priority":2,"status":"in_progress","assignee":"me"}]`
+	)
+
+	threeStores := func() []hookStore {
+		return []hookStore{
+			{dir: "city"},
+			{dir: "riga", rig: "riga"},
+			{dir: "rigb", rig: "rigb"},
+		}
+	}
+
+	rows := []hookSelectionRow{
+		{
+			name:    "primary in-progress short-circuit",
+			stores:  threeStores,
+			answers: map[string]hookStoreLegResult{"city": {out: workCityInProg}, "riga": {out: workRigaP0}, "rigb": {out: "[]"}},
+			wantOut: workCityInProg,
+			wantDir: "city",
+		},
+		{
+			name:    "rank winner across stores",
+			stores:  threeStores,
+			answers: map[string]hookStoreLegResult{"city": {out: workCityP2}, "riga": {out: workRigaP0}, "rigb": {out: "[]"}},
+			wantOut: workRigaP0,
+			wantDir: "riga",
+		},
+		{
+			// A migrated bead is ready from more than one store under the SAME
+			// id: the same row, not two tied pieces of work, and the first-seen
+			// store keeps it (hookTiedIDSeen) whatever order they answer in.
+			name:   "pinned tie (same migrated id)",
+			stores: threeStores,
+			answers: map[string]hookStoreLegResult{
+				"city": {out: `[{"id":"moved-1","priority":1}]`},
+				"riga": {out: `[{"id":"moved-1","priority":1}]`},
+				"rigb": {out: "[]"},
+			},
+			wantOut: `[{"id":"moved-1","priority":1}]`,
+			wantDir: "city",
+		},
+		{
+			name:   "unrankable output degrades to first-hit",
+			stores: threeStores,
+			answers: map[string]hookStoreLegResult{
+				"city": {out: "va-1 some plain-text row"},
+				"riga": {out: workRigaP0},
+				"rigb": {out: "[]"},
+			},
+			wantOut: "va-1 some plain-text row",
+			wantDir: "city",
+		},
+		{
+			name:    "primary read error with work in a rig",
+			stores:  threeStores,
+			answers: map[string]hookStoreLegResult{"city": {err: errTestStoreTimeout}, "riga": {out: workRigaP0}, "rigb": {out: "[]"}},
+			wantOut: workRigaP0,
+			wantDir: "riga",
+		},
+		{
+			name:         "primary read error with no work anywhere",
+			stores:       threeStores,
+			answers:      map[string]hookStoreLegResult{"city": {err: errTestStoreTimeout}, "riga": {out: "[]"}, "rigb": {out: "[]"}},
+			wantOut:      "",
+			wantDir:      "",
+			wantErrClass: "err: " + errTestStoreTimeout.Error(),
+		},
+		{
+			name:         "secondary failure only names the unread store",
+			stores:       threeStores,
+			answers:      map[string]hookStoreLegResult{"city": {out: "[]"}, "riga": {err: errTestStoreTimeout}, "rigb": {out: "[]"}},
+			wantOut:      "",
+			wantDir:      "",
+			wantErrClass: "secondary failure naming 1 store(s):",
+		},
+		{
+			// A rig whose managed Dolt runtime is down does not hold the answer
+			// up: it is passed to noted and the invocation answers without it.
+			name:   "down managed rig is noted, not fatal",
+			stores: threeStores,
+			answers: map[string]hookStoreLegResult{
+				"city": {out: "[]"},
+				"riga": {out: "[]"},
+				"rigb": {err: fmt.Errorf("%w: %w", errHookRigRuntimeUnavailable, errTestStoreTimeout)},
+			},
+			wantOut: "[]",
+			wantDir: "",
+			wantNoted: []string{
+				`work query against rig "rigb" store rigb failed: ` + errHookRigRuntimeUnavailable.Error() + ": " + errTestStoreTimeout.Error(),
+			},
+		},
+		{
+			// The federated reader pinned to the primary, primary fails: every
+			// extra leg is a partial view, so no answer may come from them and
+			// the primary's error is the invocation's answer.
+			name: "federated-pinned primary failure without a resume answer",
+			stores: func() []hookStore {
+				stores := threeStores()
+				stores[1].command = "q-single-store"
+				stores[2].command = "q-single-store"
+				return stores
+			},
+			answers:      map[string]hookStoreLegResult{"city": {err: errTestStoreTimeout}, "riga": {out: workRigaP0}, "rigb": {out: "[]"}},
+			wantOut:      "",
+			wantDir:      "",
+			wantErrClass: "err: " + errTestStoreTimeout.Error(),
+		},
+		{
+			// ...with the single exception that a resume row is this session's
+			// own work: no federated view could overturn it, and refusing it
+			// would regress crash recovery whenever the primary is down.
+			name: "federated-pinned primary failure keeps the resume answer",
+			stores: func() []hookStore {
+				stores := threeStores()
+				stores[1].command = "q-single-store"
+				stores[2].command = "q-single-store"
+				return stores
+			},
+			answers: map[string]hookStoreLegResult{"city": {err: errTestStoreTimeout}, "riga": {out: resumeRiga}, "rigb": {out: "[]"}},
+			wantOut: resumeRiga,
+			wantDir: "riga",
+		},
+	}
+
+	// The schedules: per-leg delays in store order, reversed, and seeded-random
+	// (the permutation is fixed by the seed so a failure reproduces), once at
+	// the production width and once at width 1, which is exactly the serial
+	// behavior and therefore the oracle every other sweep must match.
+	ascDelays := func(n int) []time.Duration {
+		delays := make([]time.Duration, n)
+		for i := range delays {
+			delays[i] = time.Duration(i) * 30 * time.Millisecond
+		}
+		return delays
+	}
+	schedules := []hookSelectionSchedule{
+		{
+			name:  "delays in store order",
+			width: 8,
+			delaysFor: func(stores []hookStore) []time.Duration {
+				return ascDelays(len(stores))
+			},
+		},
+		{
+			name:  "delays reversed",
+			width: 8,
+			delaysFor: func(stores []hookStore) []time.Duration {
+				delays := ascDelays(len(stores))
+				for i, j := 0, len(delays)-1; i < j; i, j = i+1, j-1 {
+					delays[i], delays[j] = delays[j], delays[i]
+				}
+				return delays
+			},
+		},
+		{
+			name:  "delays shuffled (seeded)",
+			width: 8,
+			delaysFor: func(stores []hookStore) []time.Duration {
+				delays := ascDelays(len(stores))
+				rnd := rand.New(rand.NewSource(5533)) //nolint:gosec // a fixed seed is the point: a failure must reproduce
+				rnd.Shuffle(len(delays), func(i, j int) { delays[i], delays[j] = delays[j], delays[i] })
+				return delays
+			},
+		},
+		{
+			name:  "serial (width 1), delays in store order",
+			width: 1,
+			delaysFor: func(stores []hookStore) []time.Duration {
+				return ascDelays(len(stores))
+			},
+		},
+	}
+
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			type selectionObservation struct {
+				out, dir, errClass string
+				noted              []string
+			}
+			observed := make([]selectionObservation, len(schedules))
+			for i, schedule := range schedules {
+				out, dir, errClass, noted, _ := runHookSelectionRow(t, row, schedule)
+				observed[i] = selectionObservation{out: out, dir: dir, errClass: errClass, noted: noted}
+			}
+			serial := observed[len(observed)-1] // the width-1 sweep: today's serial behavior
+			for i, schedule := range schedules {
+				obs := observed[i]
+				if obs.out != row.wantOut {
+					t.Errorf("%s: out = %q, want %q", schedule.name, obs.out, row.wantOut)
+				}
+				if obs.dir != row.wantDir {
+					t.Errorf("%s: store.dir = %q, want %q", schedule.name, obs.dir, row.wantDir)
+				}
+				if row.wantErrClass == "" && obs.errClass != "ok" {
+					t.Errorf("%s: errClass = %q, want no error", schedule.name, obs.errClass)
+				}
+				if row.wantErrClass != "" && !strings.HasPrefix(obs.errClass, row.wantErrClass) {
+					t.Errorf("%s: errClass = %q, want prefix %q", schedule.name, obs.errClass, row.wantErrClass)
+				}
+				if fmt.Sprintf("%v", obs.noted) != fmt.Sprintf("%v", row.wantNoted) {
+					t.Errorf("%s: noted = %v, want %v", schedule.name, obs.noted, row.wantNoted)
+				}
+				if i != len(observed)-1 && (obs.out != serial.out || obs.dir != serial.dir || obs.errClass != serial.errClass || fmt.Sprintf("%v", obs.noted) != fmt.Sprintf("%v", serial.noted)) {
+					t.Errorf("%s: selection ({out %q dir %q err %q}, noted %v) differs from the serial answer ({out %q dir %q err %q}, noted %v)",
+						schedule.name, obs.out, obs.dir, obs.errClass, obs.noted, serial.out, serial.dir, serial.errClass, serial.noted)
+				}
+			}
+			// The early-return edge: in the short-circuit row, the legs still
+			// in flight when the primary answered must observe the shared
+			// context cancel. At width 1 nothing is in flight, so the sweep
+			// that must show it is an overlapping one whose slow legs are
+			// still sleeping when the primary answers.
+			if row.name == "primary in-progress short-circuit" {
+				canceling := hookSelectionSchedule{
+					name:  "overlapping, primary first",
+					width: 8,
+					delaysFor: func(stores []hookStore) []time.Duration {
+						delays := ascDelays(len(stores))
+						for i := 1; i < len(delays); i++ {
+							delays[i] = 250 * time.Millisecond
+						}
+						return delays
+					},
+				}
+				_, _, _, _, canceled := runHookSelectionRow(t, row, canceling)
+				sawCancel := 0
+				deadline := time.After(2 * time.Second)
+			awaitCancel:
+				for {
+					select {
+					case <-canceled:
+						sawCancel++
+					case <-deadline:
+						break awaitCancel
+					}
+				}
+				if sawCancel == 0 {
+					t.Errorf("no leg observed ctx.Done() after the short-circuit return: the legs still in flight were not canceled")
+				}
+			}
+		})
 	}
 }
