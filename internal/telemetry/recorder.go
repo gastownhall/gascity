@@ -15,7 +15,6 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	otellog "go.opentelemetry.io/otel/log"
-	"go.opentelemetry.io/otel/log/global"
 	"go.opentelemetry.io/otel/metric"
 )
 
@@ -222,7 +221,7 @@ func statusStr(err error) string {
 
 // emit sends an OTel log event with the given body and key-value attributes.
 func emit(ctx context.Context, body string, sev otellog.Severity, attrs ...attribute.KeyValue) {
-	logger := global.GetLoggerProvider().Logger(loggerName)
+	logger := otel.GetLoggerProvider().Logger(loggerName)
 	var r otellog.Record
 	r.SetBody(attribute.StringValue(body))
 	r.SetSeverity(sev)

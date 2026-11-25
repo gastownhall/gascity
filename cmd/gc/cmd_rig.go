@@ -28,7 +28,7 @@ import (
 const rigDeferredStoreInitWait = 30 * time.Second
 
 var (
-	rigReloadControllerConfig = reloadControllerConfig
+	rigReloadControllerConfig = reloadControllerConfigAndWait
 	rigWaitForStoreAccessible = waitForRigStoreAccessible
 	rigListSessionProvider    = newSessionProvider
 )
@@ -402,11 +402,7 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 				fmt.Fprintf(stderr, "gc rig add: warning: writing .beads/.env: %v\n", err) //nolint:errcheck // best-effort stderr
 			}
 
-			if err := rigReloadControllerConfig(cityPath); err == nil && pc.Deferred && cityUsesBdStoreContract(cityPath) {
-				if waitErr := rigWaitForStoreAccessible(cityPath, rigPath, rigDeferredStoreInitWait); waitErr != nil {
-					fmt.Fprintf(stderr, "gc rig add: warning: controller init still pending for rig %q: %v\n", name, waitErr) //nolint:errcheck // best-effort stderr
-				}
-			}
+			reloadControllerAfterRigAdd(cityPath, rigPath, name, pc.Deferred, stderr)
 			return nil
 		},
 		OnStep: func(s rig.ProvisionStep) {
@@ -449,6 +445,23 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 	return r, 0
 }
 
+// reloadControllerAfterRigAdd asks the controller to apply the config a rig add
+// just saved and, for a rig whose store init was deferred to the controller on
+// a bd-store city, waits for that store to become accessible. The rig is
+// already saved, so an incomplete reload or a store that is still pending only
+// warns.
+func reloadControllerAfterRigAdd(cityPath, rigPath, name string, deferred bool, stderr io.Writer) {
+	reloadErr := rigReloadControllerConfig(cityPath)
+	if errors.Is(reloadErr, errRigReloadIncomplete) {
+		fmt.Fprintf(stderr, "gc rig add: warning: rig %q saved but controller reload did not complete: %v; run gc reload\n", name, reloadErr) //nolint:errcheck // best-effort stderr
+	}
+	if reloadErr == nil && deferred && cityUsesBdStoreContract(cityPath) {
+		if waitErr := rigWaitForStoreAccessible(cityPath, rigPath, rigDeferredStoreInitWait); waitErr != nil {
+			fmt.Fprintf(stderr, "gc rig add: warning: controller init still pending for rig %q: %v\n", name, waitErr) //nolint:errcheck // best-effort stderr
+		}
+	}
+}
+
 // recordNewRigClean writes the S4 clean record for a rig `gc rig add` just
 // added, adopted or re-added on a split city whose binding has converged,
 // when a census of its store finds no infrastructure row (recordCensusClean):
@@ -477,7 +490,7 @@ func recordNewRigClean(cityPath string, cfg *config.City, r config.Rig, stderr i
 	// create (or start a server for) the store being asked about.
 	row := rigCensusRow{Rig: r.Name, State: rigCensusAwaiting}
 	if !rigScopeHasNoStore(cityPath, r) {
-		row = censusRig(cityPath, loadedCityName(cfg, cityPath), cfg, target, r, false)
+		row = censusRig(cityPath, loadedCityName(cfg, cityPath), cfg, target, r, false, storageForce{})
 	}
 	if _, err := recordCensusClean(cityPath, target, r, &row, "gc rig add"); err != nil {
 		fmt.Fprintf(stderr, "gc rig add: warning: recording rig %s clean for the split store: %v (run `%s` to record it)\n", r.Name, err, rigImportInstruction(r.Name)) //nolint:errcheck // best-effort stderr
@@ -1159,6 +1172,38 @@ func cmdRigSuspend(args []string, stdout, stderr io.Writer) int {
 	return finishDirectRigSuspension(cityPath, "suspend", doRigSuspend(fsys.OSFS{}, cityPath, rigName, stdout, stderr), stderr)
 }
 
+// errRigReloadIncomplete reports that a running controller answered the
+// reload request without applying the new config.
+var errRigReloadIncomplete = errors.New("controller reload did not complete")
+
+// reloadControllerConfigAndWait asks the running controller to reload config
+// and returns once it has applied it. `gc rig add` needs this: a reload that is
+// only queued leaves the controller serving `gc ready` from the pre-rig config
+// until its reconcile tick starts the reload, so work created in the new rig
+// right after the add is missing from a controller-served answer. Only an
+// absent controller (no socket, a refused connection, or an unavailable
+// controller) wakes the supervisor as reloadControllerConfig does; any other
+// failed exchange with a running controller reports errRigReloadIncomplete.
+func reloadControllerConfigAndWait(cityPath string) error {
+	if onWorkerSite(cityPath) {
+		return errWorkerSiteNoController
+	}
+	reply, err := sendReloadControlRequestHook(cityPath, reloadControlRequest{Wait: true, Timeout: "5m"})
+	if err != nil {
+		// No controller listening: wake the supervisor; a later start reads the saved rig.
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, errControllerUnavailable) {
+			return pokeSupervisor()
+		}
+		// A controller answered the connection but the exchange failed (timeout,
+		// unresponsive, unparsable reply): the rig is saved but may not be served yet.
+		return fmt.Errorf("%w: %w", errRigReloadIncomplete, err)
+	}
+	if reply.Outcome != reloadOutcomeApplied && reply.Outcome != reloadOutcomeNoChange {
+		return fmt.Errorf("%w: outcome=%q error=%q message=%q", errRigReloadIncomplete, reply.Outcome, reply.Error, reply.Message)
+	}
+	return nil
+}
+
 // Direct writes bypass the API's mutateAndPoke path. Reload the running
 // controller so its rig store picks up the changed background-refresh gate.
 func finishDirectRigSuspension(cityPath, action string, code int, stderr io.Writer) int {
@@ -1387,8 +1432,34 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 
 	// Remove the rig and every block that would dangle without it (#3666).
 	if !cfg.RemoveRig(rigName) {
-		fmt.Fprintln(stderr, rigNotFoundMsg("gc rig remove", rigName, cfg)) //nolint:errcheck // best-effort stderr
-		return 1
+		// city.toml has no entry, but .gc/site.toml may still carry a
+		// machine-local binding orphaned by an out-of-band city.toml edit
+		// (a hand edit, a git pull, or a regeneration script never touches
+		// the machine-local file). Clean that up instead of just erroring,
+		// since the command's own help text promises it removes the site
+		// binding too (#8337).
+		binding, err := config.LoadSiteBinding(fsys.OSFS{}, cityPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc rig remove: loading site binding: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		hasOrphanBinding := false
+		for _, r := range binding.Rigs {
+			if strings.TrimSpace(r.Name) == rigName {
+				hasOrphanBinding = true
+				break
+			}
+		}
+		if !hasOrphanBinding {
+			fmt.Fprintln(stderr, rigNotFoundMsg("gc rig remove", rigName, cfg)) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if err := config.PersistRigSiteBindingsRemovingRigs(fsys.OSFS{}, cityPath, cfg.Rigs, rigName); err != nil {
+			fmt.Fprintf(stderr, "gc rig remove: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		fmt.Fprintf(stdout, "Rig '%s' is not declared in city.toml; removed its orphaned .gc/site.toml binding\n", rigName) //nolint:errcheck // best-effort stdout
+		return 0
 	}
 
 	// Detach before changing city.toml. If its write fails, the configured rig

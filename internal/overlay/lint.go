@@ -137,6 +137,7 @@ var toolMatcherEvents = map[string]bool{
 	"PostToolUse":        true,
 	"PostToolUseFailure": true,
 	"PermissionRequest":  true,
+	"PermissionDenied":   true,
 }
 
 // knownToolNames are the built-in Claude Code tools a hook matcher can name.

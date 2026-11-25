@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -40,10 +41,12 @@ type laneHostEnvFake struct {
 	enqueued []reconcilekey.Key
 }
 
-func (e *laneHostEnvFake) SessionsBeadStore() beads.SessionStore {
+// Stores is a single-store city over the env's store, with no projection: its
+// sessions handle wraps exactly the store a test set.
+func (e *laneHostEnvFake) Stores() storeref.Stores {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return beads.SessionStore{Store: e.store}
+	return storeref.NewStores(storeref.Topology{Work: storeref.Leg{Ref: storeref.WorkRef, Store: e.store}}, storeref.StoresOptions{})
 }
 
 // setStore replaces the sessions store the env answers.
@@ -973,11 +976,17 @@ func TestLaneWorkerNextDelay(t *testing.T) {
 	}
 }
 
-// TestLaneWorkerRechecksAStartingWake pins the quick recheck through a woken
-// session's start: a pass that finds the session starting rechecks at
-// laneWakeRecheck up to startFor after the recorded wake, and otherwise waits
-// for the op's own Next. A take, or any other wait, ends it.
-func TestLaneWorkerRechecksAStartingWake(t *testing.T) {
+// TestLaneWorkerRechecksAStartingSession pins the quick recheck through a
+// session's start: a pass that finds its op waiting on a session still being
+// created or started rechecks at laneWakeRecheck, whoever started the session,
+// up to startFor after the worker first saw it starting (or after the wake the
+// lane recorded), and otherwise waits for the op's own Next.
+//
+// A session a create request is starting gets no wake from the lane and its
+// row is written in process, so nothing rings the lane when it becomes ready:
+// without the recheck its first message waits for the anti-entropy scan, up
+// to a minute after the agent could have taken it.
+func TestLaneWorkerRechecksAStartingSession(t *testing.T) {
 	next := laneT0.Add(24 * time.Hour)
 	blocked := func(detail string) lanePassOutcome {
 		return lanePassOutcome{res: opjournal.PassResult{Next: next, Waits: []opjournal.OpWait{
@@ -986,19 +995,24 @@ func TestLaneWorkerRechecksAStartingWake(t *testing.T) {
 	}
 	starting, held := blocked(session.ContentGateStarting), blocked(session.ContentGateHeld)
 	woke := lanePassOutcome{res: opjournal.PassResult{Wake: true}, wake: session.WakeRecorded}
+	notDormant := lanePassOutcome{res: opjournal.PassResult{Wake: true, Next: next, Waits: starting.res.Waits}, wake: session.WakeNotDormant}
 	took := lanePassOutcome{res: opjournal.PassResult{Took: opjournal.TakeContent}}
 	for _, tc := range []struct {
 		name    string
 		before  []lanePassOutcome
 		advance time.Duration
+		last    *lanePassOutcome
 		quick   bool
 	}{
-		{name: "no wake recorded"},
+		{name: "starting, no wake recorded", quick: true},
+		{name: "starting, the wake refused as not dormant", last: &notDormant, quick: true},
 		{name: "after a recorded wake", before: []lanePassOutcome{woke}, quick: true},
 		{name: "still starting inside startFor", before: []lanePassOutcome{woke, starting}, advance: time.Minute - time.Second, quick: true},
-		{name: "startFor passed", before: []lanePassOutcome{woke, starting}, advance: time.Minute},
-		{name: "another wait ended it", before: []lanePassOutcome{woke, held}},
-		{name: "a take ended it", before: []lanePassOutcome{woke, took}},
+		{name: "startFor passed since the wake", before: []lanePassOutcome{woke, starting}, advance: time.Minute},
+		{name: "still starting inside startFor, no wake", before: []lanePassOutcome{starting}, advance: time.Minute - time.Second, quick: true},
+		{name: "startFor passed since it was first seen starting", before: []lanePassOutcome{starting}, advance: time.Minute},
+		{name: "starting again after another wait", before: []lanePassOutcome{starting, held}, advance: time.Minute, quick: true},
+		{name: "starting again after a take", before: []lanePassOutcome{woke, took}, quick: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clk := &laneTestClock{now: laneT0}
@@ -1011,10 +1025,42 @@ func TestLaneWorkerRechecksAStartingWake(t *testing.T) {
 			if tc.quick {
 				want = laneWakeRecheck
 			}
-			if d, idle := w.nextDelay(starting); d != want || idle {
+			out := starting
+			if tc.last != nil {
+				out = *tc.last
+			}
+			if d, idle := w.nextDelay(out); d != want || idle {
 				t.Errorf("delay %s idle %v, want %s", d, idle, want)
 			}
 		})
+	}
+	// Any other content block is not a start: it changes on no schedule of
+	// the lane's, and is not looked at again early.
+	w := &conversationLaneWorker{clk: &laneTestClock{now: laneT0}, startFor: time.Minute}
+	if d, idle := w.nextDelay(held); d != next.Sub(laneT0) || idle {
+		t.Errorf("held: delay %s idle %v, want the op's own Next", d, idle)
+	}
+}
+
+// TestLaneWorkerRechecksAStartingSessionResetsOnTake pins that a take resets
+// startingSince: 70813cc's "starting again after a take" case starts from
+// woke, so it never exercises the reset on take by itself. Here a take ends a
+// startFor-old starting stretch, and the very next pass that finds the
+// (perhaps different) session starting again still gets the quick recheck,
+// because the take cleared startingSince rather than leaving it stale.
+func TestLaneWorkerRechecksAStartingSessionResetsOnTake(t *testing.T) {
+	next := laneT0.Add(24 * time.Hour)
+	starting := lanePassOutcome{res: opjournal.PassResult{Next: next, Waits: []opjournal.OpWait{
+		{ID: "op-1", Reason: opjournal.WaitContentBlock, Detail: session.ContentGateStarting},
+	}}}
+	took := lanePassOutcome{res: opjournal.PassResult{Took: opjournal.TakeContent}}
+	clk := &laneTestClock{now: laneT0}
+	w := &conversationLaneWorker{clk: clk, startFor: time.Minute}
+	w.nextDelay(starting)
+	clk.Advance(time.Minute)
+	w.nextDelay(took)
+	if d, idle := w.nextDelay(starting); d != laneWakeRecheck || idle {
+		t.Errorf("starting again after a take: delay %s idle %v, want %s", d, idle, laneWakeRecheck)
 	}
 }
 
@@ -2201,5 +2247,31 @@ func TestExplicitEmptyAuthoritativeRollsBackAndWarns(t *testing.T) {
 	gh.start()
 	if logs := gh.logLines(); len(logs) != 1 || !strings.Contains(logs[0], "[daemon] nudge_dispatcher is deprecated") || strings.Contains(logs[0], "remove it") {
 		t.Fatalf("logs = %q, want the nudge_dispatcher deprecation, without asking for removal", logs)
+	}
+}
+
+// laneStoreWithoutBatches is a store whose guarded batches are hidden: a lane
+// host refuses to run over it.
+type laneStoreWithoutBatches struct{ beads.Store }
+
+// TestLaneHostServesTheSessionsBindingOnASplitCity pins the lane host's
+// sessions reads to the sessions class on a split city (typed-stores T6c):
+// the host decides to run over the sessions binding, which holds guarded
+// batches, though the work store beside it does not, and its op store opens
+// over that binding.
+func TestLaneHostServesTheSessionsBindingOnASplitCity(t *testing.T) {
+	binding := newLaneTestStore()
+	f := newLaneFixtureOver(t, binding)
+	work := laneStoreWithoutBatches{beads.NewMemStore()}
+	cs := &controllerState{cityBeadStore: work, storageRoutes: splitRoutes(binding), cfg: f.cfg, sp: f.sp, cityPath: f.dir, beadsQuiescent: new(atomic.Bool)}
+	h := newConversationLaneHost(cs, []string{"message"}, session.StopRequestsLive)
+	if state := h.decide(); state != laneHostStateRunning {
+		t.Fatalf("decide = %q (%s), want running over the sessions binding", state, h.reason)
+	}
+	if _, _, err := h.store(); err != nil {
+		t.Fatalf("store = %v, want the op store opened over the sessions binding", err)
+	}
+	if !sameBeadStore(h.stOver, binding) {
+		t.Errorf("the op store opened over %T, want the sessions binding", h.stOver)
 	}
 }

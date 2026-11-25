@@ -18,7 +18,8 @@ import (
 // report a fault, not routine state.
 
 // logAssignedWorkBeads prints the tick's assigned-work snapshot when GC_DEBUG
-// is on.
+// is on. Bead.Status collapses bd's deferred status into "open", so each row
+// also carries deferred=<bool> to tell a deferred bead from an open one.
 func logAssignedWorkBeads(stderr io.Writer, rows []beads.Bead, rigStores int) {
 	if !gcDebugEnabled() {
 		return
@@ -29,7 +30,7 @@ func logAssignedWorkBeads(stderr io.Writer, rows []beads.Bead, rigStores int) {
 	}
 	fmt.Fprintf(stderr, "assignedWorkBeads: %d beads found\n", len(rows)) //nolint:errcheck
 	for _, wb := range rows {
-		fmt.Fprintf(stderr, "  %s assignee=%s routed=%s status=%s\n", wb.ID, wb.Assignee, wb.Metadata[beadmeta.RoutedToMetadataKey], wb.Status) //nolint:errcheck
+		fmt.Fprintf(stderr, "  %s assignee=%s routed=%s status=%s deferred=%t\n", wb.ID, wb.Assignee, wb.Metadata[beadmeta.RoutedToMetadataKey], wb.Status, wb.IndefinitelyDeferred) //nolint:errcheck
 	}
 }
 

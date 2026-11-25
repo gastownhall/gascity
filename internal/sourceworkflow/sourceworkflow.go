@@ -20,7 +20,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -29,6 +28,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 )
 
 // ConflictError is returned when a graph workflow launch is blocked by one
@@ -79,6 +79,13 @@ const RunCanceledCloseReason = "run canceled via POST /runs/{id}/cancel"
 // input convoy work is already terminal (cmd/gc skipDoneWorkflow, which keeps
 // its own copy; a cmd/gc test pins that the two agree).
 const HookSkipDoneWorkflowCloseReason = "hook --claim: input convoy work already terminal; nothing to do"
+
+// HookInputPurgedWorkflowCloseReason is the close_reason `gc hook --claim`
+// stamps on every open bead under a graph.v2 workflow root (by
+// gc.root_bead_id) whose input convoy work is proven to exist in no store of
+// the city (cmd/gc failPurgedWorkflow), beside gc.outcome=fail,
+// gc.failure_class=hard and gc.failure_reason=input_purged.
+const HookInputPurgedWorkflowCloseReason = "hook --claim: workflow input convoy work no longer exists in any store"
 
 // StaleOrderWispCloseReason is the close_reason the order-tracking sweep
 // stamps on every bead of a stale order wisp subtree it closes (cmd/gc
@@ -381,10 +388,11 @@ func WithLock(ctx context.Context, cityPath, scopeRef, sourceBeadID string, fn f
 		return fmt.Errorf("open source workflow lock: %w", err)
 	}
 	defer f.Close() //nolint:errcheck // best-effort cleanup
-	if err := lockFile(ctx, f, sourceBeadID); err != nil {
+	lock, err := lockFile(ctx, f, sourceBeadID)
+	if err != nil {
 		return err
 	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN) //nolint:errcheck // best-effort unlock
+	defer lock.Release() //nolint:errcheck // best-effort unlock
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -437,20 +445,24 @@ func (l *localLock) Unlock() {
 	l.token <- struct{}{}
 }
 
-func lockFile(ctx context.Context, f *os.File, sourceBeadID string) error {
+func lockFile(ctx context.Context, f *os.File, sourceBeadID string) (*filelock.Lock, error) {
 	for {
-		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		lock, err := filelock.Acquire(f, filelock.Options{
+			Mode:        filelock.Exclusive,
+			NonBlocking: true,
+			Label:       f.Name(),
+		})
 		if err == nil {
-			return nil
+			return lock, nil
 		}
-		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
-			return fmt.Errorf("lock source workflow %q: %w", sourceBeadID, err)
+		if !errors.Is(err, filelock.ErrBusy) {
+			return nil, fmt.Errorf("lock source workflow %q: %w", sourceBeadID, err)
 		}
 		timer := time.NewTimer(fileLockRetryInterval)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return ctx.Err()
+			return nil, ctx.Err()
 		case <-timer.C:
 		}
 	}

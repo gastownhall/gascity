@@ -19,10 +19,10 @@ import (
 // switch off. Every reading a point's rule judges is taken on the decision
 // path, before the point hands control back to its caller: a baseline before
 // gc types, the reading just before a look whose verdict gc acts on at once,
-// or the reading right after a wait decided. Each is one tmux read (pending's
-// comes from the state cache). Read any later, it could judge what gc did
-// with the decision instead (a delivery typed as soon as a wait returns
-// starts a turn). Everything after that read (any follow-up that times the
+// or the reading right after a wait decided. Each is one tmux read, past the
+// state cache (pending's is taken right after the parsers' capture). Read
+// any later, it could judge what gc did with the decision instead (a
+// delivery typed as soon as a wait returns starts a turn). Everything after that read (any follow-up that times the
 // program's own signal, the hand-off to the sink) runs on a bounded
 // background goroutine, and a point whose work finds no free slot is dropped
 // and counted, never waited for. A comparison carries the reading its rule
@@ -110,9 +110,13 @@ type shadowInterrupt struct {
 }
 
 // shadowSink returns the sink comparisons go to, nil unless the switch is
-// shadow and a sink is configured.
+// shadow, a sink is configured, and the process records comparisons
+// (Config.ComparisonEnabled).
 func (t *Tmux) shadowSink() runtime.ProgramStatusComparisonSink {
 	if t.programStatusMode() != runtime.ProgramStatusShadow {
+		return nil
+	}
+	if t.cfg.ComparisonEnabled != nil && !t.cfg.ComparisonEnabled() {
 		return nil
 	}
 	return t.cfg.ComparisonSink
@@ -225,14 +229,25 @@ func (t *Tmux) claimShadowFollow(session string, point runtime.ProgramStatusPoin
 // pane_dead, then programPaneFormat, terminated against the executor's trim.
 const programFreshFormat = "#{pane_dead}\t" + programPaneFormat + "\t" + runtimeInventoryEnd
 
-// shadowRead takes one fresh reading of session's agent pane: one tmux
-// list-panes of the session, bounded by shadowReadTimeout, folded to its
-// agent pane and judged under the switch, with the tap liveness of the state
-// cache's last process table. ok is false when the leaf is not shadowing,
-// session is not a session name, or the read failed: there is nothing to
-// compare.
+// shadowRead takes one fresh reading of session's agent pane (programRead).
+// ok is false when the leaf is not shadowing, session is not a session name,
+// or the read failed: there is nothing to compare.
 func (t *Tmux) shadowRead(session string) (runtime.ProgramStatus, bool) {
-	if !t.shadowing() || !validSessionNameRe.MatchString(session) {
+	if !t.shadowing() {
+		return runtime.ProgramStatus{}, false
+	}
+	return t.programRead(session)
+}
+
+// programRead takes one fresh reading of session's agent pane, past the
+// state cache: one tmux list-panes of the session, bounded by
+// shadowReadTimeout, folded to its agent pane and judged under the switch,
+// with the tap liveness of the state cache's last process table. ok is
+// false, and nothing is read, while the switch is off; it is false as well
+// when session is not a session name or the read failed.
+func (t *Tmux) programRead(session string) (runtime.ProgramStatus, bool) {
+	mode := t.programStatusMode()
+	if mode == runtime.ProgramStatusOff || !validSessionNameRe.MatchString(session) {
 		return runtime.ProgramStatus{}, false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), shadowReadTimeout)
@@ -258,7 +273,7 @@ func (t *Tmux) shadowRead(session string) (runtime.ProgramStatus, bool) {
 	if t.shadow.taps != nil {
 		taps = t.shadow.taps()
 	}
-	return judgeProgramPane(t.programStatusMode(), t.captureGatePassed(), pane, named, taps), true
+	return judgeProgramPane(mode, t.captureGatePassed(), pane, named, taps), true
 }
 
 // shadowDecision is the reading a decision point's rule judges, and when it
@@ -507,13 +522,19 @@ func (t *Tmux) shadowNoteInterrupt(session string) {
 	if !ok {
 		return
 	}
+	t.keepInterrupt(session, shadowInterrupt{baseline: s.Baseline(), at: time.Now()})
+}
+
+// keepInterrupt keeps mark as session's last interrupt, for the settle wait
+// that follows it (takeShadowInterrupt).
+func (t *Tmux) keepInterrupt(session string, mark shadowInterrupt) {
 	sh := &t.shadow
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
 	if sh.interrupts == nil || len(sh.interrupts) >= 4096 {
 		sh.interrupts = make(map[string]shadowInterrupt)
 	}
-	sh.interrupts[session] = shadowInterrupt{baseline: s.Baseline(), at: time.Now()}
+	sh.interrupts[session] = mark
 }
 
 // takeShadowInterrupt returns and forgets session's interrupt baseline when
@@ -569,9 +590,15 @@ func (t *Tmux) shadowSettleFrom(session string, mark shadowInterrupt, decidedAt 
 }
 
 // shadowTypingGate records a typing gate (typing_gate): the parser look's
-// verdict (lookErr, nil when it let the keys through) beside the record's
-// pending verdict in s, read at the same moment.
-func (t *Tmux) shadowTypingGate(session string, lookErr error, s runtime.ProgramStatus) {
+// verdict (lookErr, nil when it let the keys through), taken at lookAt (a
+// clock read before the look), beside the record's fresh pending verdict
+// (runtime.ProgramFreshPendingVerdict) on s, read fresh with the look. A
+// look that read the pane is observed, with s, into the session's dialog
+// watch, so a dialog close it saw supersedes the blocked record the dialog
+// was seen with. A look that could not read the pane observes nothing and is
+// judged on the watch as it stands, which supersedes nothing while its
+// latest capture showed a dialog.
+func (t *Tmux) shadowTypingGate(session string, lookErr error, lookAt time.Time, s runtime.ProgramStatus) {
 	scrape := runtime.ProgramVerdictNone
 	switch {
 	case errors.Is(lookErr, runtime.ErrPendingInteraction):
@@ -579,17 +606,23 @@ func (t *Tmux) shadowTypingGate(session string, lookErr error, s runtime.Program
 	case lookErr != nil:
 		scrape = runtime.ProgramVerdictIndeterminate
 	}
+	var reading runtime.ProgramPendingReading
+	if scrape == runtime.ProgramVerdictIndeterminate {
+		reading = runtime.ProgramPendingReading{Status: s, Dialogs: t.dialogWatch(session)}
+	} else {
+		reading = t.pendingReading(session, lookAt, scrape == runtime.ProgramVerdictPending, s)
+	}
 	now := time.Now()
 	t.shadowGo(func() {
-		t.shadowEmit(session, runtime.ProgramPointTypingGate, scrape, runtime.ProgramPendingVerdict(s, time.Time{}, now), s, now, 0, false)
+		t.shadowEmit(session, runtime.ProgramPointTypingGate, scrape, runtime.ProgramFreshPendingVerdict(reading, time.Time{}, now), s, now, 0, false)
 	})
 }
 
 // shadowTypingGateNow is shadowTypingGate with a reading taken now, for a
-// look that refused before any baseline was needed.
-func (t *Tmux) shadowTypingGateNow(session string, lookErr error) {
+// look taken at lookAt that refused before any baseline was needed.
+func (t *Tmux) shadowTypingGateNow(session string, lookErr error, lookAt time.Time) {
 	if s, ok := t.shadowRead(session); ok {
-		t.shadowTypingGate(session, lookErr, s)
+		t.shadowTypingGate(session, lookErr, lookAt, s)
 	}
 }
 

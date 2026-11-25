@@ -180,6 +180,36 @@ func TestNudgePollCityStopped(t *testing.T) {
 	}
 }
 
+func TestNudgePollCitySuspendedDrained(t *testing.T) {
+	t.Setenv("GC_SUSPENDED", "")
+	running := runtime.NewFake()
+	if err := running.Start(context.Background(), "worker-session", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	cases := []struct {
+		name      string
+		suspended bool
+		sp        runtime.Provider
+		want      bool
+	}{
+		{name: "city suspended, session gone", suspended: true, sp: runtime.NewFake(), want: true},
+		{name: "city suspended, session still draining", suspended: true, sp: running, want: false},
+		{name: "city running, session gone (a wake may be in progress)", suspended: false, sp: runtime.NewFake(), want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			if tc.suspended {
+				suspendCityAt(t, cityPath)
+			}
+			target := nudgeTarget{cityPath: cityPath, sessionName: "worker-session"}
+			if got := nudgePollCitySuspendedDrained(target, tc.sp); got != tc.want {
+				t.Fatalf("nudgePollCitySuspendedDrained = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestCmdNudgePollExitsWithoutObservingWhenItsCityIsStopped(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
@@ -256,5 +286,93 @@ func TestCmdNudgePollExitsWithoutObservingWhenItsCityIsStopped(t *testing.T) {
 	}
 	if len(state.Pending) != 1 || state.Pending[0].ID != item.ID {
 		t.Fatalf("pending after exit = %+v, want queued nudge %s kept for the next start", state.Pending, item.ID)
+	}
+}
+
+// A suspended city keeps its controller running, so the stopped-city exit
+// above never fires for it. Suspension is quiescence all the same
+// (beads_quiescence.go): once the suspension has drained the poller's session,
+// each observation would read the city store, restart its bd proxy and Dolt
+// child, and the controller would stop them again on its next tick, for as
+// long as a queued nudge keeps the poller alive (ga-5uties7y). The poller must
+// leave the store alone and exit, keeping its queued nudges for the resume.
+func TestCmdNudgePollExitsWithoutObservingWhenItsCityIsSuspended(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	writeNamedSessionCityTOML(t, cityDir)
+	t.Setenv("GC_CITY", cityDir)
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	created, err := store.Create(beads.Bead{
+		Title:  "Session: worker",
+		Type:   session.BeadType,
+		Status: "open",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "worker-session",
+			"agent_name":   "worker",
+			"template":     "worker",
+			"state":        string(session.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create session: %v", err)
+	}
+	item := newQueuedNudgeWithOptions("worker", "follow-up", "session", time.Now().Add(-time.Minute), queuedNudgeOptions{
+		SessionID: created.ID,
+	})
+	// Queue the nudge through the nudges-class store, where gc nudge writes
+	// it (cliNudgesStore), not the work store openCityStoreAt returns: under
+	// the split-strict gate that work store does not own nudge rows.
+	if err := enqueueQueuedNudgeWithStore(cityDir, cliNudgesStore(store, nil, cityDir), item); err != nil {
+		t.Fatalf("enqueueQueuedNudgeWithStore: %v", err)
+	}
+
+	// The city is suspended the way gc suspend does it, its controller still
+	// answers, and the fake runtime has no session: the suspension drained it.
+	suspendCityAt(t, cityDir)
+	markNudgePollCityRunningForTest(t)
+
+	observeCalls := 0
+	origObserve := nudgeObserveTarget
+	nudgeObserveTarget = func(_ nudgeTarget, _ beads.Store, _ runtime.Provider) (worker.LiveObservation, error) {
+		observeCalls++
+		return worker.LiveObservation{Running: false}, nil
+	}
+	defer func() { nudgeObserveTarget = origObserve }()
+
+	var stdout, stderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- cmdNudgePoll([]string{created.ID}, "worker-session", time.Millisecond, 0, true, &stdout, &stderr)
+	}()
+	var code int
+	select {
+	case code = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("cmdNudgePoll kept polling a suspended city: %d observations in 10s, each a bead-store read that restarts the city's bd proxy and Dolt", observeCalls)
+	}
+	if code != 0 {
+		t.Fatalf("cmdNudgePoll = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if observeCalls != 0 {
+		t.Fatalf("observe calls = %d, want 0: observing reads the bead store, which restarts a suspended city's bd and Dolt", observeCalls)
+	}
+	if !strings.Contains(stderr.String(), "suspended") {
+		t.Fatalf("stderr = %q, want the suspended-city exit explained", stderr.String())
+	}
+	state, err := nudgequeue.LoadState(cityDir)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if len(state.Pending) != 1 || state.Pending[0].ID != item.ID {
+		t.Fatalf("pending after exit = %+v, want queued nudge %s kept for the resume", state.Pending, item.ID)
 	}
 }

@@ -16,17 +16,17 @@ import (
 
 func TestStrictWorkLeafRecordsAByIDReadOfAClassNamespaceID(t *testing.T) {
 	work := NewWorkStore(t, "gc")
-	// storeref.Resolve is a production by-id probe: handing the work leaf a
+	// convoy.ConvoyClose is a production by-id read: handing the work leaf a
 	// graph id asks the wrong store.
-	if _, err := storeref.Resolve("gcg-7", []beads.Store{work}); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("Resolve error = %v, want ErrNotFound", err)
+	if err := convoyCloseThrough(work, "gcg-7"); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("ConvoyClose error = %v, want ErrNotFound", err)
 	}
 	got := TakeSplitViolations(work)
 	if len(got) == 0 {
 		t.Fatal("no split violation for a graph id read through the work leaf")
 	}
 	v := got[0]
-	if v.Op != "get" || v.Class != "graph" || v.ID != "gcg-7" || v.Site.File != "internal/storeref/storeref.go" {
+	if v.Op != "get" || v.Class != "graph" || v.ID != "gcg-7" || v.Site.File != "internal/convoy/convoy.go" {
 		t.Fatalf("violation = %+v", v)
 	}
 }
