@@ -2508,6 +2508,86 @@ func requireOnlySeedBeads(t *testing.T, store beads.Store, want int) {
 	}
 }
 
+// The cross-rig refusal offers --force only where --force routes the bead
+// (#3707). A rig-scoped target with the built-in sling query cannot read a
+// city-store bead, so the forced sling stops at the cross-store check and the
+// refusal must not name --force. A custom sling_query skips the store check,
+// so there --force does override and the remedy stays.
+func TestDoSlingCrossRigOffersForceOnlyWhereItRoutes(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		query     string
+		wantForce bool
+	}{
+		{name: "built-in sling query", wantForce: false},
+		{name: "custom sling query", query: "bd update {} --set-metadata gc.routed_to=target --set-metadata owner=ops", wantForce: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			deps, _, target := crossStoreSlingDeps(t) // rig prefix RW, bead store city:test-city
+			target.SlingQuery = tt.query
+			deps.Store = beadstest.Work(seededStore("DE-1"))
+
+			_, err := DoSling(testOpts(target, "DE-1"), deps, deps.Store)
+			var crossRig *CrossRigError
+			if !errors.As(err, &crossRig) {
+				t.Fatalf("error = %T %[1]v, want CrossRigError", err)
+			}
+			if got := strings.Contains(err.Error(), "--force to override"); got != tt.wantForce {
+				t.Fatalf("refusal offers --force = %t, want %t: %v", got, tt.wantForce, err)
+			}
+
+			forced := testOpts(target, "DE-1")
+			forced.Force = true
+			_, err = DoSling(forced, deps, deps.Store)
+			if tt.wantForce {
+				if err != nil {
+					t.Fatalf("forced sling: %v, want routed", err)
+				}
+				return
+			}
+			var crossStore *CrossStoreRouteError
+			if !errors.As(err, &crossStore) {
+				t.Fatalf("forced sling error = %T %[1]v, want CrossStoreRouteError", err)
+			}
+		})
+	}
+}
+
+// The batch container refusal follows the same rule as a single bead: it
+// offers --force only where --force would route the children (#3707).
+func TestDoSlingBatchCrossRigOffersForceOnlyWhereItRoutes(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		query     string
+		wantForce bool
+	}{
+		{name: "built-in sling query", wantForce: false},
+		{name: "custom sling query", query: "bd update {} --set-metadata gc.routed_to=target --set-metadata owner=ops", wantForce: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			deps, _, target := crossStoreSlingDeps(t) // rig prefix RW, bead store city:test-city
+			target.SlingQuery = tt.query
+			store := deps.Store
+			convoy, err := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
+			if err != nil {
+				t.Fatalf("create convoy: %v", err)
+			}
+			if _, err := store.Create(beads.Bead{Title: "one", Type: "task", ParentID: convoy.ID, Status: "open"}); err != nil {
+				t.Fatalf("create child: %v", err)
+			}
+
+			_, err = DoSlingBatch(SlingOpts{Target: target, BeadOrFormula: convoy.ID}, deps, store)
+			var crossRig *CrossRigError
+			if !errors.As(err, &crossRig) {
+				t.Fatalf("error = %T %[1]v, want CrossRigError", err)
+			}
+			if got := strings.Contains(err.Error(), "--force to override"); got != tt.wantForce {
+				t.Fatalf("refusal offers --force = %t, want %t: %v", got, tt.wantForce, err)
+			}
+		})
+	}
+}
+
 func TestDoSlingRefusesCrossStoreOnFormulaBeforeMutation(t *testing.T) {
 	opts, deps, router, bead := crossStoreSlingFixture(t, "")
 	opts.OnFormula = "code-review"
