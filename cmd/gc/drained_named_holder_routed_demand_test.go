@@ -135,13 +135,16 @@ func reconcileNamedHolderWithRoutedWork(t *testing.T, cfg *config.City, holderSt
 	}
 }
 
-// TestDrainedNamedHolder_RoutedDemandWakesHolder_GaQbbnr9 reproduces the
+// TestDrainedNamedHolder_RoutedDemandWakesHolder_GaQbbnr9 covers the
 // 2026-09-26 gascity/builder starvation (ga-qbbnr9): the named holder
 // drain-acked after its last task (state=asleep, sleep_reason=drained), and
-// the only remaining demand is routed-but-unassigned. Every tick, the pool
-// asks for a canonical session and is refused because the drained holder
-// still carries the canonical name, while the named arm of ComputeAwakeSet
-// drops the routed-demand wake because the holder is Drained. Nothing starts.
+// the only remaining demand was routed-but-unassigned. Before ga-j4lqwa.1
+// (#6692), every tick the pool asked for a canonical session and was refused
+// because the drained holder still carried the canonical name, while the
+// named arm of ComputeAwakeSet dropped the routed-demand wake because the
+// holder was Drained, and nothing started. This test pins the full-tick
+// behavior after that fix: routed, unassigned demand wakes the drained
+// holder exactly once and creates no second session.
 func TestDrainedNamedHolder_RoutedDemandWakesHolder_GaQbbnr9(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -201,9 +204,10 @@ func TestDrainedNamedHolder_RoutedDemandWakesHolder_GaQbbnr9(t *testing.T) {
 
 // TestAsleepNamedHolder_RoutedDemandWakesHolder_Control_GaQbbnr9 is the
 // control for the test above: the same holder, asleep for any reason other
-// than drained, already wakes from routed demand alone (#4644, #4702). The
-// discriminating fact is the Drained sub-state, not routed-versus-assigned
-// demand.
+// than drained, wakes from routed demand alone (#4644, #4702). Both holders
+// now wake; the remaining difference is that a non-drained holder suppresses
+// the pool request outright (the alias is held), while a drained holder's
+// pool request is refused with "is held by session".
 func TestAsleepNamedHolder_RoutedDemandWakesHolder_Control_GaQbbnr9(t *testing.T) {
 	cfg := drainedNamedHolderConfig()
 	sessionName := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, "builder")
