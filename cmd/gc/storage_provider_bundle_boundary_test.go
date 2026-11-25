@@ -39,7 +39,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/storebinding"
 	"github.com/gastownhall/gascity/internal/testpolicy/resourcecensus"
 )
@@ -432,9 +431,24 @@ func anyGoWorkFile(t *testing.T, root string) bool {
 
 // --- shared helpers ----------------------------------------------------------
 
+// moduleRoot resolves the module root the source scans read. It tries, in
+// order:
+//
+//  1. GC_TEST_REPO_ROOT, the explicit override;
+//  2. under Bazel (TEST_SRCDIR and TEST_WORKSPACE both set), the runfiles
+//     workspace tree $TEST_SRCDIR/$TEST_WORKSPACE;
+//  3. the first go.mod at or above the working directory, for plain go test.
+//
+// Under Bazel the root is never derived from the working directory: any test
+// in the same process can leave the cwd inside an unrelated tree that holds a
+// go.mod, and a scan rooted there reads nothing (or the wrong source) and can
+// pass vacuously.
 func moduleRoot(t *testing.T) string {
 	t.Helper()
-	if root := bazeltest.OverrideRoot(); root != "" {
+	if root := os.Getenv("GC_TEST_REPO_ROOT"); root != "" {
+		return root
+	}
+	if root := bazelRunfilesWorkspace(); root != "" {
 		return root
 	}
 	dir, err := os.Getwd()
@@ -453,6 +467,21 @@ func moduleRoot(t *testing.T) string {
 	}
 }
 
+// bazelRunfilesWorkspace returns $TEST_SRCDIR/$TEST_WORKSPACE when both are
+// set and that tree holds the module's go.mod, and "" otherwise (not under
+// Bazel, or the test did not declare //:go.mod in its data).
+func bazelRunfilesWorkspace() string {
+	srcDir, workspace := os.Getenv("TEST_SRCDIR"), os.Getenv("TEST_WORKSPACE")
+	if srcDir == "" || workspace == "" {
+		return ""
+	}
+	root := filepath.Join(srcDir, workspace)
+	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
+		return ""
+	}
+	return root
+}
+
 // moduleGoFiles lists every non-test Go file in the module, module-relative.
 // It lists git-tracked files rather than walking the filesystem so an
 // untracked nested git worktree checked out under root — the common
@@ -461,9 +490,22 @@ func moduleRoot(t *testing.T) string {
 // replaced.
 func moduleGoFiles(t *testing.T, root string) []string {
 	t.Helper()
+	files, err := listModuleGoFiles(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return files
+}
+
+// listModuleGoFiles is moduleGoFiles without the testing.T, so the empty-scan
+// refusal is itself testable. It returns an error naming root and the working
+// directory when root yields no non-test Go files: every scan built on this
+// list would otherwise read an empty set and report nothing, or pass for want
+// of a subject.
+func listModuleGoFiles(root string) ([]string, error) {
 	tracked, err := resourcecensus.TrackedGoFiles(root)
 	if err != nil {
-		t.Fatalf("listing tracked Go files: %v", err)
+		return nil, fmt.Errorf("listing tracked Go files under %s: %w", root, err)
 	}
 	files := make([]string, 0, len(tracked))
 	for _, rel := range tracked {
@@ -472,8 +514,15 @@ func moduleGoFiles(t *testing.T, root string) []string {
 		}
 		files = append(files, rel)
 	}
+	if len(files) == 0 {
+		cwd, cwdErr := os.Getwd()
+		if cwdErr != nil {
+			cwd = fmt.Sprintf("<unavailable: %v>", cwdErr)
+		}
+		return nil, fmt.Errorf("module scan root %q yielded no non-test Go files (cwd %q); the scan has no subject and would pass or fail on an empty set", root, cwd)
+	}
 	sort.Strings(files)
-	return files
+	return files, nil
 }
 
 // moduleScanUnderTestdata reports whether rel is under a testdata directory.

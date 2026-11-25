@@ -1926,6 +1926,7 @@ go_test(
         "metrics_classifier_test.go",
         "metrics_lifecycle_test.go",
         "module_scan_nested_worktree_test.go",
+        "module_scan_root_test.go",
         "molecule_autoclose_split_test.go",
         "molecule_autoclose_test.go",
         "mysql_driver_log_test.go",
