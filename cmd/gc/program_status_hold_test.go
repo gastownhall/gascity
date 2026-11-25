@@ -8,6 +8,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // heldTurnProvider is a liveTurnProvider (its screen's turn look scripted)
@@ -135,6 +136,28 @@ func TestStarvedBypassVetoedWhileTheRecordSaysWorking(t *testing.T) {
 	}
 	if q.pass(t) || len(q.sends()) != 1 {
 		t.Fatalf("a later pass sent again: %+v", q.sends())
+	}
+}
+
+// Kills a veto that misses a session naming no agent, as a provider
+// session (API or dashboard kind=provider) names none: its target takes
+// its provider's declaration by name, the declaration its pane was armed
+// with, so the record vetoes its starved bypass as it does an agent
+// session's, and the next pass after the turn delivers it.
+func TestStarvedBypassVetoReachesASessionNamingNoAgent(t *testing.T) {
+	q := newHeldQueue(t, runtime.ProgramStatusOn, runtime.ProgramWorking, "on", true)
+	q.target = resolveNudgeTargetFromSessionInfo(q.dir, codexCatalogCity("on"), session.Info{
+		ID: q.target.sessionID, SessionNameMetadata: q.target.sessionName, Template: "worker", Provider: "codex", SessionOrigin: "manual",
+	})
+	if q.pass(t) || len(q.sends()) != 0 {
+		t.Fatalf("a starved pass under a working record delivered: sends %+v", q.sends())
+	}
+	if n := q.fake.CountCalls("ProgramStatusHoldRead", q.target.sessionName); n != 1 {
+		t.Fatalf("%d hold reads, want the record read for the vetoed pass", n)
+	}
+	q.fake.SetProgramPane(q.target.sessionName, holdPaneRow(runtime.ProgramStatusOn, runtime.ProgramDone, time.Now()))
+	if !q.pass(t) || len(q.sends()) != 1 {
+		t.Fatalf("the pass after the turn ended: sends %+v, want one delivery", q.sends())
 	}
 }
 

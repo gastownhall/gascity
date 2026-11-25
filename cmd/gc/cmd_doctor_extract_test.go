@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 
@@ -36,6 +37,10 @@ func TestBuildDoctorChecks_NameSetUnchanged(t *testing.T) {
 		t.Fatalf("read golden: %v", err)
 	}
 	want := strings.TrimSpace(string(data))
+	if goruntime.GOOS == "windows" {
+		// bd can be a batch file only on Windows, so only there is its check registered.
+		want = strings.Replace(want, "beads-role\n", "beads-role\nbd-batch-file\n", 1)
+	}
 	got := strings.Join(names, "\n")
 	if got != want {
 		t.Fatalf("doctor check names changed\n--- got ---\n%s\n--- want ---\n%s", got, want)

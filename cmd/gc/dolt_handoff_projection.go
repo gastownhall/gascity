@@ -133,6 +133,10 @@ func committedBeadsHandoffOwnsScope(scopeRoot string) (bool, error) {
 	if !info.Mode().IsRegular() {
 		return false, fmt.Errorf("ownership handoff journal is not a regular file")
 	}
+	// canonical-path-exception: existence/resolvability only, not comparison
+	// preparation. The journal is trusted only under the scope's physical
+	// root, so a root that cannot be resolved must fail closed rather than
+	// fall back to the lexical spelling (TestCommittedBeadsHandoffRejectsSymlinkedJournal).
 	physicalRoot, err := filepath.EvalSymlinks(scopeRoot)
 	if err != nil {
 		return false, fmt.Errorf("resolve ownership handoff scope root: %w", err)

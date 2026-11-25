@@ -12,6 +12,7 @@ go_library(
         "//internal/citylayout",
         "//internal/coordclass",
         "//internal/pathutil",
+        "//internal/platform/filelock",
     ],
 )
 

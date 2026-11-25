@@ -401,6 +401,84 @@ func TestAlert_DiskCriticalSkipIsNotRecovery(t *testing.T) {
 	}
 }
 
+// TestAlert_LiveSessionSkipIsNotRecovery pins the live-session gate to the same
+// rule as the disk-critical skip: a cycle that declined CALL DOLT_GC because
+// other sessions were connected ran neither GC nor the smoke test, so it is no
+// evidence the store recovered. It must not mail a recovery notice or clear the
+// open failure streak; the next real successful cycle closes it.
+func TestAlert_LiveSessionSkipIsNotRecovery(t *testing.T) {
+	t.Parallel()
+	fakeMail := mail.NewFake()
+	ops := &fakeDoltOps{}
+	loop := NewStoreMaintenanceLoop(StoreMaintenanceLoopDeps{
+		Cfg: config.DoltMaintenance{
+			Enabled:   true,
+			Interval:  "168h",
+			GCTimeout: "1s",
+			AlertTo:   "gascity/mayor",
+		},
+		CityPath: t.TempDir(),
+		Recorder: events.NewFake(),
+		Mail:     fakeMail,
+		OpenDoltOps: func(context.Context) (DoltOps, error) {
+			return ops, nil
+		},
+	})
+
+	started := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
+	fail := func(offset time.Duration) {
+		emitUnderLock(loop, MaintenanceRun{
+			StartedAt:  started.Add(offset),
+			FinishedAt: started.Add(offset + time.Second),
+			Stage:      "gc",
+			Err:        "open dolt conn: connection refused",
+		})
+	}
+
+	fail(0)
+	if got := len(fakeMail.Messages()); got != 1 {
+		t.Fatalf("delivered %d messages for the opening failure; want 1 alert", got)
+	}
+
+	// Other sessions are connected, so the gate skips GC.
+	ops.liveSessions = 3
+	skipped, err := loop.TriggerNow(context.Background())
+	if err != nil {
+		t.Fatalf("TriggerNow = %v; want nil", err)
+	}
+	if skipped.Stage != "done" || skipped.Err != "" {
+		t.Fatalf("run = %+v; want a done cycle with no error", skipped)
+	}
+	if ops.gcCalls != 0 {
+		t.Fatalf("ExecGC called %d times with live sessions; want 0", ops.gcCalls)
+	}
+	if got := len(fakeMail.Messages()); got != 1 {
+		t.Fatalf("delivered %d messages after a live-session skip; want no recovery notice for a cycle that ran no GC", got)
+	}
+
+	// The failure state survived, so the same failure is still a repeat.
+	fail(2 * time.Hour)
+	if got := len(fakeMail.Messages()); got != 1 {
+		t.Fatalf("delivered %d messages for a repeat of the alerted failure; want 1, the skip must not have cleared the state", got)
+	}
+
+	// A real successful cycle closes the streak with exactly one notice.
+	ops.liveSessions = 0
+	ops.smokeCount = 5
+	if _, err := loop.TriggerNow(context.Background()); err != nil {
+		t.Fatalf("TriggerNow = %v; want nil", err)
+	}
+	var recovered int
+	for _, m := range fakeMail.Messages() {
+		if strings.HasPrefix(m.Subject, "[RECOVERED]") {
+			recovered++
+		}
+	}
+	if recovered != 1 {
+		t.Fatalf("delivered %d [RECOVERED] messages after a real success; want exactly 1; messages=%+v", recovered, fakeMail.Messages())
+	}
+}
+
 // TestAlert_NoRecoveryNoticeWithoutAlert ensures success-after-failure
 // stays silent when no failure alert was ever mailed (AlertTo empty for
 // the whole streak): there is no open loop to close.
