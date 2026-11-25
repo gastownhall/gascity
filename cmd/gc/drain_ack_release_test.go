@@ -522,6 +522,37 @@ func TestReleaseSeatReadsNamedIdentity(t *testing.T) {
 	}
 }
 
+// TestSelfDrainAckIsNotRefusedByNamedIdentityClaim: a named seat acking its
+// own drain (refuseStarted) while it holds only a claim under its configured
+// named identity, with no work_started cell or execution_claim_started stamp,
+// is not refused, and the claim is still kept in place. Kills the keep being
+// folded into keepsStarted, which would refuse the named seat's own ack.
+func TestSelfDrainAckIsNotRefusedByNamedIdentityClaim(t *testing.T) {
+	const namedIdentity = "frontend/refinery"
+	work := splittest.NewWorkStore(t, "gc")
+	claim := mustCreateDrainAckBead(t, work, beads.Bead{
+		Title: "identity claim", Type: "task", Metadata: routedToWorker(),
+	}, "in_progress", namedIdentity)
+
+	seat := drainAckSessionBead()
+	seat.Metadata[session.NamedSessionIdentityMetadata] = namedIdentity
+
+	var stderr bytes.Buffer
+	held := releaseDrainAckClaims(testWorkLegs("", servingCity("worker"), work, nil), seat, true, drainAckReleaseBudget, &stderr)
+	if len(held) != 0 {
+		t.Fatalf("self drain-ack refused, held=%v; want not refused; stderr=%s", held, stderr.String())
+	}
+
+	got, err := work.Get(claim.ID)
+	if err != nil {
+		t.Fatalf("reading %s back: %v", claim.ID, err)
+	}
+	if got.Status != "in_progress" || got.Assignee != namedIdentity || got.Metadata[beadmeta.RoutedToMetadataKey] != "worker" {
+		t.Errorf("claim %s: status=%q assignee=%q routed_to=%q after self drain-ack, want in_progress, %q and worker unchanged; stderr=%s",
+			claim.ID, got.Status, got.Assignee, got.Metadata[beadmeta.RoutedToMetadataKey], namedIdentity, stderr.String())
+	}
+}
+
 // TestRefusedDrainAckNamesAFailedLegRead (F2): a seat's own drain-ack is
 // refused because it holds started work, and a second leg could not be read.
 // The refusal releases nothing, but the failed read is still reported. Kills
