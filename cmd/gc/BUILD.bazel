@@ -2014,6 +2014,7 @@ go_test(
         "polecat_report_formula_test.go",
         "pool_alias_assignment_test.go",
         "pool_demand_class_binding_test.go",
+        "pool_demand_live_holder_test.go",
         "pool_desired_prerefactor_test.go",
         "pool_desired_state_asleep_alias_test.go",
         "pool_desired_state_floor_test.go",

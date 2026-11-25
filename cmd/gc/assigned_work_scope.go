@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"strings"
 	"time"
 
@@ -187,13 +188,26 @@ func filterAssignedWorkBeadsForPoolDemand(
 		return assignedWorkBeads, assignedWorkStoreRefs
 	}
 	claimRefs := assignedWorkRelocatedClaimRefs(cityPath, cfg, leading)
-	return filterAssignedWorkBeadsForPoolDemandAt(cfg, cityPath, claimRefs, sessionInfos, assignedWorkBeads, assignedWorkStoreRefs, time.Now().UTC())
+	holderClaimRefs := assignedWorkClaimRefs(cityPath, cfg, leading)
+	return filterAssignedWorkBeadsForPoolDemandAt(cfg, cityPath, claimRefs, holderClaimRefs, sessionInfos, assignedWorkBeads, assignedWorkStoreRefs, time.Now().UTC())
 }
 
 // filterAssignedWorkBeadsForPoolDemandAt is filterAssignedWorkBeadsForPoolDemand
-// with the claim refs (assignedWorkRelocatedClaimRefs) resolved and the clock
-// read by the caller, so it does no I/O: the v2 allocator calls it inside its
-// pure pass.
+// with the claim refs (assignedWorkRelocatedClaimRefs) and the holder claim refs
+// (assignedWorkClaimRefs) resolved and the clock read by the caller, so it does
+// no I/O: the v2 allocator calls it inside its pure pass.
+//
+// A bead is kept when its store is reachable from the template it routes to
+// (rig equality, or claimRefs), or when it is a LIVE holder's own claim: its
+// assignee is an open session of that same template that claims a live runtime
+// (sessionBeadClaimsLiveRuntime), and its store is one of holderClaimRefs. That
+// second arm is the wake filter's widening (ga-whzrt) applied to the same
+// identities, so a working rig pool session holding city-store work is resumed
+// and counted rather than read as idle capacity that the next new request is
+// realized onto. It matches an exact assignee identity, so
+// unassigned or foreign city-store work still does not reach a rig pool, and an
+// asleep holder is still not resumed by it
+// (TestBuildDesiredState_RigPoolIgnoresAssignedWorkInUnreachableStore).
 //
 // It returns the kept beads plus their store refs, index-aligned, so the
 // caller can resolve store-scoped wake-demand readiness
@@ -204,6 +218,7 @@ func filterAssignedWorkBeadsForPoolDemandAt(
 	cfg *config.City,
 	cityPath string,
 	claimRefs []string,
+	holderClaimRefs []string,
 	sessionInfos []sessionpkg.Info,
 	assignedWorkBeads []beads.Bead,
 	assignedWorkStoreRefs []string,
@@ -231,6 +246,25 @@ func filterAssignedWorkBeadsForPoolDemandAt(
 		for _, id := range sessionBeadAssigneeIdentitiesInfo(sb) {
 			assigneeToSessionBeadID[id] = sb.ID
 		}
+	}
+	// heldByLiveSessionOf reports whether wb is the claim of a live open
+	// session of template, recorded under one of the holder claim refs. It
+	// runs only for beads the rig-reach test rejected, so the session lookup
+	// and the lifecycle projection stay off the common path.
+	heldByLiveSessionOf := func(wb beads.Bead, index int, template string) bool {
+		if index >= len(assignedWorkStoreRefs) || !slices.Contains(holderClaimRefs, assignedWorkStoreRefs[index]) {
+			return false
+		}
+		sessionBeadID := assigneeToSessionBeadID[strings.TrimSpace(wb.Assignee)]
+		if sessionBeadID == "" || !agentTemplateIdentitiesEquivalent(cfg, template, sessionBeadTemplate[sessionBeadID]) {
+			return false
+		}
+		for _, sb := range sessionInfos {
+			if sb.ID == sessionBeadID && !sb.Closed {
+				return sessionBeadClaimsLiveRuntime(sb)
+			}
+		}
+		return false
 	}
 	filtered := make([]beads.Bead, 0, len(assignedWorkBeads))
 	filteredRefs := make([]string, 0, len(assignedWorkStoreRefs))
@@ -269,7 +303,8 @@ func filterAssignedWorkBeadsForPoolDemandAt(
 		}
 		// Reachability holds only for an index the refs cover, so a kept row
 		// always has its own ref.
-		if assignedWorkIndexReachableFromAgentOnClaimRefs(cityPath, cfg, agentCfg, assignedWorkStoreRefs, i, claimRefs) {
+		if assignedWorkIndexReachableFromAgentOnClaimRefs(cityPath, cfg, agentCfg, assignedWorkStoreRefs, i, claimRefs) ||
+			heldByLiveSessionOf(wb, i, template) {
 			filtered = append(filtered, wb)
 			filteredRefs = append(filteredRefs, assignedWorkStoreRefs[i])
 		}
