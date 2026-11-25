@@ -73,12 +73,16 @@ func newReapBoundProvider(t *testing.T, hold *reapHold) *Provider {
 
 func awaitReap(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(reapWait)
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.NewTimer(reapWait)
+	defer deadline.Stop()
 	for !cond() {
-		if time.Now().After(deadline) {
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
 			t.Fatalf("timed out waiting for %s", what)
 		}
-		time.Sleep(5 * time.Millisecond)
 	}
 }
 
