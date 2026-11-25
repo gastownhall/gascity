@@ -302,6 +302,8 @@ func TestOwnerlessSightingForgottenWhenNotSeen(t *testing.T) {
 func TestOwnerlessRuntimeFindings(t *testing.T) {
 	c := newOwnerlessCase(t)
 	c.sp.visible["anon"] = true
+	c.sp.dead["anon"] = true
+	c.sp.created["anon"] = ownerlessT0.Add(-time.Hour)
 	c.sp.visible["owned"] = true
 	if err := c.sp.SetMeta("owned", "GC_SESSION_ID", "gc-named"); err != nil {
 		t.Fatal(err)

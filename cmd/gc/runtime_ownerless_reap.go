@@ -190,6 +190,27 @@ func ownerlessRuntimeDead(sp runtime.Provider, name string, now time.Time) (dead
 	return len(names) > 0 && !live.Alive, true, created, nil
 }
 
+// ownerlessRuntimeYoungOrGone rechecks a runtime whose session ID could not
+// be read. A vanished name or a creation time inside the startup grace
+// (including an unreadable creation time) is not an ownerless-runtime finding.
+func ownerlessRuntimeYoungOrGone(sp runtime.Provider, name string, now time.Time, grace time.Duration) (bool, error) {
+	names, err := sp.ListRunning("")
+	if err != nil && !runtime.IsPartialListError(err) {
+		return false, err
+	}
+	if err == nil && !slices.Contains(names, name) {
+		return true, nil
+	}
+	_, present, created, err := ownerlessRuntimeDead(sp, name, now)
+	if err != nil {
+		return false, err
+	}
+	if !present {
+		return true, nil
+	}
+	return created.IsZero() || now.Sub(created) < grace, nil
+}
+
 // ownerlessSightings is the controller's in-memory record of ownerless
 // runtimes between ticks: when each (name, owner) pair was first seen not
 // found, and which alive ones it has reported. A restart forgets it, which
@@ -386,9 +407,15 @@ func ownerlessRuntimeFindings(owners ownerLookup, sp runtime.Provider, cityPath 
 		id = strings.TrimSpace(id)
 		switch {
 		case idErr != nil:
+			if youngOrGone, err := ownerlessRuntimeYoungOrGone(sp, name, now, grace); err == nil && youngOrGone {
+				continue
+			}
 			findings = append(findings, fmt.Sprintf("%s: GC_SESSION_ID unreadable (%v); no owner can be proven", name, idErr))
 			continue
 		case id == "":
+			if youngOrGone, err := ownerlessRuntimeYoungOrGone(sp, name, now, grace); err == nil && youngOrGone {
+				continue
+			}
 			findings = append(findings, fmt.Sprintf("%s: no GC_SESSION_ID; no owner can be proven", name))
 			continue
 		case !owners.notFound(id):
