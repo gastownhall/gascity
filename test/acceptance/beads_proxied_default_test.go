@@ -1669,8 +1669,12 @@ func runProxiedNativeLaneGates(t *testing.T, bdPath, doltPath string) {
 		)
 		floorSample := func() time.Duration {
 			start := time.Now()
-			helpers.RunGC(lane, cityRoot, processfloor.Args()...) //nolint:errcheck // the exit status of the floor is not the measurement
-			return time.Since(start)
+			out, err := helpers.RunGC(lane, cityRoot, processfloor.Args()...)
+			elapsed := time.Since(start)
+			if err != nil {
+				t.Fatalf("process floor gc %q failed, so its time is not a bare gc start: %v\n%s", processfloor.Args(), err, out)
+			}
+			return elapsed
 		}
 		// Each gc-side sample returns its time already attributed. It used to
 		// return (wall, child) and clamp a negative difference to zero, and
