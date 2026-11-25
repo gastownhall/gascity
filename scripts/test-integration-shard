@@ -143,6 +143,9 @@ cmd_gc_integration_tests=(
   TestInfraScopedManagedDoltPIDIdentityUnderRealSystemd
   TestInitJudgeSplitBDMatchesGcBdVerdictOnRealBinaries
   TestInitializingARealEmbeddedRigLetsItCreateGcTypedBeads
+  TestInputLifecycleCompiledSettlementToNotice
+  TestInputLifecycleProxyAndCLI
+  TestInputLifecycleServer
   TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind
   TestManagedBeadsNativeCLICompatibility
   TestPhase2RealTransportBoundsStayAHangDetector
