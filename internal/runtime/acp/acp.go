@@ -103,6 +103,15 @@ type Provider struct {
 	dial          func(network, addr string, timeout time.Duration) (net.Conn, error)          // test seam
 	fenceChecked  func(name string)                                                            // test seam: runs between a fence check and its send
 	environFunc   func() []string                                                              // test seam: replaces execenv.Environ
+
+	// Post-SIGKILL wait seams. Zero values select the production bounds; none is
+	// reachable from Config, which user config populates.
+	reapGate         func(done <-chan struct{}) <-chan struct{} // test seam: stands in for a process-exit channel every bounded reap wait selects on
+	reapBound        time.Duration                              // test seam: bound on a Start post-SIGKILL wait; zero is runtime.ManagedProcessReapGrace
+	startupStopBound time.Duration                              // test seam: bound on Stop's startup-cancel wait; zero is stop grace plus reap grace
+	stopLockBound    time.Duration                              // test seam: bound on Stop's lifecycle-lock wait; zero is stop grace plus reap grace
+	stopLockPoll     time.Duration                              // test seam: Stop's lifecycle-lock retry interval; zero is 50ms
+	afterHandshake   func(name string)                          // test seam: runs after Start's handshake outcome is known, before the cancel recheck
 }
 
 // Compile-time check.

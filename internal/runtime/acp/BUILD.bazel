@@ -71,6 +71,7 @@ go_test(
         "protocol_test.go",
         "seams_test.go",
         "socket_probe_test.go",
+        "startup_reap_bound_test.go",
         "startup_test.go",
         "stop_grace_test.go",
         "stop_not_confirmed_dead_test.go",
