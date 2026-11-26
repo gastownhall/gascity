@@ -208,3 +208,32 @@ Compact execution record (raw counts and pending-attribution fields preserved):
 ```
 
 Landing handoff: mayor owns ga-bygzs8i0. After this PR lands, bind the squash/tree/work record to main, inspect recordWriteBudget, all retry-loop wiring and contract tests, close that landing record and notify gascity/pm --notify with ga-bygzs8i0 and ga-4iy5mmmh.
+
+## Publication hook attribution
+
+The normal pre-push at5ba91616bc38b51b437bc30503852ba666779f03 (reviewed source plus this record) ran `bazel test //... --config=remote-exec --keep_going`:307/310 targets passed and3 failed locally; no push landed. This is separate evidence from criterion3 above. Six top-level failing tests, grouped by three conditions:
+
+| Failed tests | Condition tracker | Clause3 proof |
+|---|---|---|
+| TestRepositoryLedgerMatchesCensusAndDocumentation; TestRepositoryCountsFileIsCanonicalAndDerivesEveryCountedRow | ga-bxcuiz6j | (a) complete binary import closure has no changed non-test package; source-data audit below |
+| TestSchemaFreshness (city-schema.json, config.md) | ga-6a24iyhf | (c) all24 reachable changed functions instrumented, zero coverage |
+| TestInitScrubsLeakVectors; TestInitPassthroughPreservesNamed; TestInitRefusesProdDoltPort | ga-2fv9v6z6 | (c) all24 reachable changed functions instrumented, zero coverage |
+
+Clause1 for all six: actual failure sites census_test.go:2444, counts_test.go:1202, docsync_test.go:532, testenv_test.go:50/146/532 read UNCHANGED, func_touched=no, shared_hunks_in_file=0. The sole SHARED-HUNKS entry is an import/declaration hunk in a Beads test file; dependency test files do not compile into any failing binary, and it cannot reach these tests.
+Clause2: six exact-name open searches empty;151 open condition trackers read with no matching condition;122 closed trackers read. Census ledger test has unrelated UNVERIFIED historical ga-yihql5 (subprocess705/704 growth), linked on the new census tracker; the other five names return NONE. Open ga-5550q2dx covers expired historical waiver dates, a different condition. Each new tracker is OPEN and read-back verified, labelled gate-tracker only, unrouted/unassigned. New first-sighting gm-sf3238 escape: proof3 landed and clauses1/4 clear; no claim that a new id predates the observation.
+Clause4 for all six: no failing-test package/directory overlaps the changed API,Beads or telemetry packages. No same-package or inconclusive exception is used. No signature blocked this deploy twice.
+
+Census source-data mechanism: its unchanged AST scanner reports31 missing runnable owners, all in unchanged packages/files; none of the changed test declarations can remove those owners. Their source declarations and currently materialized runfiles were inspected (not asserted to describe the original action's entire filesystem). No policy,ledger/counts or scanner input in that failing owner set changed. Census/ledger/counts and schema generator/config/reference inputs are byte-identical between reviewed source and the passed merged validation tree. Root causes of the diagnostics remain NOT_ENOUGH_INFO; no generic host-load attribution is claimed.
+
+Coverage probe: fresh committed view of the exact pre-push head, through the isolation wrapper, remote-class load gate and detached service. Command `bazel coverage --config=remote-exec --noremote_local_fallback --combined_report=lcov --instrumentation_filter='^//internal/(beads|telemetry)[/:]' --test_filter='^(TestSchemaFreshness|TestInitScrubsLeakVectors|TestInitPassthroughPreservesNamed|TestInitRefusesProdDoltPort)$' --test_sharding_strategy=disabled --test_env=GO_TEST_WRAP_TESTV=1 --test_output=all //test/docsync:docsync_test //internal/testenv:testenv_test`; exit0, both target logs confirm selected names actually ran, both targets remote. All24 changed functions in Beads/telemetry have measured instrumented lines and zero covered lines; API is absent from both full import closures. Supplementary passing probes establish reachability only; original pre-push failures and raw criterion3 counts remain unchanged.
+`LOAD_GATE_SUMMARY threshold=15 waited_seconds=0 wait_timed_out=0 run_start_load=15.97 run_max_load=17.00 run_mean_load=17.00 run_readings=1 wait_first_load=15.97 wait_max_load=15.97 wait_mean_load=15.97 wait_readings=1 read_errors=0`
+
+Pre-push attribution uses the standing authorization in non-diff-owned-gate-failure: record the six attributions, then push this reviewed code plus release-record-only commits with --no-verify. No product code, baseline, shared Git template or test result was changed. Before that push, guards re-check branch identity, reviewed ancestry, record size, clean worktree and that all additions since the reviewed source are this gate record only.
+
+Retained publication proof directory: /var/tmp/gc-gate-ga-0oh7fg94.vprk988y/prepush-attribution.
+coverage-proof.json: SHA256 54ccd9676dcb26f4ec660ea9e40619563056f49b40d7e884bac828a76b59432d.
+coverage.lcov: SHA256 23719bcd72e0d14d19648a007c24eaaa26d1a2154c7fa5dab2421850d19c63d4.
+ownership.txt: SHA256 e2d57d4fd9bc0a4aa601b0a00bc2f5fc4d53d9b40bb99d03d4cf0779b5da4c15.
+closed-trackers.txt: SHA256 1020a6ec186d97fd35a6429c99dfdb190423cb00522de052434cf6639455cff1.
+tracker-ids.json: SHA256 efb3f4b028cb4402250ec497581881b5c86901538f03826831ca4fa115858772.
+missing-owners-source-inspection.json: SHA256 a77c595cd6e8163cc46ce81fc995ebb5ab502679dd24a0744fc0e61f37ec3492.
