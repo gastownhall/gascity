@@ -220,6 +220,31 @@ The one exception is a provider with a session-id flag whose start the Manager
 launched without its key: its identity takes the key once one is written,
 normally by the provider's hook.
 
+## Fresh-cycle kill guard
+
+The legacy reconciler cycles a live `wake_mode=fresh` session whose assigned
+bead changed (`cycleAliveSessionForFreshReassign`, `cmd/gc/session_reconciler.go`)
+from a tick snapshot that can be minutes old, so the kill is gated on live
+reads first. Keep every gate before the kill or the stamp:
+
+- Q1: no in-progress claim still assigned to the session
+  (`sessionHasFreshInProgressClaim`). An unreadable store defers the cycle.
+- Q2: the anchor, read once and uncached (`freshAnchorBeadTerminal`), is not
+  closed and is still owned by the session. An unassigned anchor (a blank or
+  whitespace assignee included) or one assigned outside
+  `sessionAssignmentIdentifiersForConfigInfo`, which excludes pool-slot
+  aliases, `alias_history` and pool templates, was released or handed off, so
+  the session is not cycled onto it. Status and assignee come from that one
+  row: a second read, or the owner probe's row, can disagree with it.
+- Q3: the cycle is deferred while the previous bead is still open and owned by
+  the session, or when it closed before this incarnation started
+  (`awake_started_at` is after its `closed_at`, so the session is already
+  fresh). A previous bead handed to another owner, or closed since this
+  incarnation woke, does not defer it.
+
+A failed anchor read is "could not tell", and the cycle proceeds, since Q1
+already ruled out a claim a kill could cost. Do not turn that into a skip.
+
 ## Worker sites
 
 A city directory holding `.gc/control-plane.toml` is a worker site: a box
