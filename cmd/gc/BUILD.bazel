@@ -1968,6 +1968,7 @@ go_test(
         "order_args_channel_test.go",
         "order_backend_followup_test.go",
         "order_backend_test.go",
+        "order_check_concurrent_test.go",
         "order_command_test.go",
         "order_cursor_bound_test.go",
         "order_dispatch_bench_test.go",
