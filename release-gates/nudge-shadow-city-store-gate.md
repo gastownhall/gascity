@@ -31,7 +31,7 @@ merge_validation: merge result built and vetted here; merge-time CI remains requ
 scope_stack: none
 heavy_mode: none
 waiver_ref: none
-failure_attribution: none (no failed test or guard)
+failure_attribution: the independent criterion-3 run had no failure; publication-hook attributions follow below.
 
 ## Fast lane
 
@@ -142,3 +142,57 @@ ci_lane_run: n/a (no CI-config change in this diff)
 The local cross-compile job's load summary is threshold=15, waited_seconds=0, wait_timed_out=0, run_start_load=12.58, run_max_load=17.82, run_mean_load=16.09, run_readings=4.
 
 The PR can merge only after CI / required and the deferred native Windows job are green on its exact head. This gate does not merge.
+
+
+## Publication-hook attribution
+
+The additional normal pre-push hook ran on source/gate head
+2e152eabce39b840912efecf66b976de1f379bd6 with --config=fork-cache, because that
+reviewed source predates the farm worker pin. It independently reported the
+two conditions below. The owned hook service was stopped after these
+failures were attributed; this partial duplicate run and its unfinished
+targets are not claimed as PASS and do not replace the completed full-scope
+criterion-3 evidence above.
+
+failure_attribution: TestDatedWaiversAgainstToday -> ga-5550q2dx
+- Clause 1: waiverexpiry_test.go:41 UNCHANGED; no shared hunks; not diff-owned.
+- Clause 2: tracker opened and read; created 2026-11-05, before this run.
+  It explicitly covers the same expired provider-ledger waiver condition
+  and this test on stale source trees.
+- Clause 3(a), MECHANISM: successful go list -mod=readonly -test -deps of
+  ./internal/testpolicy/waiverexpiry yielded 21 module directories and
+  zero changed non-test inputs in that test binary's import closure.
+- Clause 4: no package/path overlap with the CLI nudge source or tests.
+- Sighting comment read back: 69c95c52-3456-5d5e-97d6-bcedb2f13023.
+- Failure: unchanged t3bridge/exec waivers expired 2026-11-05 and became
+  fleet-fatal 2026-11-19. No date or waiver was modified.
+- Evidence: /var/tmp/gc-gate-ga-63vdy1zb-push/failures/waiverexpiry.log;
+  /var/tmp/gc-ga-63vdy1zb-waiver-expiry-closure.txt;
+  /var/tmp/gc-ga-63vdy1zb-prepush-waiver-site.txt.
+
+failure_attribution: scripts_test package alarm -> ga-vg3wto5
+- A single existing package-budget condition, not one new tracker per test.
+  Shards 4/5/6 exhausted the five-minute package alarm while
+  TestMacRegressionGateRunsSmokeOnEveryNonDocsPullRequest/code_change (0s),
+  TestGoTestShardPreservesAcceptanceAuthEnv (25s), and
+  TestWorkerEnvNotifyBeadsGraceJob/Go_re-pin (2s) were running.
+- Clause 1: all three function sites UNCHANGED, no shared hunks.
+- Clause 2: tracker opened and read; created 2026-10-24. Its condition is
+  scripts_test's five-minute package alarm under whole-suite/host load.
+- Clause 3(a), MECHANISM: successful scripts test-binary import closure
+  yielded 26 module directories, zero changed non-test inputs.
+- Clause 4: no scripts package/path overlap. No census or test-target changes.
+- Load read after alarms, while the same hook continued: 86.53/89.71/67.63.
+- Sighting comment read back: aa2e883c-0e28-5a0c-b047-cd55b9ec86f8.
+- Evidence: /var/tmp/gc-gate-ga-63vdy1zb-push/failures/scripts-shard-{4,5,6}.log;
+  /var/tmp/gc-ga-63vdy1zb-scripts-closure.txt;
+  /var/tmp/gc-ga-63vdy1zb-prepush-scripts-sites.txt.
+
+These are first sightings for this deploy bead, not repeated failed rounds.
+Both landed MECHANISM proofs; neither uses an inconclusive attribution or
+waiver_ref. No failed test was re-run. The four-clause standing pre-push
+authorization in non-diff-owned-gate-failure permits --no-verify for the
+specific recorded publication head after the live ownership/source guards.
+This addendum changes only the gate Markdown, outside both test binaries'
+input closures; the reviewed code and the completed merged-tree evidence
+are unchanged.
