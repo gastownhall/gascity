@@ -43,7 +43,7 @@ func TestRepro_8567_StaleEventCursorBoundsToLogHeadNotZero(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rawCursor, err := bdCursorAcrossStores(orderName, mem)
+	rawCursor, _, err := bdCursorAcrossStores(orderName, nil, mem)
 	if err != nil {
 		t.Fatalf("bdCursorAcrossStores: %v", err)
 	}
@@ -190,9 +190,9 @@ func TestRepro_8567_StaleLabelHeldThenResumesOnValidRunRecord(t *testing.T) {
 	}
 
 	// Tick 1 (head 3): only a stale label exists. The check is held.
-	_, stale, err := bdEventCursorAtHead(orderName, ep, mem)
+	_, stale, err := bdCursorAcrossStores(orderName, ep, mem)
 	if err != nil {
-		t.Fatalf("tick 1: bdEventCursorAtHead: %v", err)
+		t.Fatalf("tick 1: bdCursorAcrossStores: %v", err)
 	}
 	if !stale {
 		t.Fatalf("tick 1: stale = false, want true (every seq label is above head 3)")
@@ -207,9 +207,9 @@ func TestRepro_8567_StaleLabelHeldThenResumesOnValidRunRecord(t *testing.T) {
 	}
 	ep.Record(events.Event{Type: "digest.ready"}) // seq 4
 
-	cursor, stale, err := bdEventCursorAtHead(orderName, ep, mem)
+	cursor, stale, err := bdCursorAcrossStores(orderName, ep, mem)
 	if err != nil {
-		t.Fatalf("tick 2: bdEventCursorAtHead: %v", err)
+		t.Fatalf("tick 2: bdCursorAcrossStores: %v", err)
 	}
 	if stale {
 		t.Fatalf("tick 2: stale = true, want false: seq:4 is at or below head 4")

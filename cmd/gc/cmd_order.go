@@ -1394,7 +1394,7 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 			cursorFn := orders.CursorAcross(frontDoors)
 			eventCursorUnavailable := false
 			if a.Trigger == "event" {
-				cursor, stale, err := bdEventCursorAtHead(a.ScopedName(), ep, rawOrderStores(typedStores)...)
+				cursor, stale, err := bdCursorAcrossStores(a.ScopedName(), ep, rawOrderStores(typedStores)...)
 				if err != nil {
 					fmt.Fprintf(stderr, "gc order check: reading event cursor for %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
 					return 1
@@ -1505,7 +1505,7 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 		cursorFn := orders.CursorAcross(frontDoors)
 		eventCursorUnavailable := false
 		if a.Trigger == "event" {
-			cursor, stale, err := bdEventCursorAtHead(a.ScopedName(), ep, rawOrderStores(typedStores)...)
+			cursor, stale, err := bdCursorAcrossStores(a.ScopedName(), ep, rawOrderStores(typedStores)...)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc order check: reading event cursor for %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
 				return 1
@@ -2183,19 +2183,11 @@ func findOrder(aa []orders.Order, name, rig string) (orders.Order, bool) {
 // when a same-second burst exceeds the cap.
 const bdCursorRecentRunsLimit = 256
 
-func bdCursor(store beads.Store, orderName string) (uint64, error) {
-	labelSets, err := bdRunSeqLabels(store, orderName)
-	if err != nil {
-		return 0, err
-	}
-	return orders.MaxSeqFromLabels(labelSets), nil
-}
-
-// bdRunSeqLabels returns the labels of the order's run records in one store.
-func bdRunSeqLabels(store beads.Store, orderName string) ([][]string, error) {
-	// One leg of bdCursorAcrossStores: run records live in the orders binding
-	// and, for v1 poured order-run roots (work class), on the work legs, so a
-	// leg that holds none of them is expected to miss.
+// bdCursor returns the order's run-record seq cursor in one store. With a
+// nil head it is the plain max seq (main's behavior). With a head, a seq above
+// the event log's head is stale (#8567): it is ignored, and sawStale reports
+// it. sawValid reports a seq at or below head.
+func bdCursor(store beads.Store, orderName string, head *uint64) (uint64, bool, bool, error) {
 	var beadList []beads.Bead
 	err := beads.FederatedRead(func() (err error) {
 		beadList, err = store.List(beads.ListQuery{
@@ -2219,7 +2211,7 @@ func bdRunSeqLabels(store beads.Store, orderName string) ([][]string, error) {
 	})
 	if err != nil {
 		if len(beadList) == 0 {
-			return nil, fmt.Errorf("listing event cursor beads for order %q: %w", orderName, err)
+			return 0, false, false, fmt.Errorf("listing event cursor beads for order %q: %w", orderName, err)
 		}
 		orderLogf("gc order: event cursor lookup partially failed for %s: %v", orderName, err)
 	}
@@ -2232,74 +2224,66 @@ func bdRunSeqLabels(store beads.Store, orderName string) ([][]string, error) {
 			labelSets = append(labelSets, b.Labels)
 		}
 	}
-	return labelSets, nil
-}
-
-func bdCursorAcrossStores(orderName string, stores ...beads.Store) (uint64, error) {
-	var maxSeq uint64
-	for i, store := range stores {
-		if store == nil {
-			continue
-		}
-		seq, err := bdCursor(store, orderName)
-		if err != nil {
-			return 0, fmt.Errorf("store %d: %w", i, err)
-		}
-		if seq > maxSeq {
-			maxSeq = seq
+	if head == nil {
+		return orders.MaxSeqFromLabels(labelSets), true, false, nil
+	}
+	var cursor uint64
+	var sawStale, sawValid bool
+	for _, labels := range labelSets {
+		for _, l := range labels {
+			if !strings.HasPrefix(l, "seq:") {
+				continue
+			}
+			n, perr := strconv.ParseUint(l[4:], 10, 64)
+			if perr != nil {
+				continue
+			}
+			if n > *head {
+				sawStale = true
+				continue
+			}
+			sawValid = true
+			if n > cursor {
+				cursor = n
+			}
 		}
 	}
-	return maxSeq, nil
+	return cursor, sawValid, sawStale, nil
 }
 
-// bdEventCursorAtHead is bdCursorAcrossStores with the head applied per read
-// (#8567, PR #8605 review). A run record's seq:<N> above the event log's head
-// is stale: it survived a log reset. Such labels are ignored, so the cursor is
-// the largest seq at or below head. When every seq label is above head, no
-// cursor can be trusted: stale is true and the caller holds the check. The
-// cursor is not clamped to head in that case, because a head-clamp is redone
-// from the same stale labels on every tick and skips events recorded between
-// ticks.
-func bdEventCursorAtHead(orderName string, ep events.Provider, stores ...beads.Store) (cursor uint64, stale bool, err error) {
-	if ep == nil {
-		cursor, err = bdCursorAcrossStores(orderName, stores...)
-		return cursor, false, err
-	}
-	head, err := ep.LatestSeq()
-	if err != nil {
-		return 0, false, fmt.Errorf("reading event head for order %q: %w", orderName, err)
+// bdCursorAcrossStores is the max run-record seq across stores. With ep set,
+// each seq above the event log's head is stale (#8567, PR #8605 review) and
+// ignored, so the cursor is the largest seq at or below head. When every seq
+// label is above head, no cursor can be trusted: stale is true and the caller
+// holds the check. The cursor is not clamped to head in that case, because a
+// head-clamp is redone from the same stale labels on every tick and skips
+// events recorded between ticks. With ep nil, the result is the plain max.
+func bdCursorAcrossStores(orderName string, ep events.Provider, stores ...beads.Store) (cursor uint64, stale bool, err error) {
+	var head *uint64
+	if ep != nil {
+		h, herr := ep.LatestSeq()
+		if herr != nil {
+			return 0, false, fmt.Errorf("reading event head for order %q: %w", orderName, herr)
+		}
+		head = &h
 	}
 	var sawStale, sawValid bool
 	for i, store := range stores {
 		if store == nil {
 			continue
 		}
-		labelSets, err := bdRunSeqLabels(store, orderName)
+		seq, valid, staleHere, err := bdCursor(store, orderName, head)
 		if err != nil {
 			return 0, false, fmt.Errorf("store %d: %w", i, err)
 		}
-		for _, labels := range labelSets {
-			for _, l := range labels {
-				if !strings.HasPrefix(l, "seq:") {
-					continue
-				}
-				n, perr := strconv.ParseUint(l[4:], 10, 64)
-				if perr != nil {
-					continue
-				}
-				if n > head {
-					sawStale = true
-					continue
-				}
-				sawValid = true
-				if n > cursor {
-					cursor = n
-				}
-			}
+		sawValid = sawValid || valid
+		sawStale = sawStale || staleHere
+		if seq > cursor {
+			cursor = seq
 		}
 	}
-	if !sawValid && sawStale {
-		orderLogf("gc order: event cursor for %s: every run record seq is above the event log head (seq:%d); holding the check until a run records a seq at or below head (#8567)", orderName, head)
+	if head != nil && !sawValid && sawStale {
+		orderLogf("gc order: event cursor for %s: every run record seq is above the event log head (seq:%d); holding the check until a run records a seq at or below head (#8567)", orderName, *head)
 		return 0, true, nil
 	}
 	return cursor, false, nil

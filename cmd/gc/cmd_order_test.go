@@ -3781,7 +3781,7 @@ func TestBdCursorUsesRowsFromPartialTierError(t *testing.T) {
 		err: fmt.Errorf("wisps tier unavailable"),
 	}
 
-	got, err := bdCursor(store, "digest")
+	got, _, err := bdCursorAcrossStores("digest", nil, store)
 	if err != nil {
 		t.Fatalf("bdCursor: %v", err)
 	}

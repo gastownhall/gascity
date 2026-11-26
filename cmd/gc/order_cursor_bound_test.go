@@ -28,7 +28,7 @@ func TestBdCursorBoundsItsTrackingRead(t *testing.T) {
 	}
 	store := &captureListStore{Store: mem}
 
-	got, err := bdCursor(store, "digest")
+	got, _, err := bdCursorAcrossStores("digest", nil, store)
 	if err != nil {
 		t.Fatalf("bdCursor: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestBdCursorIgnoresAForgedSeq(t *testing.T) {
 	if _, err := mem.Create(beads.Bead{Title: "forged", Type: "task", Labels: []string{"order-run:digest", "order:digest", "seq:999999"}}); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := bdCursor(mem, "digest"); err != nil || got != 5 {
+	if got, _, err := bdCursorAcrossStores("digest", nil, mem); err != nil || got != 5 {
 		t.Fatalf("bdCursor = %d (%v), want the run record's 5", got, err)
 	}
 }
@@ -83,7 +83,7 @@ func TestBdCursorSurvivesAnOrderLabelFlood(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got, err := bdCursor(mem, "digest"); err != nil || got != 5 {
+	if got, _, err := bdCursorAcrossStores("digest", nil, mem); err != nil || got != 5 {
 		t.Fatalf("bdCursor = %d (%v), want the run record's 5", got, err)
 	}
 }
