@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/convergence"
 )
@@ -159,14 +160,15 @@ func (s *Store) OpenRuns() ([]OrderRun, error) {
 // sweep-vocabulary metadata close. Names are resolved best-effort (Scoped is ""
 // for a tracking bead that carries neither an order-run label nor an order:
 // title), matching the sweep's "when no order filter is set, close every stale
-// tracking bead" behavior.
-func (s *Store) StaleOpenRuns(cutoff time.Time) ([]OrderRun, error) {
+// tracking bead" behavior. Unfinished dispatches are excluded until their
+// persisted deadline plus completion grace, measured against now.
+func (s *Store) StaleOpenRuns(cutoff, now time.Time) ([]OrderRun, error) {
 	if s.store == (beads.OrdersStore{}) {
 		return nil, nil
 	}
 	// Open first: a claim moves a bead forward to in_progress, so a bead
 	// claimed between the two reads is read twice rather than missed.
-	return staleRuns(beads.LiveFor(s.store), cutoff, "open", "in_progress")
+	return staleRuns(beads.LiveFor(s.store), cutoff, now, "open", "in_progress")
 }
 
 // StaleNotClosedRuns lists every not-closed tracking bead whose CreatedAt is at
@@ -182,18 +184,20 @@ func (s *Store) StaleOpenRuns(cutoff time.Time) ([]OrderRun, error) {
 // releases its order once it is stale rather than holding it until the next
 // boot. It reads every not-closed status in one query, so a native Dolt store
 // decodes the retained closed tracking history for it, as it already does when
-// gc order sweep-tracking reads that history to prune it.
-func (s *Store) StaleNotClosedRuns(cutoff time.Time) ([]OrderRun, error) {
+// gc order sweep-tracking reads that history to prune it. Unfinished dispatches
+// are excluded as in StaleOpenRuns.
+func (s *Store) StaleNotClosedRuns(cutoff, now time.Time) ([]OrderRun, error) {
 	if s.store == (beads.OrdersStore{}) {
 		return nil, nil
 	}
-	return staleRuns(beads.LiveFor(s.store), cutoff, everyNotClosed)
+	return staleRuns(beads.LiveFor(s.store), cutoff, now, everyNotClosed)
 }
 
 // staleRuns is the stale readers' shared body: the tracking beads in statuses
 // whose CreatedAt is at or before cutoff, oldest-first, read through live. A
-// bead with no CreatedAt is never stale.
-func staleRuns(live beads.LiveReader, cutoff time.Time, statuses ...string) ([]OrderRun, error) {
+// bead with no CreatedAt is never stale, and a dispatch still inside its
+// persisted deadline plus completion grace at now is not returned.
+func staleRuns(live beads.LiveReader, cutoff, now time.Time, statuses ...string) ([]OrderRun, error) {
 	all, err := sweepTrackingBeads(live, statuses...)
 	if err != nil {
 		return nil, err
@@ -201,6 +205,13 @@ func staleRuns(live beads.LiveReader, cutoff time.Time, statuses ...string) ([]O
 	out := make([]OrderRun, 0, len(all))
 	for _, b := range all {
 		if b.CreatedAt.IsZero() || b.CreatedAt.After(cutoff) {
+			continue
+		}
+		protected, err := dispatchProtectedFromSweep(b, now)
+		if err != nil {
+			return nil, err
+		}
+		if protected {
 			continue
 		}
 		name, _ := NameFromTrackingBead(b)
@@ -217,9 +228,10 @@ func staleRuns(live beads.LiveReader, cutoff time.Time, statuses ...string) ([]O
 // in one query, a tracking bead parked by hand included: it runs once per boot,
 // so it can afford the closed rows a native Dolt store decodes for that query.
 // It is the typed read half of the orphaned-order-tracking startup sweep; the
-// caller closes the returned runs via CloseRuns. Names are best-effort (the
-// sweep closes by ID and does not resolve names).
-func (s *Store) OrphanedOpenRuns() ([]OrderRun, error) {
+// caller closes the returned runs via CloseRuns. A dispatch with an unexpired
+// deadline is preserved across controller reloads and restarts. Names are
+// best-effort (the sweep closes by ID and does not resolve names).
+func (s *Store) OrphanedOpenRuns(now time.Time) ([]OrderRun, error) {
 	if s.store == (beads.OrdersStore{}) {
 		return nil, nil
 	}
@@ -230,6 +242,13 @@ func (s *Store) OrphanedOpenRuns() ([]OrderRun, error) {
 	out := make([]OrderRun, 0, len(all))
 	for _, b := range all {
 		if beadLabelsContain(b.Labels, labelTriggerEnvFail) {
+			continue
+		}
+		protected, err := dispatchProtectedFromSweep(b, now)
+		if err != nil {
+			return nil, err
+		}
+		if protected {
 			continue
 		}
 		name, _ := NameFromTrackingBead(b)
@@ -270,6 +289,25 @@ func sweepTrackingBeads(live beads.LiveReader, statuses ...string) ([]beads.Bead
 	}
 	beads.SortBeads(out, beads.SortCreatedAsc)
 	return out, nil
+}
+
+// dispatchProtectedFromSweep reports whether b is an unfinished dispatch still
+// inside its persisted deadline plus completion grace at now. A bead with no
+// deadline keeps the legacy recovery policy; malformed metadata is an error so
+// no destructive sweep acts on it.
+func dispatchProtectedFromSweep(b beads.Bead, now time.Time) (bool, error) {
+	raw := b.Metadata[beadmeta.OrderDispatchDeadlineMetadataKey]
+	if raw == "" {
+		return false, nil
+	}
+	deadline, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return false, fmt.Errorf("order run %q has invalid dispatch deadline %q: %w", b.ID, raw, err)
+	}
+	if outcomeFromLabels(b.Labels) != RunOutcomeNone {
+		return false, nil
+	}
+	return now.Before(deadline.Add(dispatchCompletionGrace)), nil
 }
 
 // ClosedRunsForRetention lists the CLOSED tracking beads across every order

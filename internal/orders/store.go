@@ -48,6 +48,10 @@ const (
 	labelWispFailed     = "wisp-failed"
 	labelWispCanceled   = "wisp-canceled"
 	labelTriggerEnvFail = "trigger-env-failed"
+
+	// Allow canceled subprocess groups and outcome writes to finish before
+	// another process recovers an expired dispatch's tracking record.
+	dispatchCompletionGrace = time.Minute
 )
 
 // RunOutcome enumerates the terminal outcome of an order run. Each value maps
@@ -179,6 +183,10 @@ type RunOpts struct {
 	// the trigger-env-failed pre-dispatch path which creates an already-labeled
 	// open bead so the open-work gate suppresses repeat ticks.
 	Outcome RunOutcome
+	// Deadline is the absolute deadline of the dispatch context. Recovery
+	// preserves an unfinished run until this deadline plus completion grace.
+	// Zero keeps the legacy recovery policy for markers that launch no work.
+	Deadline time.Time
 }
 
 // Store is the order-class domain wrapper. It holds the strongly-typed
@@ -299,15 +307,18 @@ func baseLabels(scoped string, outcome RunOutcome) []string {
 }
 
 // CreateRun creates an OPEN tracking bead for scoped (the in-flight marker
-// whose CreatedAt advances the cooldown clock). It is the byte-identical
-// replacement for the store.Create(beads.Bead{Title:"order:"+scoped, Labels:
-// {order-run, order-tracking[, outcome]}, NoHistory:true}) sites in
-// order_dispatch.go.
+// whose CreatedAt advances the cooldown clock). The dispatch deadline is written
+// atomically with the bead so concurrent recovery cannot see an unprotected run.
 func (s *Store) CreateRun(scoped string, opts RunOpts) (OrderRun, error) {
+	var metadata map[string]string
+	if !opts.Deadline.IsZero() {
+		metadata = map[string]string{beadmeta.OrderDispatchDeadlineMetadataKey: opts.Deadline.UTC().Format(time.RFC3339Nano)}
+	}
 	created, err := s.store.Create(beads.Bead{
 		Title:     trackingTitle(scoped),
 		Labels:    baseLabels(scoped, opts.Outcome),
 		NoHistory: true,
+		Metadata:  metadata,
 	})
 	if err != nil {
 		return OrderRun{}, fmt.Errorf("creating order run for %q: %w", scoped, err)
