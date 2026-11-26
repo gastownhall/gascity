@@ -2,8 +2,49 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 )
+
+// lanePassSlowThreshold is how long a background lane pass may run before it
+// writes a slow-pass line. Order dispatch passes run in seconds; a pass past a
+// minute is holding every cooldown order behind it, so the line names the step
+// that held it.
+const lanePassSlowThreshold = time.Minute
+
+// lanePhase is one timed step of a background lane pass.
+type lanePhase struct {
+	name string
+	took time.Duration
+}
+
+// recordLanePhases records each step of a pass as a phase operation on the
+// pass's trace cycle, so `gc trace` attributes a long pass to its step.
+func recordLanePhases(trace *sessionReconcilerTraceCycle, phases []lanePhase) {
+	if trace == nil {
+		return
+	}
+	for _, p := range phases {
+		trace.RecordControllerOperation(TraceSiteControllerTickPhase, TraceReasonRetained, TraceOutcomeComplete,
+			p.name, p.took, nil)
+	}
+}
+
+// logSlowLanePass writes one stderr line when a lane pass ran past
+// lanePassSlowThreshold, with every step's time, so the step that held the
+// lane is in the supervisor log without arming a trace.
+func (cr *CityRuntime) logSlowLanePass(lane, reason string, took time.Duration, phases []lanePhase) {
+	if took < lanePassSlowThreshold || cr.stderr == nil {
+		return
+	}
+	parts := make([]string, 0, len(phases))
+	for _, p := range phases {
+		parts = append(parts, fmt.Sprintf("%s=%s", p.name, p.took.Round(time.Millisecond)))
+	}
+	fmt.Fprintf(cr.stderr, "%s: lane %s: slow pass (%s) took %s (threshold %s): %s\n", //nolint:errcheck // best-effort stderr
+		cr.logPrefix, lane, reason, took.Round(time.Millisecond), lanePassSlowThreshold, strings.Join(parts, " "))
+}
 
 // startPacedLane starts a background lane goroutine and returns a channel
 // closed when it exits (ctx done). pass runs one pass; wake reports whether a

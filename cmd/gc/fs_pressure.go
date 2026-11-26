@@ -141,10 +141,49 @@ func (cr *CityRuntime) resetFSPressureEpisode() {
 	cr.fsPressureEpisodeLogged = false
 }
 
+// fsPressureEpisode is one background lane's own FS-pressure episode: how many
+// passes in a row it has skipped, and whether it has logged the episode yet.
+// Each lane keeps its own, so the tick and the lanes shed independently.
+type fsPressureEpisode struct {
+	skips  int
+	logged bool
+}
+
+// laneShouldSkipForFSPressure is the tick's pressure gate for a background
+// lane: skip while pressure is high, but force a pass after
+// maxConsecutiveFSPressureSkips so the lane's work cannot starve. It logs once
+// per episode, naming work, and records the decision on the lane's trace
+// under trigger. The supervisor skipped-tick event stays the tick's, so its
+// counts keep meaning ticks.
+func (cr *CityRuntime) laneShouldSkipForFSPressure(ep *fsPressureEpisode, trace *sessionReconcilerTraceCycle, trigger, work string) bool {
+	status, ok := currentFSPressureStatus(cr.stderr)
+	if !ok || !status.High {
+		*ep = fsPressureEpisode{}
+		return false
+	}
+	if ep.skips >= maxConsecutiveFSPressureSkips {
+		if cr.stderr != nil {
+			fmt.Fprintf(cr.stderr, "supervisor: FS pressure high (some avg60=%.2f > threshold=%.1f), forcing %s after %d skipped passes\n", //nolint:errcheck // best-effort stderr
+				status.Avg60, status.Threshold, work, ep.skips)
+		}
+		recordFSPressureForcedTickTrace(trace, trigger, status, ep.skips)
+		*ep = fsPressureEpisode{}
+		return false
+	}
+	ep.skips++
+	if !ep.logged && cr.stderr != nil {
+		fmt.Fprintf(cr.stderr, "supervisor: FS pressure high (some avg60=%.2f > threshold=%.1f), skipping %s\n", //nolint:errcheck // best-effort stderr
+			status.Avg60, status.Threshold, work)
+	}
+	ep.logged = true
+	recordFSPressureSkippedTickTrace(trace, trigger, status, ep.skips)
+	return true
+}
+
 // shouldSkipTickForFSPressure gates only the patrol/poke tick path after
 // config reload and before managed-Dolt preflight, session sync, demand
-// build, and reconciliation. Order dispatch runs on its own lane and applies
-// the same gate there (ordersLaneShouldSkipForFSPressureLocked). Pressure-skipped
+// build, and reconciliation. Order dispatch and order maintenance run on lanes
+// of their own and apply the same gate there (laneShouldSkipForFSPressure). Pressure-skipped
 // ticks still drain already queued convergence requests; nudge-dispatch,
 // control-dispatcher, socket-driven convergence requests, and manual reload
 // refreshes are separate high-priority paths and are not covered by this gate.

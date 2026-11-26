@@ -174,15 +174,35 @@ the tick never waits on order gates.
   config change waits for the lane's own forced pass, up to
   `maxConsecutiveFSPressureSkips`+1 passes. After the gate, a pass runs
   the managed-Dolt preflight and the periodic order rescan, installs any
-  staged dispatcher (a reload's, or the rescan's), runs the
-  tracking/nudge-mail watchdogs, and calls `dispatch()`. The preflight
-  waits at most 30 seconds for a Dolt recover, counted from when the
-  recover started; past that the pass carries on and the recover keeps
-  running, so a slow recover never holds up dispatch. A panic
-  is recovered per pass (`safeTick`). Each pass is its own trace cycle
-  with trigger `orders`.
+  staged dispatcher (a reload's, or the rescan's), and calls `dispatch()`.
+  The preflight waits at most 30 seconds for a Dolt recover, counted from
+  when the recover started; past that the pass carries on and the recover
+  keeps running, so a slow recover never holds up dispatch. A panic is
+  recovered per pass (`safeTick`). Each pass is its own trace
+  cycle with trigger `orders`, with one phase operation per step
+  (`order_rescan`, `install_order_dispatcher`, `order_dispatch`), and a pass
+  that runs past a minute writes one `lane orders-lane: slow pass` line to
+  the supervisor log with every step's time.
+- **Store maintenance runs on lanes of its own**
+  (`cmd/gc/order_maintenance_lane.go`), never in a dispatch pass. Each
+  watchdog sweeps every scope's store, and the retention prune's delete run
+  (up to 100 graph-aware deletes) took 7-15 minutes on a loaded host. While
+  it ran inside the pass, every order waited behind it and cooldown orders
+  fired ~9 minutes late together. There are two lanes, so the slow one
+  cannot hold the one dispatch depends on:
+  - `order-tracking-sweep` closes stale open tracking beads, whose jam would
+    shut every order's gate (#2168). Its cadence is the sweep's 30s interval.
+  - `bead-retention` runs the closed order-tracking retention prune (15m)
+    and the stale nudge/mail sweep (5m). The prune stops between delete chunks
+    when the lane is stopped.
+
+  Each lane skips a suspended city, sheds FS pressure with its own episode
+  like the orders lane, records a trace cycle (triggers
+  `order_tracking_sweep`, `bead_retention`) with one phase per watchdog,
+  and writes the same slow-pass line. `run()` stops and joins both on every
+  exit.
 - **Reloads never wait on a pass.** A pass holds the lane's `passMu` for the
-  live dispatcher, the retired dispatchers and the watchdog clocks. A config
+  live dispatcher and the retired dispatchers. A config
   reload stages the rebuilt dispatcher and installs it at once if the lane
   is idle. Otherwise the next pass installs it, draining the outgoing
   dispatcher first. A pass already in flight when the reload lands
@@ -192,7 +212,7 @@ the tick never waits on order gates.
   always stages; a same-revision reload stages only when its rescan finds
   the order set changed; a superseded reload never stages. Each pass reads
   the generation and the one config snapshot the whole pass uses (trace,
-  rescan, watchdogs) as a pair, under the lock the bump takes, so no stage
+  rescan) as a pair, under the lock the bump takes, so no stage
   lands between them. The rescan stages its result only if the generation
   is unchanged, so a rescan of pre-reload config can never overwrite the
   reload's dispatcher.
@@ -368,6 +388,7 @@ Violations indicate bugs.
 | `internal/orders/triggers.go` | `TriggerResult`, `CheckTrigger()`, `checkCooldown()`, `checkCron()`, `checkCondition()`, `checkEvent()`, `cronFieldMatches()`, `MaxSeqFromLabels()` |
 | `internal/orders/scanner.go` | `Scan()` -- discovers orders across formula layers with priority override |
 | `cmd/gc/orders_lane.go` | The orders lane: duty-cycle wake pacing and backstop timer, `runOrdersLanePass()`, the FS-pressure gate, dispatcher staging and install, the order-set generation guard |
+| `cmd/gc/order_maintenance_lane.go` | The order-tracking-sweep and bead-retention lanes: the tracking sweep, retention prune and nudge/mail sweep watchdogs, off the dispatch pass |
 | `cmd/gc/order_dispatch.go` | `orderDispatcher` interface, `memoryOrderDispatcher`, `buildOrderDispatcher()`, `dispatch()`, `dispatchOne()`, `dispatchExec()`, `dispatchWisp()`, `effectiveTimeout()`, `rigExclusiveLayers()`, `qualifyPool()`, `ExecRunner`, `shellExecRunner` |
 | `cmd/gc/cmd_order.go` | CLI commands: `gc order list`, `show`, `run`, `check`, `history`. Helper functions: `loadOrders()`, `loadAllOrders()`, `cityFormulaLayers()`, `findOrder()`, `orderLastRunFn()`, `bdCursorFunc()` |
 

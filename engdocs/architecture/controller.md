@@ -93,6 +93,7 @@ gc start --foreground
   │           ├─ watchConfigDirs()   →  fsnotify on config + pack dirs
   │           ├─ startup order dispatch (once, synchronous)
   │           ├─ startOrdersLane()   →  orders lane goroutine (below)
+  │           ├─ startOrderMaintenanceLanes() → tracking-sweep + retention lanes
   │           ├─ initial reconciliation
   │           └─ ticker loop:
   │                 ├─ if dirty: tryReloadConfig() + stage order dispatcher
@@ -103,11 +104,15 @@ gc start --foreground
   │
   │     orders lane (own goroutine; wake after a duty-cycle gap, or backstop):
   │           ├─ FS-pressure gate + managed-Dolt preflight
-  │           ├─ rescan; install staged dispatcher; watchdogs
+  │           ├─ rescan; install staged dispatcher
   │           └─ orderDispatcher.dispatch()
   │
+  │     maintenance lanes (own goroutines; one pass per interval):
+  │           ├─ order-tracking-sweep: stale open tracking beads (30s)
+  │           └─ bead-retention: nudge/mail sweep (5m), retention prune (15m)
+  │
   └─ shutdown:
-        ├─ stop + join orders lane
+        ├─ stop + join maintenance lanes and orders lane
         ├─ orderDispatcher.drain(ctx) →  wait for in-flight order goroutines
         │                               (skipped if a forced stop overlaps a pass)
         ├─ gracefulStopAll()         →  interrupt → wait → kill

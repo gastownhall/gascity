@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -50,6 +51,30 @@ func TestOrdersLanePassSkipsDispatchUnderFSPressure(t *testing.T) {
 	if !od.called.Load() {
 		t.Fatal("order dispatch did not run on the forced pass after max consecutive pressure skips")
 	}
+
+	// Maintenance owns a separate pressure episode under the same pressure.
+	t.Run("maintenance", func(t *testing.T) {
+		runs := 0
+		lane := &orderMaintenanceLane{
+			name: beadRetentionLaneName,
+			jobs: []orderMaintenanceJob{{name: "job", run: func(context.Context, *config.City, time.Time) { runs++ }}},
+		}
+
+		for i := 0; i < maxConsecutiveFSPressureSkips; i++ {
+			cr.runOrderMaintenancePass(context.Background(), lane)
+		}
+		if runs != 0 {
+			t.Fatalf("maintenance job ran %d times during pressure-skipped passes", runs)
+		}
+		if n := strings.Count(stderr.String(), "skipping "+beadRetentionLaneName); n != 1 {
+			t.Fatalf("stderr = %q, want one %s skip warning per pressure episode", stderr.String(), beadRetentionLaneName)
+		}
+
+		cr.runOrderMaintenancePass(context.Background(), lane)
+		if runs != 1 {
+			t.Fatalf("maintenance job runs after the forced pass = %d, want 1", runs)
+		}
+	})
 }
 
 // Low pressure never gates the lane.

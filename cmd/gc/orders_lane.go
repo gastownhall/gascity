@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -68,8 +67,7 @@ type ordersLane struct {
 	// the lane ends its episode only when it sees pressure drop or forces a
 	// pass. A tick forced every few seconds under pressure must not reset the
 	// lane's count, or the lane would never reach its own forced pass.
-	fsPressureSkips  int
-	fsPressureLogged bool
+	fsPressure fsPressureEpisode
 
 	// Last pass that reached dispatch, for the tick trace (statusMu). A pass
 	// the FS gate skipped does not count, so a lane starved by pressure shows
@@ -197,13 +195,18 @@ func (cr *CityRuntime) runOrdersLanePass(ctx context.Context, cityRoot, reason s
 		return
 	}
 
+	preflight := lanePhase{name: "managed_dolt_preflight", took: time.Since(phaseStart)}
+
 	phaseStart = time.Now()
-	cr.dispatchOrdersLocked(ctx, cityRoot, generation, cfg)
+	phases := cr.dispatchOrdersLocked(ctx, cityRoot, generation, cfg)
 	lane.notePass(time.Now(), reason)
+	took := time.Since(phaseStart)
+	recordLanePhases(trace, phases)
 	if trace != nil {
 		trace.RecordControllerOperation(TraceSiteOrderDispatch, TraceReasonRetained, TraceOutcomeComplete,
-			"dispatch_orders", time.Since(phaseStart), nil)
+			"dispatch_orders", took, nil)
 	}
+	cr.logSlowLanePass(ordersLaneSafeTickTrigger, reason, preflight.took+took, append([]lanePhase{preflight}, phases...))
 	if ctx.Err() != nil {
 		return
 	}
@@ -246,31 +249,7 @@ func (cr *CityRuntime) beginOrdersLaneTrace(cfg *config.City, reason string) *se
 // episode and records the decision on the lane's trace; the supervisor
 // skipped-tick event stays the tick's, so its counts keep meaning ticks.
 func (cr *CityRuntime) ordersLaneShouldSkipForFSPressureLocked(lane *ordersLane, trace *sessionReconcilerTraceCycle, reason string) bool {
-	status, ok := currentFSPressureStatus(cr.stderr)
-	if !ok || !status.High {
-		lane.fsPressureSkips = 0
-		lane.fsPressureLogged = false
-		return false
-	}
-	trigger := ordersLaneSafeTickTrigger + ":" + reason
-	if lane.fsPressureSkips >= maxConsecutiveFSPressureSkips {
-		if cr.stderr != nil {
-			fmt.Fprintf(cr.stderr, "supervisor: FS pressure high (some avg60=%.2f > threshold=%.1f), forcing order dispatch after %d skipped passes\n", //nolint:errcheck // best-effort stderr
-				status.Avg60, status.Threshold, lane.fsPressureSkips)
-		}
-		recordFSPressureForcedTickTrace(trace, trigger, status, lane.fsPressureSkips)
-		lane.fsPressureSkips = 0
-		lane.fsPressureLogged = false
-		return false
-	}
-	lane.fsPressureSkips++
-	if !lane.fsPressureLogged && cr.stderr != nil {
-		fmt.Fprintf(cr.stderr, "supervisor: FS pressure high (some avg60=%.2f > threshold=%.1f), skipping order dispatch\n", //nolint:errcheck // best-effort stderr
-			status.Avg60, status.Threshold)
-	}
-	lane.fsPressureLogged = true
-	recordFSPressureSkippedTickTrace(trace, trigger, status, lane.fsPressureSkips)
-	return true
+	return cr.laneShouldSkipForFSPressure(&lane.fsPressure, trace, ordersLaneSafeTickTrigger+":"+reason, "order dispatch")
 }
 
 // dispatchOrders runs one dispatch outside the lane goroutine — the startup
@@ -285,33 +264,42 @@ func (cr *CityRuntime) dispatchOrders(ctx context.Context, cityRoot string) {
 }
 
 // dispatchOrdersLocked is the dispatch body. passMu must be held; generation
-// and cfg come from orderPassConfig.
-func (cr *CityRuntime) dispatchOrdersLocked(ctx context.Context, cityRoot string, generation uint64, cfg *config.City) {
+// and cfg come from orderPassConfig. It returns how long each step took, for
+// the pass's trace and slow-pass line.
+//
+// Store maintenance is not a step here: the tracking-sweep, retention and
+// nudge/mail watchdogs run on the maintenance lanes (order_maintenance_lane.go),
+// so a slow store read or a long delete run in one of them cannot hold every
+// order.
+func (cr *CityRuntime) dispatchOrdersLocked(ctx context.Context, cityRoot string, generation uint64, cfg *config.City) []lanePhase {
 	if ctx.Err() != nil {
-		return
+		return nil
 	}
 	// A suspended city gets no order pass at all: dispatch already skips it,
-	// and the tracking and mail watchdogs below would read every scope's
-	// store, restarting the proxies suspension retired.
+	// and the rescan below would read the city's order sources for nothing.
 	if effectiveCitySuspended(cfg, loadSuspensionStateBestEffort(cr.cityPath)) {
-		return
+		return nil
+	}
+	var phases []lanePhase
+	step := func(name string, run func()) {
+		start := time.Now()
+		run()
+		phases = append(phases, lanePhase{name: name, took: time.Since(start)})
 	}
 	now := time.Now()
 	if !cr.wispIndexMigrationApplied {
 		cr.wispIndexMigrationApplied = true
-		cr.applyWispQueryIndexes(ctx)
+		step("wisp_query_indexes", func() { cr.applyWispQueryIndexes(ctx) })
 	}
-	cr.rescanOrderDispatcherIfDue(cityRoot, cfg, generation, now)
+	step("order_rescan", func() { cr.rescanOrderDispatcherIfDue(cityRoot, cfg, generation, now) })
 	// Installs whatever is staged — this rescan's result, or a reload staged
 	// while the previous pass held the lock — before anything dispatches
 	// against the outgoing dispatcher.
-	cr.installPendingOrderDispatcherLocked(ctx)
-	cr.runOrderTrackingSweepWatchdog(cfg, now)
-	cr.runOrderTrackingRetentionWatchdog(cfg, now)
-	cr.runNudgeMailSweepWatchdog(cfg, now)
+	step("install_order_dispatcher", func() { cr.installPendingOrderDispatcherLocked(ctx) })
 	if cr.od != nil {
-		cr.od.dispatch(ctx, cityRoot, now)
+		step("order_dispatch", func() { cr.od.dispatch(ctx, cityRoot, now) })
 	}
+	return phases
 }
 
 // stageOrderDispatcher is the reload-side stage: it records next as the
