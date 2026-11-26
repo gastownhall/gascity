@@ -66,6 +66,7 @@ tcp_check() { return 0; }
 do_query_probe() { return 0; }
 check_read_only() { return 1; }
 get_connection_count() { return 1; }
+run_bd_pinned() { [ "$2" = ping ] || exit 9; return 0; }
 ` + stubs + `
 set +e
 (` + op + `)

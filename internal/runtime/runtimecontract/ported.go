@@ -87,10 +87,15 @@ type metaUnsupported struct{ op string }
 func (e metaUnsupported) Error() string { return e.op + " returned exit 2" }
 
 // metaSkipOrFail is the meta group's verdict on an op that answered exit
-// 2: SKIP, unless observe.v1 is declared, whose rule 3 makes it a failure.
+// 2: SKIP, unless observe.v1 is declared, whose rule 3 makes it a failure,
+// or the handshake un-welds start, whose first turn is bound to the launch
+// identity gc stores with set-meta (RPP-PROVISION-005).
 func metaSkipOrFail(hs runtime.ProtocolInfo, e metaUnsupported) (Status, string) {
 	if hs.Has(runtime.ProtocolCapabilityObserveV1) {
 		return StatusFail, e.Error() + " although observe.v1 is declared (a metadata op's exit 2 is a missing store)"
+	}
+	if hs.SeparableLaunch() {
+		return StatusFail, e.Error() + " although the handshake un-welds start (proc.provision): gc binds the first turn to the launch identity it stores with set-meta"
 	}
 	return StatusSkip, e.Error() + " — metadata ops not implemented"
 }

@@ -71,7 +71,9 @@ type releasePolicy struct {
 	statuses     []string // the claim statuses the path gives back
 	startedKeeps bool     // a started claim keeps the seat: nothing is released
 	// startedNamedKeeps keeps each claim the seat's own started records name
-	// (releaseSeat.keepsStarted); the rest are released.
+	// (releaseSeat.keepsStarted) and each claim held under the seat's
+	// configured named identity (releaseSeat.keepsNamedIdentity); the rest
+	// are released.
 	startedNamedKeeps bool
 	lane              laneRule
 	seatRoute         bool // the seat's route is the fallback, stamped on a routeless claim
@@ -97,7 +99,11 @@ var (
 //     claim the seat's work_started cell or execution_claim_started stamp
 //     names is kept (PHASE1-2 §6.5), unless it is on a dispatch hold: the ack
 //     is no proof it never ran, and giving it back lost started work
-//     (mc-ilr3b);
+//     (mc-ilr3b). A claim assigned to the seat's configured named identity is
+//     kept too, started record or not, on the same hold exception: the next
+//     incarnation of a named session resumes it through the awake set's
+//     assigned anchor, and a release would strand it open and unassigned. The
+//     keep is that identity alone, never the session_name;
 //   - the cascade, the stranded repair, both orphan releases and the
 //     retired-session sweep (`gc session close`, a removed named session)
 //     give back started work too: the seat is gone;
@@ -131,6 +137,7 @@ var releasePolicies = map[releaseWhy]releasePolicy{
 // Why a claim was kept or failed.
 const (
 	keptStarted       = "started"
+	keptNamedIdentity = "named-identity" // held under the seat's configured named identity
 	keptUnservedRoute = "unserved-route"
 	keptMoved         = "moved"
 	keptDetachedHeld  = "detached-held" // its gc.detached probe did not attest the runtime dead
@@ -146,6 +153,9 @@ var errReleaseNoConfig = errors.New("release: no city config to judge routes by"
 type releaseSeat struct {
 	id, name, template string
 	fallback           string // the seat's own route (template, else agent_name)
+	// namedIdentity is the seat's configured_named_identity metadata, empty
+	// for a seat no named-session config backs.
+	namedIdentity string
 	// started is every claim the seat names as executing: its current bead
 	// and claim stamps and its started records. The killed-seat release (B1)
 	// keeps the seat's work when any of them is held.
@@ -162,7 +172,10 @@ type releaseSeat struct {
 }
 
 func releaseSeatOfBead(b beads.Bead) releaseSeat {
-	s := releaseSeat{id: b.ID, name: b.Metadata["session_name"], template: b.Metadata["template"], fallback: retiredSessionFallbackRoute(b)}
+	s := releaseSeat{
+		id: b.ID, name: b.Metadata["session_name"], template: b.Metadata["template"], fallback: retiredSessionFallbackRoute(b),
+		namedIdentity: strings.TrimSpace(b.Metadata[sessionpkg.NamedSessionIdentityMetadata]),
+	}
 	s.nameStarted(b.Metadata[sessionpkg.CurrentBeadIDKey], b.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey])
 	s.nameRecorded(startedClaimBead(b.Metadata[executionClaimStartedKey]))
 	s.nameWorkStarted(b.Metadata[sessionpkg.WorkStartedKey])
@@ -170,7 +183,10 @@ func releaseSeatOfBead(b beads.Bead) releaseSeat {
 }
 
 func releaseSeatOfInfo(info sessionpkg.Info) releaseSeat {
-	s := releaseSeat{id: info.ID, name: info.SessionNameMetadata, template: info.Template, fallback: retiredSessionFallbackRouteInfo(info)}
+	s := releaseSeat{
+		id: info.ID, name: info.SessionNameMetadata, template: info.Template, fallback: retiredSessionFallbackRouteInfo(info),
+		namedIdentity: sessionpkg.NamedSessionIdentityInfo(info),
+	}
 	s.nameStarted(info.CurrentlyProcessingBeadID, info.CurrentClaimBeadID)
 	s.nameRecorded(startedClaimBead(info.ExecutionClaimStarted))
 	s.nameWorkStarted(info.WorkStartedRaw)
@@ -222,6 +238,15 @@ func (s *releaseSeat) nameWorkStarted(raw string) {
 // always has (gas-kg6).
 func (s releaseSeat) keepsStarted(b beads.Bead) bool {
 	return (s.recordedUnread || s.recorded[strings.TrimSpace(b.ID)]) && !beadmeta.HasDispatchHold(b.Labels)
+}
+
+// keepsNamedIdentity reports whether the drain-ack release keeps b because it
+// is assigned to the seat's configured named identity, on the same dispatch
+// hold exception as keepsStarted. It stays out of keepsStarted on purpose:
+// that one also decides whether a seat's own drain-ack is refused, and a
+// named seat holding only this kind of claim must still be able to ack.
+func (s releaseSeat) keepsNamedIdentity(b beads.Bead) bool {
+	return s.namedIdentity != "" && strings.TrimSpace(b.Assignee) == s.namedIdentity && !beadmeta.HasDispatchHold(b.Labels)
 }
 
 // startedClaimBead is the bead an execution_claim_started stamp names
@@ -338,6 +363,10 @@ func releaseListed(claims []seatWorkHit, why releaseWhy, seat releaseSeat, cfg *
 	for _, c := range mine {
 		if p.startedNamedKeeps && seat.keepsStarted(c.bead) {
 			keep(c, keptStarted)
+			continue
+		}
+		if p.startedNamedKeeps && seat.keepsNamedIdentity(c.bead) {
+			keep(c, keptNamedIdentity)
 			continue
 		}
 		if route, served := releaseRoute(cfg, c.bead, fallback, p.lane); !served {

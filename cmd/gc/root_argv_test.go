@@ -5,6 +5,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/test/processfloor"
 )
 
 func TestFirstRootCommandMatchesPersistentScopeGrammar(t *testing.T) {
@@ -119,6 +121,33 @@ func TestRootCommandOptionsSkipPackDiscoveryForBuiltinCommands(t *testing.T) {
 				t.Fatalf("root options args = %q, want %q", options.invocationArgs, test.args)
 			}
 		})
+	}
+}
+
+// TestAcceptanceProcessFloorTakesGCBDsDiscoveryBranch pins the process floor
+// the native-lane acceptance budget subtracts (test/processfloor.Args, used by
+// test/acceptance/beads_proxied_default_test.go's bd-list-gc-side-budget) to
+// the startup path of the command it is subtracted from.
+//
+// The row reads `gc bd list --json`'s marginal cost as its gc side minus a
+// floor: one gc process that starts and does nothing else. Eager pack-command
+// discovery loads the city config and the pack tree before the command runs,
+// and `gc bd` skips it (rootCommandSkipsPackDiscovery). A floor that does not
+// skip it carries city-config loading the gc side never does, and on a loaded
+// box that work alone puts the floor more than the whole budget above the gc
+// side (gate tracker ga-97b2v9wd).
+func TestAcceptanceProcessFloorTakesGCBDsDiscoveryBranch(t *testing.T) {
+	t.Parallel()
+
+	floorArgs := processfloor.Args()
+	measuredArgs := []string{"bd", "list", "--json"}
+	floor := rootCommandOptionsForArgs(floorArgs)
+	measured := rootCommandOptionsForArgs(measuredArgs)
+	if floor.discoverPackCommands != measured.discoverPackCommands ||
+		floor.eagerPackCommandDiscovery != measured.eagerPackCommandDiscovery {
+		t.Fatalf("the acceptance process floor gc %q runs pack discovery=%t (eager=%t), but the gc side it is subtracted from, gc %q, runs discovery=%t (eager=%t): the floor must take the measured command's discovery branch, or it measures city-config loading the gc side never does",
+			floorArgs, floor.discoverPackCommands, floor.eagerPackCommandDiscovery,
+			measuredArgs, measured.discoverPackCommands, measured.eagerPackCommandDiscovery)
 	}
 }
 

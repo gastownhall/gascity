@@ -3917,8 +3917,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			tick.set(id, clearChurn(infoByID[id], sessFront))
 		}
 		if alive && shouldRollbackPendingCreateInfo(infoByID[id]) {
+			// The heal projects a claimed live row to awake, so awake is a
+			// start's post-heal face and is deferred like creating. Active is
+			// not: the heal keeps an active row with a claim active, so
+			// recovery repairs that partial commit now.
 			switch stateBeforeHeal {
-			case sessionpkg.StateStartPending, sessionpkg.StateCreating:
+			case sessionpkg.StateStartPending, sessionpkg.StateCreating, sessionpkg.StateAwake:
 				if pendingCreateStartInFlightInfo(infoByID[id], clk, startupTimeout) {
 					if trace != nil {
 						trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateRecoveryInFlight, TraceOutcomeDeferred, tp.TemplateName, name, nil)
@@ -5026,11 +5030,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// that is already closed on a live read is pure loss, so
 					// re-check it before killing. Failing to read it falls through
 					// to the cycle: Q1 just established a complete scan with no
-					// claim, so the cycle costs no in-flight work.
-					if terminal, err := freshAnchorBeadTerminal(topo, decision.AssignedWorkBeadID); err == nil && terminal {
+					// claim, so the cycle costs no in-flight work. The same live
+					// row also decides ownership: an anchor that is now unassigned
+					// (blank assignee included) or owned outside this session's
+					// own identifiers was released or handed off since the stale
+					// snapshot, so there is nothing to cycle this session onto.
+					terminal, anchorAssignee, anchorErr := freshAnchorBeadTerminal(topo, decision.AssignedWorkBeadID)
+					if freshAnchorCycleSkippable(terminal, anchorAssignee, anchorErr, sessionAssignmentIdentifiersForConfigInfo(info, cfg)) {
 						continue
 					}
-					if ran, fold := cycleAliveSessionForFreshReassign(cityPath, infoByID[target.info.ID], target.tp, sp, store, cfg, cb, name, decision.AssignedWorkBeadID, clk.Now(), stdout, stderr, trace); ran {
+					if ran, fold := cycleAliveSessionForFreshReassign(cityPath, rec, infoByID[target.info.ID], target.tp, sp, store, cfg, cb, name, decision.AssignedWorkBeadID, clk.Now(), stdout, stderr, trace); ran {
 						if fold != nil {
 							tick.apply(target.info.ID, fold)
 						}
@@ -5795,6 +5804,11 @@ func firstOpenClaimableAssignedWorkBeadForReachableStore(sw *SeatWork, info sess
 //   - held — a canonical dispatch hold label (beadmeta.HasDispatchHold) is a
 //     fresh bead-local field too, and the hook refuses to serve a held row on
 //     every path, so this is PROOF as well: draining past it was correct pull.
+//   - status_blocked — bd itself parked the row (status "blocked", read back from
+//     Bead.SourceStatus because the read folds it to "open"). A fresh bead-local
+//     field, and the seat's ready query excludes the row whatever its
+//     dependencies, so this is PROOF with no dependency read: draining past it
+//     was correct pull.
 //   - blockedness_unproven — bd's is_blocked projection reads STALE-CAPABLE true,
 //     or (the production reading) is absent entirely. Neither is proof, so the
 //     row's real blockedness is settled against live deps first
@@ -5824,7 +5838,7 @@ func firstOpenClaimableAssignedWorkBeadForReachableStore(sw *SeatWork, info sess
 // TestReconcileSessionBeads_DrainAckDepConfirmReadErrorNoFireAndLogsError.
 func openAssignedRowProvablyNonClaimable(store beads.Store, item beads.Bead, now time.Time) (bool, error) {
 	switch classifyDemandRowClaimability(item, now) {
-	case demandRowDeferred, demandRowHeld:
+	case demandRowDeferred, demandRowHeld, demandRowStatusBlocked:
 		return true, nil
 	case demandRowBlockednessUnproven:
 		return beadHasUnmetPlainBlocksDep(store, item.ID)
@@ -7951,8 +7965,9 @@ func relaunchAgentForLaunchDrift(
 		return false, relaunchAbortResidueFold(preparedInfo, sessFront, hadResumeKeyBeforePrepare)
 	}
 	relaunchErr := r.Relaunch(ctx, name, prepared.cfg)
-	// A startup nudge the session's program held back behind a dialog
-	// (program_status = "on", row A20) is queued, never typed or failed.
+	// A startup nudge the runtime handed back (one held behind a dialog
+	// under program_status = "on", row A20, or an un-welded exec launch's
+	// first turn) is queued, never typed or failed.
 	// A warm relaunch keeps the box's token, never the config's, so the turn
 	// binds to the live token alone (else it is queued untagged).
 	if err := queueStartupNudgeHandback(cityPath, cfg, sp, preparedInfo, name, "", relaunchErr == nil, time.Now()); err != nil {

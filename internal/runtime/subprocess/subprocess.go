@@ -1116,9 +1116,11 @@ func (p *Provider) stopBySocketAt(name string, euid int) error {
 const stopSocketReplyMargin = 2 * time.Second
 
 // stopSocketTimeout bounds a cross-process stop request: the owner replies only
-// after its stop grace and the post-SIGKILL reap grace have both run out.
+// after its stop grace and the post-SIGKILL reap grace have both run out, plus
+// however long its SIGTERM and SIGKILL spend retrying an EPERM from a member
+// that is still exiting.
 func stopSocketTimeout() time.Duration {
-	return sessionStopGrace + runtime.ManagedProcessReapGrace + stopSocketReplyMargin
+	return sessionStopGrace + runtime.ManagedProcessReapGrace + processgroup.ManagedStopSignalRetryBudget + stopSocketReplyMargin
 }
 
 // --- In-memory process helpers ---

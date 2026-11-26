@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/spf13/cobra"
 )
 
@@ -213,6 +214,10 @@ func resolveBdInvokingGCBinary() (string, error) {
 	if !filepath.IsAbs(executable) {
 		return "", fmt.Errorf("invoking gc executable %q is not absolute", executable)
 	}
+	// canonical-path-exception: existence/resolvability only, not comparison
+	// preparation. GC_BIN pins the physical executable bd re-invokes, so an
+	// unresolvable path must be an error, never a lexical fallback
+	// (TestLoadBearingGCBinPinsStayStrict).
 	canonical, err := filepath.EvalSymlinks(executable)
 	if err != nil {
 		return "", fmt.Errorf("canonicalize invoking gc executable: %w", err)
@@ -221,7 +226,7 @@ func resolveBdInvokingGCBinary() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("stat invoking gc executable: %w", err)
 	}
-	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+	if !info.Mode().IsRegular() || !fsys.IsExecutable(info) {
 		return "", fmt.Errorf("invoking gc executable %q is not an executable regular file", canonical)
 	}
 	return canonical, nil
@@ -297,7 +302,7 @@ func bestEffortInvokingGCBinary() string {
 // follows symlinks, so a link whose target an upgrade removed is refused too.
 func runnableGCBinary(path string) bool {
 	info, err := os.Stat(path)
-	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
+	return err == nil && info.Mode().IsRegular() && fsys.IsExecutable(info)
 }
 
 func warnExternalBdOverrideDrift(stderr io.Writer, cityPath string, target execStoreTarget) {

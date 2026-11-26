@@ -264,6 +264,7 @@ gc analyze
 | Subcommand | Description |
 |------------|-------------|
 | [gc analyze reliability](#gc-analyze-reliability) | Correlate session-lifecycle events with model/version/rig |
+| [gc analyze work-record](#gc-analyze-work-record) | Report work-record close-gate coverage across closed beads |
 
 ## gc analyze reliability
 
@@ -298,6 +299,35 @@ gc analyze reliability [flags]
 | `--rig` | string |  | filter to a specific rig |
 | `--since` | string | `7d` | start of the analysis window — duration (1h, 7d) or RFC3339 timestamp |
 | `--until` | string |  | end of the analysis window — duration (0s = now, 30m = 30 minutes ago) or RFC3339 timestamp |
+
+## gc analyze work-record
+
+Work-record scans closed, worker-claimable beads and reports how
+many carry a valid gc.work_outcome (shipped, no-op, blocked, abandoned)
+versus how many are missing one, per the work-record close gate
+(ADR-0009, cmd/gc/work_record_gate.go). Control/structural beads (gc.kind
+workflow roots, scope/run/check/drain steps, etc.) and non-task beads are
+excluded — they are not subject to the gate.
+
+Scope: scans the city (HQ) bead store only; rig stores are not included.
+"Covered" means the bead carries a valid gc.work_outcome value; it does not
+re-check the rest of the close contract (e.g. commits for "shipped").
+
+--limit caps the newest closed rows read before eligibility filtering, so a
+bounded report covers only the gated beads among them; use --limit 0 for an
+exact report.
+
+Read-only: this command never writes beads.
+
+```
+gc analyze work-record [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--city` | string |  | city directory (default: discover from cwd) |
+| `--json` | bool |  | emit JSON instead of a table |
+| `--limit` | int | `500` | maximum number of closed beads to read before eligibility filtering (0 = scan every closed bead; use 0 for an exact report) |
 
 ## gc bd
 
@@ -1206,7 +1236,7 @@ gc convoy
 
 | Subcommand | Description |
 |------------|-------------|
-| [gc convoy add](#gc-convoy-add) | Add an issue to a convoy |
+| [gc convoy add](#gc-convoy-add) | Add one or more issues to a convoy |
 | [gc convoy check](#gc-convoy-check) | Auto-close convoys where all issues are closed |
 | [gc convoy close](#gc-convoy-close) | Close a convoy |
 | [gc convoy control](#gc-convoy-control) | Execute control beads or run the control-dispatcher loop |
@@ -1222,13 +1252,13 @@ gc convoy
 
 ## gc convoy add
 
-Link an existing issue bead to a convoy.
+Link one or more existing issue beads to a convoy.
 
-Adds a tracks dependency from the convoy to the issue, making it appear
+Adds a tracks dependency from the convoy to each issue, making it appear
 in the convoy's progress tracking without changing the issue parent.
 
 ```
-gc convoy add <convoy-id> <issue-id> [flags]
+gc convoy add <convoy-id> <bead-ids...> [flags]
 ```
 
 | Flag | Type | Default | Description |
@@ -3907,8 +3937,9 @@ recorded config hash is updated to the hash the freshly reloaded
 config produces for it, the matching hash breakdown is refreshed, and
 any already queued config-drift drain for that session is canceled. The
 immediately-following reconcile tick sees no drift and no config-drift
-drains fire. Useful when editing a running city's .gc/settings.json
-without disrupting in-flight work. Sessions whose template no longer
+drains fire. Useful when editing a running city's .claude/settings.json
+without disrupting in-flight work. The .gc/settings.json file is generated
+from the selected settings source. Sessions whose template no longer
 maps to a configured agent are NOT updated; normal orphan/suspended
 drain handles them on the next tick.
 
@@ -4275,6 +4306,15 @@ server-stop; one that does not exit 0 is reported as a warning, as the
 server it was to end may still be running. A runtime that does not scope
 its server by GC_EXEC_CITY_PATH ends every session the server holds, so
 check it only against a backend that no live city uses.
+
+A runtime whose handshake un-welds start (proc.provision with
+proc.launch, or with proc.exec and without carrier.ops) is sent
+provision, which must leave is-running false, and with proc.launch a
+launch into that box, which must leave is-running true, and a fresh_only
+launch over the running agent, which must exit 73. They run in a private
+city of their own, as server-stop does. Such a runtime must also keep
+metadata, since gc publishes each launch's identity with set-meta: a
+set-meta that exits 2 fails the metadata round-trip instead of skipping it.
 
 The argument is an executable (path or PATH name) or a pack-declared
 runtime name: when it names a [runtimes.&lt;name&gt;] entry from the current
@@ -5351,7 +5391,8 @@ session stopped. If it could not list the runtime's sessions completely,
 or could not check whether a session is still running, it names what it
 could not verify, still stops every session it did see, and exits
 non-zero; a supervisor registration is restored. When a controller
-handled the stop, gc stop lists the runtime afterwards: a session still
+handled the stop, or gc stop itself stopped a registered city that no
+controller served, gc stop lists the runtime afterwards: a session still
 running, or a runtime that does not answer the listing in time (a wedged
 server), is reported the same way. Resolve the reported error and run gc
 stop again.
@@ -5359,8 +5400,12 @@ stop again.
 Use --timeout=DURATION to cap the wall-clock time gc stop will spend
 before giving up; the default budgets configured session interrupt and
 stop waves, the configured shutdown grace wait, and a second orphan
-cleanup pass. Use --force to skip the interrupt grace period and go
-straight to kill.
+cleanup pass. If the cap fires while gc stop is itself stopping a
+registered city that no controller served, the city is left unregistered
+rather than restored, so the supervisor does not relaunch it under that
+stop, and gc stop prints the command that finishes the stop: it names
+the city by its path, since its name no longer resolves. Use --force to
+skip the interrupt grace period and go straight to kill.
 
 ```
 gc stop [path|name] [flags]

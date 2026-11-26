@@ -22,6 +22,8 @@ type managedDoltSQLHealthReport struct {
 	QueryReady      bool
 	ReadOnly        string
 	ConnectionCount string
+	DataReadError   string
+	DataReadWarning string
 	// Database is the scope database the check was asked to prove. It is
 	// empty when the caller named none, and then DatabaseReady and
 	// DatabaseError carry no information.
@@ -331,6 +333,12 @@ func managedDoltHealthCheckFor(host, port, user string, checkReadOnly bool, targ
 		}
 	}
 	report.ConnectionCount = managedDoltConnectionCountBestEffort(host, port, user)
+	// A data-read failure is reported, never returned: dolt_recover_managed.go
+	// treats a health-check error as a failed recovery and terminates the server,
+	// which would turn unreadable data into an outage.
+	dataRead := managedDoltDataReadProbeFn(host, port, user)
+	report.DataReadError = dataRead.Err
+	report.DataReadWarning = dataRead.Warning
 	return report, nil
 }
 
@@ -445,6 +453,16 @@ func managedDoltHealthCheckFields(report managedDoltSQLHealthReport) []string {
 		"query_ready\ttrue",
 		"read_only\t" + report.ReadOnly,
 		"connection_count\t" + report.ConnectionCount,
+	}
+	// Emitted only when present so consumers of the exact field set are
+	// unaffected on a healthy server. Values are single-line: a driver message
+	// must not break the one-field-per-line protocol. They come before the
+	// scope-database fields so the early return below cannot drop them.
+	if report.DataReadError != "" {
+		fields = append(fields, "data_read_error\t"+managedDoltFieldValue(report.DataReadError))
+	}
+	if report.DataReadWarning != "" {
+		fields = append(fields, "data_read_warning\t"+managedDoltFieldValue(report.DataReadWarning))
 	}
 	if report.Database == "" {
 		return fields

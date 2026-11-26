@@ -160,6 +160,12 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 	e.vars["HOME"] = home
 	e.vars[supervisorIsolatedHomeEnv] = "1"
 	e.vars["GC_HOME"] = gcHome
+	// The bd provider's init takes a per-database flock, by default in a
+	// per-user directory under /tmp that every process on the host shares.
+	// Cities that share a managed Dolt server share a GC_HOME, so a lock
+	// directory under it keeps the serialization the lock exists for without
+	// queuing this test on the host's own initializers.
+	e.vars["GC_DOLT_INIT_LOCK_DIR"] = filepath.Join(gcHome, "dolt-init-locks")
 
 	// gc carries its environment into every bd it forks, including ones that
 	// reach a bd not wrapped by the tool-home wrapper (a raw BD_BIN). Pin bd's

@@ -49,19 +49,22 @@
 #       revalidate-then-force sequence, the interrupted-bootstrap reset)
 #       holds it exclusive, so a destructive step never lands on another
 #       initializer's in-flight migration (default:
-#       gc-beads-bd-init-locks-<uid> under $TMPDIR or /tmp, one directory
-#       per OS user, because a lock directory or file another user or a
-#       sudo run created is not writable by this one; initializers running
-#       as different OS users share a lock only when this names one
-#       directory they can all write to). Where flock is installed, an init
+#       /tmp/gc-beads-bd-init-locks-<uid>, one directory per OS user,
+#       because a lock directory or file another user or a sudo run created
+#       is not writable by this one). Where flock is installed, an init
 #       that takes the lock must be able to create its lock file here, and
 #       fails naming the file when it cannot. An init that only adopts an
 #       existing database that does not look like an interrupted bootstrap
-#       never takes it. Not under GC_CITY_PATH on purpose: two
-#       cities/worktrees that share one managed Dolt server can target the
-#       same dolt_database from different city paths, so the lock must
-#       resolve to the same file for both regardless of which city each
-#       process was invoked from.
+#       never takes it. Neither GC_CITY_PATH nor $TMPDIR is consulted, on
+#       purpose: two cities/worktrees that share one managed Dolt server can
+#       target the same dolt_database from different city paths or with
+#       different TMPDIRs, so the lock must resolve to the same file for
+#       both regardless of which city or environment each process was
+#       invoked from. Residual limits: initializers running as different OS
+#       users share a lock only when this names one directory they can all
+#       write to; and initializers whose /tmp is a private mount namespace
+#       (systemd PrivateTmp, a container) share no path at all, which only
+#       a server-side lock could fix.
 #   GC_DOLT_INIT_LOCK_TIMEOUT_MS — wait budget for that lock before op_init
 #       gives up on a concurrent initializer and fails closed instead of
 #       proceeding unprotected, in milliseconds (default: 60000).
@@ -93,11 +96,12 @@ DOLT_LOGLEVEL="${GC_DOLT_LOGLEVEL:-warning}"
 LSOF_TIMEOUT_SECONDS="${GC_LSOF_TIMEOUT_SECONDS:-2}"
 CONCURRENT_START_READY_TIMEOUT_MS="${GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS:-}"
 LOCK_RELEASE_TIMEOUT_MS="${GC_DOLT_LOCK_RELEASE_TIMEOUT_MS:-60000}"
-# Deliberately NOT derived from GC_CITY_PATH — see op_init's use of this for
-# why (two cities/worktrees sharing one managed Dolt server must resolve to
-# the same lock file despite having different city paths). The per-user
-# default is resolved by acquire_init_lock, so invocations that never take
-# the lock never run id(1).
+# Deliberately NOT derived from GC_CITY_PATH or TMPDIR — see op_init's use of
+# this for why (two cities/worktrees sharing one managed Dolt server must
+# resolve to the same lock file despite having different city paths or
+# TMPDIRs). The per-user default (/tmp/gc-beads-bd-init-locks-<uid>) is
+# resolved by acquire_init_lock, so invocations that never take the lock
+# never run id(1).
 INIT_LOCK_DIR="${GC_DOLT_INIT_LOCK_DIR:-}"
 INIT_LOCK_TIMEOUT_MS="${GC_DOLT_INIT_LOCK_TIMEOUT_MS:-60000}"
 BEADS_BACKEND="${GC_BEADS_BACKEND:-${BEADS_BACKEND:-dolt}}"
@@ -416,6 +420,24 @@ path_under_data_dir() {
     return 1
 }
 
+# dolt_client runs a dolt CLI command against the managed server without
+# putting a configured password on argv (world-readable /proc/<pid>/cmdline).
+# A non-empty password travels only in DOLT_CLI_PASSWORD, scoped to this one
+# dolt process. An empty password is also passed as an explicit empty
+# --password, which discloses nothing and masks a dolt `default` CLI profile
+# that stores a password. Mirrors cmd/gc/dolt_sql_health.go runManagedDoltSQLContext.
+# Do not call dolt_client with an assignment prefix: in POSIX sh an assignment
+# before a function call can persist in the calling shell.
+# Usage: dolt_client <host> <dolt args after --no-tls...>
+dolt_client() {
+    _dc_host="$1"; shift
+    if [ -z "${DOLT_PASSWORD:-}" ]; then
+        DOLT_CLI_PASSWORD="" dolt --host "$_dc_host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "" --no-tls "$@"
+    else
+        DOLT_CLI_PASSWORD="$DOLT_PASSWORD" dolt --host "$_dc_host" --port "$DOLT_PORT" --user "$DOLT_USER" --no-tls "$@"
+    fi
+}
+
 # do_query_probe runs a read-only information_schema query against the dolt server.
 do_query_probe() {
     local host gc_bin
@@ -425,7 +447,7 @@ do_query_probe() {
         "$gc_bin" dolt-state query-probe --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" >/dev/null 2>&1
         return $?
     fi
-    dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls         sql -r csv -q "SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA" >/dev/null 2>&1
+    dolt_client "$host" sql -r csv -q "SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA" >/dev/null 2>&1
 }
 
 # server_sql runs a SQL query against the running dolt server.
@@ -434,7 +456,7 @@ do_query_probe() {
 server_sql() {
     local host
     host=$(connect_host)
-    dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+    dolt_client "$host" \
         sql -q "$1"
 }
 
@@ -855,14 +877,32 @@ ensure_project_identity() {
     if [ -z "$dolt_database" ]; then
         return 0
     fi
-    host=$(connect_host)
-    "$gc_bin" dolt-state ensure-project-id \
-        --city "$GC_CITY_PATH" \
-        --metadata "$meta_file" \
-        --host "$host" \
-        --port "$DOLT_PORT" \
-        --user "$DOLT_USER" \
-        --database "$dolt_database" >/dev/null \
+    set -- --city "$GC_CITY_PATH" --metadata "$meta_file"
+    if [ "${GC_BEADS_PROVIDER_OWNED:-}" != "1" ] || {
+        [ "${GC_BEADS_TRANSPORT:-}" = "direct" ] &&
+            [ "${GC_BEADS_TARGET:-}" = "external" ] &&
+            [ -z "${BEADS_DOLT_SERVER_SOCKET:-}" ] && [ -n "$DOLT_PORT" ];
+    }; then
+        # Managed init already resolved DOLT_PORT from gc's runtime layout,
+        # and direct/external TCP init has the endpoint bd just used. Keep
+        # forwarding those explicit endpoints. Provider-owned local init and
+        # socket-backed init (BEADS_DOLT_SERVER_SOCKET takes precedence over
+        # any inherited TCP port) reconcile from the binding bd persisted.
+        if [ "${GC_BEADS_PROVIDER_OWNED:-}" = "1" ] &&
+            [ "${GC_BEADS_TRANSPORT:-}" = "direct" ] &&
+            [ "${GC_BEADS_TARGET:-}" = "external" ] &&
+            [ -z "${BEADS_DOLT_SERVER_SOCKET:-}" ]; then
+            # Reuse the exact host bd received at init. connect_host folds
+            # loopback IPv6 into IPv4 for gc-managed local servers, but an
+            # external binding may be IPv6-only.
+            host="${GC_DOLT_HOST:-$DOLT_HOST}"
+        else
+            host=$(connect_host)
+        fi
+        set -- "$@" --host "$host" --port "$DOLT_PORT"
+    fi
+    set -- "$@" --user "$DOLT_USER" --database "$dolt_database"
+    "$gc_bin" dolt-state ensure-project-id "$@" >/dev/null \
         || die "failed to ensure project identity for $dir"
 }
 
@@ -1158,7 +1198,7 @@ acquire_init_lock() {
         exclusive) mode_flag=-x ;;
         *) die "acquire_init_lock: unknown lock mode '$mode'" ;;
     esac
-    [ -n "$INIT_LOCK_DIR" ] || INIT_LOCK_DIR="${TMPDIR:-/tmp}/gc-beads-bd-init-locks-$(id -u)"
+    [ -n "$INIT_LOCK_DIR" ] || INIT_LOCK_DIR="/tmp/gc-beads-bd-init-locks-$(id -u)"
     local init_lock_file="$INIT_LOCK_DIR/$db.lock"
     case "$INIT_LOCK_TIMEOUT_MS" in
         ''|*[!0-9]*) INIT_LOCK_TIMEOUT_MS=60000 ;;
@@ -1497,7 +1537,7 @@ bd_runtime_bd_table_count() {
     [ -n "$db" ] || return 1
     valid_sql_name "$db" || return 1
     host=$(connect_host)
-    output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+    output=$(dolt_client "$host" \
         sql -r csv -q "SELECT COUNT(*) AS cnt FROM information_schema.tables WHERE table_schema = '$db' AND table_name IN ('issues', 'comments', 'events', 'dependencies')" 2>/dev/null) || return 1
     # Parse CSV: "cnt\n3\n" — take the last non-empty line, as get_connection_count does.
     echo "$output" | tail -1 | tr -d '[:space:]'
@@ -1519,7 +1559,7 @@ bd_runtime_schema_cursor() {
     [ -n "$db" ] || return 1
     valid_sql_name "$db" || return 1
     host=$(connect_host)
-    exists_output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+    exists_output=$(dolt_client "$host" \
         sql -r csv -q "SELECT COUNT(*) AS cnt FROM information_schema.tables WHERE table_schema = '$db' AND table_name = 'schema_migrations'" 2>/dev/null) || return 1
     exists=$(echo "$exists_output" | tail -1 | tr -d '[:space:]')
     case "$exists" in
@@ -1529,7 +1569,7 @@ bd_runtime_schema_cursor() {
         echo 0
         return 0
     fi
-    cursor_output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+    cursor_output=$(dolt_client "$host" \
         sql -r csv -q "SELECT COALESCE(MAX(version), 0) AS cur FROM \`$db\`.schema_migrations" 2>/dev/null) || return 1
     cursor=$(echo "$cursor_output" | tail -1 | tr -d '[:space:]')
     case "$cursor" in
@@ -1553,7 +1593,7 @@ bd_runtime_schema_migration_count() {
     [ -n "$db" ] || return 1
     valid_sql_name "$db" || return 1
     host=$(connect_host)
-    exists_output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+    exists_output=$(dolt_client "$host" \
         sql -r csv -q "SELECT COUNT(*) AS cnt FROM information_schema.tables WHERE table_schema = '$db' AND table_name = 'schema_migrations'" 2>/dev/null) || return 1
     exists=$(echo "$exists_output" | tail -1 | tr -d '[:space:]')
     case "$exists" in
@@ -1563,7 +1603,7 @@ bd_runtime_schema_migration_count() {
         echo 0
         return 0
     fi
-    count_output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+    count_output=$(dolt_client "$host" \
         sql -r csv -q "SELECT COUNT(*) AS cnt FROM \`$db\`.schema_migrations" 2>/dev/null) || return 1
     count=$(echo "$count_output" | tail -1 | tr -d '[:space:]')
     case "$count" in
@@ -2319,7 +2359,7 @@ YAML
 get_connection_count() {
     local host output
     host=$(connect_host)
-    output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+    output=$(dolt_client "$host" \
         sql -r csv -q "SELECT COUNT(*) AS cnt FROM information_schema.PROCESSLIST" 2>/dev/null) || return 1
     # Parse CSV: "cnt\n5\n" — take last non-empty line.
     echo "$output" | tail -1 | tr -d '[:space:]'
@@ -2363,7 +2403,7 @@ check_read_only() {
         return 1
     fi
     err_file=$(mktemp "${TMPDIR:-/tmp}/gc-dolt-show-databases.XXXXXX") || return 2
-    if output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+    if output=$(dolt_client "$host" \
         sql -r csv -q "SHOW DATABASES" 2>"$err_file"); then
         status=0
     else
@@ -2401,7 +2441,7 @@ check_read_only() {
     # the classification below keys on. Mirrors cmd/gc/dolt_sql_health.go
     # managedDoltReadOnlyProbeStatementsFor.
     sql="USE ${quoted_db}; CREATE TABLE IF NOT EXISTS ${quoted_db}.${probe_table} (k INT PRIMARY KEY); REPLACE INTO ${quoted_db}.${probe_table} VALUES (1); INSERT IGNORE INTO ${quoted_db}.${ignore_table} (pattern, ignored) VALUES ('__gc_read_only_probe', 1);"
-    if output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+    if output=$(dolt_client "$host" \
         sql -q "$sql" 2>&1); then
         return 1
     fi
@@ -2426,6 +2466,8 @@ load_health_check_from_gc() {
     GC_HEALTH_QUERY_READY="false"
     GC_HEALTH_READ_ONLY=""
     GC_HEALTH_CONNECTION_COUNT=""
+    GC_HEALTH_DATA_READ_ERROR=""
+    GC_HEALTH_DATA_READ_WARNING=""
     GC_HEALTH_DATABASE_READY=""
     GC_HEALTH_DATABASE_ERROR=""
     while IFS="$(printf '	')" read -r key value; do
@@ -2438,6 +2480,12 @@ load_health_check_from_gc() {
                 ;;
             connection_count)
                 GC_HEALTH_CONNECTION_COUNT="$value"
+                ;;
+            data_read_error)
+                GC_HEALTH_DATA_READ_ERROR="$value"
+                ;;
+            data_read_warning)
+                GC_HEALTH_DATA_READ_WARNING="$value"
                 ;;
             database_ready)
                 GC_HEALTH_DATABASE_READY="$value"
@@ -2496,7 +2544,7 @@ check_city_database() {
         fi
     fi
     host=$(connect_host)
-    if ! output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+    if ! output=$(dolt_client "$host" \
         sql -r csv -q "USE $(quote_dolt_identifier "$db"); SELECT DOLT_HASHOF('HEAD') AS head" 2>&1); then
         echo "database \"$db\" default branch head unresolvable: $(printf '%s' "$output" | tr '\n' ' ')"
         return 1
@@ -3756,10 +3804,6 @@ op_start() {
             if [ "$GC_PROBE_PORT_HOLDER_OWNED" = "true" ]; then
                 graceful_stop_owned_pid "$holder" || \
                     die "could not stop dolt server (PID $holder) holding port $DOLT_PORT without risking journal corruption (check $LOG_FILE)"
-            else
-                if [ -z "$gc_helper_bin" ]; then
-                    leave_foreign_port_holder_alone "$holder"
-                fi
             fi
         fi
     else
@@ -4891,6 +4935,31 @@ op_store_bridge() {
     GC_DOLT_PASSWORD="$DOLT_PASSWORD"     BEADS_DOLT_PASSWORD="$DOLT_PASSWORD"     "$gc_bin" bd-store-bridge         --dir "$scope_dir"         --host "$host"         --port "$DOLT_PORT"         --user "$DOLT_USER"         "$@"
     return $?
 }
+# health_data_read_gate fails the health check when the gc helper's data-read
+# probe could not read a pre-existing dolt-ignored table (a lost chunk: catalog
+# queries and the probe's own table stay green while bd's tables are unreadable).
+# An inconclusive read only warns. Only the gc helper path reports this; the
+# shell-native fallback has no data-read probe.
+health_data_read_gate() {
+    if [ -n "${GC_HEALTH_DATA_READ_ERROR:-}" ]; then
+        die "dolt data read probe failed: $GC_HEALTH_DATA_READ_ERROR"
+    fi
+    if [ -n "${GC_HEALTH_DATA_READ_WARNING:-}" ]; then
+        echo "warning: dolt data read probe inconclusive: $GC_HEALTH_DATA_READ_WARNING" >&2
+    fi
+}
+
+# health_store_open_gate exercises bd's own store-open path (bd ping opens the
+# store and runs a trivial query): a server that answers SQL can still hand bd a
+# store it cannot open.
+health_store_open_gate() {
+    local out
+    [ -d "$GC_CITY_PATH/.beads" ] || return 0
+    if ! out=$(run_bd_pinned "$GC_CITY_PATH" ping 2>&1); then
+        die "bd store-open probe failed (bd ping): $out"
+    fi
+}
+
 op_health() {
     local conn_count="" read_only_status health_db health_data_dir db_failure
 
@@ -4918,6 +4987,7 @@ op_health() {
         if ! is_remote && [ "$GC_HEALTH_READ_ONLY" = "unknown" ]; then
             echo "warning: dolt read-only probe inconclusive" >&2
         fi
+        health_data_read_gate
         conn_count="$GC_HEALTH_CONNECTION_COUNT"
     else
         # Query probe.
@@ -4950,6 +5020,8 @@ op_health() {
         # Connection capacity warning (non-fatal, single query).
         conn_count=$(get_connection_count 2>/dev/null) || conn_count=""
     fi
+
+    health_store_open_gate
 
     if [ -n "$conn_count" ] && [ "$conn_count" -ge 800 ] 2>/dev/null; then
         echo "warning: connection count ($conn_count) near capacity (80% of 1000)" >&2
@@ -5446,10 +5518,28 @@ op_provider_owned_init() {
         anchored=true
     fi
     GC_BEADS_PROVIDER_INIT=1 run_provider_owned_bd "$dir" "$@" || status=$?
-    if [ "$status" -ne 0 ] && [ "$anchored" = true ]; then
-        release_fresh_beads_dir_anchor "$dir"
+    if [ "$status" -ne 0 ]; then
+        if [ "$anchored" = true ]; then
+            release_fresh_beads_dir_anchor "$dir"
+        fi
+        return "$status"
     fi
-    return "$status"
+    # The normal managed path allocates DOLT_PORT after provider-owned dispatch.
+    # Preserve only a direct external TCP endpoint here; local init and a
+    # socket init (bd was handed --server-socket, which wins over any
+    # inherited GC_DOLT_PORT) reconcile from the binding bd persisted.
+    if [ "${GC_BEADS_TRANSPORT:-}" = "direct" ] && [ "${GC_BEADS_TARGET:-}" = "external" ] &&
+        [ -z "${BEADS_DOLT_SERVER_SOCKET:-}" ]; then
+        DOLT_PORT="${GC_DOLT_PORT:-$DOLT_PORT}"
+    fi
+    # gc's ProviderRoot must resolve the proxy root under the same
+    # shared-server opt-out bd ran under in run_provider_owned_bd, or an
+    # inherited BEADS_DOLT_SHARED_SERVER=1 sends it to a different root.
+    # This is the op's last step, so exporting in this process is safe.
+    if [ "${GC_BEADS_TRANSPORT:-}" = "proxied" ]; then
+        pin_proxied_shared_server_off
+    fi
+    ensure_project_identity "$dir"
 }
 
 # anchor_fresh_beads_dir makes BEADS_DIR authoritative for a scope bd has not

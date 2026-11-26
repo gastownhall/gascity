@@ -393,6 +393,19 @@ func scopeIsBdOwnedDirectExternal(cityPath, scopeRoot string) (bool, error) {
 //
 // Fact 2 alone is not enough either: a city that gc managed and an operator
 // has since re-pointed at a hosted server still has its old database on disk.
+//
+// Known limitation (low): fact 1 is existence-only and never expires, because a
+// clean `gc stop` leaves the provider state file behind with running:false. So
+// a previously gc-managed city re-pointed at a hosted server in place still
+// satisfies both facts and is classified gc-managed. A rig has the same twin: a
+// rig whose stale database directory remains in the city's data dir satisfies
+// both facts and is misclassified the same way. For the city, either fix
+// closes the gap: require running:true with a live PID, as
+// currentManagedDoltPort already does, or have the stop path remove the
+// provider state file. Neither closes the rig twin while the city's Dolt is
+// running: the publication is then live, and a stale database directory
+// still satisfies fact 2. That case needs per-scope evidence of which
+// upstream the rig's own metadata names.
 func scopeStoreLivesInTheCitysManagedDolt(cityPath, scopeRoot string) bool {
 	if !cityCarriesGCDoltRuntimePublication(cityPath) {
 		return false
@@ -1041,7 +1054,7 @@ func providerOwnershipIntentFromPersistedCity(cityPath string) (providerScopeInt
 		// Embedded Beads metadata has no server transport a fresh rig can
 		// inherit. Preserve the city exactly as it is and initialize the new
 		// provider-owned rig with the normal fresh-scope default.
-		return providerScopeIntent{Transport: "proxied", Target: "local"}, nil
+		return providerScopeIntent{Transport: freshScopeTransportDefault, Target: "local"}, nil
 	}
 	state, configured, err := contract.ReadConfigState(fsys.OSFS{}, filepath.Join(cityPath, ".beads", "config.yaml"))
 	if err != nil {

@@ -1199,6 +1199,12 @@ type PackCommandEntry struct {
 	// Script is the path to the script (relative to pack dir).
 	// Supports Go text/template variables: {{.CityRoot}}, {{.ConfigDir}}, etc.
 	Script string `toml:"script" jsonschema:"required"`
+	// NativeHelp opts the command into delegated help: when true,
+	// gc <pack> <command> --help runs the script with exactly "--help" and
+	// shows its stdout, instead of rendering Description and LongDescription.
+	// Set it only when the script's own --help is a safe, side-effect-free
+	// query that exits 0. Default false keeps the static rendering.
+	NativeHelp bool `toml:"native_help,omitempty"`
 }
 
 // PackGlobal defines commands a pack applies to all agents in scope.
@@ -1491,6 +1497,22 @@ type BeadsConfig struct {
 	// value through internal/rollout.Flags.AllowSchemaBehindMigrate, never
 	// this field directly.
 	AllowSchemaBehindMigrate *bool `toml:"allow_schema_behind_migrate,omitempty" jsonschema:"default=false"`
+	// MigrateCommand is the command gc's notices name for migrating an existing
+	// bd database whose schema is behind the beads library linked into gc (gc
+	// start, gc reload and gc doctor's bd-schema check). gc never runs it:
+	// migrating an existing database is the operator's consent. It is a
+	// one-line Go text/template rendered per database with the fields
+	// {{.City}}, {{.Rig}}, {{.ScopeDir}}, {{.BeadsDir}}, {{.Database}},
+	// {{.Host}}, {{.Port}}, {{.Socket}} and {{.Bd}}, and a shq function that
+	// quotes a value for a POSIX shell. Set it when the city's pinned bd is not
+	// the binary to migrate with, so the notice names the migrator the operator
+	// trusts. Its bd must migrate to the schema of the bd the city pins and no
+	// further: the pinned bd refuses a database migrated past its own schema.
+	// Empty uses gc's default: gc bd ... migrate schema, or the pinned bd with
+	// BEADS_DIR in a city whose gc bd refuses migrate. A template that does not
+	// parse, or that does not render a single line for sample databases, fails
+	// config load.
+	MigrateCommand string `toml:"migrate_command,omitempty"`
 	// ProxiedIdleTimeout is how long a bd-owned proxied scope's proxy and Dolt
 	// child stay up with no connections before bd retires them; the next bd
 	// command restarts them. Go duration; "0" means never. A finite value
@@ -4266,7 +4288,9 @@ type agentKey struct{ dir, name string }
 
 // InjectImplicitAgents adds implicit agent entries for configured providers
 // that lack an explicit [[agent]] entry, enabling auto-materialization of
-// sling targets without requiring manual agent declarations.
+// sling targets without requiring manual agent declarations. Implicit agents
+// carry no prompt_template: gc prime selects their builtin worker prompt as it
+// does for any agent without one.
 func InjectImplicitAgents(cfg *City) {
 	// Build set of existing agent keys (dir, name).
 	existing := make(map[agentKey]bool, len(cfg.Agents))
@@ -4283,15 +4307,6 @@ func InjectImplicitAgents(cfg *City) {
 	// then any custom providers in sorted order.
 	providers := configuredProviderOrder(configured)
 
-	// Implicit agents default to the core pack's pool-worker prompt when
-	// the core pack is composed (it resolves from the user-global cache,
-	// so the path is absolute). Without core the template stays empty and
-	// prompt rendering falls back to the embedded baseline.
-	promptTemplate := ""
-	if coreDir := cfg.PackDirByName("core"); coreDir != "" {
-		promptTemplate = filepath.Join(coreDir, "assets", "prompts", "pool-worker.template.md")
-	}
-
 	slingFormula := cfg.AgentDefaults.DefaultSlingFormula
 	if slingFormula == "" {
 		slingFormula = "mol-do-work"
@@ -4305,7 +4320,6 @@ func InjectImplicitAgents(cfg *City) {
 		cfg.Agents = append(cfg.Agents, Agent{
 			Name:                name,
 			Provider:            name,
-			PromptTemplate:      promptTemplate,
 			DefaultSlingFormula: &slingFormula,
 			Implicit:            true,
 		})
@@ -4321,7 +4335,6 @@ func InjectImplicitAgents(cfg *City) {
 				Name:                name,
 				Dir:                 rig.Name,
 				Provider:            name,
-				PromptTemplate:      promptTemplate,
 				DefaultSlingFormula: &slingFormula,
 				Implicit:            true,
 			})
@@ -5281,7 +5294,8 @@ func Parse(data []byte) (*City, error) {
 }
 
 // validateBeadsModes rejects an out-of-enum value in any [beads] mode field
-// (conditional_writes, guarded_release, native_transport, ledger_feed). Parse runs it on
+// (conditional_writes, guarded_release, native_transport, ledger_feed), and a
+// migrate_command template that does not render. Parse runs it on
 // its single layer and LoadWithIncludesOptions runs it again on the composed
 // root, because a fragment may supply any of these fields; one shared list
 // keeps the two load paths from drifting when a field is added.
@@ -5295,7 +5309,10 @@ func validateBeadsModes(b BeadsConfig) error {
 	if err := validateNativeTransport(b.NativeTransport); err != nil {
 		return err
 	}
-	return validateLedgerFeed(b.LedgerFeed)
+	if err := validateLedgerFeed(b.LedgerFeed); err != nil {
+		return err
+	}
+	return validateBeadsMigrateCommand(b.MigrateCommand)
 }
 
 // validateConditionalWrites rejects an out-of-enum beads.conditional_writes

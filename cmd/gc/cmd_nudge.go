@@ -468,7 +468,7 @@ func cmdNudgeStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) in
 		return 1
 	}
 
-	target, err := resolveNudgeTarget(targetID, stderr)
+	target, err := resolveNudgeStatusTarget(targetID, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc nudge status: %v\n", err) //nolint:errcheck
 		return 1
@@ -1206,6 +1206,15 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 			lastFreeOS = now
 		}
 
+		// A suspended city is quiescent: once the suspension has drained this
+		// session, every store read below (the due gate's census, the
+		// observation, the delivery) would restart the bd and Dolt servers the
+		// controller retired (ga-5uties7y).
+		if nudgePollCitySuspendedDrained(target, sp) {
+			fmt.Fprintf(stderr, "gc nudge poll: city is suspended and session %q is not running; exiting and leaving queued nudges for the resume\n", target.sessionName) //nolint:errcheck
+			return 0
+		}
+
 		// Cheap gate, read before paying for the expensive observe/deliver
 		// pair: this target's queue state alone (no tmux/session probe) tells
 		// us whether there is anything to deliver this tick. When nothing is
@@ -1919,6 +1928,16 @@ func requestWorkerSiteNudgeWake(target nudgeTarget, store beads.Store) (session.
 	return outcome, nil
 }
 
+// nudgeTargetRuntimeHandle is the runtime handle factory builds for target's
+// session runtime, by its session name. A target with a session row gets the
+// session's startup-turn barrier (worker.Factory.SessionRuntimeHandle): its
+// nudges wait behind a first turn the session's queue still holds, the
+// queue's own delivery of that turn aside, as the session manager's sends do.
+func nudgeTargetRuntimeHandle(factory *worker.Factory, target nudgeTarget) (worker.Handle, error) {
+	return factory.SessionRuntimeHandle(target.sessionID, target.sessionName,
+		strings.TrimSpace(target.providerFamily()), strings.TrimSpace(target.sessionTransport()), target.processNames())
+}
+
 func workerHandleForNudgeTarget(target nudgeTarget, store beads.Store, sp runtime.Provider) (worker.Handle, error) {
 	programShadowDecideForTarget(target)
 	if target.sessionName != "" {
@@ -1940,16 +1959,11 @@ func workerHandleForNudgeTarget(target nudgeTarget, store beads.Store, sp runtim
 				return nil, err
 			}
 		}
-		handle, err := runtimeWorkerHandleWithConfig(
-			target.cityPath,
-			store,
-			sp,
-			target.cfg,
-			target.sessionName,
-			strings.TrimSpace(target.providerFamily()),
-			strings.TrimSpace(target.sessionTransport()),
-			target.processNames(),
-		)
+		factory, err := workerFactoryWithConfig(target.cityPath, store, sp, target.cfg)
+		var handle worker.Handle
+		if err == nil {
+			handle, err = nudgeTargetRuntimeHandle(factory, target)
+		}
 		if err == nil {
 			return handle, nil
 		}
@@ -2379,24 +2393,66 @@ func resolveNudgeTargetPreferringHookIdentity(identifier string, preferHookIdent
 // ahead of the resolution, which may write (it materializes a configured
 // named session's row): an error from before is returned unresolved.
 func resolveNudgeTargetAfter(identifier string, preferHookIdentity bool, before func(cityPath string, cfg *config.City, store beads.NudgesStore) error, warningWriter ...io.Writer) (nudgeTarget, error) {
-	cityPath, err := resolveCity()
+	cityPath, cfg, store, release, err := openNudgeResolution(warningWriter...)
 	if err != nil {
 		return nudgeTarget{}, err
 	}
-	cfg, err := loadCityConfig(cityPath, warningWriter...)
-	if err != nil {
-		return nudgeTarget{}, err
-	}
-	// The load ran the builtin readiness pass the routing read needs; resolve
-	// the routes alongside the store open (prewarmCLIStorageRoutes).
-	defer prewarmCLIStorageRoutes(cityPath)()
-	store := openNudgeBeadStore(cityPath)
+	defer release()
 	if before != nil {
 		if err := before(cityPath, cfg, store); err != nil {
 			return nudgeTarget{}, err
 		}
 	}
-	return resolveNudgeTargetInStore(cityPath, cfg, store, identifier, preferHookIdentity, resolveLoadCityConfigWarningWriter(warningWriter...))
+	return resolveNudgeTargetInStore(cityPath, cfg, store, identifier, preferHookIdentity, false, resolveLoadCityConfigWarningWriter(warningWriter...))
+}
+
+// openNudgeResolution resolves the city, loads its config and opens the nudges
+// store, the three things every target resolution starts from. release ends
+// the routes warm-up the open needs and is called once the resolution is done;
+// it is a no-op when err is set.
+func openNudgeResolution(warningWriter ...io.Writer) (cityPath string, cfg *config.City, store beads.NudgesStore, release func(), err error) {
+	cityPath, err = resolveCity()
+	if err != nil {
+		return "", nil, beads.NudgesStore{}, func() {}, err
+	}
+	cfg, err = loadCityConfig(cityPath, warningWriter...)
+	if err != nil {
+		return "", nil, beads.NudgesStore{}, func() {}, err
+	}
+	// The load ran the builtin readiness pass the routing read needs; resolve
+	// the routes alongside the store open (prewarmCLIStorageRoutes).
+	release = prewarmCLIStorageRoutes(cityPath)
+	return cityPath, cfg, openNudgeBeadStore(cityPath), release, nil
+}
+
+// resolveNudgeStatusTarget is resolveNudgeTarget for a caller that only
+// reads (gc nudge status): it never writes a session record or starts a
+// runtime. See resolveNudgeTargetInStore, observeOnly.
+func resolveNudgeStatusTarget(identifier string, warningWriter ...io.Writer) (nudgeTarget, error) {
+	cityPath, cfg, store, release, err := openNudgeResolution(warningWriter...)
+	if err != nil {
+		return nudgeTarget{}, err
+	}
+	defer release()
+	return resolveNudgeTargetInStore(cityPath, cfg, store, identifier, false, true, nil)
+}
+
+// observedNamedNudgeTarget is the target of a configured named session that
+// has no open row, for a caller that must not create one: the configured
+// identity addresses the queue, and there is no session id to name. ok is
+// false when identifier names no configured named session.
+func observedNamedNudgeTarget(cityPath string, cfg *config.City, identifier string) (target nudgeTarget, ok bool, err error) {
+	spec, ok, err := findNamedSessionSpecForTarget(cfg, loadedCityName(cfg, cityPath), identifier)
+	if err != nil || !ok {
+		return nudgeTarget{}, false, err
+	}
+	backing := namedSessionBackingTemplate(spec)
+	return buildNudgeTarget(cityPath, cfg, nudgeTargetFields{
+		sessionName: spec.SessionName,
+		alias:       spec.Identity,
+		agentName:   backing,
+		template:    backing,
+	}), true, nil
 }
 
 // errMessageOpRefused is a message verb's require refusal that its preflight
@@ -2446,7 +2502,16 @@ func messageOpPreflight(cityPath string, cfg *config.City, store beads.NudgesSto
 // unopened store from a missing session opens the store itself and checks the
 // open error first. stderr receives the report of a configured named session
 // the resolution materialized for the reconciler to start; nil discards it.
-func resolveNudgeTargetInStore(cityPath string, cfg *config.City, store beads.NudgesStore, identifier string, preferHookIdentity bool, stderr io.Writer) (nudgeTarget, error) {
+//
+// With observeOnly the resolution writes nothing: a configured named session
+// with no open row (never created, or only a closed one) is not created or
+// reopened but resolves to its configured identity with no session id
+// (observedNamedNudgeTarget), and a zero store is reported as unavailable
+// rather than as a missing session, since nothing was read to say it is
+// missing. Four kinds of target stay distinct: an open row, an unmaterialized
+// configured named session, session.ErrSessionNotFound, and an unavailable
+// store. Poll, drain, delivery and the mutating verbs pass false.
+func resolveNudgeTargetInStore(cityPath string, cfg *config.City, store beads.NudgesStore, identifier string, preferHookIdentity, observeOnly bool, stderr io.Writer) (nudgeTarget, error) {
 	if store.Store != nil {
 		// Named-session materialization is a session WRITE, and the follow-up Get
 		// reads the session bead; both route through the session-class store
@@ -2464,7 +2529,13 @@ func resolveNudgeTargetInStore(cityPath string, cfg *config.City, store beads.Nu
 				return resolveNudgeTargetFromSessionInfo(cityPath, cfg, identity.info), nil
 			}
 		}
-		sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, sessStore, identifier, stderr)
+		var sessionID string
+		var err error
+		if observeOnly {
+			sessionID, err = resolveSessionIDWithOptions(cityPath, cfg, sessStore, identifier, namedSessionResolveOptions{observeOnly: true})
+		} else {
+			sessionID, err = resolveSessionIDMaterializingNamed(cityPath, cfg, sessStore, identifier, stderr)
+		}
 		if err == nil {
 			info, getErr := sessionFrontDoor(sessStore).Get(sessionID)
 			if getErr != nil {
@@ -2475,6 +2546,13 @@ func resolveNudgeTargetInStore(cityPath string, cfg *config.City, store beads.Nu
 		if !errors.Is(err, session.ErrSessionNotFound) {
 			return nudgeTarget{}, err
 		}
+		if observeOnly {
+			if target, ok, namedErr := observedNamedNudgeTarget(cityPath, cfg, identifier); namedErr != nil || ok {
+				return target, namedErr
+			}
+		}
+	} else if observeOnly {
+		return nudgeTarget{}, fmt.Errorf("session store unavailable: cannot resolve %q", identifier)
 	}
 	return nudgeTarget{}, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 }
@@ -3882,22 +3960,25 @@ func ackQueuedNudgesWithOutcome(cityPath string, ids []string, outcome, reason, 
 // again. A vanished session and a seat holding a pending interaction are
 // refusals, not delivery failures: nothing was typed, and charging them would
 // dead-letter a good nudge for arriving at the wrong moment. A session that
-// went away may be back at once. The ACP provider refuses a nudge while it
-// holds a permission request, and the next pass tries again. A permission
-// prompt the runtime refused to type into (#2892) stays up until someone
-// answers it, so claiming the nudges again on the very next pass would only
-// be refused again. A session still running a turn the runtime would not
-// interrupt (runtime.ErrSessionBusy) is deferred the same way: nothing was
-// typed, and the turn needs time to end.
+// went away may be back at once. A pending interaction (a prompt or question
+// the runtime would not type into, #2892, or the runtime's own
+// pending_interaction refusal, runtime.ErrNudgeRefusedPendingInteraction)
+// stays up until someone answers it: claiming the nudges again on the very
+// next pass would only be refused again, each time at the cost of a runtime
+// op, so they wait out the retry delay. Answering the interaction does not by
+// itself wake the queue: delivery resumes after the retry delay plus one
+// delivery pass, about 15s plus a 2s poll tick for the per-session poller, and
+// for the supervisor dispatcher the first patrol tick (30s by default) or
+// enqueue wake after deliver_after. The backoff is per batch: a nudge that
+// arrives while the interaction stays up is claimed into its own batch, costs
+// one refused runtime op, and then retries on its own clock. A session still
+// running a turn the runtime would not interrupt (runtime.ErrSessionBusy) is
+// deferred the same way: nothing was typed, and the turn needs time to end.
 func queuedNudgeReleaseAfter(err error, now time.Time) (time.Time, bool) {
 	switch {
 	case errors.Is(err, runtime.ErrSessionBusy):
 		return now.Add(defaultQueuedNudgeRetryDelay), true
-	// Before ErrPendingInteraction: the session layer wraps this refusal in
-	// session.ErrPendingInteraction, which is that sentinel.
-	case errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction):
-		return time.Time{}, true
-	case errors.Is(err, runtime.ErrPendingInteraction):
+	case errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction), errors.Is(err, runtime.ErrPendingInteraction):
 		return now.Add(defaultQueuedNudgeRetryDelay), true
 	// The runtime could not be observed, so nothing was delivered: back off
 	// without spending an attempt, so an outage cannot dead-letter the queue.

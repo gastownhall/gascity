@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -4325,6 +4326,97 @@ func TestDoSupervisorInstallRejectsHomeOverrideEvenWhenIsolated(t *testing.T) {
 	}
 }
 
+// seedSupervisorServiceUnit writes a gc-owned platform unit at the path this
+// platform's uninstall would remove, derived from the current (test) HOME, and
+// returns that path.
+func seedSupervisorServiceUnit(t *testing.T) string {
+	t.Helper()
+	path := supervisorSystemdServicePath()
+	if goruntime.GOOS == "darwin" {
+		path = supervisorLaunchdPlistPath()
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("Environment=GC_HOME=\""+os.Getenv("GC_HOME")+"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// uninstall resolves the unit path from $HOME, so under an overridden HOME it
+// would look in the wrong place and report success while the real unit,
+// installed under the real HOME, stays enabled. It must refuse instead, and
+// must not reach the platform uninstall at all.
+func TestDoSupervisorUninstallRejectsHomeOverride(t *testing.T) {
+	requireHomeOverrideGuard(t)
+	lookup, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	unit := seedSupervisorServiceUnit(t)
+
+	var systemctlCalls, launchctlCalls []string
+	oldSystemctl, oldLaunchctl := supervisorSystemctlRun, supervisorLaunchctlRun
+	supervisorSystemctlRun = func(args ...string) error {
+		systemctlCalls = append(systemctlCalls, strings.Join(args, " "))
+		return nil
+	}
+	supervisorLaunchctlRun = func(args ...string) error {
+		launchctlCalls = append(launchctlCalls, strings.Join(args, " "))
+		return nil
+	}
+	t.Cleanup(func() {
+		supervisorSystemctlRun, supervisorLaunchctlRun = oldSystemctl, oldLaunchctl
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := doSupervisorUninstall(&stdout, &stderr); code != 1 {
+		t.Fatalf("doSupervisorUninstall code = %d, want 1; stderr=%q", code, stderr.String())
+	}
+	if !strings.HasPrefix(stderr.String(), "gc supervisor uninstall: ") {
+		t.Fatalf("stderr = %q, want a 'gc supervisor uninstall:' refusal", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "Keep HOME unchanged and use GC_HOME for isolated runs") {
+		t.Fatalf("stderr = %q, want HOME override guidance", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), lookup.HomeDir) {
+		t.Fatalf("stderr = %q, want current home %q", stderr.String(), lookup.HomeDir)
+	}
+	if len(systemctlCalls) != 0 || len(launchctlCalls) != 0 {
+		t.Fatalf("service manager reached under a HOME override: systemctl=%q launchctl=%q", systemctlCalls, launchctlCalls)
+	}
+	if _, err := os.Stat(unit); err != nil {
+		t.Fatalf("unit %q must survive a refused uninstall; stat err=%v", unit, err)
+	}
+}
+
+// The refusal comes after the delegated-mode warning, so a delegated operator
+// still sees why gc's own service files are left alone.
+func TestDoSupervisorUninstallHomeOverrideKeepsDelegationWarning(t *testing.T) {
+	requireHomeOverrideGuard(t)
+	if goruntime.GOOS != "linux" {
+		t.Skip("systemd delegation only applies on linux")
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	setDelegationEnvForTest(t, "gascity-prod.service", "")
+
+	var stdout, stderr bytes.Buffer
+	if code := doSupervisorUninstall(&stdout, &stderr); code != 1 {
+		t.Fatalf("doSupervisorUninstall code = %d, want 1; stderr=%q", code, stderr.String())
+	}
+	warning := strings.Index(stderr.String(), "does not touch the delegated unit")
+	refusal := strings.Index(stderr.String(), "Keep HOME unchanged and use GC_HOME for isolated runs")
+	if warning < 0 || refusal < 0 || warning > refusal {
+		t.Fatalf("stderr = %q, want the delegation warning, then the HOME override refusal", stderr.String())
+	}
+}
+
 // The opt-in requires an explicit GC_HOME: without one, supervisor state would
 // land in the throwaway HOME's default ~/.gc with nothing tying the run to an
 // isolated installation.
@@ -5080,120 +5172,69 @@ func TestStopManagedCityDoesNotUseStartupOrDriftTimeouts(t *testing.T) {
 	assertSingleStopWithBenignNoise(t, ops)
 }
 
-// stampedWriter is a Writer that records when each line was written.
-type stampedWriter struct {
-	mu     sync.Mutex
-	buf    bytes.Buffer
-	lines  []stampedLine
-	onLine func(string) // called with each line as it is written
-}
-
-type stampedLine struct {
-	at   time.Time
-	text string
-}
-
-func (w *stampedWriter) Write(p []byte) (int, error) {
-	if w.onLine != nil {
-		w.onLine(string(p))
-	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.lines = append(w.lines, stampedLine{at: time.Now(), text: string(p)})
-	return w.buf.Write(p)
-}
-
-// at is when the first write containing sub landed; zero when none did.
-func (w *stampedWriter) at(sub string) time.Time {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	for _, l := range w.lines {
-		if strings.Contains(l.text, sub) {
-			return l.at
-		}
-	}
-	return time.Time{}
-}
-
-func (w *stampedWriter) String() string {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.buf.String()
-}
-
-// hangingListProvider wraps a runtime.Provider but makes ListRunning block
-// forever. This simulates a session/beads dependency call inside
-// CityRuntime.shutdown that never returns (#5256) — ListRunning has no
-// context argument, so nothing can bound or cancel it from outside.
+// hangingListProvider holds ListRunning until the test releases it. This
+// simulates a dependency without a context that outlives the shutdown budget,
+// while allowing the shutdown goroutine to finish during test cleanup.
 type hangingListProvider struct {
 	runtime.Provider
+	entered *atomic.Bool
+	release <-chan struct{}
 }
 
-func (hangingListProvider) ListRunning(string) ([]string, error) {
-	select {}
+func (p hangingListProvider) ListRunning(string) ([]string, error) {
+	p.entered.Store(true)
+	<-p.release
+	return nil, nil
 }
 
 func TestStopManagedCityBoundsForcedShutdownWhenRuntimeHangs(t *testing.T) {
 	cityPath := t.TempDir()
-	logFile := filepath.Join(t.TempDir(), "ops.log")
-	script := writeSpyScript(t, logFile)
-	t.Setenv("GC_BEADS", "exec:"+script)
+	// Provider subprocess shutdown is covered by TestStopManagedCityForcesCleanupAfterTimeout.
+	// This proof owns the composition of the grace and forced-runtime timers.
+	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
 
-	closer := &closerSpy{}
-	forceStop := &atomic.Bool{}
-	mc := &managedCity{
-		name:   "bright-lights",
-		cancel: func() {},
-		done:   make(chan struct{}), // never closes: city never exits on its own
-		closer: closer,
-		cr: &CityRuntime{
-			cfg: &config.City{
-				Daemon: config.DaemonConfig{
-					ShutdownTimeout: "20ms",
+	synctest.Test(t, func(t *testing.T) {
+		entered := &atomic.Bool{}
+		release := make(chan struct{})
+		defer close(release)
+		closer := &closerSpy{}
+		forceStop := &atomic.Bool{}
+		mc := &managedCity{
+			name:   "bright-lights",
+			cancel: func() {},
+			done:   make(chan struct{}), // never closes: city never exits on its own
+			closer: closer,
+			cr: &CityRuntime{
+				cfg: &config.City{
+					Daemon: config.DaemonConfig{
+						ShutdownTimeout: "20ms",
+					},
 				},
+				sp: hangingListProvider{
+					Provider: runtime.NewFake(),
+					entered:  entered,
+					release:  release,
+				},
+				rec:               events.Discard,
+				stdout:            io.Discard,
+				stderr:            io.Discard,
+				forceStopShutdown: forceStop,
 			},
-			sp:                hangingListProvider{Provider: runtime.NewFake()},
-			rec:               events.Discard,
-			stdout:            io.Discard,
-			stderr:            io.Discard,
-			forceStopShutdown: forceStop,
-		},
-	}
-
-	// A sibling 100ms timer, armed as the forced phase begins (the grace's
-	// warning), fires as late as the forced wait's own timer on a loaded
-	// host: the forced phase is judged against it, not the wall clock.
-	var sibling atomic.Int64
-	stderr := &stampedWriter{onLine: func(line string) {
-		if strings.Contains(line, "after cancel") {
-			time.AfterFunc(100*time.Millisecond, func() { sibling.Store(time.Now().UnixNano()) })
 		}
-	}}
-	result := make(chan error, 1)
-	go func() {
-		result <- stopManagedCity(mc, cityPath, stderr)
-	}()
 
-	select {
-	case err := <-result:
+		var stderr bytes.Buffer
+		start := time.Now()
+		err := stopManagedCity(mc, cityPath, &stderr)
 		// ShutdownTimeout is 20ms, so the forced-stop timeout (5x) is
-		// 100ms, and with CityRuntime.shutdown hung the forced phase is
-		// one 100ms wait. A second full wait on the forced timeout, the
-		// regression this test guards against, ends it a further 100ms
-		// after the sibling timer. Timing the phase against that sibling
-		// leaves out timer lateness on a loaded host, and the bead
-		// provider's shutdown (an exec subprocess) after the phase.
-		forcedAt := stderr.at("after forced shutdown")
-		if stderr.at("after cancel").IsZero() || forcedAt.IsZero() {
-			t.Fatalf("stderr = %q, want the grace and forced-shutdown warnings", stderr.String())
+		// 100ms. Fake time must advance by exactly grace + forced, even
+		// though neither shutdown nor mc.done completes. Waiting the
+		// forced budget twice advances to 220ms and fails this assertion.
+		if elapsed := time.Since(start); elapsed != 120*time.Millisecond {
+			t.Fatalf("stopManagedCity advanced fake time by %s, want grace+forced = 120ms", elapsed)
 		}
-		siblingAt := time.Unix(0, sibling.Load())
-		if sibling.Load() == 0 {
-			siblingAt = time.Now() // not fired yet: the forced phase ended before it
-		}
-		if after := forcedAt.Sub(siblingAt); after >= 50*time.Millisecond {
-			t.Fatalf("the forced phase ended %s after one forced wait would have, want one forced wait (~100ms), not two (~200ms), even when CityRuntime.shutdown hangs", after)
+		if !entered.Load() {
+			t.Fatal("expected shutdown to reach the hanging runtime ListRunning call")
 		}
 		if err == nil {
 			t.Fatal("stopManagedCity err = nil, want non-nil because city never exited and shutdown hung")
@@ -5207,9 +5248,7 @@ func TestStopManagedCityBoundsForcedShutdownWhenRuntimeHangs(t *testing.T) {
 		if !closer.closed {
 			t.Fatal("expected closer to be closed even though CityRuntime.shutdown never returned")
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("stopManagedCity did not return within 2s: forced shutdown is not bounded when CityRuntime.shutdown hangs (issue #5256)")
-	}
+	})
 }
 
 func TestCityRuntimeShutdownPreservesSessionsWhenRequested(t *testing.T) {

@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/test/dolttest"
 	_ "github.com/go-sql-driver/mysql"
 	beadslib "github.com/steveyegge/beads"
 )
@@ -283,18 +284,13 @@ func assertNativeIDDefaultAbsent(t *testing.T, db *sql.DB, table string) {
 	}
 }
 
-// startTestDoltServer launches a throwaway server for tests that need the raw
-// SQL accessor exposed by upstream's server-mode Dolt store.
-func startTestDoltServer(t testing.TB) int {
-	t.Helper()
-	doltBin, err := exec.LookPath("dolt")
-	if err != nil {
-		t.Skip("dolt binary not in PATH")
-	}
+// testDoltPortPick chooses the port startTestDoltServer hands to dolt; tests
+// replace it to force a lost race.
+var testDoltPortPick = pickUnreservedTestDoltPort
 
-	// The candidate is chosen outside the ports a test must never bind or
-	// reach (3307, 45865, 8123) before anything binds it.
-	port := 0
+// pickUnreservedTestDoltPort returns a port that is free right now, chosen
+// outside the ports a test must never bind or reach (3307, 45865, 8123).
+func pickUnreservedTestDoltPort() (int, error) {
 	for range 50 {
 		candidate := 20000 + rand.IntN(40000)
 		if reservedDoltTestPorts[candidate] {
@@ -305,25 +301,38 @@ func startTestDoltServer(t testing.TB) int {
 			continue
 		}
 		if err := lis.Close(); err != nil {
-			t.Fatalf("release test port: %v", err)
+			return 0, fmt.Errorf("release test port: %w", err)
 		}
-		port = candidate
-		break
+		return candidate, nil
 	}
-	if port == 0 {
-		t.Fatal("no free port outside the reserved ones")
+	return 0, errors.New("no free port outside the reserved ones")
+}
+
+// startTestDoltServer launches a throwaway server for tests that need the raw
+// SQL accessor exposed by upstream's server-mode Dolt store.
+func startTestDoltServer(t testing.TB) int {
+	t.Helper()
+	doltBin, err := exec.LookPath("dolt")
+	if err != nil {
+		t.Skip("dolt binary not in PATH")
 	}
 
 	dataDir := t.TempDir()
-	cmd := exec.Command(doltBin, "sql-server", "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--data-dir", dataDir)
-	cmd.Env = append(os.Environ(), "DOLT_ROOT_PATH="+dataDir)
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start dolt sql-server: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
+	srv := dolttest.StartSQLServer(t, dolttest.SQLServerSpec{
+		Dolt: doltBin,
+		Args: func(port int) []string {
+			return []string{"sql-server", "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--data-dir", dataDir}
+		},
+		Env: append(os.Environ(), "DOLT_ROOT_PATH="+dataDir),
+		// The picker is the reserved-port one: it stays a seam so a test can
+		// make the first pick a port something else already holds.
+		PickPort: func() (int, error) { return testDoltPortPick() },
 	})
+	t.Cleanup(func() {
+		_ = srv.Process.Kill()
+		<-srv.Exited
+	})
+	port := srv.Port
 
 	db, err := sql.Open("mysql", fmt.Sprintf("root@tcp(127.0.0.1:%d)/", port))
 	if err != nil {

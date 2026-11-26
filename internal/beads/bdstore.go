@@ -833,23 +833,23 @@ func truncateRawOutput(data []byte, maxBytes int) string {
 // store bridge, t3bridge, libstore, provider lifecycle — current and future.
 const bdAutoBackupOptOutEnvKey = "BD_BACKUP_ENABLED"
 
-// Legacy and current bd OTEL env var names. gc's own telemetry
-// (SetProcessOTELAttrs, internal/telemetry/subprocess.go) sets the legacy
-// BD_OTEL_METRICS_URL / BD_OTEL_LOGS_URL names process-wide so every bd
-// subprocess inherits them. bd v1.2.0, v1.2.1 and v1.3.0+ deprecate those
-// names in favor of the standard OTEL_EXPORTER_OTLP_*_ENDPOINT names gated by
+// Legacy and current bd OTEL env var names. bd v1.2.0, v1.2.1 and v1.3.0+
+// deprecate the legacy BD_OTEL_METRICS_URL / BD_OTEL_LOGS_URL names in favor
+// of the standard OTEL_EXPORTER_OTLP_*_ENDPOINT names gated by
 // BD_OTEL_ENABLED=true, and log a stderr deprecation warning on every
 // invocation that still carries a legacy name; older bd reads only the legacy
 // names.
 //
-// The standard names are NOT set process-wide (e.g. in SetProcessOTELAttrs):
-// unlike the bd-specific legacy names, OTEL_EXPORTER_OTLP_METRICS_ENDPOINT /
-// OTEL_EXPORTER_OTLP_LOGS_ENDPOINT are consulted by any standard
-// OTel-instrumented child process, not just bd. Setting them in the
-// gc process's own environment would make every other child that honors the
-// OTel spec (not only bd) start exporting to gc's collectors, whether or not
-// it ever opted in. Translating here, scoped to the "bd" exec only, keeps the
-// new names off every other child gc spawns.
+// gc's own telemetry (SetProcessOTELAttrs and OTELEnvMap,
+// internal/telemetry/subprocess.go) emits BD_OTEL_ENABLED=true plus the
+// standard OTEL_EXPORTER_OTLP_METRICS_ENDPOINT /
+// OTEL_EXPORTER_OTLP_LOGS_ENDPOINT names, and no legacy names. The standard
+// names are deliberately visible to every OTel-aware child gc spawns, not
+// only bd, and they overwrite any per-signal endpoint already present in gc's
+// process environment.
+//
+// translateBdLegacyOTELEnv therefore only translates legacy names that come
+// from the user or the inherited environment, scoped to the "bd" exec.
 const (
 	bdLegacyOTELMetricsURLKey = "BD_OTEL_METRICS_URL"
 	bdLegacyOTELLogsURLKey    = "BD_OTEL_LOGS_URL"
@@ -877,7 +877,8 @@ func execEnvFor(name string, baseEnv []string, overrides map[string]string, read
 }
 
 // translateBdLegacyOTELEnv rewrites the legacy BD_OTEL_METRICS_URL /
-// BD_OTEL_LOGS_URL names gc's own telemetry sets process-wide into the names a
+// BD_OTEL_LOGS_URL names, which gc's own telemetry no longer emits but which a
+// user or the inherited environment may still set, into the names a
 // current bd reads, scoped to this bd child's environment only. It applies the
 // same mapping bd itself applies at startup, so the bd exports exactly as it
 // would have, minus the deprecation warning:
@@ -2565,15 +2566,52 @@ func (s *BdStore) runBDTransientReleaseOutput(args ...string) ([]byte, error) {
 func (s *BdStore) runBDTransientWriteOutputWhen(shouldRetry func(error) bool, args ...string) ([]byte, error) {
 	var err error
 	var out []byte
+	operation, id := bdWriteTarget(args)
 	args = s.bdTransientWriteArgs(args)
 	for attempt := 1; attempt <= bdTransientWriteAttempts; attempt++ {
 		out, err = s.runner(s.dir, "bd", args...)
 		if err == nil || !shouldRetry(err) || attempt == bdTransientWriteAttempts {
+			recordWriteBudget(operation, id, attempt, bdTransientWriteAttempts, err, err != nil && shouldRetry(err))
 			return out, err
 		}
 		time.Sleep(time.Duration(attempt) * 25 * time.Millisecond)
 	}
 	return out, err
+}
+
+// bdWriteTarget names the store verb and the bead a bd write command targets,
+// for write-conflict telemetry. The verb is args[0]; the bead is the first
+// positional argument after it, skipping flags and the values of the flags
+// that take one. It is empty for a verb whose first positional argument is not
+// a bead (an import file, a sub-command) and for a command with no
+// positional argument. A multi-bead close names its first bead.
+func bdWriteTarget(args []string) (operation, id string) {
+	if len(args) == 0 {
+		return "", ""
+	}
+	operation = args[0]
+	switch operation {
+	case "update", "close", "reopen", "delete", "reclaim", "dep":
+	default:
+		return operation, ""
+	}
+	rest := args[1:]
+	if operation == "dep" && len(rest) > 0 {
+		rest = rest[1:] // dep add|remove <issue> ...
+	}
+	for i := 0; i < len(rest); i++ {
+		switch a := rest[i]; {
+		case a == "--id" && i+1 < len(rest):
+			return operation, rest[i+1]
+		case a == "--reason" || a == "-r" || strings.HasPrefix(a, "--set-") ||
+			a == "--status" || a == "--assignee" || a == "--add-label" || a == "--remove-label":
+			i++ // flag value
+		case strings.HasPrefix(a, "-"):
+		default:
+			return operation, a
+		}
+	}
+	return operation, ""
 }
 
 // runBDTransientRead runs a read-only bd command, retrying on transient Dolt
@@ -3148,6 +3186,7 @@ func (s *BdStore) fetchViaBDList(query ListQuery) ([]Bead, *PartialResultError, 
 	if bdListShouldIncludeTemplates(query) {
 		args = append(args, "--include-templates")
 	}
+	args = append(args, bdListSortArgs(serverQuery, limit)...)
 	args = append(args, "--limit", fmt.Sprintf("%d", limit))
 	if serverQuery.ParentID != "" {
 		args = append(args, "--parent", serverQuery.ParentID)
@@ -3186,6 +3225,18 @@ func (s *BdStore) fetchViaBDList(query ListQuery) ([]Bead, *PartialResultError, 
 	return result, nil, nil
 }
 
+// bdListSortArgs returns the bd list ordering flags for a bounded read. bd
+// orders priority-first by default, so a bare --limit on a created-desc query
+// keeps the N best-priority rows, not the N newest; ask bd for created_at DESC
+// so its page is the newest population. Only a caller that opted into a
+// backing limit reaches here with one (see bdListRequiresClientLimit).
+func bdListSortArgs(serverQuery ListQuery, limit int) []string {
+	if limit > 0 && serverQuery.Sort == SortCreatedDesc {
+		return []string{"--sort", "created"}
+	}
+	return nil
+}
+
 func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssignees bool) bool {
 	// TierWisps always merges two independently-fetched legs (this bd-list
 	// leg plus the ephemeral leg in listWispsTier) and needs full candidates
@@ -3212,6 +3263,15 @@ func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssig
 	// has no --id flag, so a bd-side limit could truncate before the
 	// matching IDs are even fetched.
 	if len(serverQuery.IDs) > 0 {
+		return true
+	}
+	// A bounded created-desc read is exact only when Go cuts it: bd list breaks
+	// created_at ties by id ASC where the canonical order (and cursor
+	// continuation) breaks them by id DESC, so a bd-side limit can drop the
+	// larger-id ties at the boundary. Only a caller that opted into a bounded
+	// newest-by-created_at sample (AllowBackingCreatedLimit) takes the bd-side
+	// limit, as the native stores do (nativeCreatedLimitPushdown).
+	if serverQuery.Sort == SortCreatedDesc && !serverQuery.AllowBackingCreatedLimit {
 		return true
 	}
 	return false
