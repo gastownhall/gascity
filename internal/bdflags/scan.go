@@ -95,19 +95,30 @@ func splitShellSegments(line string) []string {
 	return append(segments, current.String())
 }
 
+// maxJoinFields bounds how many fields a joined quoted or $(...) run may
+// span. A run whose closer is not within this many fields is left unjoined, so
+// a line of many unmatched openers costs linear time rather than a rescan to
+// the end of the line for each one.
+const maxJoinFields = 64
+
 // tokenize splits a line on whitespace and trims flagTokenCutset from each
-// resulting token, dropping any token that becomes empty. A quoted run that
-// follows a flag ("--title \"a | b\"") is kept as one token, so a multi-word
+// resulting token, dropping any token that becomes empty. A quoted run
+// ("Fix the auth bug", "a | b") is kept as one token, so a multi-word title or
 // flag value counts as the single argument it is; a quote with no closing
-// partner on the line is left alone rather than swallowing the rest of it.
+// field within maxJoinFields is left as it is. A balanced $(...) run is
+// likewise one token. Outside a flag value, a quoted run that contains the
+// word "bd" is not joined: it is an example command to scan, not a value.
 func tokenize(line string) []string {
 	fields := strings.Fields(line)
 	tokens := make([]string, 0, len(fields))
 	prev := ""
 	for i := 0; i < len(fields); i++ {
 		f := fields[i]
-		if strings.HasPrefix(prev, "-") && !strings.Contains(prev, "=") {
-			f, i = joinQuotedRun(fields, i)
+		afterFlag := strings.HasPrefix(prev, "-") && !strings.Contains(prev, "=")
+		if strings.HasPrefix(f, "$(") {
+			f, i = joinSubstitutionRun(fields, i)
+		} else {
+			f, i = joinQuotedRun(fields, i, afterFlag)
 		}
 		prev = f
 		if t := strings.Trim(f, flagTokenCutset); t != "" {
@@ -118,10 +129,11 @@ func tokenize(line string) []string {
 }
 
 // joinQuotedRun returns fields[i] and i unchanged unless it opens a quote
-// that a later field closes, in which case it returns the fields from i
-// through the closing one joined with single spaces and the index of the
-// closing field.
-func joinQuotedRun(fields []string, i int) (string, int) {
+// that a later field within maxJoinFields closes, in which case it returns the
+// fields from i through the closing one joined with single spaces and the
+// index of the closing field. Unless afterFlag, a run containing the word "bd"
+// is left unjoined so the command inside it is still scanned.
+func joinQuotedRun(fields []string, i int, afterFlag bool) (string, int) {
 	f := fields[i]
 	if f == "" || (f[0] != '"' && f[0] != '\'') {
 		return f, i
@@ -130,12 +142,34 @@ func joinQuotedRun(fields []string, i int) (string, int) {
 	if len(f) > 1 && strings.HasSuffix(f, quote) {
 		return f, i // opens and closes within one field
 	}
-	for k := i + 1; k < len(fields); k++ {
+	if !afterFlag && strings.Trim(f, quote) == "bd" {
+		return f, i
+	}
+	end := min(len(fields), i+maxJoinFields)
+	for k := i + 1; k < end; k++ {
+		if !afterFlag && strings.Trim(fields[k], quote) == "bd" {
+			return f, i
+		}
 		if strings.HasSuffix(fields[k], quote) {
 			return strings.Join(fields[i:k+1], " "), k
 		}
 	}
 	return f, i
+}
+
+// joinSubstitutionRun is joinQuotedRun for a "$(" opener: it joins the fields
+// through the one that balances the parentheses, if that is within
+// maxJoinFields.
+func joinSubstitutionRun(fields []string, i int) (string, int) {
+	depth := 0
+	end := min(len(fields), i+maxJoinFields)
+	for k := i; k < end; k++ {
+		depth += strings.Count(fields[k], "(") - strings.Count(fields[k], ")")
+		if depth <= 0 {
+			return strings.Join(fields[i:k+1], " "), k
+		}
+	}
+	return fields[i], i
 }
 
 // scanLineForUnknownFlags walks tokens looking for bd/"gc bd" invocations of
@@ -219,6 +253,10 @@ func scanInvocationFlags(tokens []string, flagStart int, key string, viaGC bool,
 		}
 		if next, _ := bdSubcommandStart(tokens, j); next >= 0 {
 			return findings, j // a new bd invocation begins; the outer loop takes it
+		}
+		if strings.HasPrefix(tok, "$(") {
+			j++ // a command substitution expands to arguments we cannot see; it spends no budget
+			continue
 		}
 		if !strings.HasPrefix(tok, "-") || tok == "-" {
 			positionalsSeen++

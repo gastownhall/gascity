@@ -270,18 +270,24 @@ func Known(sub string) bool {
 // adding a subcommand forces the decision there.
 //
 // Variadic [id...] subcommands (update, close, reopen, delete, show,
-// mol burn, dep list) are bounded at one id rather than left open-ended: the
+// mol burn) are bounded at one id rather than left open-ended: the
 // scan reads prompt prose as well as commands, and an open budget lets the
 // words after "bd update" absorb everything up to an unrelated command's
 // flags. The known cost is that a real multi-id call ("bd close a b --reason
-// x") stops being flag-checked after its first id.
+// x") stops being flag-checked after its first id. dep list is the exception
+// at two, because its documented batch form names two ids ("bd dep list <id>
+// <id> --type=blocks").
+//
+// A quoted title and a $(...) substitution are handled before the budget (see
+// tokenize and scanInvocationFlags): the quoted run is one argument and the
+// substitution is not counted.
 var positionalCountBySub = map[string]int{
 	"create": 1, // [title]
 	"update": 1, "close": 1, "reopen": 1, "delete": 1, "show": 1,
 	"ready": 0, "list": 0,
 	"mol current": 1, "mol pour": 1, "mol wisp": 1, "mol burn": 1,
 	"gate check": 0, "gate list": 1,
-	"dep add": 2, "dep list": 1, "dep remove": 2,
+	"dep add": 2, "dep list": 2, "dep remove": 2,
 }
 
 // PositionalCount returns how many leading bare (non-flag) arguments sub
@@ -464,7 +470,10 @@ func isValueToken(token string) bool {
 
 	// Type annotations that are not boolean.
 	switch t {
-	case "string", "stringArray", "stringSlice", "duration", "int", "int64", "uint", "uint64", "float64", "float32", "time.Duration", "path", "file", "type", "id", "ids", "args", "name", "keys", "value":
+	case "string", "stringArray", "stringSlice", "duration", "int", "int64", "uint", "uint64", "float64", "float32", "time.Duration", "path", "file", "type", "id", "ids", "args", "name", "keys", "value",
+		// pflag's repeatable and map types print a plural or compound word
+		// ("--add-label strings"); each takes a value.
+		"strings", "ints", "int32s", "int64s", "uints", "float32s", "float64s", "durations", "stringToString", "stringToInt", "stringToInt64":
 		return true
 	case "bool", "boolean":
 		return false
