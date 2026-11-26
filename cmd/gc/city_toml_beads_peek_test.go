@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func writeBeadsPeekCityTOML(t *testing.T, dir, body string) string {
@@ -117,14 +118,20 @@ func TestCityTOMLBeadsPeekDecodesEachFieldOnItsOwn(t *testing.T) {
 			t.Run("inside a scope", func(t *testing.T) {
 				end := beginInvocationConfigMemo()
 				defer end()
+				before := cityTOMLBeadsPeekDecodes.Load()
 				check(t)
-				writeBeadsPeekCityTOML(t, dir, "[beads]\nprovider = \"file\"\nbackend = \"dolt\"\n")
-				want := tc.want
-				if tc.partial {
-					want = rewritten
+				// A complete decode is reused. A partial one is not, so both
+				// peeks in check read the file.
+				if got := cityTOMLBeadsPeekDecodes.Load() - before; got != map[bool]int64{true: 2, false: 1}[tc.partial] {
+					t.Fatalf("decodes before the rewrite = %d, partial=%v", got, tc.partial)
 				}
-				if got := peekCityTOMLBeads(path); got != want {
-					t.Fatalf("peek after the file was rewritten = %+v, want %+v: the scope remembers only an answer that decoded both fields", got, want)
+				writeBeadsPeekCityTOML(t, dir, "[beads]\nprovider = \"file\"\nbackend = \"dolt\"\n")
+				stamp := time.Now().Add(2 * time.Second)
+				if err := os.Chtimes(path, stamp, stamp); err != nil {
+					t.Fatal(err)
+				}
+				if got := peekCityTOMLBeads(path); got != rewritten {
+					t.Fatalf("peek after the file was rewritten = %+v, want %+v: a city.toml write invalidates a remembered peek", got, rewritten)
 				}
 			})
 		})

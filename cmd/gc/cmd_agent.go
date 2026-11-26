@@ -263,6 +263,10 @@ func loadCityConfigForEditFS(fs fsys.FS, tomlPath string) (*config.City, error) 
 // when on-disk content already matches the desired content, preserving
 // idempotency for repeated config-edit commands.
 func writeCityConfigForEditFS(fs fsys.FS, tomlPath string, cfg *config.City) error {
+	// A later read in this command must see the written city, including a
+	// write that preserved size and mtime. Idempotent edits pay one fresh
+	// composition; the hot read path does not.
+	defer invalidateInvocationConfigMemo()
 	return config.WriteCityAndRigSiteBindingsForEdit(fs, tomlPath, cfg)
 }
 
