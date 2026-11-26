@@ -1654,6 +1654,8 @@ go_test(
         "dispatch_runtime_quiet_retry_test.go",
         "dispatch_runtime_skip_test.go",
         "dispatch_runtime_wake_test.go",
+        "dispatch_scope_close_test.go",
+        "dispatch_scope_serve_settle_test.go",
         "dispatch_session_provider_lazy_test.go",
         "disposition_heartbeat_test.go",
         "disposition_read_ratchet_test.go",

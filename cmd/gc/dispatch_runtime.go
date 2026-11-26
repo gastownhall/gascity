@@ -705,7 +705,7 @@ func reconcileClosedScopeMembers(cityPath, storePath string, ids []string, stder
 			workflowTracef("serve scope-reconcile close-store err=%v", cerr)
 		}
 	}()
-	graph := beads.GraphStore{Store: store}
+	graph := cliGraphStore(store, cfg, cityPath)
 	for _, id := range ids {
 		if _, err := dispatch.ReconcileClosedScopeMember(graph, id); err != nil {
 			workflowTracef("serve scope-reconcile bead=%s err=%v", id, err)
