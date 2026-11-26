@@ -243,6 +243,30 @@ func (p *Parser) ParseTOML(data []byte) (*Formula, error) {
 // Resolve fully resolves a formula, processing extends and expansions.
 // Returns a new formula with all inheritance applied.
 func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
+	resolved, err := p.resolve(formula)
+	if err != nil {
+		return nil, err
+	}
+	// Scope declarations resolve against the final step list, so only the
+	// outermost call stamps: a parent's stamps would otherwise outlive a child
+	// declaration that replaces its own.
+	stamped, err := applyScopeDecls(resolved)
+	if err != nil {
+		return nil, err
+	}
+	// A formula with declarations is checked for dangling scope refs only once
+	// stamped, since a declared body becomes a scope body only then.
+	if len(stamped.Scopes) > 0 {
+		if err := validateScopeMembership(stamped); err != nil {
+			return nil, err
+		}
+	}
+	return stamped, nil
+}
+
+// resolve merges a formula with its parents, recursively, without stamping
+// formula-level scope declarations.
+func (p *Parser) resolve(formula *Formula) (*Formula, error) {
 	// Check for cycles
 	if p.resolvingSet[formula.Formula] {
 		// Build the cycle chain for a clear error message
@@ -281,6 +305,7 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 		Pour:        formula.Pour,
 		Vars:        make(map[string]*VarDef),
 		Steps:       nil,
+		Scopes:      cloneScopeDecls(formula.Scopes),
 		Template:    nil,
 		Compose:     nil,
 	}
@@ -293,7 +318,7 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 		}
 
 		// Resolve parent recursively
-		parent, err = p.Resolve(parent)
+		parent, err = p.resolve(parent)
 		if err != nil {
 			return nil, fmt.Errorf("resolve parent %s: %w", parentName, err)
 		}
@@ -340,6 +365,10 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 		// Merge parent steps (append, child steps come after)
 		merged.Steps = append(merged.Steps, parent.Steps...)
 
+		// Inherit parent scope declarations the child does not redeclare by
+		// name; a redeclared name replaces the parent's whole.
+		merged.Scopes = inheritScopeDecls(merged.Scopes, parent.Scopes)
+
 		// Parent templates append in declaration order. Only the child gets
 		// override semantics so parent-parent conflicts still surface later.
 		merged.Template = append(merged.Template, parent.Template...)
@@ -373,7 +402,7 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 	if err := merged.Validate(); err != nil {
 		return nil, err
 	}
-	if err := validateScopeMembership(merged); err != nil {
+	if err := validateUnstampedScopeMembership(merged); err != nil {
 		return nil, err
 	}
 	if err := validateResolvedGraphV2DescriptionFiles(merged); err != nil {
