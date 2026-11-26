@@ -73,6 +73,8 @@ go_test(
         "attach_live_windows_test.go",
         "attach_windows_test.go",
         "batchfile_windows_test.go",
+        "bounded_exec_test.go",
+        "bounded_lookup_test.go",
         "claude_text_test.go",
         "client_test.go",
         "conformance_test.go",
@@ -85,6 +87,7 @@ go_test(
         "errorcode_test.go",
         "events_live_test.go",
         "events_test.go",
+        "exec_site_guard_test.go",
         "fakeherdr_behavior_windows_test.go",
         "fakeherdr_other_test.go",
         "fakeherdr_test.go",
@@ -126,8 +129,10 @@ go_test(
         "startup_dialogs_test.go",
         "startup_notready_test.go",
         "testenv_import_test.go",
+        "verb_timeout_bound_test.go",
         "verdict_windows_test.go",
     ],
+    data = glob(["*.go"]),  # exec_site_guard_test.go scans the package's own sources
     embed = [":herdr"],
     deps = [
         "//internal/execenv",

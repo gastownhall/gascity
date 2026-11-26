@@ -569,3 +569,75 @@ func TestCloseClearsTheHolds(t *testing.T) {
 		}
 	}
 }
+
+// TestSuspendFailsClosedWhenTeardownCannotReachRuntime: a suspend whose
+// runtime teardown could not reach the runtime fails closed for every
+// suspend intent. Stop wraps runtime.ErrRuntimeUnavailable while liveness
+// cannot report the session running either, so the failure is not the
+// historical "cleanup of an already-dead session is best-effort" case: the
+// row is left not suspended — an unknown state never certifies a session
+// stopped — and the wake stamp is restored, as every failed stop is. The
+// guard is provider-agnostic: besides a k8s or herdr Stop that got no
+// answer, it holds for t3bridge's Stop while the bridge is soft-unavailable
+// (and for ssh's on a box it cannot reach), whose suspends used to succeed.
+// A plain Stop failure on a runtime that simply is not running keeps the
+// historical best-effort suspend.
+func TestSuspendFailsClosedWhenTeardownCannotReachRuntime(t *testing.T) {
+	const woke = "2026-10-08T11:59:50Z"
+	unreachable := fmt.Errorf("k8s stop %q: %w: %w", "s-wake", runtime.ErrRuntimeUnavailable, context.DeadlineExceeded)
+	bridgeDown := errors.New("t3 code is not answering")
+	softUnavailable := fmt.Errorf("%w: t3bridge snapshot unavailable stopping %q: %w", runtime.ErrRuntimeUnavailable, "s-wake", bridgeDown)
+	for name, tc := range map[string]struct {
+		kind  ActorKind
+		soft  bool
+		stop  error
+		cause error // the Stop failure's own cause, kept on the suspend error
+		want  bool  // want the suspend to succeed
+	}{
+		"operator":                               {kind: ActorOperator, stop: unreachable, cause: context.DeadlineExceeded},
+		"chat idle":                              {kind: ActorOperator, soft: true, stop: unreachable, cause: context.DeadlineExceeded},
+		"shutdown sweep":                         {kind: ActorSweep, stop: unreachable, cause: context.DeadlineExceeded},
+		"t3bridge soft-unavailable idle":         {kind: ActorOperator, soft: true, stop: softUnavailable, cause: bridgeDown},
+		"plain not-running error still suspends": {kind: ActorOperator, stop: errors.New("stop failed"), want: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			b := wakeRow(t, store)
+			if err := store.SetMetadata(b.ID, "last_woke_at", woke); err != nil {
+				t.Fatal(err)
+			}
+			sp := &nonRunningStopRecorder{Fake: runtime.NewFake(), stopErr: tc.stop}
+			m := newTestManager(t, store, sp)
+
+			err := m.Suspend(context.Background(), testActor(m, tc.kind), b.ID, tc.soft)
+			got := mustGet(t, store, b.ID).Metadata
+			if sp.stopCalls == 0 {
+				t.Fatal("the teardown never issued its Stop")
+			}
+			if tc.want {
+				if err != nil {
+					t.Fatalf("Suspend = %v; want the not-running cleanup to stay best-effort", err)
+				}
+				if got["state"] != string(StateSuspended) || got["last_woke_at"] != "" {
+					t.Fatalf("state=%q last_woke_at=%q; want suspended with the stamp cleared", got["state"], got["last_woke_at"])
+				}
+				return
+			}
+			if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("Suspend = %v; want the unreachable runtime to fail the suspend closed", err)
+			}
+			if !errors.Is(err, tc.cause) {
+				t.Fatalf("Suspend = %v; want the cause (%v) kept", err, tc.cause)
+			}
+			if sp.stopCalls != 1 {
+				t.Fatalf("Stop calls = %d; want exactly 1", sp.stopCalls)
+			}
+			if got["state"] == string(StateSuspended) {
+				t.Fatalf("state=suspended over a runtime that could not be reached")
+			}
+			if got["last_woke_at"] != woke {
+				t.Fatalf("last_woke_at=%q; want the failed stop's stamp restored", got["last_woke_at"])
+			}
+		})
+	}
+}

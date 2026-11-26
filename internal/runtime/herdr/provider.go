@@ -32,7 +32,8 @@ type Provider struct {
 	// fixed wall-clock deadline with "no output for setupTimeout" (idle)
 	// plus this absolute ceiling.
 	setupMaxTimeout time.Duration
-	mu              sync.Mutex // serializes workspace/tab find-or-create across concurrent Starts
+	listDeadline    time.Duration // test override for herdrListDeadline; zero selects the default
+	mu              sync.Mutex    // serializes workspace/tab find-or-create across concurrent Starts
 	// act is the tracker-backed activity source behind GetLastActivity /
 	// CanReportActivity (#4217); started lazily on first GetLastActivity.
 	act activityTracker
@@ -100,7 +101,19 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 // separated so tests can drive it against a fake herdr CLI without booting a
 // real session-server socket (mirroring tmux's Start/doStartSession split).
 func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) error {
-	if p.IsRunning(name) {
+	// The existence check runs on Start's ctx and tells a lookup whose answer
+	// is unknown from one that answered "absent": treating an unknown as
+	// absence would stage, pre_start and place a second copy of a live
+	// session. An unanswered lookup (a timeout, a cancel, or an answer lost
+	// to a descendant holding herdr's stdout; see unanswered) is reported as
+	// an unreachable runtime (wrapping runtime.ErrRuntimeUnavailable) so the
+	// launch path defers rather than failing; any other lookup error is still
+	// read as not running, as IsRunning does.
+	_, running, err := resolveBinding(p.lookupOps(ctx, name))
+	if unanswered(err) {
+		return fmt.Errorf("herdr: check existing session %q: %w: %w", name, runtime.ErrRuntimeUnavailable, err)
+	}
+	if err == nil && running {
 		return runtime.ErrSessionExists
 	}
 	if err := startCommandRefusal(cfg); err != nil {
@@ -621,7 +634,10 @@ func (p *Provider) Interrupt(name string) error {
 // never register a name; herdr ≥0.7.4 clears names on occupant change — a
 // name-only check re-Starts live sessions every tick: the spawn storm). An
 // exited agent whose pane idles at a shell prompt is NOT running, so
-// restarts still happen.
+// restarts still happen. A lookup that fails reads false, an unanswered one
+// (see unanswered) included, because a bool cannot say unknown. Start
+// therefore runs its own existence check, and on an unanswered lookup it
+// defers instead of launching a second copy.
 func (p *Provider) IsRunning(name string) bool {
 	_, running, err := resolveBinding(p.lookupOps(context.Background(), name))
 	return err == nil && running
@@ -684,17 +700,21 @@ func (p *Provider) processAliveByPane(ctx context.Context, name, paneID string, 
 // live holder or reaps a stale one and retries once — breaking the recreate
 // storm (see resolveAgentNameTaken). Holder liveness is the pane busy probe:
 // a contested holder whose pane runs a foreground process is a live agent
-// (version-robust, unlike matching claude ≥2.1.x's comm strings). adopted is
-// true only when an already-running holder was adopted, so the caller can
-// skip re-priming a live agent.
+// (version-robust, unlike matching claude ≥2.1.x's comm strings). A probe
+// that fails says nothing about the holder, so it is never read as a dead
+// one: nothing is reaped. adopted is true only when an already-running
+// holder was adopted, so the caller can skip re-priming a live agent.
 func (p *Provider) startAgentAdopting(ctx context.Context, name, kind, paneID string, args []string) (info agentInfo, adopted bool, err error) {
 	hn := herdrAgentName(name) // herdr ≥0.7.5 rejects raw gc session names (invalid_agent_name)
 	started, startErr := p.launchAgentKind(ctx, hn, kind, paneID, args)
 	return resolveAgentNameTaken(started, startErr, agentStartOps{
 		getAgent: func() (agentInfo, bool, error) { return p.c.getAgent(ctx, herdrAgentName(name)) },
-		paneAlive: func(holderPane string) bool {
+		paneAlive: func(holderPane string) (bool, error) {
 			probe, perr := p.probePane(ctx, holderPane)
-			return perr == nil && probe.Exists && probe.Busy
+			if perr != nil {
+				return false, perr
+			}
+			return probe.Exists && probe.Busy, nil
 		},
 		closePane:  func(holderPane string) error { return p.closeBoundPane(ctx, name, holderPane) },
 		retryStart: func() (agentInfo, error) { return p.launchAgentKind(ctx, hn, kind, paneID, args) },
@@ -948,23 +968,49 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 // bound gc session (foreign/manual agents) are appended under their
 // registered names. A registry entry with no registered name is a pane herdr
 // detected an agent in, not a session, and is never listed.
+//
+// A bound session is unknown, not absent, when herdr gave no answer for its
+// lookup (see unanswered) or the walk's deadline ended before reaching it.
+// ListRunning then returns the names it verified with an unwrapped
+// *runtime.PartialListError whose ServerAbsent is false.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
-	ctx := context.Background()
+	// One deadline covers the whole walk: each session costs up to three herdr
+	// calls, so without it a stalled herdr multiplies the per-call bound by the
+	// number of bound sessions.
+	ctx, cancel := context.WithTimeout(context.Background(), p.listBound())
+	defer cancel()
 	agents, err := p.c.listAgents(ctx)
 	if err != nil {
 		return nil, listRunningFailure(err)
 	}
 	seen := make(map[string]bool)   // gc names already listed
 	mapped := make(map[string]bool) // herdr-side names owned by bound gc sessions
-	var out []string
-	for _, name := range p.boundSessionNames() {
+	bound := p.boundSessionNames()
+	for _, name := range bound {
 		mapped[herdrAgentName(name)] = true
+	}
+	var out []string
+	var unknown error // why some bound session's state is unknown, not absent
+	for _, name := range bound {
 		if !strings.HasPrefix(name, prefix) || seen[name] {
 			continue
 		}
-		if _, running, err := resolveBinding(p.lookupOps(ctx, name)); err == nil && running {
+		_, running, err := resolveBinding(p.lookupOps(ctx, name))
+		if err == nil && running {
 			seen[name] = true
 			out = append(out, name)
+		}
+		if unanswered(err) {
+			// herdr gave no answer for this session, so it is unknown, not
+			// absent. The walk goes on: every session that answers is still
+			// listed.
+			unknown = fmt.Errorf("checking %q: %w", name, err)
+		}
+		if cerr := ctx.Err(); cerr != nil {
+			// The walk ran out of time, so the sessions not yet verified are
+			// unknown, not absent: stop and say so.
+			unknown = cerr
+			break
 		}
 	}
 	for _, a := range agents {
@@ -976,7 +1022,23 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 			out = append(out, a.Name)
 		}
 	}
+	if unknown != nil {
+		// Unwrapped: IsRuntimeServerAbsent is a direct type assertion. An
+		// unknown session is not an absent server, so ServerAbsent stays false.
+		return out, &runtime.PartialListError{Err: fmt.Errorf("herdr: list running: %w", unknown)}
+	}
 	return out, nil
+}
+
+// herdrListDeadline bounds one ListRunning walk.
+const herdrListDeadline = 25 * time.Second
+
+// listBound is the ListRunning deadline, honoring the test override.
+func (p *Provider) listBound() time.Duration {
+	if p.listDeadline > 0 {
+		return p.listDeadline
+	}
+	return herdrListDeadline
 }
 
 // SendKeys translates tmux-style key names and sends them to the agent's pane.

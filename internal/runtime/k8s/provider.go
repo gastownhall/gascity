@@ -33,6 +33,13 @@ var (
 // Provider is a native Kubernetes session provider using client-go.
 // Eliminates subprocess overhead by making direct API calls over reused
 // HTTP/2 connections. Pod manifests are compatible with gc-session-k8s.
+//
+// The verbs whose [runtime.Provider] signature carries no ctx each run under
+// one deadline over the whole verb: verbRequestBound for the request-style
+// verbs, and verbCopyBound for CopyTo, which streams a tar. Attach is exempt:
+// only its pod lookup is bounded, and the kubectl stream it hands the terminal
+// to has no deadline. A verb cut by its deadline reports the same shape as any
+// other failure of that verb.
 type Provider struct {
 	ops                k8sOps
 	namespace          string
@@ -44,17 +51,56 @@ type Provider struct {
 	memRequest         string
 	cpuLimit           string
 	memLimit           string
-	serviceAccount     string              // pod service account name (GC_K8S_SERVICE_ACCOUNT)
-	prebaked           bool                // skip staging + init container for prebaked images
-	cityName           string              // the controller's city name, for the pod's remote-stage record
-	nodeSelector       map[string]string   // GC_K8S_NODE_SELECTOR (JSON)
-	tolerations        []corev1.Toleration // GC_K8S_TOLERATIONS (JSON)
-	affinity           *corev1.Affinity    // GC_K8S_AFFINITY (JSON)
-	priorityClassName  string              // GC_K8S_PRIORITY_CLASS_NAME
-	postStartSettle    time.Duration       // settle time before post-start liveness check
-	stderr             io.Writer           // warning output (default os.Stderr)
-	pokes              runtime.PokeLedger  // gc's own input, discounted from GetLastActivity
-	now                func() time.Time    // the poke ledger's clock; nil is time.Now
+	serviceAccount     string                                         // pod service account name (GC_K8S_SERVICE_ACCOUNT)
+	prebaked           bool                                           // skip staging + init container for prebaked images
+	cityName           string                                         // the controller's city name, for the pod's remote-stage record
+	nodeSelector       map[string]string                              // GC_K8S_NODE_SELECTOR (JSON)
+	tolerations        []corev1.Toleration                            // GC_K8S_TOLERATIONS (JSON)
+	affinity           *corev1.Affinity                               // GC_K8S_AFFINITY (JSON)
+	priorityClassName  string                                         // GC_K8S_PRIORITY_CLASS_NAME
+	postStartSettle    time.Duration                                  // settle time before post-start liveness check
+	stderr             io.Writer                                      // warning output (default os.Stderr)
+	pokes              runtime.PokeLedger                             // gc's own input, discounted from GetLastActivity
+	now                func() time.Time                               // the poke ledger's clock; nil is time.Now
+	requestBound       time.Duration                                  // per-verb deadline of the request-style verbs; zero is verbRequestBound
+	copyBound          time.Duration                                  // CopyTo's deadline; zero is verbCopyBound
+	run                func(ctx context.Context, args []string) error // runs kubectl for Attach; nil execs the real kubectl
+}
+
+// verbRequestBound is the default deadline over a whole request-style verb:
+// every ctx-free Provider verb except Attach and CopyTo. It is the house
+// number for one request/response verb, matching the ssh provider's
+// defaultVerbTimeout and tmux's subprocess timeout.
+const verbRequestBound = 30 * time.Second
+
+// verbCopyBound is the default deadline over CopyTo's pod lookup plus tar
+// stream. It is longer than verbRequestBound because the stream moves a
+// workspace, not one request.
+const verbCopyBound = 120 * time.Second
+
+// requestTimeout resolves the request bound: the injected value, or
+// verbRequestBound when none is set.
+func (p *Provider) requestTimeout() time.Duration {
+	if p.requestBound > 0 {
+		return p.requestBound
+	}
+	return verbRequestBound
+}
+
+// copyTimeout resolves the copy bound: the injected value, or verbCopyBound
+// when none is set.
+func (p *Provider) copyTimeout() time.Duration {
+	if p.copyBound > 0 {
+		return p.copyBound
+	}
+	return verbCopyBound
+}
+
+// verbCtx returns the one context a ctx-free verb runs every call under, and
+// its cancel. The verb calls it once at the top and defers the cancel, so the
+// bound covers the whole verb rather than each call in it.
+func (p *Provider) verbCtx(bound time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), bound)
 }
 
 type schedulingFields struct {
@@ -466,9 +512,15 @@ func k8sRequiresPostStartLiveness(cfg runtime.Config) bool {
 // tracking while pods and their PVCs keep running untracked, leaking the most
 // expensive runtime. Delete errors are joined for the same reason; only a
 // genuine Kubernetes NotFound (the pod raced to gone) is treated as idempotent.
+// A failure carrying no Kubernetes API status never reached the API server
+// (the verb's own bound, a cancel, a dial failure): the session's state is
+// unknown, not stopped, so it is wrapped in runtime.ErrRuntimeUnavailable for
+// callers that defer on an unreachable runtime. An API status the server did
+// answer with (403, 500) keeps today's shape: it is an answer, wrong or not.
 // This mirrors the ssh provider's Stop discrimination.
 func (p *Provider) Stop(name string) error {
-	ctx := context.Background()
+	ctx, cancel := p.verbCtx(p.requestTimeout())
+	defer cancel()
 	label := SanitizeLabel(name)
 
 	pods, err := p.ops.listPods(ctx, "gc-session="+label, "")
@@ -476,12 +528,12 @@ func (p *Provider) Stop(name string) error {
 		if apierrors.IsNotFound(err) {
 			return nil // session genuinely gone
 		}
-		return fmt.Errorf("k8s stop %q: listing pods: %w", name, err)
+		return fmt.Errorf("k8s stop %q: listing pods: %w", name, unanswered(err))
 	}
 	var errs []error
 	for i := range pods {
 		if delErr := p.ops.deletePod(ctx, pods[i].Name, 5); delErr != nil && !apierrors.IsNotFound(delErr) {
-			errs = append(errs, fmt.Errorf("deleting pod %q: %w", pods[i].Name, delErr))
+			errs = append(errs, fmt.Errorf("deleting pod %q: %w", pods[i].Name, unanswered(delErr)))
 		}
 	}
 	if len(errs) > 0 {
@@ -490,15 +542,30 @@ func (p *Provider) Stop(name string) error {
 	return nil
 }
 
+// unanswered marks an API error the API server never answered (a deadline, a
+// cancel, a dial or transport failure: anything without a Kubernetes API
+// status) as runtime.ErrRuntimeUnavailable, keeping the cause. Such a call
+// cannot tell whether the pod is gone. An error carrying an API status is the
+// server's own answer and is returned as is.
+func unanswered(err error) error {
+	if errors.As(err, new(apierrors.APIStatus)) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", runtime.ErrRuntimeUnavailable, err)
+}
+
 // Interrupt sends Ctrl-C to the tmux session inside the pod.
 func (p *Provider) Interrupt(name string) error {
-	_ = p.carrier().Interrupt(context.Background(), name) // best-effort
+	ctx, cancel := p.verbCtx(p.requestTimeout())
+	defer cancel()
+	_ = p.carrier().Interrupt(ctx, name) // best-effort
 	return nil
 }
 
 // IsRunning reports whether the session has a running pod with a live tmux session.
 func (p *Provider) IsRunning(name string) bool {
-	ctx := context.Background()
+	ctx, cancel := p.verbCtx(p.requestTimeout())
+	defer cancel()
 	podName, err := p.findRunningPod(ctx, name)
 	if err != nil {
 		return false
@@ -512,7 +579,8 @@ func (p *Provider) IsRunning(name string) bool {
 // IsAttached reports whether a user terminal is connected to the tmux
 // session inside the pod.
 func (p *Provider) IsAttached(name string) bool {
-	ctx := context.Background()
+	ctx, cancel := p.verbCtx(p.requestTimeout())
+	defer cancel()
 	podName, err := p.findRunningPod(ctx, name)
 	if err != nil {
 		return false
@@ -525,10 +593,14 @@ func (p *Provider) IsAttached(name string) bool {
 	return strings.TrimSpace(output) == "1"
 }
 
-// Attach shells out to kubectl exec -it for full TTY passthrough.
+// Attach shells out to kubectl exec -it for full TTY passthrough. Only its
+// pod lookup runs under the request bound; the interactive kubectl stream it
+// hands the terminal to has no deadline, so it lasts as long as the user's
+// terminal does.
 func (p *Provider) Attach(name string) error {
-	ctx := context.Background()
-	podName, err := p.findRunningPod(ctx, name)
+	lookupCtx, cancel := p.verbCtx(p.requestTimeout())
+	podName, err := p.findRunningPod(lookupCtx, name)
+	cancel()
 	if err != nil {
 		return fmt.Errorf("attach: no running pod for session %q", name)
 	}
@@ -540,6 +612,12 @@ func (p *Provider) Attach(name string) error {
 	args = append(args, "-n", p.namespace, "exec", "-it", podName, "--",
 		"tmux", "attach", "-t", tmuxSession)
 
+	// The interactive stream runs under a ctx with no deadline: it lasts as
+	// long as the user's terminal does.
+	ctx := context.Background()
+	if p.run != nil {
+		return p.run(ctx, args)
+	}
 	cmd := exec.CommandContext(ctx, "kubectl", args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -552,7 +630,8 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 	if len(processNames) == 0 {
 		return true
 	}
-	ctx := context.Background()
+	ctx, cancel := p.verbCtx(p.requestTimeout())
+	defer cancel()
 	label := SanitizeLabel(name)
 
 	pods, err := p.ops.listPods(ctx, "gc-session="+label, "")
@@ -585,7 +664,8 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 // delivery is a poke whose keystroke echo GetLastActivity discounts (see
 // [Provider.poke]).
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
-	ctx := context.Background()
+	ctx, cancel := p.verbCtx(p.requestTimeout())
+	defer cancel()
 	return p.poke(ctx, name, func() error { return p.carrier().Nudge(ctx, name, content) })
 }
 
@@ -594,7 +674,8 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 // Best-effort on a missing session (contract: no-op), but a genuine
 // transport failure to a live pod is propagated (#4389).
 func (p *Provider) SendKeys(name string, keys ...string) error {
-	ctx := context.Background()
+	ctx, cancel := p.verbCtx(p.requestTimeout())
+	defer cancel()
 	if err := p.poke(ctx, name, func() error { return p.carrier().SendKeys(ctx, name, keys...) }); err != nil && !errors.Is(err, runtime.ErrSessionNotFound) {
 		return err
 	}
@@ -632,7 +713,8 @@ func (p *Provider) RunLive(_ string, _ runtime.Config) error {
 
 // SetMeta stores a key-value pair in the tmux environment.
 func (p *Provider) SetMeta(name, key, value string) error {
-	ctx := context.Background()
+	ctx, cancel := p.verbCtx(p.requestTimeout())
+	defer cancel()
 	podName, err := p.findPod(ctx, name)
 	if err != nil {
 		return nil // best-effort
@@ -644,7 +726,8 @@ func (p *Provider) SetMeta(name, key, value string) error {
 
 // GetMeta retrieves a metadata value from the tmux environment.
 func (p *Provider) GetMeta(name, key string) (string, error) {
-	ctx := context.Background()
+	ctx, cancel := p.verbCtx(p.requestTimeout())
+	defer cancel()
 	podName, err := p.findPod(ctx, name)
 	if err != nil {
 		return "", nil
@@ -667,7 +750,8 @@ func (p *Provider) GetMeta(name, key string) (string, error) {
 
 // RemoveMeta removes a metadata key from the tmux environment.
 func (p *Provider) RemoveMeta(name, key string) error {
-	ctx := context.Background()
+	ctx, cancel := p.verbCtx(p.requestTimeout())
+	defer cancel()
 	podName, err := p.findPod(ctx, name)
 	if err != nil {
 		return nil // best-effort
@@ -679,13 +763,16 @@ func (p *Provider) RemoveMeta(name, key string) error {
 
 // Peek captures the last N lines of tmux pane output (best-effort: empty on failure).
 func (p *Provider) Peek(name string, lines int) (string, error) {
-	out, _ := p.carrier().Peek(context.Background(), name, lines) // best-effort
+	ctx, cancel := p.verbCtx(p.requestTimeout())
+	defer cancel()
+	out, _ := p.carrier().Peek(ctx, name, lines) // best-effort
 	return out, nil
 }
 
 // ListRunning returns names of all running sessions with the given prefix.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
-	ctx := context.Background()
+	ctx, cancel := p.verbCtx(p.requestTimeout())
+	defer cancel()
 	pods, err := p.ops.listPods(ctx, "app=gc-agent", "status.phase=Running")
 	if err != nil {
 		return nil, err
@@ -726,7 +813,9 @@ func (p *Provider) ListRunningShared() bool { return true }
 // pinned at creation/attach time for a detached session and does not advance
 // when the agent prints output.
 func (p *Provider) GetLastActivity(name string) (time.Time, error) {
-	return p.pokes.Discount(name, p.rawActivity(context.Background(), name), p.clock()), nil
+	ctx, cancel := p.verbCtx(p.requestTimeout())
+	defer cancel()
+	return p.pokes.Discount(name, p.rawActivity(ctx, name), p.clock()), nil
 }
 
 // rawActivity reads the session's raw activity clock, the newest
@@ -741,7 +830,9 @@ func (p *Provider) rawActivity(ctx context.Context, name string) time.Time {
 
 // ClearScrollback clears the tmux scrollback buffer (best-effort).
 func (p *Provider) ClearScrollback(name string) error {
-	_ = p.carrier().ClearScrollback(context.Background(), name) // best-effort
+	ctx, cancel := p.verbCtx(p.requestTimeout())
+	defer cancel()
+	_ = p.carrier().ClearScrollback(ctx, name) // best-effort
 	return nil
 }
 
@@ -762,7 +853,8 @@ func (p *Provider) SleepCapability(string) runtime.SessionSleepCapability {
 
 // CopyTo copies a local file/directory into the pod via tar.
 func (p *Provider) CopyTo(name, src, relDst string) error {
-	ctx := context.Background()
+	ctx, cancel := p.verbCtx(p.copyTimeout())
+	defer cancel()
 	podName, err := p.findRunningPod(ctx, name)
 	if err != nil {
 		return nil // best-effort
