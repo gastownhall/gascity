@@ -680,7 +680,10 @@ func (p *scriptedIdleSnapshotProvider) SnapshotIdle(string) (bool, error) { retu
 func runUpdaterFlashTicks(t *testing.T, env *restartRequestTestEnv, session beads.Bead, sessionName string, idle func(elapsed time.Duration) (bool, error), tick, flashEvery, total time.Duration) time.Duration {
 	t.Helper()
 	env.setSessionMetadata(&session, map[string]string{"provider": "claude"})
-	it := newIdleTracker()
+	it := buildIdleTracker(env.cfg, env.cfg.Workspace.Name, "", env.sp)
+	if it == nil {
+		t.Fatal("buildIdleTracker returned nil for a progress-stall-only config")
+	}
 	var elapsed time.Duration
 	sp := &scriptedIdleSnapshotProvider{Fake: env.sp, idle: func() (bool, error) { return idle(elapsed) }}
 	start := env.clk.Now()

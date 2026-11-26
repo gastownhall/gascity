@@ -230,7 +230,12 @@ var startVerboseMode bool
 //     template lookup when the per-name lookup misses, so canonical and
 //     namepool members keep their per-name hit while bead-derived names
 //     pick up the template's timeout.
+//
+// The tracker also carries the progress-stall content anchor, so it is built
+// whenever a progress or claim-holder stall timeout is set, even with no
+// idle_timeout registered.
 func buildIdleTracker(cfg *config.City, cityName, _ string, sp runtime.Provider) idleTracker {
+	stall := cfg.Session.ProgressStallTimeoutDuration() > 0 || cfg.Session.ClaimHolderStallTimeoutDuration() > 0
 	var hasAny bool
 	st := cfg.Workspace.SessionTemplate
 	for _, a := range cfg.Agents {
@@ -240,7 +245,10 @@ func buildIdleTracker(cfg *config.City, cityName, _ string, sp runtime.Provider)
 		}
 	}
 	if !hasAny {
-		return nil
+		if !stall {
+			return nil
+		}
+		return newIdleTracker()
 	}
 	it := newIdleTracker()
 	var registeredAny bool
@@ -300,7 +308,7 @@ func buildIdleTracker(cfg *config.City, cityName, _ string, sp runtime.Provider)
 		it.setTimeout(sn, timeout)
 		registeredAny = true
 	}
-	if !registeredAny {
+	if !registeredAny && !stall {
 		return nil
 	}
 	return it
