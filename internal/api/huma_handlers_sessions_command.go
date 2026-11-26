@@ -1444,6 +1444,12 @@ func (s *Server) closeSession(ctx context.Context, target, key string, del bool)
 		if del {
 			if err := deleteSessionBeadAfterClose(store, id); err != nil {
 				log.Printf("gc api: deleting bead after close %s: %v", id, err)
+				// The close landed and the delete lost its serialization race
+				// on every attempt: transient, and a repeated close?delete=true
+				// finishes the delete.
+				if beads.IsRetryableConflict(err) {
+					return syncOpResult(opjournal.KindClose, err, adm.Minted), apierr.StoreUnavailable.Msg("store_conflict: closed but delete failed: " + err.Error())
+				}
 				return syncOpResult(opjournal.KindClose, err, adm.Minted), apierr.Internal.Msg("closed but delete failed: " + err.Error())
 			}
 			res.Outcome.Result.Via = legacyop.ViaLegacyDeleted
