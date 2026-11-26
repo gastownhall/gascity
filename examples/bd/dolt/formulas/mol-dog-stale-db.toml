@@ -22,6 +22,28 @@ trends. The full JSON report is recorded in the work bead's metadata
 (`gc.dolt_cleanup.scan_report`, `gc.dolt_cleanup.apply_report`) so a
 follow-up reader can `gc bd show <id>` to see details.
 
+## Store-call bound
+
+Every call that reaches the bead store (report, outcome and close
+writes, escalation mail or escalate.sh hook, maintenance nudge) runs
+under `timeout --kill-after=5 $DOG_BD_TIMEOUT` (default 60 seconds; a
+value that is not a positive whole number of seconds means 60), so a
+hung store fails the call instead of blocking the step. A report the
+store did not take is named in the close reason
+(`reports_omitted=<stage>`) and a `mol-dog-stale-db.escalate` event. A
+hung outcome write leaves the work bead open with no outcome; a hung
+close withdraws the outcome too, and the close itself may still have
+landed. The step drain-acks either way. Event emits and
+`gc dolt-cleanup` are not wrapped. Without `timeout` or `gtimeout` on
+PATH the step warns once and runs the calls unbounded.
+
+The core escalate.sh bounds its own send with
+`GC_ESCALATE_SEND_TIMEOUT_SECS` (default 30) in a process group of its
+own, out of this bound's reach, so keep `DOG_BD_TIMEOUT` above it.
+Below it, the bound kills the hook while its send is still running:
+the alert can still go out, but the hook can no longer record it, so
+the next run sends the alert again.
+
 ## Dog Contract
 
 This is infrastructure work. You:
@@ -95,6 +117,29 @@ WORK_BEAD="${GC_BEAD_ID:-$(gc hook current --id-only)}"
 [ -n "$WORK_BEAD" ] || { echo "cannot resolve work bead id: GC_BEAD_ID unset and gc hook current returned nothing; aborting" >&2; exit 1; }
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/dolt-cleanup.XXXXXX")
 DRAIN_ACKED=0
+REPORTS_OMITTED=""
+
+# store_bounded CMD... runs one bead-store call under a deadline of
+# DOG_BD_TIMEOUT seconds, so a hung store fails the call (exit 124, or 137 once
+# killed) into the failure path it already has instead of blocking the step.
+# Without --foreground, timeout signals its whole process group, so the bd a
+# passthrough `gc bd` spawned dies with it. A host with neither timeout nor
+# gtimeout runs the calls unbounded, as before, rather than failing them.
+STORE_TIMEOUT="${DOG_BD_TIMEOUT:-60}"
+case "$STORE_TIMEOUT" in
+  ''|*[!0-9]*) STORE_TIMEOUT=60 ;;
+  *[1-9]*) ;;
+  *) STORE_TIMEOUT=60 ;;
+esac
+TIMEOUT_BIN=$(command -v gtimeout || command -v timeout || true)
+[ -n "$TIMEOUT_BIN" ] || echo "mol-dog-stale-db: no timeout or gtimeout; bead-store calls run unbounded" >&2
+store_bounded() {
+  if [ -n "$TIMEOUT_BIN" ]; then
+    "$TIMEOUT_BIN" --kill-after=5 "$STORE_TIMEOUT" "$@"
+  else
+    "$@"
+  fi
+}
 
 cleanup() {
   rm -rf "$TMP_DIR"
@@ -115,11 +160,22 @@ record_report() {
   # written with `gc bd update --set-metadata`: on a city whose coordination
   # classes live in a separate store this wisp is served in process by gc,
   # which has no notes field to append to (`--append-notes` is refused there),
-  # and bare `bd` cannot see the wisp at all.
+  # and bare `bd` cannot see the wisp at all. A report the store did not take
+  # in time is named in the close reason (reports_omitted=) and an escalate
+  # event, not in another write to the store that just failed.
   local stage="${title%% *}"
+  local rc=0
   if [ -s "$file" ]; then
-    if ! gc bd update "$WORK_BEAD" --set-metadata "gc.dolt_cleanup.${stage}_report=$(printf '%s %s\\n%s' "$title" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$(cat "$file")")"; then
+    store_bounded gc bd update "$WORK_BEAD" --set-metadata "gc.dolt_cleanup.${stage}_report=$(printf '%s %s\\n%s' "$title" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$(cat "$file")")" || rc=$?
+    if [ "$rc" -ne 0 ]; then
       echo "failed to record ${title} report; continuing to drain-ack" >&2
+      if [ -z "$REPORTS_OMITTED" ]; then
+        REPORTS_OMITTED="$stage"
+      else
+        REPORTS_OMITTED="${REPORTS_OMITTED}+${stage}"
+      fi
+      run_or_warn "emit ${stage} report omission" gc event emit mol-dog-stale-db.escalate \
+        --message "${title} report was not recorded on ${WORK_BEAD} (exit ${rc}); continuing"
     fi
   fi
 }
@@ -157,11 +213,13 @@ ESCALATE_SCRIPT="$(resolve_escalate_script)"
 # override refused the incident flags as a usage error, as one written before
 # them (the 1.5.0 contract) does: with exit 2, the usage-error status, or with
 # a message that names the flag (getopt-style parsers exit 1). The core pack's
-# escalate.sh takes the flags, so no failure of it is read as a refusal.
+# escalate.sh takes the flags, so no failure of it is read as a refusal. Nor is
+# a hook the store bound killed (exit 124 or 137): that send failed.
 escalate_refused_incident_flags() {
   local city_path="${GC_CITY_PATH:-${GC_CITY:-.}}"
   local system_packs="${GC_SYSTEM_PACKS_DIR:-$city_path/.gc/system/packs}"
   [ "$1" -ne 0 ] || return 1
+  case "$1" in 124|137) return 1 ;; esac
   if [ "$ESCALATE_SCRIPT" -ef "$system_packs/core/assets/scripts/escalate.sh" ]; then
     return 1
   fi
@@ -186,18 +244,18 @@ escalate_through_hook() {
   local rc=0
   local err
   if [ -z "$incident_key" ]; then
-    "$ESCALATE_SCRIPT" --subject "$subject" --message "$message"
+    store_bounded "$ESCALATE_SCRIPT" --subject "$subject" --message "$message"
     return
   fi
   # stdout passes through; stderr is held to tell a refusal from a failure.
-  { err=$("$ESCALATE_SCRIPT" --subject "$subject" --message "$message" \
+  { err=$(store_bounded "$ESCALATE_SCRIPT" --subject "$subject" --message "$message" \
     --incident-key "$incident_key" --fingerprint "$incident_key" 2>&1 >&3 3>&-); } 3>&1 || rc=$?
   if ! escalate_refused_incident_flags "$rc" "$err"; then
     [ -z "$err" ] || printf '%s\\n' "$err" >&2
     return "$rc"
   fi
   echo "mol-dog-stale-db: $ESCALATE_SCRIPT predates incident keys (exit $rc on --incident-key); sent the alert without them, so it is not deduplicated" >&2
-  "$ESCALATE_SCRIPT" --subject "$subject" --message "$message"
+  store_bounded "$ESCALATE_SCRIPT" --subject "$subject" --message "$message"
 }
 
 # send_escalation SUBJECT MESSAGE [DEDUP_KEY] escalates through the escalate.sh
@@ -214,9 +272,9 @@ send_escalation() {
     return
   fi
   if [ -n "$dedup_key" ]; then
-    gc mail send "${GC_ESCALATION_RECIPIENT:-human}" -s "$subject" -m "$message" --dedup "$dedup_key"
+    store_bounded gc mail send "${GC_ESCALATION_RECIPIENT:-human}" -s "$subject" -m "$message" --dedup "$dedup_key"
   else
-    gc mail send "${GC_ESCALATION_RECIPIENT:-human}" -s "$subject" -m "$message"
+    store_bounded gc mail send "${GC_ESCALATION_RECIPIENT:-human}" -s "$subject" -m "$message"
   fi
 }
 
@@ -224,7 +282,7 @@ maintenance_notice() {
   local message="$1"
   local target="${GC_MAINTENANCE_DONE_TARGET:-}"
   [ -n "$target" ] || return 0
-  gc session nudge "$target" "$message" || true
+  store_bounded gc session nudge "$target" "$message" || true
 }
 
 drain_ack_once() {
@@ -419,12 +477,23 @@ fi
 # and a city whose coordination classes live in their own store serves it in
 # process, where bare `bd` cannot see the wisp. Neither write needs --actor:
 # gc closes a session's own claim under the identity that claimed it. A failed
-# close withdraws the outcome, so the wisp it leaves open carries none, as on
-# every other fail-open path.
-gc bd update "$WORK_BEAD" --set-metadata gc.outcome=pass
-if ! gc bd close "$WORK_BEAD" --reason "Stale DB scan complete (orphans=${ORPHAN_TOTAL}, applied=${APPLIED}, escalated=${ESCALATED})"; then
-  run_or_warn "withdraw pass outcome" gc bd update "$WORK_BEAD" --unset-metadata gc.outcome
-  fail_open_after_drain "gc bd close failed; leaving work bead open"
+# or overrun outcome write never reaches the close, and it or a failed close
+# withdraws the outcome (an overrun write may still have landed), so the wisp
+# left open carries none, as on every other fail-open path. An overrun close
+# may have landed too (a passthrough close still reads the closed row back
+# after bd commits it), so its message does not claim the wisp was left open.
+withdraw_and_fail_open() {
+  run_or_warn "withdraw pass outcome" store_bounded gc bd update "$WORK_BEAD" --unset-metadata gc.outcome
+  run_or_warn "emit close escalation" gc event emit mol-dog-stale-db.escalate --message "$1"
+  fail_open_after_drain "$1"
+}
+OMITTED_SUFFIX=""
+[ -z "$REPORTS_OMITTED" ] || OMITTED_SUFFIX=", reports_omitted=${REPORTS_OMITTED}"
+if ! store_bounded gc bd update "$WORK_BEAD" --set-metadata gc.outcome=pass; then
+  withdraw_and_fail_open "outcome write failed or overran ${STORE_TIMEOUT}s; leaving work bead open"
+fi
+if ! store_bounded gc bd close "$WORK_BEAD" --reason "Stale DB scan complete (orphans=${ORPHAN_TOTAL}, applied=${APPLIED}, escalated=${ESCALATED}${OMITTED_SUFFIX})"; then
+  withdraw_and_fail_open "gc bd close failed or overran ${STORE_TIMEOUT}s; the close may have landed"
 fi
 drain_ack_once # drain-ack before normal exit
 exit
