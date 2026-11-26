@@ -154,7 +154,7 @@ func expandDrain(store beads.GraphStore, bead beads.Bead, opts ProcessOptions) (
 		}
 		return ControlResult{}, err
 	}
-	if err := persistDrainManifest(store, bead.ID, manifest, map[string]string{beadmeta.DrainStateMetadataKey: beadmeta.DrainStateExpanding}); err != nil {
+	if err := persistChangedDrainManifest(store, bead, manifest, map[string]string{beadmeta.DrainStateMetadataKey: beadmeta.DrainStateExpanding}); err != nil {
 		return ControlResult{}, fmt.Errorf("%s: recording drain manifest: %w", bead.ID, err)
 	}
 	if manifest.Context == beadmeta.DrainContextShared {
@@ -1942,6 +1942,16 @@ func (e drainReservationError) Error() string {
 // reservation read and write route to the member's owning store
 // (drainMemberOwningStore). On origin/main the owning store is the single store,
 // matching the pre-seam store.Get/store.SetMetadata behavior exactly.
+//
+// A reservation naming another drain control conflicts only while that
+// control is open. Its own terminal paths release the reservation, but a
+// control closed from outside (a force-deleted convoy, a canceled run) or
+// purged never does, so a closed or missing owner is taken over with a write
+// fenced on the stale value. The reservation guards the member until the
+// owner's item work for it finishes, and closing the control from outside does
+// not always stop that work: while an item workflow the owner launched for the
+// member is still open, the drain waits for it (awaitDeadDrainItemWork)
+// instead of launching item work beside it.
 func reserveDrainMember(store beads.GraphStore, control, member beads.Bead, opts ProcessOptions) error {
 	if drainMemberAccess(control) != beadmeta.DrainMemberAccessExclusive {
 		return nil
@@ -1957,23 +1967,137 @@ func reserveDrainMember(store beads.GraphStore, control, member beads.Bead, opts
 		}
 		return fmt.Errorf("%s: loading exclusive drain member %s: %w", control.ID, member.ID, err)
 	}
-	owner := strings.TrimSpace(current.Metadata[beadmeta.ExclusiveDrainReservationMetadataKey])
-	if owner != "" && owner != control.ID {
-		return drainReservationError{ControlID: control.ID, MemberID: member.ID, Owner: owner}
-	}
+	stored := current.Metadata[beadmeta.ExclusiveDrainReservationMetadataKey]
+	owner := strings.TrimSpace(stored)
 	if owner == control.ID {
 		return nil
 	}
-	return claimDrainReservation(memberStore, control, member)
+	if owner == "" {
+		return claimDrainReservation(memberStore, control, member, stored)
+	}
+	released, ownerState, err := drainReservationOwnerReleased(store, owner, opts)
+	if err != nil {
+		return fmt.Errorf("%s: checking reservation owner %s of drain member %s: %w", control.ID, owner, member.ID, err)
+	}
+	if !released {
+		return drainReservationError{ControlID: control.ID, MemberID: member.ID, Owner: owner}
+	}
+	if err := awaitDeadDrainItemWork(store, control, member.ID, owner, ownerState, opts); err != nil {
+		return err
+	}
+	if err := claimDrainReservation(memberStore, control, member, stored); err != nil {
+		return err
+	}
+	opts.tracef("process-control bead=%s kind=drain reservation-takeover member=%s stale_owner=%s owner_state=%s", control.ID, member.ID, owner, ownerState)
+	return nil
 }
 
-// claimDrainReservation claims the empty reservation slot. When the member's
-// owning store resolves a conditional writer (beads.conditional_writes auto or
-// require on a capable store), the claim is a value-CAS so two racing drains
-// cannot both observe an empty owner and both stamp; otherwise it is the
-// byte-identical legacy write. A require-mode refusal surfaces as-is — the
+// awaitDeadDrainItemWork returns nil once dead drain control owner has no open
+// item workflow for memberID, so its reservation on the member may be taken
+// over. While one is open it returns a wait (ErrControlPending), parked the
+// way dispatch waits on live work (the ralph iteration gate, a drain's own
+// item roots): a blocking edge from control onto the open root takes the
+// drain out of the ready set until the root closes, the close re-runs it, and
+// the edge names what it waits on. Re-entry finds the edge in place and
+// writes nothing. Only a root in a store other than the drain's own (an owner
+// minted before a class split keeps its roots in the work store) cannot be
+// named by an edge; that wait is re-checked on each pass instead.
+//
+// A failed write of the edge is returned as an error, never as the wait: the
+// reservation paths classify it like any other store failure, retrying a
+// transient one on a later pass (retryableDrainReservationError).
+func awaitDeadDrainItemWork(store beads.GraphStore, control beads.Bead, memberID, owner, ownerState string, opts ProcessOptions) error {
+	rootID, local, err := openDrainItemRoot(store, owner, memberID, opts)
+	if err != nil {
+		return fmt.Errorf("%s: checking the item work of %s reservation owner %s on drain member %s: %w", control.ID, ownerState, owner, memberID, err)
+	}
+	if rootID == "" {
+		return nil
+	}
+	if local {
+		if err := ensureBlockingDependencyWithRetry(store, control.ID, rootID); err != nil {
+			return fmt.Errorf("%s: blocking on item workflow %s of %s reservation owner %s on drain member %s: %w", control.ID, rootID, ownerState, owner, memberID, err)
+		}
+	}
+	opts.tracef("process-control bead=%s kind=drain reservation-wait member=%s stale_owner=%s owner_state=%s open_item_root=%s parked=%t", control.ID, memberID, owner, ownerState, rootID, local)
+	return fmt.Errorf("%s: drain member %s stays reserved by %s drain %s while its item workflow %s is open: %w", control.ID, memberID, ownerState, owner, rootID, ErrControlPending)
+}
+
+// drainReservationOwnerReleased reports whether a reservation naming owner
+// (another drain control) is dead: the drain's residency frame holds owner as
+// a closed bead, or holds no bead with that id at all. Any other status is a
+// live owner. A lookup that could not be completed is an error, never a
+// release. state names what was observed ("closed", "missing", or the live
+// owner's status) for tracing.
+func drainReservationOwnerReleased(store beads.GraphStore, owner string, opts ProcessOptions) (released bool, state string, err error) {
+	row, found, err := resolveDrainMember(store, owner, opts)
+	if err != nil {
+		return false, "", err
+	}
+	if !found {
+		return true, "missing", nil
+	}
+	if row.Bead.Status == "closed" {
+		return true, "closed", nil
+	}
+	return false, row.Bead.Status, nil
+}
+
+// openDrainItemRoot returns the id of an item workflow root that drain control
+// owner launched for memberID and that is still open, or "" when there is
+// none. The roots carry both ids (stampDrainItemRecipe) and are listed across
+// the drain's residency frame, because an owner minted before a class split
+// keeps its roots in the work store. The unit convoys a drain mints carry the
+// same two ids; only workflow roots are item work. Each candidate is re-read by
+// id through the frame, so the row that answers is the one resolveDrainMember
+// serves: a frozen copy the split kept in the work store, open for good, does
+// not outvote a live row the binding has closed. local reports whether that
+// row lives in store, the drain's own store, where an edge can name the root.
+func openDrainItemRoot(store beads.GraphStore, owner, memberID string, opts ProcessOptions) (rootID string, local bool, err error) {
+	topo, err := drainResidency(store, opts)
+	if err != nil {
+		return "", false, err
+	}
+	plan, err := storeref.Plan(storeref.RoutedWork{}, topo)
+	if err != nil {
+		return "", false, err
+	}
+	query := beads.ListQuery{
+		Metadata: map[string]string{
+			beadmeta.DrainControlIDMetadataKey: owner,
+			beadmeta.DrainMemberIDMetadataKey:  memberID,
+		},
+		TierMode: beads.TierBoth,
+	}
+	candidates, err := storeref.TypedUnion(plan, func(b beads.Bead) string { return b.ID }, func(leg storeref.TypedLeg) ([]beads.Bead, error) {
+		return leg.Reader.List(query)
+	})
+	if err != nil {
+		return "", false, err
+	}
+	for _, candidate := range candidates.Items {
+		if !sourceworkflow.IsWorkflowRoot(candidate) {
+			continue
+		}
+		row, found, err := resolveDrainMember(store, candidate.ID, opts)
+		if err != nil {
+			return "", false, err
+		}
+		if found && row.Bead.Status != "closed" {
+			return candidate.ID, beads.SameStore(row.Store, store), nil
+		}
+	}
+	return "", false, nil
+}
+
+// claimDrainReservation replaces the reservation value expected (empty, or a
+// released owner's id) with control.ID. When the member's owning store
+// resolves a conditional writer (beads.conditional_writes auto or require on
+// a capable store), the claim is a value-CAS fenced on expected so two racing
+// drains cannot both observe the same slot and both stamp; otherwise it is
+// the legacy unconditional write. A require-mode refusal surfaces as-is — the
 // drain fails closed rather than issuing an unconditional claim.
-func claimDrainReservation(memberStore beads.Store, control, member beads.Bead) error {
+func claimDrainReservation(memberStore beads.Store, control, member beads.Bead, expected string) error {
 	writer, _, err := beads.ResolveConditionalWriter(memberStore)
 	if err != nil {
 		return fmt.Errorf("%s: reserving drain member %s: %w", control.ID, member.ID, err)
@@ -1981,22 +2105,26 @@ func claimDrainReservation(memberStore beads.Store, control, member beads.Bead) 
 	if writer == nil {
 		return memberStore.SetMetadata(member.ID, beadmeta.ExclusiveDrainReservationMetadataKey, control.ID)
 	}
-	return claimDrainReservationCAS(memberStore, writer, control, member)
+	return claimDrainReservationCAS(memberStore, writer, control, member, expected)
 }
 
-// claimDrainReservationCAS fences the claim. A failed CAS is an observation,
-// never a loss verdict by itself: the reservation value identifies its writer
+// claimDrainReservationCAS fences the claim on the observed value expected
+// (empty, or a released owner's id). A failed CAS is an observation, never a
+// loss verdict by itself: the reservation value identifies its writer
 // (control.ID), so the claim re-reads and re-decides — our own value means
 // self-win (idempotent re-entry, or our own committed-but-unacknowledged
-// write on an ambiguous transport error); a still-empty owner means a
-// spurious conflict (a raced release, or cross-key revision interference on
-// stores that emulate value-CAS over a whole-bead fence), re-issued once
-// before surfacing; anything else is a genuine competing reservation.
-func claimDrainReservationCAS(memberStore beads.Store, writer beads.ConditionalWriter, control, member beads.Bead) error {
+// write on an ambiguous transport error); a value still equal to expected
+// means a spurious conflict (cross-key revision interference on stores that
+// emulate value-CAS over a whole-bead fence), re-issued once before
+// surfacing; a slot released to empty meanwhile is re-issued against the
+// empty value; anything else is a genuine competing reservation. A value that
+// changed under the claim was written by a drain that was open when it
+// reserved, so it is never taken over here; a later pass re-checks it.
+func claimDrainReservationCAS(memberStore beads.Store, writer beads.ConditionalWriter, control, member beads.Bead, expected string) error {
 	const claimAttempts = 2
 	var lastErr error
 	for attempt := 1; attempt <= claimAttempts; attempt++ {
-		ok, casErr := writer.CompareAndSetMetadataKey(member.ID, beadmeta.ExclusiveDrainReservationMetadataKey, "", control.ID)
+		ok, casErr := writer.CompareAndSetMetadataKey(member.ID, beadmeta.ExclusiveDrainReservationMetadataKey, expected, control.ID)
 		if ok {
 			return nil
 		}
@@ -2008,23 +2136,29 @@ func claimDrainReservationCAS(memberStore beads.Store, writer beads.ConditionalW
 			}
 			return fmt.Errorf("%s: re-reading drain member %s after conditional claim: %w", control.ID, member.ID, getErr)
 		}
-		switch owner := strings.TrimSpace(current.Metadata[beadmeta.ExclusiveDrainReservationMetadataKey]); {
+		stored := current.Metadata[beadmeta.ExclusiveDrainReservationMetadataKey]
+		switch owner := strings.TrimSpace(stored); {
 		case owner == control.ID:
 			// Self-win: the value is ours — an ambiguous transport error whose
 			// write committed, or a concurrent re-entry of this same drain.
 			return nil
-		case owner != "":
+		case owner == "":
+			// Released (or never stamped): the remaining attempt claims the
+			// empty slot as observed.
+			expected = stored
+		case owner != strings.TrimSpace(expected):
 			return drainReservationError{ControlID: control.ID, MemberID: member.ID, Owner: owner}
 		}
-		// Owner still empty: spurious conflict. A non-precondition error is
-		// surfaced (transport/exhaustion — the level-triggered pass retries);
-		// a precondition/value-loss gets one bounded re-issue.
+		// The slot still holds the value the claim is fenced on: a spurious
+		// conflict. A non-precondition error is surfaced (transport/exhaustion
+		// — the level-triggered pass retries); a precondition/value-loss gets
+		// one bounded re-issue.
 		if casErr != nil && !beads.IsPreconditionFailed(casErr) {
 			return fmt.Errorf("%s: reserving drain member %s: %w", control.ID, member.ID, casErr)
 		}
 	}
 	if lastErr == nil {
-		lastErr = errors.New("conditional claim kept losing with an empty owner")
+		lastErr = fmt.Errorf("conditional claim kept losing against reservation value %q", expected)
 	}
 	return fmt.Errorf("%s: reserving drain member %s: %w", control.ID, member.ID, lastErr)
 }
@@ -2116,8 +2250,9 @@ func releaseDrainReservation(memberStore beads.Store, controlID, memberID string
 // retryableDrainReservationError reports whether a reservation failure is a
 // level-triggered re-entry class rather than a terminal drain disposition.
 // Conditional-write contention (bounded-CAS exhaustion), a runtime capability
-// latch (the next resolve degrades under auto), and transport-transient store
-// errors all heal on a later pass. A genuine competing owner
+// latch (the next resolve degrades under auto), transport-transient store
+// errors, and a member still held by a dead owner's open item work
+// (ErrControlPending) all heal on a later pass. A genuine competing owner
 // (drainReservationError) and a require-mode policy refusal stay terminal —
 // the first is the drain's designed skip/fail outcome, the second is
 // fail-closed by contract.
@@ -2129,7 +2264,7 @@ func retryableDrainReservationError(err error) bool {
 	if beads.IsConditionalWritesRequired(err) {
 		return false
 	}
-	return beads.IsCASRetriesExhausted(err) || beads.IsConditionalWriteUnsupported(err) || IsTransientControllerError(err)
+	return errors.Is(err, ErrControlPending) || beads.IsCASRetriesExhausted(err) || beads.IsConditionalWriteUnsupported(err) || IsTransientControllerError(err)
 }
 
 func closeDrainReservationFailure(store beads.GraphStore, bead beads.Bead, manifest drainManifest, err error, opts ProcessOptions) (ControlResult, error) {
@@ -2264,15 +2399,43 @@ func closeOpenDrainItemRoots(store beads.GraphStore, manifest *drainManifest, fa
 }
 
 func persistDrainManifest(store beads.GraphStore, beadID string, manifest drainManifest, metadata map[string]string) error {
-	data, err := json.Marshal(manifest)
+	metadata, err := withDrainManifest(manifest, metadata)
 	if err != nil {
 		return err
 	}
+	return store.SetMetadataBatch(beadID, metadata)
+}
+
+// persistChangedDrainManifest is persistDrainManifest at the top of a pass,
+// judged against bead as that pass read it: a drain that already carries the
+// manifest and every value in metadata is not written. A drain re-entering
+// with nothing changed, still waiting to reserve a member, then writes nothing
+// and emits no bead.updated event.
+func persistChangedDrainManifest(store beads.GraphStore, bead beads.Bead, manifest drainManifest, metadata map[string]string) error {
+	metadata, err := withDrainManifest(manifest, metadata)
+	if err != nil {
+		return err
+	}
+	for key, value := range metadata {
+		if bead.Metadata[key] != value {
+			return store.SetMetadataBatch(bead.ID, metadata)
+		}
+	}
+	return nil
+}
+
+// withDrainManifest returns metadata, allocated when nil, with manifest
+// marshaled under the drain manifest key.
+func withDrainManifest(manifest drainManifest, metadata map[string]string) (map[string]string, error) {
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		return nil, err
+	}
 	if metadata == nil {
-		metadata = make(map[string]string)
+		metadata = make(map[string]string, 1)
 	}
 	metadata[drainManifestMetadataKey] = string(data)
-	return store.SetMetadataBatch(beadID, metadata)
+	return metadata, nil
 }
 
 func parseDrainManifest(raw string) (drainManifest, error) {

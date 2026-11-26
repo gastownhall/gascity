@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
 func TestProcessDrainSeparateExpandsConvoyIntoUnitRoots(t *testing.T) {
@@ -634,7 +635,8 @@ func TestProcessDrainExclusiveReservationConflictFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Members: %v", err)
 	}
-	if err := store.SetMetadata(members[1].ID, "gc.exclusive_drain_reservation", "other-drain"); err != nil {
+	otherDrain := createExclusiveDrainControl(t, store, "other drain")
+	if err := store.SetMetadata(members[1].ID, "gc.exclusive_drain_reservation", otherDrain.ID); err != nil {
 		t.Fatalf("SetMetadata(reservation): %v", err)
 	}
 
@@ -648,6 +650,12 @@ func TestProcessDrainExclusiveReservationConflictFailsClosed(t *testing.T) {
 	drain = mustGetBead(t, store, drain.ID)
 	if drain.Status != "closed" || drain.Metadata["gc.failure_reason"] != "exclusive_reservation_conflict" {
 		t.Fatalf("drain = %+v, want closed reservation conflict", drain)
+	}
+	if got := drain.Metadata["gc.failure_subject"]; got != members[1].ID {
+		t.Fatalf("gc.failure_subject = %q, want %s", got, members[1].ID)
+	}
+	if got := drain.Metadata["gc.failure_owner"]; got != otherDrain.ID {
+		t.Fatalf("gc.failure_owner = %q, want the open drain %s", got, otherDrain.ID)
 	}
 	firstMember := mustGetBead(t, store, members[0].ID)
 	if got := strings.TrimSpace(firstMember.Metadata["gc.exclusive_drain_reservation"]); got != "" {
@@ -664,9 +672,262 @@ func TestProcessDrainExclusiveReservationConflictFailsClosed(t *testing.T) {
 		}
 	}
 	secondMember := mustGetBead(t, store, members[1].ID)
-	if got := secondMember.Metadata["gc.exclusive_drain_reservation"]; got != "other-drain" {
-		t.Fatalf("second member reservation = %q, want other-drain", got)
+	if got := secondMember.Metadata["gc.exclusive_drain_reservation"]; got != otherDrain.ID {
+		t.Fatalf("second member reservation = %q, want the open drain %s", got, otherDrain.ID)
 	}
+}
+
+// TestProcessDrainExclusiveReservationTakesOverClosedOwner covers a drain
+// re-slung over members whose reservation names a drain control that was
+// closed from outside (gc convoy delete --force, run cancel): the closed
+// control never ran its own release, so the next drain must take the
+// reservation over instead of failing on a dead owner.
+func TestProcessDrainExclusiveReservationTakesOverClosedOwner(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		metadata   map[string]string
+		wantAction string
+		reserved   int
+	}{
+		{name: "separate", metadata: map[string]string{"gc.drain_member_access": "exclusive"}, wantAction: "drain-expanded", reserved: 2},
+		{name: "shared", metadata: map[string]string{
+			"gc.drain_context":          "shared",
+			"gc.drain_member_access":    "exclusive",
+			"gc.drain_item_single_lane": "true",
+		}, wantAction: "drain-shared-advanced", reserved: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			formulatest.EnableV2ForTest(t)
+			dir := t.TempDir()
+			writeDrainItemFormula(t, dir)
+			store, drain := seedDrainWorkflow(t)
+			if err := store.SetMetadataBatch(drain.ID, tc.metadata); err != nil {
+				t.Fatalf("SetMetadataBatch(exclusive drain): %v", err)
+			}
+			root := mustGetBead(t, store, drain.Metadata["gc.root_bead_id"])
+			members, err := convoycore.MembersIn(convoycore.MemberClasses{Convoy: beadstest.Work(store)}, root.Metadata["gc.input_convoy_id"], false)
+			if err != nil {
+				t.Fatalf("Members: %v", err)
+			}
+			oldDrain := createExclusiveDrainControl(t, store, "old drain")
+			for _, member := range members {
+				if err := store.SetMetadata(member.ID, "gc.exclusive_drain_reservation", oldDrain.ID); err != nil {
+					t.Fatalf("SetMetadata(reservation): %v", err)
+				}
+			}
+			if err := updateMetadataAndClose(beadstest.Graph(store), oldDrain.ID, map[string]string{
+				beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
+				"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
+			}); err != nil {
+				t.Fatalf("close old drain: %v", err)
+			}
+
+			result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
+			if err != nil {
+				t.Fatalf("ProcessControl(drain over members reserved by a closed drain): %v", err)
+			}
+			drain = mustGetBead(t, store, drain.ID)
+			if result.Action != tc.wantAction {
+				t.Fatalf("Action = %q (gc.failure_reason=%q), want %s", result.Action, drain.Metadata["gc.failure_reason"], tc.wantAction)
+			}
+			if drain.Status == "closed" || drain.Metadata["gc.failure_reason"] != "" {
+				t.Fatalf("drain = %+v, want open with no failure reason", drain)
+			}
+			manifest := mustDrainManifest(t, drain)
+			reserved := 0
+			for _, row := range manifest.Rows {
+				if row.ItemRootID == "" {
+					continue
+				}
+				reserved++
+				member := mustGetBead(t, store, row.MemberID)
+				if got := strings.TrimSpace(member.Metadata["gc.exclusive_drain_reservation"]); got != drain.ID {
+					t.Fatalf("member %s reservation = %q, want taken over by %s", row.MemberID, got, drain.ID)
+				}
+			}
+			if reserved != tc.reserved {
+				t.Fatalf("launched %d item roots, want %d", reserved, tc.reserved)
+			}
+		})
+	}
+}
+
+// TestProcessDrainExclusiveReservationWaitsForTheDeadOwnersItemWork covers
+// how long a reservation lasts: it guards its member until the owner's item
+// workflow for that member finishes, not until the owner's control closes. A
+// control closed from outside (a scope abort, an operator close) or purged
+// leaves the item workflows it launched open and claimable, so the next
+// exclusive drain over the same member waits for them instead of launching
+// item work beside them, and takes the reservation over once they close.
+func TestProcessDrainExclusiveReservationWaitsForTheDeadOwnersItemWork(t *testing.T) {
+	for _, mode := range []struct {
+		name       string
+		metadata   map[string]string
+		wantAction string
+		launched   int
+	}{
+		{name: "separate", metadata: map[string]string{"gc.drain_member_access": "exclusive"}, wantAction: "drain-expanded", launched: 2},
+		{name: "shared", metadata: map[string]string{
+			"gc.drain_context":          "shared",
+			"gc.drain_member_access":    "exclusive",
+			"gc.drain_item_single_lane": "true",
+		}, wantAction: "drain-shared-advanced", launched: 1},
+	} {
+		for _, fate := range []struct {
+			name string
+			end  func(t *testing.T, store *beads.MemStore, drainID string)
+		}{
+			{name: "closed", end: func(t *testing.T, store *beads.MemStore, drainID string) {
+				t.Helper()
+				if err := updateMetadataAndClose(beadstest.Graph(store), drainID, map[string]string{
+					beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
+					"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
+				}); err != nil {
+					t.Fatalf("close old drain: %v", err)
+				}
+			}},
+			{name: "purged", end: func(t *testing.T, store *beads.MemStore, drainID string) {
+				t.Helper()
+				if err := store.Delete(drainID); err != nil {
+					t.Fatalf("delete old drain: %v", err)
+				}
+			}},
+		} {
+			t.Run(mode.name+"/"+fate.name, func(t *testing.T) {
+				formulatest.EnableV2ForTest(t)
+				dir := t.TempDir()
+				writeDrainItemFormula(t, dir)
+				store, oldDrain := seedDrainWorkflow(t)
+				if err := store.SetMetadataBatch(oldDrain.ID, mode.metadata); err != nil {
+					t.Fatalf("SetMetadataBatch(exclusive drain): %v", err)
+				}
+				newDrain, err := store.Create(beads.Bead{Title: "new drain", Type: "task", Metadata: maps.Clone(mustGetBead(t, store, oldDrain.ID).Metadata)})
+				if err != nil {
+					t.Fatalf("create new drain: %v", err)
+				}
+				opts := ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}
+				if _, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, oldDrain.ID), opts); err != nil {
+					t.Fatalf("ProcessControl(old drain): %v", err)
+				}
+				oldRows := launchedDrainRows(mustDrainManifest(t, mustGetBead(t, store, oldDrain.ID)))
+				if len(oldRows) != mode.launched {
+					t.Fatalf("old drain launched %d item roots, want %d", len(oldRows), mode.launched)
+				}
+				fate.end(t, store, oldDrain.ID)
+
+				_, err = ProcessControl(beadstest.Graph(store), mustGetBead(t, store, newDrain.ID), opts)
+				if !errors.Is(err, ErrControlPending) {
+					t.Fatalf("ProcessControl(new drain while the old item work is open) error = %v, want pending", err)
+				}
+				waiting := mustGetBead(t, store, newDrain.ID)
+				if waiting.Status != "open" || waiting.Metadata["gc.failure_reason"] != "" {
+					t.Fatalf("new drain = %+v, want open with no failure reason while it waits", waiting)
+				}
+				if launched := launchedDrainRows(mustDrainManifest(t, waiting)); len(launched) != 0 {
+					t.Fatalf("new drain launched %d item roots beside the old drain's open ones", len(launched))
+				}
+				for _, row := range oldRows {
+					if owner := reservationOwner(t, store, row.MemberID); owner != oldDrain.ID {
+						t.Fatalf("member %s reservation = %q, want it left with %s while its item workflow %s is open", row.MemberID, owner, oldDrain.ID, row.ItemRootID)
+					}
+				}
+
+				// The wait is parked, not polled: a pass that still finds the
+				// item work open, the way a dispatcher re-runs a drain it
+				// still sees, writes nothing to the waiting drain.
+				recording := &writeRecordingStore{Store: store}
+				recordingOpts := ProcessOptions{Work: beadstest.Work(recording), FormulaSearchPaths: []string{dir}}
+				for pass := 1; pass <= 3; pass++ {
+					if _, err := ProcessControl(beadstest.Graph(recording), mustGetBead(t, store, newDrain.ID), recordingOpts); !errors.Is(err, ErrControlPending) {
+						t.Fatalf("re-dispatch %d of the waiting drain: error = %v, want pending", pass, err)
+					}
+				}
+				if slices.Contains(recording.written, newDrain.ID) {
+					t.Fatalf("re-dispatching the waiting drain wrote to it (writes %v), want no write while nothing changed", recording.written)
+				}
+
+				// The drain waits on one item workflow at a time, and each
+				// close re-runs it.
+				for i, row := range oldRows {
+					assertDrainParkedOn(t, store, newDrain.ID, row.ItemRootID)
+					if err := updateMetadataAndClose(beadstest.Graph(store), row.ItemRootID, map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped}); err != nil {
+						t.Fatalf("close old item root %s: %v", row.ItemRootID, err)
+					}
+					if !mustReadyContains(t, store, newDrain.ID) {
+						t.Fatalf("new drain is not ready once the item workflow %s it waited on closed", row.ItemRootID)
+					}
+					if i == len(oldRows)-1 {
+						break
+					}
+					if _, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, newDrain.ID), opts); !errors.Is(err, ErrControlPending) {
+						t.Fatalf("ProcessControl(new drain while the next old item workflow is open) error = %v, want pending", err)
+					}
+				}
+				result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, newDrain.ID), opts)
+				if err != nil {
+					t.Fatalf("ProcessControl(new drain after the old item work closed): %v", err)
+				}
+				if result.Action != mode.wantAction {
+					t.Fatalf("Action = %q, want %s", result.Action, mode.wantAction)
+				}
+				newRows := launchedDrainRows(mustDrainManifest(t, mustGetBead(t, store, newDrain.ID)))
+				if len(newRows) != mode.launched {
+					t.Fatalf("new drain launched %d item roots, want %d", len(newRows), mode.launched)
+				}
+				for _, row := range newRows {
+					if owner := reservationOwner(t, store, row.MemberID); owner != newDrain.ID {
+						t.Fatalf("member %s reservation = %q, want taken over by %s", row.MemberID, owner, newDrain.ID)
+					}
+				}
+			})
+		}
+	}
+}
+
+// assertDrainParkedOn fails unless drain waits on rootID through a blocking
+// edge: it blocks on rootID, so it is absent from the ready set while rootID
+// is open, and the close of rootID is what re-runs it.
+func assertDrainParkedOn(t *testing.T, store beads.Store, drainID, rootID string) {
+	t.Helper()
+	deps, err := store.DepList(drainID, "down")
+	if err != nil {
+		t.Fatalf("DepList(%s): %v", drainID, err)
+	}
+	if !slices.ContainsFunc(deps, func(dep beads.Dep) bool { return dep.DependsOnID == rootID && dep.Type == "blocks" }) {
+		t.Fatalf("drain %s deps = %+v, want a blocks edge on the open item workflow %s it waits for", drainID, deps, rootID)
+	}
+	if mustReadyContains(t, store, drainID) {
+		t.Fatalf("drain %s is ready while the item workflow %s it waits for is open; a wait with no edge is re-dispatched on every sweep", drainID, rootID)
+	}
+}
+
+// launchedDrainRows returns the manifest rows whose item root was created.
+func launchedDrainRows(manifest drainManifest) []drainManifestRow {
+	var launched []drainManifestRow
+	for _, row := range manifest.Rows {
+		if row.ItemRootID != "" {
+			launched = append(launched, row)
+		}
+	}
+	return launched
+}
+
+// createExclusiveDrainControl persists an open exclusive drain control, the
+// only kind of bead a live reservation can name.
+func createExclusiveDrainControl(t *testing.T, store beads.Store, title string) beads.Bead {
+	t.Helper()
+	control, err := store.Create(beads.Bead{
+		Title: title,
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":                "drain",
+			"gc.drain_member_access": beadmeta.DrainMemberAccessExclusive,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create drain control %q: %v", title, err)
+	}
+	return control
 }
 
 func TestProcessDrainSeparateCompletesAfterItemRootsClose(t *testing.T) {
@@ -3476,6 +3737,173 @@ func TestManifestLoadAndReservationAgreeOnACoResidentMember(t *testing.T) {
 	}
 }
 
+// TestReserveDrainMemberLiveRelicOwnerConflicts pins the owner check to the
+// drain's residency frame. On a split city a drain control minted before the
+// split stays in the work store while the reserving control lives on the
+// binding: the owner is live even though the binding has no row for it, so
+// the reservation must conflict. Closing that control releases it.
+func TestReserveDrainMemberLiveRelicOwnerConflicts(t *testing.T) {
+	work, graph, control, member := seedCoResidentDrainMember(t)
+	opts := ProcessOptions{Work: beadstest.Work(work), MemberTail: true}
+	relic := createExclusiveDrainControl(t, work, "pre-split drain")
+	if _, err := graph.Get(relic.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("graph.Get(%s) error = %v, want not found: the owner must live only in the work store", relic.ID, err)
+	}
+	if err := graph.SetMetadata(member.ID, beadmeta.ExclusiveDrainReservationMetadataKey, relic.ID); err != nil {
+		t.Fatalf("stamp reservation on the binding copy: %v", err)
+	}
+
+	err := reserveDrainMember(beadstest.Graph(graph), control, member, opts)
+	var re drainReservationError
+	if !errors.As(err, &re) {
+		t.Fatalf("reserveDrainMember error = %v, want drainReservationError naming the open work-store owner", err)
+	}
+	if re.Owner != relic.ID || re.MemberID != member.ID || re.ControlID != control.ID {
+		t.Fatalf("reservation error = %+v, want owner %s member %s control %s", re, relic.ID, member.ID, control.ID)
+	}
+	if owner := reservationOwner(t, graph, member.ID); owner != relic.ID {
+		t.Fatalf("binding reservation = %q, want it left with %s", owner, relic.ID)
+	}
+
+	t.Run("closed relic owner is taken over", func(t *testing.T) {
+		if err := work.Close(relic.ID); err != nil {
+			t.Fatalf("close relic drain: %v", err)
+		}
+		if err := reserveDrainMember(beadstest.Graph(graph), control, member, opts); err != nil {
+			t.Fatalf("reserveDrainMember over a closed work-store owner: %v", err)
+		}
+		if owner := reservationOwner(t, graph, member.ID); owner != control.ID {
+			t.Fatalf("binding reservation = %q, want taken over by %s", owner, control.ID)
+		}
+	})
+}
+
+// TestReserveDrainMemberLiveItemRootOutvotesAFrozenOpenCopy pins the item-work
+// check to the row the residency frame serves. A class split copies each graph
+// bead into the binding and keeps the original, frozen, in the work store, so
+// an item root that was open at the split stays open there for good. The live
+// row in the binding decides: open, it holds the member; closed, the frozen
+// open copy must not.
+func TestReserveDrainMemberLiveItemRootOutvotesAFrozenOpenCopy(t *testing.T) {
+	workMem := beads.NewMemStore()
+	workMem.IDPrefix = "wrk"
+	work := prefixDeclaringStore{MemStore: workMem}
+	member, err := work.Create(beads.Bead{Title: "member", Type: "task"})
+	if err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	owner := createExclusiveDrainControl(t, work, "pre-split drain")
+	root, err := work.Create(beads.Bead{
+		Title: "item workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+			beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+			beadmeta.DrainControlIDMetadataKey:  owner.ID,
+			beadmeta.DrainMemberIDMetadataKey:   member.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create item root: %v", err)
+	}
+	if err := work.SetMetadata(member.ID, beadmeta.ExclusiveDrainReservationMetadataKey, owner.ID); err != nil {
+		t.Fatalf("stamp the owner's reservation: %v", err)
+	}
+	// The split's copies, which then live on in the binding: the drain control
+	// is closed from outside there, while its item workflow is still open.
+	closedOwner := owner
+	closedOwner.Status = "closed"
+	graphPrefix, ok := beadmeta.ReservedClassPrefix(beadmeta.ClassNameGraph)
+	if !ok {
+		t.Fatal("the graph class reserves no id prefix")
+	}
+	graphMem := beads.NewMemStoreFrom(1000, []beads.Bead{closedOwner, root}, nil)
+	graphMem.IDPrefix = graphPrefix
+	graph := prefixDeclaringStore{MemStore: graphMem}
+	control := createExclusiveDrainControl(t, graph, "post-split drain")
+	opts := ProcessOptions{Work: beadstest.Work(work), MemberTail: true}
+
+	err = reserveDrainMember(beadstest.Graph(graph), control, member, opts)
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("reserveDrainMember error = %v, want pending while the live item root %s is open", err, root.ID)
+	}
+	if got := reservationOwner(t, work, member.ID); got != owner.ID {
+		t.Fatalf("reservation = %q, want it left with %s", got, owner.ID)
+	}
+	// The live row is the binding's, the store the drain lives in, so the
+	// wait is parked on it there.
+	assertDrainParkedOn(t, graph, control.ID, root.ID)
+
+	if err := graph.Close(root.ID); err != nil {
+		t.Fatalf("close the live item root: %v", err)
+	}
+	if err := reserveDrainMember(beadstest.Graph(graph), control, member, opts); err != nil {
+		t.Fatalf("reserveDrainMember once the live item root closed, over a frozen open copy: %v", err)
+	}
+	if got := reservationOwner(t, work, member.ID); got != control.ID {
+		t.Fatalf("reservation = %q, want taken over by %s", got, control.ID)
+	}
+	if frozen := mustGetBead(t, work, root.ID); frozen.Status == "closed" {
+		t.Fatalf("frozen copy of %s is closed, want it open: the takeover must have read past an open frozen copy", root.ID)
+	}
+}
+
+// TestReserveDrainMemberWaitsUnparkedOnAWorkStoreItemRoot pins the one wait a
+// blocking edge cannot carry. An owner minted before a class split keeps its
+// item roots in the work store, while the drain waiting on one lives on the
+// binding: the drain's store holds no row an edge could name, so the drain
+// waits with no edge, is re-checked on each pass, and takes the reservation
+// over once the root closes.
+func TestReserveDrainMemberWaitsUnparkedOnAWorkStoreItemRoot(t *testing.T) {
+	workMem := beads.NewMemStore()
+	workMem.IDPrefix = "wrk"
+	work := prefixDeclaringStore{MemStore: workMem}
+	member, err := work.Create(beads.Bead{Title: "member", Type: "task"})
+	if err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	owner, root := seedClosedOwnerWithOpenItemRoot(t, work, member.ID)
+	graphPrefix, ok := beadmeta.ReservedClassPrefix(beadmeta.ClassNameGraph)
+	if !ok {
+		t.Fatal("the graph class reserves no id prefix")
+	}
+	graphMem := beads.NewMemStore()
+	graphMem.IDPrefix = graphPrefix
+	graph := prefixDeclaringStore{MemStore: graphMem}
+	control := createExclusiveDrainControl(t, graph, "post-split drain")
+	if _, err := graph.Get(root.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("graph.Get(%s) error = %v, want not found: the item root must live only in the work store", root.ID, err)
+	}
+	opts := ProcessOptions{Work: beadstest.Work(work), MemberTail: true}
+
+	for pass := 1; pass <= 2; pass++ {
+		err = reserveDrainMember(beadstest.Graph(graph), control, member, opts)
+		if !errors.Is(err, ErrControlPending) {
+			t.Fatalf("pass %d: reserveDrainMember error = %v, want pending while the work-store item root %s is open", pass, err, root.ID)
+		}
+		if got := reservationOwner(t, work, member.ID); got != owner.ID {
+			t.Fatalf("pass %d: reservation = %q, want it left with %s", pass, got, owner.ID)
+		}
+	}
+	deps, err := graph.DepList(control.ID, "down")
+	if err != nil {
+		t.Fatalf("DepList(%s): %v", control.ID, err)
+	}
+	if len(deps) != 0 {
+		t.Fatalf("drain deps = %+v, want none: an edge onto %s, which the binding does not hold, would block the drain for good", deps, root.ID)
+	}
+
+	if err := work.Close(root.ID); err != nil {
+		t.Fatalf("close the work-store item root: %v", err)
+	}
+	if err := reserveDrainMember(beadstest.Graph(graph), control, member, opts); err != nil {
+		t.Fatalf("reserveDrainMember once the work-store item root closed: %v", err)
+	}
+	if got := reservationOwner(t, work, member.ID); got != control.ID {
+		t.Fatalf("reservation = %q, want taken over by %s", got, control.ID)
+	}
+}
+
 // TestCoResidentDrainMemberAnswersFromTheBinding is the absolute row behind the
 // relative one above. A drain member is a FOREIGN bead of statically unknown
 // class — the drain reads it, it did not mint it — so a binding copy of a member
@@ -4385,6 +4813,16 @@ func (s *writeRecordingStore) SetMetadata(id, key, value string) error {
 func (s *writeRecordingStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	s.written = append(s.written, id)
 	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+func (s *writeRecordingStore) DepAdd(issueID, dependsOnID, depType string) error {
+	s.written = append(s.written, issueID)
+	return s.Store.DepAdd(issueID, dependsOnID, depType)
+}
+
+func (s *writeRecordingStore) DepRemove(issueID, dependsOnID string) error {
+	s.written = append(s.written, issueID)
+	return s.Store.DepRemove(issueID, dependsOnID)
 }
 
 // TestProcessDrainUnitConvoyRetireFailureKeepsDrainOpen pins the transient arm

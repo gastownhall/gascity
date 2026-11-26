@@ -961,7 +961,7 @@ at runtime.
 |---|---|
 | `formula` | Required. Item formula run per unit convoy; `{{templated}}` names are rejected in v0 |
 | `context` | `separate` (default — all item roots created in parallel) or `shared` (one single-lane item root at a time) |
-| `member_access` | `read` (default) or `exclusive` (records a per-member `gc.exclusive_drain_reservation`; fails if another drain owns it) |
+| `member_access` | `read` (default) or `exclusive` (records a per-member `gc.exclusive_drain_reservation`; fails if another open drain owns it; a reservation whose drain is closed or gone is taken over once that drain's item workflow for the member has closed, and until then the drain waits) |
 | `max_units` | Cap on expansion: 1–100 in v0; default and hard cap 100. Exceeding the cap closes the drain failed with `gc.failure_reason = limit_exceeded` |
 | `on_item_failure` | `skip_remaining` or `continue`; defaults to `continue` for separate drains, `skip_remaining` for shared. A shared skip marks remaining items skipped with reason `previous_item_failed` |
 | `continuation_group` | Shared execution group suffix; valid only with `context = "shared"` |
