@@ -11,6 +11,8 @@ type builtinProgramStatus struct {
 	App      string
 	Relay    bool
 	Hold     bool
+	Startup  bool
+	Settle   bool
 	Env      map[string]string
 }
 
@@ -30,13 +32,21 @@ type builtinProgramStatus struct {
 //   - amp: probe-gated with no override; its turns need Amp's hosted
 //     user-actor service, so nothing past the probe was observed under the
 //     relay.
+//
+// Startup and Settle opt a family into the record-driven startup ladder and
+// interrupt settle under the switch on; a family declares each only once a
+// shadow (ga-f4ovjm.72) measured its records against that decision, and
+// decides any other from the screen, as under off.
 var wantBuiltinProgramStatus = map[string]builtinProgramStatus{
 	// codex-cli 0.165.0 reports unprompted (tap only), and input typed into
-	// a running turn aborts it (the 2026-11-03 shadow), so it holds.
-	"codex": {Protocol: "osc7501", App: "codex", Hold: true},
+	// a running turn aborts it (the 2026-11-03 shadow), so it holds. The
+	// second shadow measured its startup ladder, but neither shadow recorded
+	// a Codex interrupt settle (ga-crzq6e), so only the ladder decides with
+	// the record.
+	"codex": {Protocol: "osc7501", App: "codex", Hold: true, Startup: true},
 	// Claude Code 2.1.311 reports only once its support probe is answered,
 	// so it runs under the relay.
-	"claude": {Protocol: "osc7501", App: "claude-code", Relay: true},
+	"claude": {Protocol: "osc7501", App: "claude-code", Relay: true, Startup: true, Settle: true},
 	// pi 1.4.0 reports only after a 7501 reply, which tmux never sends;
 	// PI_PROGRAM_STATUS=1 forces reports on and skips the probe.
 	"pi": {Protocol: "osc7501", App: "pi", Env: map[string]string{"PI_PROGRAM_STATUS": "1"}},
@@ -57,10 +67,13 @@ func TestBuiltinProgramStatusDeclarations(t *testing.T) {
 			App:      spec.ProgramStatusApp,
 			Relay:    spec.ProgramStatusRelay,
 			Hold:     spec.ProgramStatusHoldMidTurn,
+			Startup:  spec.ProgramStatusDecideStartup,
+			Settle:   spec.ProgramStatusDecideSettle,
 			Env:      spec.ProgramStatusEnv,
 		}
 		want := wantBuiltinProgramStatus[name]
-		if got.Protocol != want.Protocol || got.App != want.App || got.Relay != want.Relay || got.Hold != want.Hold || !maps.Equal(got.Env, want.Env) {
+		if got.Protocol != want.Protocol || got.App != want.App || got.Relay != want.Relay || got.Hold != want.Hold ||
+			got.Startup != want.Startup || got.Settle != want.Settle || !maps.Equal(got.Env, want.Env) {
 			t.Errorf("%s: program status = %+v, want %+v", name, got, want)
 		}
 		// The forced env must not also be launch env: profile Env is hashed

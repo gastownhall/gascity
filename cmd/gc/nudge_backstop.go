@@ -380,7 +380,9 @@ func runNudgeBackstop(
 			if !pred.reserve(store, s, target, attempts+1, now, stdout) {
 				continue
 			}
-			if err := sp.Nudge(sessName, runtime.TextContent(content)); err != nil {
+			// A delivery whose turn start went unobserved
+			// (runtime.NudgeDelivered) is a delivery, logged as one.
+			if err := sp.Nudge(sessName, runtime.TextContent(content)); !runtime.NudgeDelivered(err) {
 				if errors.Is(err, runtime.ErrSessionBusy) {
 					// The session went busy between revalidate and delivery,
 					// and the runtime typed nothing rather than interrupt its

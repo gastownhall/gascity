@@ -8,6 +8,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/storehealth"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // storeHealthCacheTTL is the refresh interval for the /v0/status
@@ -99,7 +100,10 @@ func (s *Server) computeStoreHealth(ctx context.Context) (*StatusStoreHealth, er
 	// context/timeout through WalkSize is deferred until it shows up
 	// in profiles.
 	size := storehealth.WalkSize(storehealth.StorePath(cityPath))
-	rows, err := countBeadStoreRows(ctx, s.state, s.state.CityBeadStore())
+	// The city work ledger's leg, or a zero leg when the epoch opened none,
+	// which countBeadStoreRows reports as unavailable.
+	city, _ := cityWorkLeg(s.state.Stores())
+	rows, err := countBeadStoreRows(ctx, s.state, city)
 	if err != nil {
 		return nil, err
 	}
@@ -134,8 +138,8 @@ func statusStoreHealthFromDomain(h storehealth.Health) *StatusStoreHealth {
 	return out
 }
 
-// countBeadStoreRows returns the number of retained beads in store, including
-// open and closed beads. A nil store and measurement failures are returned as
+// countBeadStoreRows returns the number of retained beads in leg's store,
+// including open and closed beads. A zero leg and measurement failures are returned as
 // errors so callers do not mistake an unavailable denominator for zero, and so
 // is a zero the store's own beads.RowWitness contradicts (measuredStoreRows
 // carries why a zero needs corroborating when the other counts do not). Errors
@@ -151,33 +155,34 @@ func statusStoreHealthFromDomain(h storehealth.Health) *StatusStoreHealth {
 // a Counter and for shapes Count reports as unsupported; that path is the
 // store-health block's exposure to ga-cdmx6x's bd-child leak, covered by
 // statusListStoreWithTimeout's state.ScopedStoreLike wiring the same way as
-// the work-count fallback.
-func countBeadStoreRows(ctx context.Context, state State, store beads.Store) (int, error) {
-	if store == nil {
+// the work-count fallback. Every read goes through the leg's strict reader, as
+// the unmarked reads of the raw store did.
+func countBeadStoreRows(ctx context.Context, state State, leg storeref.TypedLeg) (int, error) {
+	if beads.IsNilStore(leg.Strict) {
 		return 0, errors.New("counting retained bead rows: store unavailable")
 	}
 	query := beads.ListQuery{AllowScan: true, IncludeClosed: true}
-	if counter, ok := store.(beads.Counter); ok {
+	if counter, ok := beads.ReaderAs[beads.Counter](leg.Strict); ok {
 		// cachedStoreHealth strips the request deadline, so bound the count
 		// here the same way the status handler bounds its store reads.
 		reqCtx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
 		n, err := counter.Count(reqCtx, query)
 		cancel()
 		if err == nil {
-			return measuredStoreRows(store, n, countBranchCounter)
+			return measuredStoreRows(leg.Strict, n, countBranchCounter)
 		}
 		if !errors.Is(err, beads.ErrCountUnsupported) {
 			return 0, fmt.Errorf("counting retained bead rows: %s: %w", countBranchCounter, err)
 		}
 	}
-	list, err := statusListStoreWithTimeout(ctx, state, store, query)
+	list, err := statusListStoreWithTimeout(ctx, state, leg, query)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			err = retainedListOverrun{err: err}
 		}
 		return 0, fmt.Errorf("counting retained bead rows: %s: %w", countBranchList, err)
 	}
-	return measuredStoreRows(store, len(list), countBranchList)
+	return measuredStoreRows(leg.Strict, len(list), countBranchList)
 }
 
 // The two branches countBeadStoreRows can answer from, as they appear in its
@@ -216,11 +221,11 @@ var errRowCountContradicted = errors.New("store answered zero for a whole-ledger
 // keeps the prior behavior and its zero. That is deliberate: a genuinely
 // empty ledger must still report a healthy zero, and RowWitness proves only
 // presence, never absence.
-func measuredStoreRows(store beads.Store, rows int, branch string) (int, error) {
+func measuredStoreRows(store beads.FederatedReader, rows int, branch string) (int, error) {
 	if rows > 0 {
 		return rows, nil
 	}
-	witness, ok := store.(beads.RowWitness)
+	witness, ok := beads.ReaderAs[beads.RowWitness](store)
 	if !ok || !witness.SawRows() {
 		return rows, nil
 	}

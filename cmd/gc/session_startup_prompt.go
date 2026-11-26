@@ -86,7 +86,8 @@ func (c startupPromptCity) applyTo(info session.Info, resolved *config.ResolvedP
 // it uses the controller-safe query topology the reconciler renders with
 // (cityQueryTopology reopens the storage binding, which a controller must not do).
 func (c startupPromptCity) promptFor(a *config.Agent, info session.Info) string {
-	if a.PromptTemplate == "" || suppressStartupPromptForAgent(a) {
+	promptTemplate := startupPromptTemplate(c.cfg, a)
+	if promptTemplate == "" || suppressStartupPromptForAgent(a) {
 		return ""
 	}
 	identity := primeSessionIdentity{
@@ -99,5 +100,9 @@ func (c startupPromptCity) promptFor(a *config.Agent, info session.Info) string 
 		config.QueryTopology{Beads: c.cfg.Beads}, identity, c.stderr)
 	ctx.ProviderKey, ctx.ProviderDisplayName = providerInfoForAgent(a, &c.cfg.Workspace, c.cfg.Providers)
 	ctx.InstructionsFile = instructionsFileForAgent(a, &c.cfg.Workspace, c.cfg.Providers)
-	return renderPrimeAgentPrompt(c.path, cityName, c.cfg, a, ctx, c.stderr).Text
+	// Render a view of the agent that carries the template: an implicit
+	// agent's own PromptTemplate is empty.
+	withTemplate := *a
+	withTemplate.PromptTemplate = promptTemplate
+	return renderPrimeAgentPrompt(c.path, cityName, c.cfg, &withTemplate, ctx, c.stderr).Text
 }

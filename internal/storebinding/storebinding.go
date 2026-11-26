@@ -353,6 +353,17 @@ type ClaimTarget struct {
 	// is available, contains SessionID, and does not contain the item's
 	// session.
 	LiveFenceSessions func() (map[string]struct{}, bool)
+	// LiveLaunch reports the id (runtime.LaunchID) of the launch the target's
+	// session runs now, and whether it could tell. It judges the session's
+	// startup turns (nudgequeue.JudgeStartupTurns): a turn bound to the live
+	// launch is delivered alone and first, one bound to another launch is
+	// dead-lettered stale-launch, and an unknown answer (or a nil LiveLaunch)
+	// holds them all, with the session's other items behind them. Like
+	// LiveFenceSessions it is called at most once per claim, only when one of
+	// the session's startup turns is due, after the claim has read them and
+	// never inside the claim's exclusive section; a turn first seen after the
+	// call is held, not judged.
+	LiveLaunch func() (id string, ok bool)
 }
 
 // ErrNudgeDeliveryRejected is the runtime's definitive "no": nothing was
@@ -409,14 +420,25 @@ var ErrNudgeSessionFenceMismatch = errors.New("queued nudge session fence mismat
 // diagnostics. They are read-only and may be stale.
 type NudgeQueue interface {
 	Enqueue(nudgequeue.Item) error
+	// EnqueueDeferred inserts a deferred submit as pending. It supersedes
+	// nothing, a startup turn included: the claims judge startup turns.
 	EnqueueDeferred(nudgequeue.Item) error
+	// ClaimDue claims every due item addressed to the target that its fence
+	// passes. When the target's session has a live startup turn
+	// (nudgequeue.JudgeStartupTurns, asking ClaimTarget.LiveLaunch), it
+	// claims that turn alone, or nothing while a turn is held, not yet due
+	// or in flight; the turns it judges stale or superseded it dead-letters.
+	// A startup turn fenced to another session is never claimed.
 	ClaimDue(ClaimTarget, time.Time) ([]nudgequeue.Item, error)
 	// ClaimBatch claims the target's next delivery batch: a pinned batch that
 	// can be claimed whole (every live member due, fence-passing, addressed
 	// to one of the target's keys, and none in flight), all of its pending
 	// members and nothing else; otherwise every due unpinned item, pinned to
 	// a newly minted key. A pinned batch is never claimed in part. Each
-	// returned item carries ClaimedAt, LeaseUntil and DeliveryBatch.
+	// returned item carries ClaimedAt, LeaseUntil and DeliveryBatch. The
+	// session's startup turns are judged as ClaimDue judges them: a live one
+	// is claimed as a batch of one (keeping its pin, if it has one), and
+	// while one stands every other item, pinned batches included, waits.
 	ClaimBatch(ClaimTarget, time.Time) ([]nudgequeue.Item, error)
 	ListForAgent(string, time.Time) ([]nudgequeue.Item, []nudgequeue.Item, []nudgequeue.Item, error)
 	ListFor(ClaimTarget, time.Time) ([]nudgequeue.Item, []nudgequeue.Item, []nudgequeue.Item, error)
@@ -425,8 +447,11 @@ type NudgeQueue interface {
 	// deliver-by deadline reads as dead.
 	Lookup(ids []string, now time.Time) (map[string]nudgequeue.Bucket, error)
 	// DueKeys returns, sorted and unique, the non-empty queue keys with a due
-	// pending item or an in-flight item whose lease has expired. Like the
-	// delivery reads, it skips a record it cannot decode and returns the keys
+	// pending item or an in-flight item whose lease has expired, leaving out
+	// an item held behind a startup turn of its session or key that is not
+	// yet claimable (nudgequeue.StartupBarrier); a due startup turn is due.
+	// It reads no runtime, so it may report a key whose claim then takes
+	// nothing. Like the delivery reads, it skips a record it cannot decode and returns the keys
 	// it could read together with an error for which beads.IsPartialResult
 	// reports true; the caller acts on the keys and reports the error.
 	DueKeys(time.Time) ([]string, error)
@@ -760,4 +785,20 @@ func duplicateResidence(id string, candidates []Workspace) *DuplicateWorkResiden
 		scopes[i] = candidate.Scope
 	}
 	return &DuplicateWorkResidenceError{ID: id, Candidates: scopes}
+}
+
+// AskLiveLaunch asks target's LiveLaunch once, for a claim that read the
+// startup turns members before asking (nudgequeue.StartupJudgement.Members),
+// and returns the answer the claim judges them by. A nil LiveLaunch, or one
+// that names no launch, is an unknown launch.
+func AskLiveLaunch(target ClaimTarget, members []string) nudgequeue.LiveLaunch {
+	launch := nudgequeue.LiveLaunch{Asked: true, Seen: make(map[string]bool, len(members))}
+	for _, id := range members {
+		launch.Seen[id] = true
+	}
+	if target.LiveLaunch != nil {
+		launch.ID, launch.Known = target.LiveLaunch()
+		launch.Known = launch.Known && launch.ID != ""
+	}
+	return launch
 }

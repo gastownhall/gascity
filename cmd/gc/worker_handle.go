@@ -150,6 +150,7 @@ func workerSessionCreateHints(resolved *config.ResolvedProvider) runtime.Config 
 		Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
 		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
 		ReadyDelayMs:           resolved.ReadyDelayMs,
+		NotReadyMarkers:        resolved.NotReadyMarkers,
 		ProcessNames:           resolved.ProcessNames,
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
 		AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
@@ -338,7 +339,7 @@ func applyWorkerCreateRuntimeInputs(sessionCfg *worker.ResolvedSessionConfig, cf
 	sessionEnv := resolvedWorkerSessionEnvWithConfig(cityPath, cfg, resolved, transport)
 	sessionCfg.Runtime.SessionEnv = sessionEnv
 	sessionCfg.Runtime.Hints.Env = sessionEnv
-	sessionCfg.Runtime.Hints.ProgramStatus, _ = config.ProgramStatusArmFor(cfg, resolved, transport)
+	sessionCfg.Runtime.Hints.ProgramStatus, _ = config.ProgramStatusLaunchFor(cfg, resolved, transport)
 	// Stage provider-overlay hooks on the CLI create path the same way the
 	// reconciler create path does; resolvedWorkerSessionConfigWithConfig builds
 	// runtime.Config directly and never routes through resolveTemplate
@@ -450,7 +451,7 @@ func resolvedWorkerSessionEnvWithConfig(cityPath string, cfg *config.City, resol
 	if cfg != nil {
 		workspaceEnv = cfg.Workspace.Env
 	}
-	_, programStatusEnv := config.ProgramStatusArmFor(cfg, resolved, transport)
+	_, programStatusEnv := config.ProgramStatusLaunchFor(cfg, resolved, transport)
 	sessionEnv := mergeEnv(
 		providerProcessPassthroughEnv(),
 		expandEnvMap(workspaceEnv),
@@ -498,10 +499,21 @@ func workerHandleForSessionTargetWithRuntimeHintsWithConfig(cityPath string, sto
 		return nil, err
 	}
 	if store != nil {
-		if info, pr, err := session.ResolveSessionRecordByExactID(sessions, target); err == nil {
+		info, pr, exactErr := session.ResolveSessionRecordByExactID(sessions, target)
+		if exactErr == nil {
 			return factory.SessionByRecord(info, pr)
 		}
-		if id, err := session.ResolveSessionID(sessions, target); err == nil {
+		// target is not an exact bead ID: the name preference falls back to
+		// live session_name/alias matches directly, without a second exact-id
+		// probe (ResolveSessionID would otherwise repeat the Get above). Any
+		// other exact-id error (a hard store failure, say) keeps the original
+		// ResolveSessionID path, which carries its own exact-id probe and
+		// error wrapping.
+		if errors.Is(exactErr, session.ErrSessionNotFound) {
+			if id, err := session.ResolveLiveSessionIDByName(sessions, target); err == nil {
+				return factory.SessionByID(id)
+			}
+		} else if id, err := session.ResolveSessionID(sessions, target); err == nil {
 			return factory.SessionByID(id)
 		}
 		if sp != nil {
@@ -755,7 +767,7 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	// overwritten with the city-uniform default here. template_resolve.go
 	// owns the qualified override for the CLI create path.
 	sessionEnv := resolvedWorkerSessionEnvWithConfig(cityPath, cfg, resolved, transport)
-	programStatusArm, _ := config.ProgramStatusArmFor(cfg, resolved, transport)
+	programStatusArm, _ := config.ProgramStatusLaunchFor(cfg, resolved, transport)
 	// Resolve session_live so resumed sessions get re-themed (status bar,
 	// keybindings) the same way reconciler-started sessions do. Without this,
 	// `gc session attach` recreates the tmux runtime with an empty
@@ -781,6 +793,7 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 		Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
 		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
 		ReadyDelayMs:           resolved.ReadyDelayMs,
+		NotReadyMarkers:        resolved.NotReadyMarkers,
 		ProcessNames:           resolved.ProcessNames,
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
 		AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
@@ -1032,17 +1045,30 @@ func resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg *config.City, info se
 			}
 		}
 	}
-	for _, providerName := range []string{info.Provider, info.Template} {
-		providerName = strings.TrimSpace(providerName)
-		if providerName == "" {
-			continue
-		}
-		resolved, err := config.ResolveProvider(&config.Agent{Provider: providerName}, &cfg.Workspace, cfg.Providers, exec.LookPath)
-		if err == nil {
-			return resolved, strings.TrimSpace(resolved.ProviderSessionCreateTransport())
-		}
+	if resolved := resolveProviderByName(cfg, info.Provider, info.Template); resolved != nil {
+		return resolved, strings.TrimSpace(resolved.ProviderSessionCreateTransport())
 	}
 	return nil, ""
+}
+
+// resolveProviderByName resolves the provider a session no agent template
+// resolves for runs, by name: the first of names (its stored provider, then
+// its template) that resolves against cfg's provider catalog, nil when none
+// does.
+func resolveProviderByName(cfg *config.City, names ...string) *config.ResolvedProvider {
+	if cfg == nil {
+		return nil
+	}
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if resolved, err := config.ResolveProvider(&config.Agent{Provider: name}, &cfg.Workspace, cfg.Providers, exec.LookPath); err == nil {
+			return resolved
+		}
+	}
+	return nil
 }
 
 func workerDeliveryIntentForSubmitIntent(intent session.SubmitIntent) worker.DeliveryIntent {

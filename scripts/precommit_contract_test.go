@@ -221,8 +221,13 @@ func TestPrePushUsesCanonicalMachineAwareConcurrency(t *testing.T) {
 	if strings.Contains(string(suite), "LOCAL_TEST_JOBS") {
 		t.Fatal("push-suite.sh must not shadow the canonical machine-aware job count")
 	}
-	if !strings.Contains(string(suite), "exec make test-fast-parallel") {
-		t.Fatal("push-suite.sh's go fallback must continue delegating the unchanged fast-suite inventory to make test-fast-parallel")
+	if !strings.Contains(string(suite), "run_suite make test-fast-parallel") {
+		t.Fatal("push-suite.sh's go fallback must continue delegating the unchanged fast-suite inventory to make test-fast-parallel, through run_suite")
+	}
+	for _, bare := range []string{"exec make", "exec bazel"} {
+		if strings.Contains(string(suite), bare) {
+			t.Fatalf("push-suite.sh must not %q: run_suite has to see a 141 (SIGPIPE) to fail it closed", bare)
+		}
 	}
 	for _, path := range []string{"Makefile", filepath.Join("scripts", "test-local-parallel")} {
 		content, err := os.ReadFile(filepath.Join(repoRoot, path))
@@ -477,7 +482,7 @@ func TestPreCommitFailsClosedWhenGoBlockStagesSpecAsSideEffectAndNpmAbsent(t *te
 	// to EOF: one that exits without reading races the hook's printf, which
 	// dies of SIGPIPE whenever the stub exits first, and bash exits 141
 	// without printing anything (the silent CI flake on loaded runners).
-	writeExecutable(t, formatStagedGoPath, "#!/usr/bin/env bash\ncat >/dev/null\nexit 0\n")
+	writeExecutable(t, formatStagedGoPath, drainStdinStub)
 	runGit("add", "-A")
 	runGit("commit", "-m", "init")
 
@@ -582,6 +587,29 @@ func TestPreCommitWarnsOnlyWhenNpmAbsentAndSpecNotStaged(t *testing.T) {
 	}
 }
 
+// drainStdinStub is the stub scripts/precommit-format-staged-go the npm-absent
+// fixtures install. It reads its stdin to EOF with the external `cat`, so every
+// tool it names must resolve on restrictedPathWithoutNpm's PATH.
+const drainStdinStub = "#!/usr/bin/env bash\ncat >/dev/null\nexit 0\n"
+
+// TestRestrictedPathWithoutNpmProvidesToolsTheDrainStubUses pins the PATH the
+// npm-absent fixtures run under. When `cat` is missing there, the stub fails
+// with 127 without reading stdin, exits at once, and the hook's printf (under
+// `set -o pipefail`) dies of SIGPIPE: the flake drainStdinStub exists to stop.
+// The PATH must still lack npm, or the fixtures would not be npm-absent.
+func TestRestrictedPathWithoutNpmProvidesToolsTheDrainStubUses(t *testing.T) {
+	binDir := restrictedPathWithoutNpm(t, nil)
+	for _, tool := range []string{"cat"} {
+		if _, err := os.Stat(filepath.Join(binDir, tool)); err != nil {
+			t.Errorf("restrictedPathWithoutNpm has no %q, but drainStdinStub runs it: the stub fails "+
+				"with 127 without reading stdin and the hook's printf can die of SIGPIPE: %v", tool, err)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(binDir, "npm")); err == nil {
+		t.Errorf("restrictedPathWithoutNpm provides npm, so the npm-absent fixtures are not npm-absent")
+	}
+}
+
 // restrictedPathWithoutNpm builds a PATH containing only symlinks to the
 // real bash and git (plus any provided stub scripts), guaranteeing npm is
 // unreachable regardless of what's installed on the test host -- falling
@@ -597,7 +625,8 @@ func restrictedPathWithoutNpm(t *testing.T, stubs map[string]string) string {
 	// sh+env are required for beads-chain.sh's `#!/usr/bin/env sh` shebang
 	// under a restricted PATH (env is absolute in the shebang, but then looks
 	// up `sh` on PATH). timeout is optional; without it the chain still runs.
-	for _, name := range []string{"bash", "sh", "env", "git", "xargs"} {
+	// cat is required by drainStdinStub.
+	for _, name := range []string{"bash", "sh", "env", "git", "xargs", "cat"} {
 		realPath, err := exec.LookPath(name)
 		if err != nil {
 			t.Fatalf("resolve real %s on test host PATH: %v", name, err)

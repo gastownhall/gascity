@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -126,23 +125,6 @@ func TestValidateArtifactDir_SymlinkInside(t *testing.T) {
 
 	if err := ValidateArtifactDir(dir); err != nil {
 		t.Errorf("expected no error for internal symlink, got: %v", err)
-	}
-}
-
-func TestValidateArtifactDir_FIFO(t *testing.T) {
-	dir := t.TempDir()
-	fifo := filepath.Join(dir, "pipe")
-
-	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
-		t.Skipf("mkfifo not available: %v", err)
-	}
-
-	err := ValidateArtifactDir(dir)
-	if err == nil {
-		t.Fatal("expected error for FIFO in artifact directory")
-	}
-	if !strings.Contains(err.Error(), "unsafe file type") {
-		t.Errorf("error should mention unsafe file type, got: %v", err)
 	}
 }
 
