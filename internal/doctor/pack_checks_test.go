@@ -2,10 +2,12 @@ package doctor
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeCheckScript(t *testing.T, dir, content string) string {
@@ -356,5 +358,40 @@ func TestParseScriptOutput(t *testing.T) {
 				t.Errorf("details count = %d, want %d", len(details), tt.wantDetail)
 			}
 		})
+	}
+}
+
+func TestPackScriptConfigValidationMode(t *testing.T) {
+	dir := t.TempDir()
+	script := writeCheckScript(t, dir, "#!/bin/sh\nif [ \"${GC_CONFIG_VALIDATION:-}\" != 1 ]; then printf 'ordinary doctor\\n'; exit 0; fi\nread -r input\nif [ \"$input\" != valid ]; then printf 'invalid explicit input\\n'; exit 2; fi\nprintf 'resolved input\\ndetail\\n'\nexit 1\n")
+	c := &PackScriptCheck{CheckName: "tools:plan", Script: script, FixScript: script, PackDir: dir, PackName: "tools"}
+	t.Setenv("GC_CONFIG_VALIDATION", "1")
+	if got := c.Run(&CheckContext{CityPath: dir}); got.Status != StatusOK || got.Message != "ordinary doctor" {
+		t.Fatalf("ambient marker leaked into doctor: %+v", got)
+	}
+	for _, input := range [][]byte{nil, {}, []byte("malformed\n")} {
+		got := c.RunConfigValidation(context.Background(), dir, input, 10*time.Second)
+		if got.Status != StatusError || got.Message != "invalid explicit input" {
+			t.Fatalf("empty/malformed explicit input became ordinary doctor: %+v", got)
+		}
+	}
+	got := c.RunConfigValidation(context.Background(), dir, []byte("valid\n"), 10*time.Second)
+	if got.Status != StatusWarning || got.Message != "resolved input" || len(got.Details) != 1 {
+		t.Fatalf("warning protocol: %+v", got)
+	}
+	// Fix must also scrub the reserved mode marker.
+	if err := c.Fix(&CheckContext{CityPath: dir}); err != nil {
+		t.Fatalf("ambient marker leaked into fix: %v", err)
+	}
+}
+
+func TestPackScriptConfigValidationDeadline(t *testing.T) {
+	dir := t.TempDir()
+	script := writeCheckScript(t, dir, "#!/bin/sh\nexec sleep 30\n")
+	c := &PackScriptCheck{CheckName: "tools:slow", Script: script, PackDir: dir}
+	// This duration is the behavior under test, not a test hang deadline.
+	got := c.RunConfigValidation(context.Background(), dir, []byte("{}"), 20*time.Millisecond)
+	if got.Status != StatusError || !strings.Contains(got.Message, "deadline exceeded") {
+		t.Fatalf("timeout must fail validation: %+v", got)
 	}
 }
