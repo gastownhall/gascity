@@ -1169,6 +1169,61 @@ server_sql_scalar() {
     printf '%s\n' "$out" | grep -E '^\| ' | grep -vE '^\| *[A-Za-z_(*)]+ *\|$' | tail -1 | sed -E 's/^\| *//; s/ *\|$//'
 }
 
+# open_init_lock_file makes sure init lock file $2, in directory $1, exists
+# and can be opened for append, or says why on stderr and returns 1. $3 is
+# "default" when $1 is the per-user directory under /tmp (GC_DOLT_INIT_LOCK_DIR
+# unset), which is hardened, and empty when the caller named the directory,
+# which is theirs to manage: the caller's umask and modes are left alone there.
+# $4 is the uid the default directory was named for.
+#
+# The default directory is a predictable path in a world-writable /tmp, so
+# another local user can plant a lookalike before this user's first init: a
+# directory of their own (they could then read, delete and swap the lock file
+# and make this user's init wait on a lock only they hold) or a symlink
+# (aimed at a file of this user's, which the open below would then create or
+# append to). So it is created private (0700), refused when it is a symlink or
+# not owned by this user, and an existing one this user owns is tightened to
+# 0700 (a pre-hardening init left it 0755). A lock file in it that is a symlink
+# or not owned by this user is refused too, and one this init creates is
+# private. A symlinked lock file is refused in a directory the caller named
+# as well, since the open would write through it. Residual assumption: /tmp
+# is sticky, so only the owner of an entry can swap it between these checks
+# and the open that follows; a /tmp without the sticky bit, or a directory
+# the caller named that others can write to, is not defended.
+open_init_lock_file() {
+    local dir="$1" file="$2" kind="$3" uid="$4"
+    if [ -n "$kind" ]; then
+        if [ -L "$dir" ]; then
+            echo "$dir is a symbolic link" >&2
+            return 1
+        fi
+        (umask 077 && mkdir -p "$dir") || return 1
+        if [ ! -d "$dir" ] || [ ! -O "$dir" ]; then
+            echo "$dir is not a directory owned by this user (uid $uid)" >&2
+            return 1
+        fi
+        if ! chmod 0700 "$dir"; then
+            echo "could not restrict $dir to mode 0700" >&2
+            return 1
+        fi
+    else
+        mkdir -p "$dir" || return 1
+    fi
+    if [ -L "$file" ]; then
+        echo "$file is a symbolic link" >&2
+        return 1
+    fi
+    if [ -n "$kind" ]; then
+        if [ -e "$file" ] && [ ! -O "$file" ]; then
+            echo "$file is not owned by this user (uid $uid)" >&2
+            return 1
+        fi
+        (umask 077 && true >>"$file") || return 1
+    else
+        true >>"$file" || return 1
+    fi
+}
+
 # acquire_init_lock takes op_init's cross-process advisory lock for database
 # $1 (see GC_DOLT_INIT_LOCK_DIR above) on FD 8, in mode $2: "shared" for a
 # step that runs bd migrations, "exclusive" for a step that discards state
@@ -1198,7 +1253,15 @@ acquire_init_lock() {
         exclusive) mode_flag=-x ;;
         *) die "acquire_init_lock: unknown lock mode '$mode'" ;;
     esac
-    [ -n "$INIT_LOCK_DIR" ] || INIT_LOCK_DIR="/tmp/gc-beads-bd-init-locks-$(id -u)"
+    # Whether the directory is the hardened per-user default is decided from
+    # the environment on every call: INIT_LOCK_DIR itself is overwritten with
+    # the default below, so a second call would otherwise take it as named.
+    local lock_dir_kind="" lock_uid=""
+    if [ -z "${GC_DOLT_INIT_LOCK_DIR:-}" ]; then
+        lock_dir_kind=default
+        lock_uid=$(id -u)
+        INIT_LOCK_DIR="/tmp/gc-beads-bd-init-locks-$lock_uid"
+    fi
     local init_lock_file="$INIT_LOCK_DIR/$db.lock"
     case "$INIT_LOCK_TIMEOUT_MS" in
         ''|*[!0-9]*) INIT_LOCK_TIMEOUT_MS=60000 ;;
@@ -1208,7 +1271,7 @@ acquire_init_lock() {
     # outright, even inside an `if`, leaving only the shell's bare error. So
     # the open is tried first on `true`, a regular builtin whose failed
     # redirection is an ordinary error, in the append mode FD 8 then uses.
-    if ! open_err=$({ mkdir -p "$INIT_LOCK_DIR" && true >>"$init_lock_file"; } 2>&1); then
+    if ! open_err=$(open_init_lock_file "$INIT_LOCK_DIR" "$init_lock_file" "$lock_dir_kind" "$lock_uid" 2>&1); then
         die "could not open init lock for database '$db' ($init_lock_file): $open_err; set GC_DOLT_INIT_LOCK_DIR to a directory this user can write to."
     fi
     exec 8>>"$init_lock_file"
