@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -8741,6 +8742,65 @@ func failedOnHeldInitLock(out []byte, err error) bool {
 		!strings.Contains(string(out), "flock: ")
 }
 
+// initLockFakeUIDSeq numbers the fake OS users fakeInitLockUserForTest hands
+// out, so no two tests of one process share a default lock directory.
+var initLockFakeUIDSeq atomic.Int64
+
+// fakeInitLockUserForTest gives the script's `id -u` a made-up answer, so the
+// default init lock directory it derives, /tmp/gc-beads-bd-init-locks-<uid>,
+// is one that belongs to this test alone and never the host's own
+// initializers' (nothing here ever stats, creates or removes the directory of
+// the real uid). It returns that uid and the directory, and sweeps the
+// directory before and after the test. Any other `id` invocation runs the
+// real one.
+func fakeInitLockUserForTest(t *testing.T, binDir string) (uid, dir string) {
+	t.Helper()
+	uid = strconv.FormatInt(3_000_000_000+int64(os.Getpid()%1_000_000)*1000+initLockFakeUIDSeq.Add(1), 10)
+	stubIDForInitLockTest(t, binDir, uid)
+	dir = "/tmp/gc-beads-bd-init-locks-" + uid
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return uid, dir
+}
+
+// stubIDForInitLockTest puts an `id` ahead of the real one on the script's
+// PATH whose `-u` prints uidOut; any other `id` invocation runs the real one.
+func stubIDForInitLockTest(t *testing.T, binDir, uidOut string) {
+	t.Helper()
+	realID, err := exec.LookPath("id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(binDir, "id"), fmt.Sprintf(
+		"#!/bin/sh\nif [ \"$1\" = \"-u\" ]; then printf '%%s\\n' '%s'; exit 0; fi\nexec '%s' \"$@\"\n", uidOut, realID))
+}
+
+// runInitUnderUmaskForTest runs init the way runInit does, from a shell that
+// has set umask first, so a lock file's mode is known whatever the test
+// runner's own umask is. It goes through the same exec site as runInit.
+func (h gcBeadsBdHealTest) runInitUnderUmaskForTest(t *testing.T, umask string, extraEnv ...string) ([]byte, error) {
+	t.Helper()
+	wrapper := filepath.Join(t.TempDir(), "run-init")
+	writeExecutable(t, wrapper, fmt.Sprintf("#!/bin/sh\numask %s\nexec '%s' \"$@\"\n", umask, h.script))
+	return runGcBeadsBdHQInitForTest(t, wrapper, h.cityPath, h.binDir, extraEnv...)
+}
+
+// requireInitLockRefusedForTest fails the test unless init refused the lock
+// file at lockFile with reason in its message, and ran no bd migration without
+// the lock.
+func requireInitLockRefusedForTest(t *testing.T, h gcBeadsBdHealTest, out []byte, err error, lockFile, reason string) {
+	t.Helper()
+	named := "could not open init lock for database 'hq' (" + lockFile + ")"
+	if err == nil || !strings.Contains(string(out), named) || !strings.Contains(string(out), reason) || !strings.Contains(string(out), "set GC_DOLT_INIT_LOCK_DIR") {
+		t.Fatalf("expected init to fail naming %s with %q and GC_DOLT_INIT_LOCK_DIR, got err=%v:\n%s", lockFile, reason, err, out)
+	}
+	if _, bdArgs := h.logs(t); strings.Contains(bdArgs, "migrate") {
+		t.Fatalf("ran bd migrate without its init lock:\n%s", bdArgs)
+	}
+}
+
 // TestGcBeadsBdInitHealsInterruptedBootstrapBeforeForcing pins the recovery
 // for a gc-created database whose first bd bootstrap died between a
 // migration's DDL and its commit: the working set is dirty, there are no
@@ -8908,6 +8968,9 @@ func TestGcBeadsBdInitNamesAnUnopenableInitLock(t *testing.T) {
 		lockDir func(t *testing.T, base string) string
 		// modeBased rows rely on file modes, which root bypasses.
 		modeBased bool
+		// untouched names a path (relative to the returned directory) that
+		// init must not have created when it refuses.
+		untouched string
 	}{
 		{"lock directory not writable", func(t *testing.T, base string) string {
 			if err := os.Chmod(base, 0o555); err != nil {
@@ -8915,26 +8978,32 @@ func TestGcBeadsBdInitNamesAnUnopenableInitLock(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = os.Chmod(base, 0o755) })
 			return base
-		}, true},
+		}, true, ""},
 		{"lock file not writable", func(t *testing.T, base string) string {
 			if err := os.WriteFile(filepath.Join(base, "hq.lock"), nil, 0o444); err != nil {
 				t.Fatal(err)
 			}
 			return base
-		}, true},
+		}, true, ""},
 		{"lock directory cannot be created", func(t *testing.T, base string) string {
 			file := filepath.Join(base, "file")
 			if err := os.WriteFile(file, nil, 0o644); err != nil {
 				t.Fatal(err)
 			}
 			return filepath.Join(file, "locks")
-		}, false},
+		}, false, ""},
 		{"lock file is a directory", func(t *testing.T, base string) string {
 			if err := os.Mkdir(filepath.Join(base, "hq.lock"), 0o755); err != nil {
 				t.Fatal(err)
 			}
 			return base
-		}, false},
+		}, false, ""},
+		{"lock file is a dangling symlink", func(t *testing.T, base string) string {
+			if err := os.Symlink(filepath.Join(base, "planted"), filepath.Join(base, "hq.lock")); err != nil {
+				t.Fatal(err)
+			}
+			return base
+		}, false, "planted"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.modeBased && os.Geteuid() == 0 {
@@ -8952,6 +9021,11 @@ func TestGcBeadsBdInitNamesAnUnopenableInitLock(t *testing.T) {
 			if _, bdArgs := h.logs(t); strings.Contains(bdArgs, "migrate") {
 				t.Fatalf("ran bd migrate without its init lock:\n%s", bdArgs)
 			}
+			if tc.untouched != "" {
+				if _, err := os.Lstat(filepath.Join(lockDir, tc.untouched)); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("init created %s through the lock file's symlink (lstat err = %v)\n%s", tc.untouched, err, out)
+				}
+			}
 		})
 	}
 }
@@ -8963,10 +9037,11 @@ func TestGcBeadsBdInitNamesAnUnopenableInitLock(t *testing.T) {
 // not consulted: every initializer of one store must find the same lock file
 // whatever its own environment, or one lock silently becomes two.
 //
-// The default is the real /tmp directory, which belongs to the host's own
-// initializers, so the test never stats, removes or renames anything in it: a
-// recording mkdir stub shows which directory init asked for, and the test then
-// only lets init create it and open hq.lock for append.
+// The default is under the real /tmp, whose directory for this host's own uid
+// belongs to the host's own initializers, so the test never stats, removes or
+// renames it: a stub `id` answers with a made-up uid (fakeInitLockUserForTest),
+// so the directory init derives is one only this test owns, and a recording
+// mkdir stub shows which directory init asked for.
 //
 // The init creates the database and finds a schema in it, so its migration step
 // takes the lock.
@@ -8982,17 +9057,17 @@ func TestGcBeadsBdInitKeepsItsDefaultInitLockPerOSUser(t *testing.T) {
 		"#!/bin/sh\nfor a in \"$@\"; do printf '%%s\\n' \"$a\" >>'%s'; done\nexec '%s' \"$@\"\n",
 		mkdirOperands, realMkdir))
 	tmp := t.TempDir()
+	uid, wantDir := fakeInitLockUserForTest(t, h.binDir)
 
 	out, err := h.runInit(t, "GC_DOLT_INIT_LOCK_DIR=", "TMPDIR="+tmp)
 	if err != nil {
 		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
 	}
-	wantDir := fmt.Sprintf("/tmp/gc-beads-bd-init-locks-%d", os.Geteuid())
 	operands := readGcBeadsBdHealTestLog(t, mkdirOperands)
 	if !slices.Contains(strings.Split(operands, "\n"), wantDir) {
 		t.Fatalf("expected init to create its lock directory %s; mkdir operands:\n%s\noutput:\n%s", wantDir, operands, out)
 	}
-	ignored := filepath.Join(tmp, fmt.Sprintf("gc-beads-bd-init-locks-%d", os.Geteuid()))
+	ignored := filepath.Join(tmp, "gc-beads-bd-init-locks-"+uid)
 	if _, err := os.Stat(ignored); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("init's lock directory followed $TMPDIR to %s (stat err = %v); it must not consult TMPDIR\noutput:\n%s", ignored, err, out)
 	}

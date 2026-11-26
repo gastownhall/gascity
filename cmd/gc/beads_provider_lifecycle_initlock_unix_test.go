@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -121,6 +122,202 @@ func TestGcBeadsBdInitMigrationStepsHoldTheInitLockShared(t *testing.T) {
 			}
 		})
 	}
+}
+
+// otherInitLockUser is the uid the ownership rows hand a directory or lock
+// file to when the test runs as root: nobody on every host this runs on.
+const otherInitLockUser = 65534
+
+// newDefaultInitLockTest is one scenario for init's default lock directory: a
+// city whose init creates the database and finds a schema in it (so the ready
+// path's migration step takes the lock), a flock that always succeeds (every
+// row is about the open that comes before flock), and a made-up OS user whose
+// default directory the row lays out before init runs.
+func newDefaultInitLockTest(t *testing.T) (h gcBeadsBdHealTest, uid, dir string) {
+	t.Helper()
+	h = newGcBeadsBdHealTest(t, true, 0, "database-absent", "init-done", "reset-done")
+	writeExecutable(t, filepath.Join(h.binDir, "flock"), "#!/bin/sh\nexit 0\n")
+	uid, dir = fakeInitLockUserForTest(t, h.binDir)
+	return h, uid, dir
+}
+
+// requireModeForTest fails the test unless path (not following a final
+// symlink) has exactly the permission bits want.
+func requireModeForTest(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	fi, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != want {
+		t.Fatalf("%s mode = %04o, want %04o", path, got, want)
+	}
+}
+
+// TestGcBeadsBdInitHardensItsDefaultInitLock pins what init does to the
+// predictable directory it keeps its lock in when GC_DOLT_INIT_LOCK_DIR is
+// unset, /tmp/gc-beads-bd-init-locks-<uid>, where any other local user can
+// plant a lookalike before this user's first init: the directory is created
+// private (0700), an existing one this user owns is tightened to 0700, and one
+// that is a symlink, belongs to someone else, or holds a lock file that is a
+// symlink or belongs to someone else is refused, naming the lock file and
+// GC_DOLT_INIT_LOCK_DIR, before bd runs and without writing through the link.
+// The directory is a made-up user's (fakeInitLockUserForTest), never the
+// host's own. Every row runs init under umask 022, the usual one, so a mode
+// that comes out private did not come from the caller's umask.
+func TestGcBeadsBdInitHardensItsDefaultInitLock(t *testing.T) {
+	t.Run("a fresh directory is created private", func(t *testing.T) {
+		h, _, dir := newDefaultInitLockTest(t)
+
+		out, err := h.runInitUnderUmaskForTest(t, "022", "GC_DOLT_INIT_LOCK_DIR=")
+		if err != nil {
+			t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
+		}
+		requireModeForTest(t, dir, 0o700)
+		fi, statErr := os.Stat(filepath.Join(dir, "hq.lock"))
+		if statErr != nil {
+			t.Fatalf("init left no lock file in %s: %v\n%s", dir, statErr, out)
+		}
+		if fi.Mode().Perm()&0o077 != 0 {
+			t.Fatalf("lock file mode = %04o, want no group or other bits", fi.Mode().Perm())
+		}
+	})
+
+	t.Run("a legacy 0755 directory this user owns is tightened and its lock file reused", func(t *testing.T) {
+		h, _, dir := newDefaultInitLockTest(t)
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		lock := filepath.Join(dir, "hq.lock")
+		if err := os.WriteFile(lock, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		before, err := os.Stat(lock)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		out, err := h.runInitUnderUmaskForTest(t, "022", "GC_DOLT_INIT_LOCK_DIR=")
+		if err != nil {
+			t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
+		}
+		requireModeForTest(t, dir, 0o700)
+		after, err := os.Stat(lock)
+		if err != nil || !os.SameFile(before, after) {
+			t.Fatalf("init replaced the existing lock file (stat err = %v)\n%s", err, out)
+		}
+	})
+
+	t.Run("a directory that is a symlink is refused and its target left alone", func(t *testing.T) {
+		h, _, dir := newDefaultInitLockTest(t)
+		target := t.TempDir()
+		if err := os.Chmod(target, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, dir); err != nil {
+			t.Fatal(err)
+		}
+
+		out, err := h.runInitUnderUmaskForTest(t, "022", "GC_DOLT_INIT_LOCK_DIR=")
+		requireInitLockRefusedForTest(t, h, out, err, dir+"/hq.lock", "is a symbolic link")
+		requireModeForTest(t, target, 0o755)
+		if entries, readErr := os.ReadDir(target); readErr != nil || len(entries) != 0 {
+			t.Fatalf("init wrote into the symlink's target (entries = %v, err = %v)\n%s", entries, readErr, out)
+		}
+	})
+
+	t.Run("a directory owned by another user is refused and left alone", func(t *testing.T) {
+		h, uid, dir := newDefaultInitLockTest(t)
+		lockDir := dir
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if os.Geteuid() == 0 {
+			if err := os.Chown(dir, otherInitLockUser, otherInitLockUser); err != nil {
+				t.Skipf("cannot hand a directory to uid %d: %v", otherInitLockUser, err)
+			}
+		} else {
+			// No directory can be handed away without root, so the made-up
+			// uid is made to resolve the default to one this user does not
+			// own, the host's /usr, through the directory of the made-up
+			// user's own that the path has to pass through.
+			lockDir = dir + "/../../usr"
+			stubIDForInitLockTest(t, h.binDir, uid+"/../../usr")
+		}
+
+		out, err := h.runInitUnderUmaskForTest(t, "022", "GC_DOLT_INIT_LOCK_DIR=")
+		requireInitLockRefusedForTest(t, h, out, err, lockDir+"/hq.lock", "not a directory owned by this user")
+		if os.Geteuid() == 0 {
+			requireModeForTest(t, dir, 0o755)
+			fi, statErr := os.Stat(dir)
+			if statErr != nil || fi.Sys().(*syscall.Stat_t).Uid != otherInitLockUser {
+				t.Fatalf("init changed the other user's directory (stat err = %v)", statErr)
+			}
+		}
+	})
+
+	t.Run("a dangling lock file symlink is refused and not written through", func(t *testing.T) {
+		h, _, dir := newDefaultInitLockTest(t)
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		planted := filepath.Join(dir, "planted")
+		if err := os.Symlink(planted, filepath.Join(dir, "hq.lock")); err != nil {
+			t.Fatal(err)
+		}
+
+		out, err := h.runInitUnderUmaskForTest(t, "022", "GC_DOLT_INIT_LOCK_DIR=")
+		requireInitLockRefusedForTest(t, h, out, err, dir+"/hq.lock", "is a symbolic link")
+		if _, lstatErr := os.Lstat(planted); !errors.Is(lstatErr, os.ErrNotExist) {
+			t.Fatalf("init created %s through the lock file's symlink (lstat err = %v)\n%s", planted, lstatErr, out)
+		}
+	})
+
+	t.Run("a lock file owned by another user is refused", func(t *testing.T) {
+		if os.Geteuid() != 0 {
+			t.Skip("only root can hand a file to another user")
+		}
+		h, _, dir := newDefaultInitLockTest(t)
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		lock := filepath.Join(dir, "hq.lock")
+		if err := os.WriteFile(lock, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chown(lock, otherInitLockUser, otherInitLockUser); err != nil {
+			t.Skipf("cannot hand a file to uid %d: %v", otherInitLockUser, err)
+		}
+
+		out, err := h.runInitUnderUmaskForTest(t, "022", "GC_DOLT_INIT_LOCK_DIR=")
+		requireInitLockRefusedForTest(t, h, out, err, lock, "owned by this user")
+	})
+}
+
+// TestGcBeadsBdInitLeavesAnExplicitInitLockDirectoryAlone pins the other half
+// of the hardening: a directory the caller named in GC_DOLT_INIT_LOCK_DIR is
+// the caller's to manage, so init neither tightens its mode nor changes how
+// its lock file is created (the caller's umask decides).
+func TestGcBeadsBdInitLeavesAnExplicitInitLockDirectoryAlone(t *testing.T) {
+	h := newGcBeadsBdHealTest(t, true, 0, "database-absent", "init-done", "reset-done")
+	writeExecutable(t, filepath.Join(h.binDir, "flock"), "#!/bin/sh\nexit 0\n")
+	lockDir := t.TempDir()
+	if err := os.Chmod(lockDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := h.runInitUnderUmaskForTest(t, "027", "GC_DOLT_INIT_LOCK_DIR="+lockDir)
+	if err != nil {
+		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
+	}
+	requireModeForTest(t, lockDir, 0o755)
+	requireModeForTest(t, filepath.Join(lockDir, "hq.lock"), 0o640)
 }
 
 func TestGcBeadsBdStartRestartsServerHoldingDeletedDataInodes(t *testing.T) {
