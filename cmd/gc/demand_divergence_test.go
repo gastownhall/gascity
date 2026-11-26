@@ -7,12 +7,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/pkg/eventexport"
 )
@@ -57,7 +62,7 @@ func captureDivergenceEmitter(t *testing.T, stdout *bytes.Buffer) *divergenceCap
 	t.Helper()
 	capture := &divergenceCapture{}
 	prev := hookRecordDemandClaimDivergence
-	hookRecordDemandClaimDivergence = func(reason, _ string, _ hookClaimOptions, ops hookClaimOps, _ io.Writer) {
+	hookRecordDemandClaimDivergence = func(reason string, _ hookClaimOptions, ops hookClaimOps, _ io.Writer) {
 		capture.calls++
 		capture.reason = reason
 		capture.stdoutAt = stdout.String()
@@ -198,7 +203,7 @@ func TestDivergenceClassification(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			opts := divergenceOptions()
 			ops := demandDivergenceOpsForBlockedBead(tt.bead, tt.readErr, tt.blocked, tt.confirmErr)
-			status, class := classifyDemandTrigger(tt.triggerID, "/rig", opts, ops)
+			status, class := classifyDemandTrigger(demandTrigger{ID: tt.triggerID, StoreRef: demandDivergenceSeatStoreRef}, opts, ops)
 			if class != tt.wantClass {
 				t.Errorf("classification = %q, want %q", class, tt.wantClass)
 			}
@@ -224,7 +229,7 @@ func TestSiblingRaceLoserClassifiesBenign(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	recordDemandClaimDivergence(hookClaimReasonNoWork, "/rig", opts, demandDivergenceOpsForBead(winner, nil), &stderr)
+	recordDemandClaimDivergence(hookClaimReasonNoWork, opts, demandDivergenceOpsForBead(winner, nil), &stderr)
 
 	if len(rec.Events) != 1 {
 		t.Fatalf("events = %d, want exactly 1", len(rec.Events))
@@ -259,7 +264,7 @@ func TestDivergenceCaseIsReportedToTheWorkerStderr(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	recordDemandClaimDivergence(hookClaimReasonNoWork, "/rig", opts, demandDivergenceOpsForBead(stillThere, nil), &stderr)
+	recordDemandClaimDivergence(hookClaimReasonNoWork, opts, demandDivergenceOpsForBead(stillThere, nil), &stderr)
 
 	if len(rec.Events) != 1 || rec.Events[0].Message != events.DemandClaimDivergence {
 		t.Fatalf("events = %+v, want one divergence-classified event", rec.Events)
@@ -304,7 +309,7 @@ func TestDivergenceStatusBlockedRowIsBlockedWithoutSettlement(t *testing.T) {
 			}
 
 			var stderr bytes.Buffer
-			recordDemandClaimDivergence(hookClaimReasonNoWork, "/rig", divergenceOptions(demandSpawnEnv()...), ops, &stderr)
+			recordDemandClaimDivergence(hookClaimReasonNoWork, divergenceOptions(demandSpawnEnv()...), ops, &stderr)
 
 			if len(rec.Events) != 1 || rec.Events[0].Message != events.DemandClaimBlocked {
 				t.Fatalf("events = %+v, want one blocked-classified event", rec.Events)
@@ -345,7 +350,7 @@ func TestDivergenceStatusBlockedRowIsBlockedWithoutSettlement(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			_, class := classifyDemandTrigger(tt.bead.ID, "/rig", divergenceOptions(), demandDivergenceOpsForBlockedBead(tt.bead, nil, false, nil))
+			_, class := classifyDemandTrigger(demandTrigger{ID: tt.bead.ID, StoreRef: demandDivergenceSeatStoreRef}, divergenceOptions(), demandDivergenceOpsForBlockedBead(tt.bead, nil, false, nil))
 			if class != tt.want {
 				t.Errorf("classification = %q, want %q", class, tt.want)
 			}
@@ -370,7 +375,7 @@ func TestNonDemandSpawnedSeatRecordsNoDivergence(t *testing.T) {
 		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"},
 	}
 
-	recordDemandClaimDivergence(hookClaimReasonNoWork, "/rig", opts, demandDivergenceOpsForBead(stillThere, nil), &stderr)
+	recordDemandClaimDivergence(hookClaimReasonNoWork, opts, demandDivergenceOpsForBead(stillThere, nil), &stderr)
 
 	if len(rec.Events) != 0 {
 		t.Fatalf("events = %+v, want none for a seat not spawned from demand", rec.Events)
@@ -406,13 +411,13 @@ func TestDivergenceClassifiesTheSessionRowStampNotTheEnv(t *testing.T) {
 				return stillThere, nil
 			}
 			var asked []string
-			ops.ReadSessionTrigger = func(sessionID string) (string, error) {
+			ops.ReadSessionTrigger = func(sessionID string) (demandTrigger, error) {
 				asked = append(asked, sessionID)
-				return stillThere.ID, nil
+				return demandTrigger{ID: stillThere.ID, StoreRef: demandDivergenceSeatStoreRef}, nil
 			}
 
 			var stderr bytes.Buffer
-			recordDemandClaimDivergence(hookClaimReasonNoWork, "/rig", divergenceOptions(c.env...), ops, &stderr)
+			recordDemandClaimDivergence(hookClaimReasonNoWork, divergenceOptions(c.env...), ops, &stderr)
 
 			if len(asked) != 1 || asked[0] != "gcs-1" {
 				t.Fatalf("session trigger reads = %v, want one read of gcs-1", asked)
@@ -451,7 +456,9 @@ func TestDivergenceWithAnUnreadableSessionRowIsUnknownAndLeavesTheDrainAlone(t *
 	ops := demandDivergenceOpsForBlockedBead(stillThere, nil, false, nil)
 	ops.DrainAck = func(io.Writer) error { return nil }
 	ops.ReadWorkStarted = noStartedClaims
-	ops.ReadSessionTrigger = func(string) (string, error) { return "", errors.New("session row read failed") }
+	ops.ReadSessionTrigger = func(string) (demandTrigger, error) {
+		return demandTrigger{}, errors.New("session row read failed")
+	}
 
 	var baseOut, baseErr bytes.Buffer
 	baseCode := writeHookClaimNoWork(divergenceOptions(), ops, false, "/rig", &baseOut, &baseErr)
@@ -484,5 +491,471 @@ func TestDivergenceWithAnUnreadableSessionRowIsUnknownAndLeavesTheDrainAlone(t *
 func TestDemandClaimDivergenceStaysOffTheExportAllowlist(t *testing.T) {
 	if eventexport.IsAllowed(events.SessionDemandClaimDivergence) {
 		t.Fatal("session.demand_claim_divergence is on the redacted-export allowlist; that is an egress-surface change and needs its own review")
+	}
+}
+
+// demandCountingLegs is a DemandTriggerStore double: each store ref it knows
+// resolves to its leg, anything else is a ref the seat cannot place.
+func demandCountingLegs(legs map[string]hookStore) func(string) (hookStore, error) {
+	return func(ref string) (hookStore, error) {
+		leg, ok := legs[ref]
+		if !ok {
+			return hookStore{}, fmt.Errorf("store ref %q is not placeable from this seat", ref)
+		}
+		return leg, nil
+	}
+}
+
+// gastownhall/gascity#5858, the benign direction: the controller counted the
+// trigger in the CITY store, where it has since moved on (closed, or claimed by
+// a sibling), while the seat's own rig leg still holds an open, route-matching
+// copy of the same id. The verdict is the counting store's, so it is benign;
+// and the classification never reads the seat's own leg at all, neither for
+// the row nor for its dependencies.
+func TestDivergenceClassifiesTheCountingStoreNotTheSeatsOwnLeg(t *testing.T) {
+	routed := map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"}
+	openInSeatLeg := beads.Bead{ID: "canary-8a1", Status: "open", Type: "task", Metadata: routed}
+	for _, tt := range []struct {
+		name     string
+		counted  beads.Bead
+		wantStat string
+	}{
+		{
+			name:     "closed where it was counted",
+			counted:  beads.Bead{ID: "canary-8a1", Status: "closed", Type: "task", Metadata: routed},
+			wantStat: "closed",
+		},
+		{
+			name:     "claimed by a sibling where it was counted",
+			counted:  beads.Bead{ID: "canary-8a1", Status: "in_progress", Type: "task", Assignee: "gc__worker-2", Metadata: routed},
+			wantStat: "in_progress",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := events.NewFake()
+			prev := demandDivergenceRecorder
+			demandDivergenceRecorder = func(io.Writer) events.Recorder { return rec }
+			t.Cleanup(func() { demandDivergenceRecorder = prev })
+
+			const seatDir, cityDir = "/rig", "/city"
+			ops := demandDivergenceOpsForBlockedBead(openInSeatLeg, nil, false, nil)
+			ops.ReadSessionTrigger = func(string) (demandTrigger, error) {
+				return demandTrigger{ID: "canary-8a1", StoreRef: "city"}, nil
+			}
+			ops.DemandTriggerStore = demandCountingLegs(map[string]hookStore{
+				"city": {dir: cityDir, env: []string{"GC_STORE=city"}},
+			})
+			var reads, depReads []string
+			ops.ReadWorkMeta = func(_ context.Context, dir string, env []string, _, _ string) (beads.Bead, error) {
+				reads = append(reads, dir+" "+strings.Join(env, ","))
+				if dir == cityDir {
+					return tt.counted, nil
+				}
+				return openInSeatLeg, nil
+			}
+			ops.ConfirmBlocked = func(_ context.Context, dir string, _ []string, _, _ string) (bool, error) {
+				depReads = append(depReads, dir)
+				return false, nil
+			}
+			ops.DrainAck = func(io.Writer) error { return nil }
+			ops.ReadWorkStarted = noStartedClaims
+
+			var stdout, stderr bytes.Buffer
+			writeHookClaimNoWork(divergenceOptions(demandSpawnEnv()...), ops, false, seatDir, &stdout, &stderr)
+
+			if len(rec.Events) != 1 {
+				t.Fatalf("events = %+v, want exactly 1", rec.Events)
+			}
+			var payload events.SessionDemandClaimDivergencePayload
+			if err := json.Unmarshal(rec.Events[0].Payload, &payload); err != nil {
+				t.Fatalf("decoding payload: %v", err)
+			}
+			if payload.Classification != events.DemandClaimBenign || payload.TriggerStatusAtDrain != tt.wantStat {
+				t.Fatalf("payload = %+v, want benign over the counting store's %q row", payload, tt.wantStat)
+			}
+			if len(reads) != 1 || reads[0] != cityDir+" GC_STORE=city" {
+				t.Fatalf("trigger reads = %q, want exactly one, in the counting leg %s with its env", reads, cityDir)
+			}
+			if len(depReads) != 0 {
+				t.Fatalf("dependency reads = %q, want none for a row that moved on", depReads)
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("stderr = %q, want silence for a benign classification", stderr.String())
+			}
+		})
+	}
+}
+
+// gastownhall/gascity#5858: the controller counted the trigger in the CITY
+// store (open, unassigned, route-matching), but the seat drained in a rig store
+// where a same-id row is closed. The classifier must read the row in the store
+// the demand was counted in, not re-read the seat's own store, or a
+// cross-store demand/claim disagreement always classifies as benign. The
+// operator line names the row and the store it is still claimable in.
+func TestDivergenceReadsTheTriggerInTheCountingStoreNotOnlyTheWorkers(t *testing.T) {
+	rec := events.NewFake()
+	prev := demandDivergenceRecorder
+	demandDivergenceRecorder = func(io.Writer) events.Recorder { return rec }
+	t.Cleanup(func() { demandDivergenceRecorder = prev })
+
+	const seatDir, cityDir = "/rig", "/city"
+	countedInCity := beads.Bead{
+		ID: "canary-8a1", Status: "open", Type: "task",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"},
+	}
+	closedInSeatStore := countedInCity
+	closedInSeatStore.Status = "closed"
+
+	ops := demandDivergenceOpsForBlockedBead(countedInCity, nil, false, nil)
+	ops.ReadSessionTrigger = func(string) (demandTrigger, error) {
+		return demandTrigger{ID: countedInCity.ID, StoreRef: "city"}, nil
+	}
+	ops.DemandTriggerStore = demandCountingLegs(map[string]hookStore{
+		"city":                       {dir: cityDir},
+		demandDivergenceSeatStoreRef: {dir: seatDir},
+	})
+	var readDirs, depDirs []string
+	ops.ReadWorkMeta = func(_ context.Context, dir string, _ []string, beadID, _ string) (beads.Bead, error) {
+		readDirs = append(readDirs, dir)
+		if beadID != countedInCity.ID {
+			return beads.Bead{}, fmt.Errorf("read %s: not the trigger", beadID)
+		}
+		if dir == seatDir {
+			return closedInSeatStore, nil
+		}
+		return countedInCity, nil
+	}
+	ops.ConfirmBlocked = func(_ context.Context, dir string, _ []string, _, _ string) (bool, error) {
+		depDirs = append(depDirs, dir)
+		return false, nil
+	}
+
+	var stderr bytes.Buffer
+	recordDemandClaimDivergence(hookClaimReasonNoWork, divergenceOptions(demandSpawnEnv()...), ops, &stderr)
+
+	if len(rec.Events) != 1 {
+		t.Fatalf("events = %+v, want exactly 1", rec.Events)
+	}
+	var payload events.SessionDemandClaimDivergencePayload
+	if err := json.Unmarshal(rec.Events[0].Payload, &payload); err != nil {
+		t.Fatalf("decoding payload: %v", err)
+	}
+	if payload.Classification != events.DemandClaimDivergence || payload.TriggerStatusAtDrain != "open" {
+		t.Fatalf("payload = %+v (trigger reads in %v); want divergence over the open row: it is still claimable in the city store the controller counted it in, only the seat's own store says closed",
+			payload, readDirs)
+	}
+	if len(readDirs) != 1 || readDirs[0] != cityDir || len(depDirs) != 1 || depDirs[0] != cityDir {
+		t.Fatalf("trigger reads %v, dependency reads %v; want one of each, in the counting leg %s", readDirs, depDirs, cityDir)
+	}
+	if line := stderr.String(); !strings.Contains(line, "canary-8a1 is still claimable in city") {
+		t.Fatalf("stderr = %q, want the line naming canary-8a1 and the city store it was counted in", line)
+	}
+}
+
+// demandStampCity is a city with three rigs for the stamp resolver: riga is
+// served, rigb is suspended on start, and rigc's store env cannot be projected.
+// The env projection is stubbed to name the leg it was built for.
+func demandStampCity(t *testing.T) (string, *config.City) {
+	t.Helper()
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "riga", Path: filepath.Join(cityPath, "rigs", "riga")},
+			{Name: "rigb", Path: filepath.Join(cityPath, "rigs", "rigb"), SuspendedOnStart: true},
+			{Name: "rigc", Path: filepath.Join(cityPath, "rigs", "rigc")},
+		},
+	}
+	prev := hookStoreQueryEnv
+	hookStoreQueryEnv = func(_ string, _ *config.City, a *config.Agent) (map[string]string, error) {
+		if a.Dir == "rigc" {
+			return nil, errors.New("projecting rigc's store env failed")
+		}
+		return map[string]string{"GC_STORE": "leg-" + a.Dir}, nil
+	}
+	t.Cleanup(func() { hookStoreQueryEnv = prev })
+	return cityPath, cfg
+}
+
+// Kills a resolver that places a stamp the census never meant: every spelling
+// of this city's store and of a served rig's store resolves to that store's
+// leg, and every stamp the seat cannot honestly place is an error, never a
+// fallback to some other store (gastownhall/gascity#5858).
+func TestDemandTriggerStoreAtResolvesEachStampSpelling(t *testing.T) {
+	cityPath, cfg := demandStampCity(t)
+	rigaDir := filepath.Join(cityPath, "rigs", "riga")
+	for _, tt := range []struct {
+		stamp   string
+		wantDir string
+		wantEnv string
+	}{
+		{stamp: "city", wantDir: cityPath, wantEnv: "GC_STORE=leg-"},
+		{stamp: "city:test-city", wantDir: cityPath, wantEnv: "GC_STORE=leg-"},
+		{stamp: " city ", wantDir: cityPath, wantEnv: "GC_STORE=leg-"},
+		{stamp: "class:graph", wantDir: cityPath, wantEnv: "GC_STORE=leg-"},
+		{stamp: "rig:riga", wantDir: rigaDir, wantEnv: "GC_STORE=leg-riga"},
+		{stamp: "riga", wantDir: rigaDir, wantEnv: "GC_STORE=leg-riga"},
+	} {
+		t.Run("places "+tt.stamp, func(t *testing.T) {
+			leg, err := demandTriggerStoreAt(cityPath, cfg, tt.stamp)
+			if err != nil {
+				t.Fatalf("demandTriggerStoreAt(%q): %v", tt.stamp, err)
+			}
+			if filepath.Clean(leg.dir) != filepath.Clean(tt.wantDir) || !slices.Contains(leg.env, tt.wantEnv) {
+				t.Fatalf("leg = dir %q, env has %q: %v; want dir %q with %q", leg.dir, tt.wantEnv, slices.Contains(leg.env, tt.wantEnv), tt.wantDir, tt.wantEnv)
+			}
+		})
+	}
+	for _, stamp := range []string{
+		"",                 // nothing records where the row was counted
+		"city:other-city",  // another city's store
+		"rig:nope",         // a rig not in city.toml
+		"rig:rigb",         // a suspended rig: its Dolt may be stopped
+		"rigb",             // the same, in the bare spelling
+		"rig:rigc",         // a rig whose store env cannot be projected
+		"0xc000123456",     // the census's %p fallback key
+		"elsewhere:canary", // a scheme the census never writes
+	} {
+		t.Run("refuses "+stamp, func(t *testing.T) {
+			if leg, err := demandTriggerStoreAt(cityPath, cfg, stamp); err == nil {
+				t.Fatalf("demandTriggerStoreAt(%q) = leg at %q, nil; want an error: the seat cannot place that store", stamp, leg.dir)
+			}
+		})
+	}
+	t.Run("refuses a rig while the suspension state is unreadable", func(t *testing.T) {
+		statePath := citylayout.SuspensionStateFile(cityPath)
+		if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(statePath, []byte("{not json"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if leg, err := demandTriggerStoreAt(cityPath, cfg, "rig:riga"); err == nil {
+			t.Fatalf("demandTriggerStoreAt(rig:riga) = leg at %q, nil with an unreadable suspension state; want an error", leg.dir)
+		}
+	})
+}
+
+// gastownhall/gascity#5858: a stamp the seat cannot place classifies unknown
+// with status store_unresolved, and reads nothing: neither the trigger row nor
+// its dependencies, in the counting store or in the seat's own.
+func TestDivergenceUnplaceableStampIsUnknownWithoutAnyRead(t *testing.T) {
+	cityPath, cfg := demandStampCity(t)
+	resolver := func(ref string) (hookStore, error) { return demandTriggerStoreAt(cityPath, cfg, ref) }
+	openRow := beads.Bead{
+		ID: "canary-8a1", Status: "open", Type: "task",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"},
+	}
+	for _, tt := range []struct {
+		name     string
+		stamp    string
+		resolver func(string) (hookStore, error)
+	}{
+		{name: "no stamp", stamp: "", resolver: resolver},
+		{name: "another city", stamp: "city:other-city", resolver: resolver},
+		{name: "a rig not in city.toml", stamp: "rig:nope", resolver: resolver},
+		{name: "a suspended rig", stamp: "rig:rigb", resolver: resolver},
+		{name: "the census fallback key", stamp: "0xc000123456", resolver: resolver},
+		{name: "an env projection failure", stamp: "rig:rigc", resolver: resolver},
+		{name: "no resolver wired", stamp: "city", resolver: nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := events.NewFake()
+			prev := demandDivergenceRecorder
+			demandDivergenceRecorder = func(io.Writer) events.Recorder { return rec }
+			t.Cleanup(func() { demandDivergenceRecorder = prev })
+
+			ops := demandDivergenceOpsForBlockedBead(openRow, nil, false, nil)
+			ops.ReadSessionTrigger = func(string) (demandTrigger, error) {
+				return demandTrigger{ID: openRow.ID, StoreRef: tt.stamp}, nil
+			}
+			ops.DemandTriggerStore = tt.resolver
+			reads := 0
+			ops.ReadWorkMeta = func(context.Context, string, []string, string, string) (beads.Bead, error) {
+				reads++
+				return openRow, nil
+			}
+			ops.ConfirmBlocked = func(context.Context, string, []string, string, string) (bool, error) {
+				reads++
+				return false, nil
+			}
+
+			var stderr bytes.Buffer
+			recordDemandClaimDivergence(hookClaimReasonNoWork, divergenceOptions(demandSpawnEnv()...), ops, &stderr)
+
+			if len(rec.Events) != 1 {
+				t.Fatalf("events = %+v, want exactly 1", rec.Events)
+			}
+			var payload events.SessionDemandClaimDivergencePayload
+			if err := json.Unmarshal(rec.Events[0].Payload, &payload); err != nil {
+				t.Fatalf("decoding payload: %v", err)
+			}
+			if payload.Classification != events.DemandClaimUnknown || payload.TriggerStatusAtDrain != "store_unresolved" || payload.TriggerBeadID != openRow.ID {
+				t.Fatalf("payload = %+v, want unknown with status store_unresolved for %s", payload, openRow.ID)
+			}
+			if reads != 0 {
+				t.Fatalf("store reads = %d, want none for a counting store the seat cannot place", reads)
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("stderr = %q, want silence for an unknown classification", stderr.String())
+			}
+		})
+	}
+}
+
+// gastownhall/gascity#5858, the failure modes once the counting store
+// resolves: a failed trigger read, a failed dependency settlement, and a row
+// the class route served from the relocated binding whose blockedness the row
+// alone cannot answer are each unknown, never divergence. A binding-served row
+// gets no dependency walk at all: the walk is not class-routed, and run against
+// a work ledger that does not hold the row it would read "not blocked" and
+// invent a divergence. The control shows the route alone changes nothing for a
+// row it did not serve.
+func TestDivergenceCountingStoreFailuresAreUnknown(t *testing.T) {
+	openRow := beads.Bead{
+		ID: "canary-8a1", Status: "open", Type: "task",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"},
+	}
+	servedFromBinding := &hookClaimClassRoute{resident: map[string]bool{openRow.ID: true}}
+	servedFromLedger := &hookClaimClassRoute{resident: map[string]bool{"gcg-other": true}}
+	for _, tt := range []struct {
+		name       string
+		readErr    error
+		confirmErr error
+		route      *hookClaimClassRoute
+		wantStat   string
+		wantClass  string
+		wantDeps   int
+	}{
+		{
+			name: "the counting-store read fails", readErr: errors.New("city store read failed"),
+			wantStat: "unreadable", wantClass: events.DemandClaimUnknown, wantDeps: 0,
+		},
+		{
+			name: "the dependency settlement fails", confirmErr: errors.New("dependency read failed"),
+			wantStat: "open", wantClass: events.DemandClaimUnknown, wantDeps: 1,
+		},
+		{
+			name: "the class route served the row from the binding", route: servedFromBinding,
+			wantStat: "open", wantClass: events.DemandClaimUnknown, wantDeps: 0,
+		},
+		{
+			name: "control: the class route did not serve this row", route: servedFromLedger,
+			wantStat: "open", wantClass: events.DemandClaimDivergence, wantDeps: 1,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			const cityDir = "/city"
+			ops := demandDivergenceOpsForBlockedBead(openRow, nil, false, nil)
+			ops.ClassRoute = tt.route
+			ops.DemandTriggerStore = demandCountingLegs(map[string]hookStore{"city": {dir: cityDir}})
+			var reads, deps []string
+			ops.ReadWorkMeta = func(_ context.Context, dir string, _ []string, _, _ string) (beads.Bead, error) {
+				reads = append(reads, dir)
+				return openRow, tt.readErr
+			}
+			ops.ConfirmBlocked = func(_ context.Context, dir string, _ []string, _, _ string) (bool, error) {
+				deps = append(deps, dir)
+				return false, tt.confirmErr
+			}
+
+			status, class := classifyDemandTrigger(demandTrigger{ID: openRow.ID, StoreRef: "city"}, divergenceOptions(), ops)
+
+			if status != tt.wantStat || class != tt.wantClass {
+				t.Fatalf("classification = %q (status %q), want %q (status %q)", class, status, tt.wantClass, tt.wantStat)
+			}
+			if len(reads) != 1 || reads[0] != cityDir {
+				t.Fatalf("trigger reads = %v, want one, in the counting leg %s", reads, cityDir)
+			}
+			if len(deps) != tt.wantDeps || (len(deps) == 1 && deps[0] != cityDir) {
+				t.Fatalf("dependency reads = %v, want %d in the counting leg %s", deps, tt.wantDeps, cityDir)
+			}
+		})
+	}
+}
+
+// gastownhall/gascity#5858, the no-regression guard: a seat whose trigger was
+// counted in its own store — a rig-pool seat stamped with its rig, a
+// city-scoped seat stamped with the city — resolves the stamp, through the
+// production resolver, to the leg it already queries, and every verdict is
+// what it was before the counting store existed. The trigger read and the
+// dependency settlement both land in that one leg.
+func TestDivergenceSeatsOwnStampKeepsEveryVerdict(t *testing.T) {
+	cityPath, cfg := demandStampCity(t)
+	routed := map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"}
+	for _, seat := range []struct {
+		name    string
+		stamp   string
+		wantDir string
+	}{
+		{name: "rig-pool seat", stamp: "rig:riga", wantDir: filepath.Join(cityPath, "rigs", "riga")},
+		{name: "city-scoped seat", stamp: "city", wantDir: cityPath},
+	} {
+		for _, tt := range []struct {
+			name       string
+			bead       beads.Bead
+			readErr    error
+			blocked    bool
+			confirmErr error
+			wantClass  string
+			wantStat   string
+			wantDeps   int
+		}{
+			{
+				name:      "open and claimable",
+				bead:      beads.Bead{ID: "wb-1", Status: "open", Type: "task", Metadata: routed},
+				wantClass: events.DemandClaimDivergence, wantStat: "open", wantDeps: 1,
+			},
+			{
+				name:      "open but dep-confirmed blocked",
+				bead:      beads.Bead{ID: "wb-1", Status: "open", Type: "task", Metadata: routed},
+				blocked:   true,
+				wantClass: events.DemandClaimBlocked, wantStat: "open", wantDeps: 1,
+			},
+			{
+				name:       "settlement read fails",
+				bead:       beads.Bead{ID: "wb-1", Status: "open", Type: "task", Metadata: routed},
+				confirmErr: errors.New("dependency read failed"),
+				wantClass:  events.DemandClaimUnknown, wantStat: "open", wantDeps: 1,
+			},
+			{
+				name:      "claimed by a sibling",
+				bead:      beads.Bead{ID: "wb-1", Status: "in_progress", Type: "task", Assignee: "gc__worker-2", Metadata: routed},
+				wantClass: events.DemandClaimBenign, wantStat: "in_progress",
+			},
+			{
+				name:      "unreadable",
+				readErr:   errors.New("store read failed"),
+				wantClass: events.DemandClaimUnknown, wantStat: "unreadable",
+			},
+		} {
+			t.Run(seat.name+"/"+tt.name, func(t *testing.T) {
+				ops := demandDivergenceOpsForBlockedBead(tt.bead, tt.readErr, tt.blocked, tt.confirmErr)
+				ops.DemandTriggerStore = func(ref string) (hookStore, error) {
+					return demandTriggerStoreAt(cityPath, cfg, ref)
+				}
+				var reads, deps []string
+				ops.ReadWorkMeta = func(_ context.Context, dir string, _ []string, _, _ string) (beads.Bead, error) {
+					reads = append(reads, filepath.Clean(dir))
+					return tt.bead, tt.readErr
+				}
+				ops.ConfirmBlocked = func(_ context.Context, dir string, _ []string, _, _ string) (bool, error) {
+					deps = append(deps, filepath.Clean(dir))
+					return tt.blocked, tt.confirmErr
+				}
+
+				status, class := classifyDemandTrigger(demandTrigger{ID: "wb-1", StoreRef: seat.stamp}, divergenceOptions(), ops)
+
+				if class != tt.wantClass || status != tt.wantStat {
+					t.Fatalf("classification = %q (status %q), want %q (status %q)", class, status, tt.wantClass, tt.wantStat)
+				}
+				if len(reads) != 1 || reads[0] != seat.wantDir {
+					t.Fatalf("trigger reads = %v, want one, in the seat's own leg %s", reads, seat.wantDir)
+				}
+				if len(deps) != tt.wantDeps || (len(deps) == 1 && deps[0] != seat.wantDir) {
+					t.Fatalf("dependency reads = %v, want %d in the seat's own leg %s", deps, tt.wantDeps, seat.wantDir)
+				}
+			})
+		}
 	}
 }

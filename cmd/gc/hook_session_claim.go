@@ -456,35 +456,39 @@ func sessionWorkStartedVia(front sessionFrontGetter, sessionID string) (string, 
 }
 
 // hookSessionTriggerBead is the production ReadSessionTrigger seam: the
-// session row's gc.trigger_bead_id stamp, read through the routed front door.
+// session row's gc.trigger_bead_id and gc.trigger_bead_store_ref stamps, read
+// through the routed front door in one row read.
 //
 // The id is resolved EXACTLY, for the same reason the claim stamp is: bd's
 // fuzzy resolver could otherwise hand back a prefix-colliding session. Errors
 // are returned, not logged away, so the caller can report an honest unknown
 // rather than a silent empty trigger that looks like "no stamp".
-func hookSessionTriggerBead(sessionID string) (string, error) {
+func hookSessionTriggerBead(sessionID string) (demandTrigger, error) {
 	return sessionTriggerBeadVia(sessionCurrentClaimFrontDoor, sessionID)
 }
 
 // sessionTriggerBeadVia is hookSessionTriggerBead through front.
-func sessionTriggerBeadVia(front sessionFrontGetter, sessionID string) (string, error) {
+func sessionTriggerBeadVia(front sessionFrontGetter, sessionID string) (demandTrigger, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
-		return "", nil
+		return demandTrigger{}, nil
 	}
 	sessFront, err := front()
 	if err != nil {
-		return "", fmt.Errorf("opening the session front door for %q: %w", sessionID, err)
+		return demandTrigger{}, fmt.Errorf("opening the session front door for %q: %w", sessionID, err)
 	}
 	resolved, err := sessFront.ResolveIDByExactID(sessionID)
 	if err != nil {
-		return "", fmt.Errorf("resolving session id %q exactly: %w", sessionID, err)
+		return demandTrigger{}, fmt.Errorf("resolving session id %q exactly: %w", sessionID, err)
 	}
 	info, err := sessFront.Get(resolved)
 	if err != nil {
-		return "", fmt.Errorf("reading session bead %q: %w", resolved, err)
+		return demandTrigger{}, fmt.Errorf("reading session bead %q: %w", resolved, err)
 	}
-	return strings.TrimSpace(info.TriggerBeadID), nil
+	return demandTrigger{
+		ID:       strings.TrimSpace(info.TriggerBeadID),
+		StoreRef: strings.TrimSpace(info.TriggerBeadStoreRef),
+	}, nil
 }
 
 // hookClaimStoreRefForDir is the production StoreRef seam: the work leg at
