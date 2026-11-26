@@ -2267,7 +2267,7 @@ func TestEndpointCapacityGuard_SessionRefusalsHoldPendingCreate(t *testing.T) {
 }
 
 // TestExecutePlannedStarts_SessionRepeatRefusalBacksOffOnlyThatSession is the
-// start-path contract (ga-jwbrl): one session's first exit 75 is endpoint
+// per-session start-refusal contract: one session's first exit 75 is endpoint
 // capacity, its repeat inside the window neither opens nor extends the
 // endpoint breaker nor accrues startup health, other sessions on the
 // endpoint start during its backoff, and a non-75 start death of the backed-
