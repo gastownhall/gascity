@@ -311,6 +311,13 @@ func PersistRigSiteBindings(fs fsys.FS, cityRoot string, rigs []Rig) error {
 	return persistRigSiteBindings(fs, cityRoot, rigs, nil)
 }
 
+// PersistRigSiteBindingsRemovingRigs rewrites only .gc/site.toml: it keeps
+// bindings for declared rigs and drops any binding named in removedRigNames,
+// declared or not. city.toml is never touched.
+func PersistRigSiteBindingsRemovingRigs(fs fsys.FS, cityRoot string, rigs []Rig, removedRigNames ...string) error {
+	return persistRigSiteBindings(fs, cityRoot, rigs, rigNameSet(removedRigNames))
+}
+
 func persistRigSiteBindings(fs fsys.FS, cityRoot string, rigs []Rig, removedRigNames map[string]struct{}) error {
 	return persistSiteBinding(fs, cityRoot, func(doc map[string]any, existing *SiteBinding) {
 		setSiteRigBindings(doc, desiredRigSiteBindings(rigs, existing.Rigs, removedRigNames), removedRigNames)

@@ -20,7 +20,7 @@ import (
 )
 
 // RUNTIME-CONTRACT-017 on the real tmux: the runtimetest program-status
-// suite (PS-001…PS-015) against sessions whose agent pane runs the scripted
+// suite (PS-001…PS-016) against sessions whose agent pane runs the scripted
 // emitter, armed with the built companion, each on its own scratch server
 // (osc7501x-heal-<rand> for the heal cases PS-013 and PS-014). The Relayed
 // fixture runs the emitter under the built companion's relay.
@@ -42,6 +42,9 @@ func TestTmuxProgramStatusContract(t *testing.T) {
 		},
 		Held: func(t *testing.T, mode runtime.ProgramStatusMode, script ...string) runtimetest.ProgramStatusSession {
 			return start(t, mode, runtime.ProgramStatusArm{Capture: true, HoldMidTurn: true}, script).session()
+		},
+		Nudged: func(t *testing.T, mode runtime.ProgramStatusMode, decide bool, nudge string, script ...string) runtimetest.ProgramStatusSession {
+			return startNudgedProgramSession(t, companion, emitter, mode, decide, nudge, script).session()
 		},
 		Inherited: func(t *testing.T, mode runtime.ProgramStatusMode) runtimetest.ProgramStatusSession {
 			s := start(t, mode, runtime.ProgramStatusArm{}, nil)
@@ -91,6 +94,54 @@ func startProgramSession(t *testing.T, companion, emitter string, mode runtime.P
 	if startMode != mode {
 		s.setMode(t, mode)
 	}
+	return s
+}
+
+// nudgedReadyDelayMs is the readiness delay of a nudged fixture's start: long
+// enough for the capture to publish what the program reported at launch
+// before the startup ladder reads its record.
+const nudgedReadyDelayMs = 2000
+
+// nudgedFamily is the provider family a nudged fixture's session names: one
+// no submit verification knows, so its startup nudge is a plain typed line.
+const nudgedFamily = "testfam"
+
+// startNudgedProgramSession starts an armed emitter running script under
+// mode, with startup nudge nudge, its arm opting the startup ladder into the
+// record when decide is true, and returns once the start (its startup
+// ladder included, on shortened backoffs) has returned and the capture has
+// published at least what script wrote. A nudge the start typed runs as the
+// program's next step.
+func startNudgedProgramSession(t *testing.T, companion, emitter string, mode runtime.ProgramStatusMode, decide bool, nudge string, script []string) *programSession {
+	t.Helper()
+	backoffs := startupNudgeRetryBackoffs
+	startupNudgeRetryBackoffs = []time.Duration{100 * time.Millisecond, 100 * time.Millisecond}
+	t.Cleanup(func() { startupNudgeRetryBackoffs = backoffs })
+	// The nudge is typed as the line the emitter reads, with no Escape
+	// before its Enter (which a cooked line would keep as a byte).
+	skip := providersSkippingEscapeBeforeEnter
+	providersSkippingEscapeBeforeEnter = append(append([]string(nil), skip...), nudgedFamily)
+	t.Cleanup(func() { providersSkippingEscapeBeforeEnter = skip })
+	p := captureProvider(t, newScratchServer(t, programScratchKind(t)), companion)
+	p.tm.cfg.ProgramStatus, p.cfg.ProgramStatus = mode, mode
+	s := &programSession{p: p, name: "gc-ps-nudged", emitter: emitter}
+	s.cfg = runtime.Config{
+		Command: s.command(script), WorkDir: t.TempDir(), ProgramStatus: runtime.ProgramStatusArm{Capture: true, DecideStartup: decide},
+		Nudge: nudge, ReadyDelayMs: nudgedReadyDelayMs, Env: map[string]string{"GC_PROVIDER": nudgedFamily},
+	}
+	if err := p.Start(context.Background(), s.name, s.cfg); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Stop(s.name) })
+	s.nonce = armedNonce(t, p, s.name)
+	s.run(t, script)
+	if want := s.expectedSeq(t); want > 0 {
+		eventually(t, "the capture to publish record "+strconv.FormatUint(want, 10)+" or later", func() bool {
+			rec, err := programstatus.Decode(paneOption(t, s.p, s.name, programStatusOption))
+			return err == nil && rec.Nonce == s.nonce && rec.Seq >= want
+		})
+	}
+	p.cache.Invalidate()
 	return s
 }
 

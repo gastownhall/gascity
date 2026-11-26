@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -22,9 +23,42 @@ import (
 // failing open there switches the fence off fleet-wide for as long as the city
 // stays refused. It must fail CLOSED. A transient store fault still fails open.
 
-// strandedSplitCity is a converged split city whose retained work store holds an
-// infrastructure bead the binding does not: the exact shape the storage gate
-// refuses on every one-shot command until `gc storage recover-stranded` runs.
+// refusedSplitCity is a converged split city the storage gate still refuses
+// on every one-shot command: its convergence marker names a different work
+// store (identity mismatch).
+//
+// The incident above refused for stranded rows. A stranded city now serves
+// degraded (infraMigrationReport.servesDegraded; strandedSplitCity and
+// TestHookDrainFenceStaysOpenOnAStrandedCity), so the fail-closed contract is
+// pinned on a refusal that still stands.
+func refusedSplitCity(t *testing.T) string {
+	t.Helper()
+	cityPath, cfg := migratedOneShotCLICity(t)
+	captureCLIStorageStderr(t)
+	if err := closeCLIStorageRoutes(); err != nil {
+		t.Fatal(err)
+	}
+	target := mustResolveInfraTarget(t, cityPath, cfg)
+	data, err := os.ReadFile(target.MarkerPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kept []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, workStoreIdentityLinePrefix) {
+			kept = append(kept, line)
+		}
+	}
+	other := workStoreIdentityLinePrefix + workStoreIdentity{ProjectID: "another-project"}.String()
+	if err := os.WriteFile(target.MarkerPath(), []byte(other+"\n"+strings.Join(kept, "\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return cityPath
+}
+
+// strandedSplitCity is a converged split city whose retained work store holds
+// an infrastructure bead the binding does not: the shape that refused every
+// one-shot command before the degraded verdict, and now serves degraded.
 func strandedSplitCity(t *testing.T) string {
 	t.Helper()
 	cityPath, _ := migratedOneShotCLICity(t)
@@ -43,8 +77,25 @@ func strandedSplitCity(t *testing.T) string {
 	return cityPath
 }
 
-func TestHookDrainPendingProbeCarriesTheStorageGateRefusal(t *testing.T) {
+// TestHookDrainFenceStaysOpenOnAStrandedCity: a stranded city serves
+// degraded, so the drain-pending probe answers and the seat claims. Before,
+// every worker's claim, close and drain-ack was refused while the controller
+// kept dispatching (substrate 2026-11-09).
+func TestHookDrainFenceStaysOpenOnAStrandedCity(t *testing.T) {
 	strandedSplitCity(t)
+	if _, err := hookSessionDrainPending(drainPendingTestSessionID); err != nil && (storeref.IsStandingRefusal(err) || hookDrainProbeFailsClosed(err)) {
+		t.Fatalf("the drain-pending probe carries a standing refusal on a stranded city: %v", err)
+	}
+	e := newDrainPendingClaimEnv()
+	ops := e.ops()
+	ops.DrainPending = hookSessionDrainPending
+	if code := doHookClaim("query", "/rig", e.opts(true), ops, &e.stdout, &e.stderr); code != 0 || len(e.claimed) != 1 {
+		t.Errorf("claim on a stranded city = (%d, claimed %v), want the claim; stderr=%s", code, e.claimed, e.stderr.String())
+	}
+}
+
+func TestHookDrainPendingProbeCarriesTheStorageGateRefusal(t *testing.T) {
+	refusedSplitCity(t)
 
 	pending, err := hookSessionDrainPending(drainPendingTestSessionID)
 	if err == nil {
@@ -53,13 +104,13 @@ func TestHookDrainPendingProbeCarriesTheStorageGateRefusal(t *testing.T) {
 	if !storeref.IsStandingRefusal(err) {
 		t.Fatalf("the probe's error lost the standing-refusal mark, so the fence cannot tell it from a hiccup: %v", err)
 	}
-	if !strings.Contains(err.Error(), "infrastructure bead") {
+	if !strings.Contains(err.Error(), "different work store") {
 		t.Errorf("the probe's error is not the storage gate's refusal: %v", err)
 	}
 }
 
 func TestHookClaimDrainFenceFailsClosedOnAStorageGateRefusal(t *testing.T) {
-	strandedSplitCity(t)
+	refusedSplitCity(t)
 	var emitted []error
 	old := hookEmitDrainFenceUnavailable
 	hookEmitDrainFenceUnavailable = func(_ io.Writer, _, _ string, err error) { emitted = append(emitted, err) }
@@ -80,7 +131,7 @@ func TestHookClaimDrainFenceFailsClosedOnAStorageGateRefusal(t *testing.T) {
 	if e.drainAcked {
 		t.Error("a storage refusal acknowledged a drain; the seat's row was never read, so it is not known to be draining")
 	}
-	if !strings.Contains(e.stderr.String(), hookStoreUnavailableToken) || !strings.Contains(e.stderr.String(), "infrastructure bead") {
+	if !strings.Contains(e.stderr.String(), hookStoreUnavailableToken) || !strings.Contains(e.stderr.String(), "different work store") {
 		t.Errorf("stderr = %q, want the store-unavailable token and the gate's refusal", e.stderr.String())
 	}
 	if len(emitted) != 1 || !storeref.IsStandingRefusal(emitted[0]) {
@@ -89,7 +140,7 @@ func TestHookClaimDrainFenceFailsClosedOnAStorageGateRefusal(t *testing.T) {
 }
 
 func TestHookDiscoveryDrainFenceFailsClosedOnAStorageGateRefusal(t *testing.T) {
-	strandedSplitCity(t)
+	refusedSplitCity(t)
 	var emitted int
 	old := hookEmitDrainFenceUnavailable
 	hookEmitDrainFenceUnavailable = func(io.Writer, string, string, error) { emitted++ }
@@ -171,12 +222,12 @@ func TestHookDrainFenceFailsOpenOnATransientGateFault(t *testing.T) {
 	}
 }
 
-// The control: a standing refusal (the stranded city) stays closed.
+// The control: a standing refusal (the identity-mismatched city) stays closed.
 func TestStandingGateRefusalIsNotTransient(t *testing.T) {
-	strandedSplitCity(t)
+	refusedSplitCity(t)
 	_, err := hookSessionDrainPending(drainPendingTestSessionID)
 	if err == nil || isTransientStorageGateFault(err) || !hookDrainProbeFailsClosed(err) {
-		t.Errorf("stranded-city refusal: err=%v transient=%v failsClosed=%v; want a standing, fail-closed refusal", err, isTransientStorageGateFault(err), hookDrainProbeFailsClosed(err))
+		t.Errorf("standing refusal: err=%v transient=%v failsClosed=%v; want a standing, fail-closed refusal", err, isTransientStorageGateFault(err), hookDrainProbeFailsClosed(err))
 	}
 }
 
@@ -184,7 +235,7 @@ func TestStandingGateRefusalIsNotTransient(t *testing.T) {
 // startup-health episode and an own-session wait work, so its copy left them in
 // the work store, unlisted. They are not strands: a fence that failed closed
 // over them would stop every seat's claims on the first hook after the
-// upgrade. A real strand under the same earlier manifest still fails closed
+// upgrade. A real strand under the same earlier manifest now serves degraded too
 // (the control row).
 func TestAnEarlierMigrationsReclassifiedRowsKeepTheFenceOpen(t *testing.T) {
 	cases := []struct {
@@ -194,7 +245,10 @@ func TestAnEarlierMigrationsReclassifiedRowsKeepTheFenceOpen(t *testing.T) {
 	}{
 		{"startup-health episode", reclassifiedShapes()[0], false},
 		{"own-session wait without gc:wait", reclassifiedShapes()[1], false},
-		{"mail message stranded after the copy", beads.Bead{Title: "auto-handoff", Type: "message"}, true},
+		// A real strand under the same earlier manifest no longer fails the
+		// fence closed either: a stranded city serves degraded. The
+		// fail-closed control is refusedSplitCity's (identity mismatch).
+		{"mail message stranded after the copy serves degraded", beads.Bead{Title: "auto-handoff", Type: "message"}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -77,12 +77,7 @@ func rigFederationFixture(t *testing.T, bdPayload string) (cityPath, rigPath str
 
 	// The payload is baked in, so the fake bd answers every invocation with the
 	// rig leg's ready set whatever flags the caller passed.
-	tmp := t.TempDir()
-	bdPath := filepath.Join(tmp, "bd")
-	if err := os.WriteFile(bdPath, []byte("#!/bin/sh\nprintf '%s' '"+bdPayload+"'\n"), 0o755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	installFakeBdOnPath(t, "#!/bin/sh\nprintf '%s' '"+bdPayload+"'\n", map[string]nativeFakeBdReply{"": {Stdout: bdPayload}})
 	t.Setenv("GC_BEADS", "bd")
 
 	return cityPath, rigPath, beads.NewMemStore()
@@ -861,5 +856,43 @@ func TestControlReadyScanRigScopeStopsOfferingABeadTheDispatchClosed(t *testing.
 	if got := controlReadyScan(t, rigPath, agentCfg, config.BeadsConfig{}); len(got) != 0 {
 		t.Fatalf("control-ready queue after dispatch = %v, want empty; "+
 			"the serve loop re-offers a bead the dispatch already finished and drainWorkflowServeWork never returns", got)
+	}
+}
+
+// TestControlReadyFallbackRelicLegOmitsReadonlyOnProxiedRig is the relocated
+// arm of ga-p25uw4 (#7358): a rig on a Dolt proxied-server still reads its own
+// store as the relic leg behind the city binding, and that shell read must drop
+// the --readonly bd refuses there, or the whole federated scan fails.
+func TestControlReadyFallbackRelicLegOmitsReadonlyOnProxiedRig(t *testing.T) {
+	cityPath, rigPath, binding := rigFederationFixture(t, `[]`)
+	logPath := installArgvLoggingFakeBd(t, true, fakeBdReplyJSON(`[{"id":"ga-rig-relic"}]`))
+	writeScopeMetadataForTest(t, rigPath, proxiedDoltScopeMetadata)
+	routed, err := binding.Create(beads.Bead{Title: "check 1", Type: "task"})
+	if err != nil {
+		t.Fatalf("seed the binding: %v", err)
+	}
+	seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(binding))
+	if !scopeUsesProxiedDoltMode(cityPath, rigPath) {
+		t.Fatalf("fixture rig %s is not classified proxied-server", rigPath)
+	}
+	if _, relocated := controlGraphBinding(cityPath, rigPath); !relocated || !controlGraphRelicLeg(cityPath, rigPath) {
+		t.Fatalf("fixture rig %s does not read a relic leg behind a relocated graph binding", rigPath)
+	}
+
+	got, err := controlReadyFallbackReady(rigPath, cityPath, nil, false)
+	if err != nil {
+		t.Fatalf("federated scan of a proxied rig: %v", err)
+	}
+	gotIDs := controlLegIDs(got)
+	slices.Sort(gotIDs)
+	wantIDs := []string{"ga-rig-relic", routed.ID}
+	slices.Sort(wantIDs)
+	if !slices.Equal(gotIDs, wantIDs) {
+		t.Fatalf("federated scan returned %v, want the binding's and the relic leg's beads %v", gotIDs, wantIDs)
+	}
+	calls := readFakeBdCalls(t, logPath)
+	want := controlReadyFallbackArgv(false, false)
+	if len(calls) != 1 || !slices.Equal(calls[0], want) {
+		t.Fatalf("bd calls = %q, want exactly one relic-leg call with argv %q", calls, want)
 	}
 }

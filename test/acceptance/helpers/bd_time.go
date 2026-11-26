@@ -176,12 +176,12 @@ func PassthroughGCSide(records []BDTraceRecord, wall time.Duration) (time.Durati
 // MarginalOverFloor is a command's gc-side time over the bare-process floor
 // measured beside it, and refuses a floor that is not one.
 //
-// The floor (`gc --help`) does strictly less than any command, so a small
-// inversion is noise and reads as a zero marginal — which is also the truth,
-// since the command's gc side is then within noise of starting a process at
-// all. An inversion larger than the budget itself is not noise: the floor has
-// stopped measuring "start gc", and a clamped zero would pass any gc side up
-// to that inflated floor.
+// The floor (test/processfloor.Args) does strictly less than the command it is
+// subtracted from, so a small inversion is noise and reads as a zero marginal —
+// which is also the truth, since the command's gc side is then within noise of
+// starting a process at all. An inversion larger than the budget itself is not
+// noise: the floor has stopped measuring "start gc", and a clamped zero would
+// pass any gc side up to that inflated floor.
 func MarginalOverFloor(gcSide, floor, budget time.Duration) (time.Duration, error) {
 	if floor > gcSide+budget {
 		return 0, fmt.Errorf("the process floor (%s) exceeds the command's own gc side (%s) by more than the %s budget: the floor is not measuring a bare gc start, and a zero marginal would pass anything under it", floor, gcSide, budget)
@@ -190,6 +190,78 @@ func MarginalOverFloor(gcSide, floor, budget time.Duration) (time.Duration, erro
 		return marginal, nil
 	}
 	return 0, nil
+}
+
+// FloorMeasurementMinPairs is how many (floor, gc side) sample pairs every
+// MeasureMarginalOverFloor call takes.
+const FloorMeasurementMinPairs = 5
+
+// FloorMeasurementMaxPairs bounds the extra pairs MeasureMarginalOverFloor
+// takes to re-measure an inverted reading.
+const FloorMeasurementMaxPairs = 20
+
+// FloorMeasurement is a command's gc-side time read against the process floor
+// measured beside it (MeasureMarginalOverFloor).
+type FloorMeasurement struct {
+	// Floor and GCSide are the best (smallest) sample of each.
+	Floor, GCSide time.Duration
+	// Marginal is MarginalOverFloor's reading of the two. It means nothing
+	// while Inverted is set.
+	Marginal time.Duration
+	// Pairs is how many samples of each were taken.
+	Pairs int
+	// Inverted reports that after every pair FloorMeasurementMaxPairs allows,
+	// the best floor still exceeds the best gc side by more than the budget —
+	// the reading MarginalOverFloor refuses. Such a measurement is
+	// inconclusive: it says nothing about the gc side, so the caller must
+	// report it as neither a pass nor a budget failure.
+	Inverted bool
+}
+
+// MeasureMarginalOverFloor samples the floor and the gc side in interleaved
+// pairs, a floor and then a gc side, and reads the marginal between the best
+// of each once it has FloorMeasurementMinPairs pairs.
+//
+// The minimum, not the mean: what is being measured is a fixed cost, and every
+// sample is that cost plus whatever else this shared box was doing during it.
+// The mean of a fixed cost plus one-sided noise is a measure of the noise. The
+// minimum is the closest any sample got to the quantity, and a regression that
+// really did add work to gc's side raises every sample, including the best one.
+//
+// Interleaved, not in two blocks: each minimum is only as low as the quietest
+// stretch its samples landed in. Five floors and then five gc sides would draw
+// the two from different stretches, and a load burst over the first block alone
+// reads as a floor far above the command it is subtracted from (ga-97b2v9wd).
+//
+// A reading whose floor is more than the budget above its gc side is no
+// verdict on the gc side, so it is measured again, one more pair at a time,
+// until the floor reads as one or FloorMeasurementMaxPairs pairs have been
+// taken; the result is then Inverted. Every pair counts toward both minima, so
+// the extra pairs can only bring each nearer its fixed cost. A reading that is
+// not inverted is returned as it stands, whatever its marginal: an over-budget
+// reading is a verdict, and is never re-measured.
+func MeasureMarginalOverFloor(budget time.Duration, floor, gcSide func() time.Duration) FloorMeasurement {
+	var m FloorMeasurement
+	for m.Pairs < FloorMeasurementMaxPairs {
+		f := floor()
+		g := gcSide()
+		if m.Pairs == 0 || f < m.Floor {
+			m.Floor = f
+		}
+		if m.Pairs == 0 || g < m.GCSide {
+			m.GCSide = g
+		}
+		m.Pairs++
+		if m.Pairs < FloorMeasurementMinPairs {
+			continue
+		}
+		marginal, err := MarginalOverFloor(m.GCSide, m.Floor, budget)
+		m.Marginal, m.Inverted = marginal, err != nil
+		if !m.Inverted {
+			return m
+		}
+	}
+	return m
 }
 
 // Reset discards the trace so a measurement can be attributed to one step of a

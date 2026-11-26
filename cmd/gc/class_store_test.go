@@ -10,29 +10,20 @@ import (
 	"github.com/gastownhall/gascity/internal/molecule"
 )
 
-// controllerClassAccessor names a controllerState per-class accessor for the
-// identity conformance table.
+// controllerClassAccessor names a controllerState per-class store read (a
+// Stores() class handle, unwrapped to compare store pointers) for the identity
+// conformance table.
 type controllerClassAccessor struct {
 	name string
 	got  func(cs *controllerState) beads.Store
 }
 
 var controllerCityClassAccessors = []controllerClassAccessor{
-	// graphBeadStore returns the strongly-typed beads.GraphStore; unwrap its
-	// embedded .Store so the identity check compares the underlying store pointer.
-	{"graphBeadStore", func(cs *controllerState) beads.Store { return cs.graphBeadStore().Store }},
-	// sessionsBeadStore returns the strongly-typed beads.SessionStore; unwrap its
-	// embedded .Store so the identity check compares the underlying store pointer.
-	{"sessionsBeadStore", func(cs *controllerState) beads.Store { return cs.sessionsBeadStore().Store }},
-	// mailBeadStore returns the strongly-typed beads.MailStore; unwrap its
-	// embedded .Store so the identity check compares the underlying store pointer.
-	{"mailBeadStore", func(cs *controllerState) beads.Store { return cs.mailBeadStore().Store }},
-	// nudgesBeadStore returns the strongly-typed beads.NudgesStore; unwrap its
-	// embedded .Store so the identity check compares the underlying store pointer.
-	{"nudgesBeadStore", func(cs *controllerState) beads.Store { return cs.nudgesBeadStore().Store }},
-	// ordersBeadStore returns the strongly-typed beads.OrdersStore; unwrap its
-	// embedded .Store so the identity check compares the underlying store pointer.
-	{"ordersBeadStore", func(cs *controllerState) beads.Store { return cs.ordersBeadStore("").Store }},
+	{"Stores().Graph()", func(cs *controllerState) beads.Store { return cs.Stores().Graph().Store }},
+	{"Stores().Sessions()", func(cs *controllerState) beads.Store { return cs.Stores().Sessions().Store }},
+	{"Stores().Mail()", func(cs *controllerState) beads.Store { return cs.Stores().Mail().Store }},
+	{"Stores().Nudges()", func(cs *controllerState) beads.Store { return cs.Stores().Nudges().Store }},
+	{"Stores().Orders()", func(cs *controllerState) beads.Store { return cs.Stores().Orders().Store }},
 	// cityWorkStore returns the strongly-typed beads.WorkStore; unwrap its embedded
 	// .Store so the identity check compares the underlying store pointer.
 	{"cityWorkStore", func(cs *controllerState) beads.Store { return cs.cityWorkStore().Store }},

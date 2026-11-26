@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -154,7 +155,7 @@ func TestWispGCWorkArmTakesOnlyWorkClassRootMolecules(t *testing.T) {
 	parent := stepless(t, e.rig, beads.Bead{Title: "parent molecule", Type: "molecule"})
 	child := stepless(t, e.rig, beads.Bead{Title: "child molecule", Type: "molecule", ParentID: parent.ID})
 	graphMarked := stepless(t, e.rig, beads.Bead{Title: "graph-marked molecule", Type: "molecule", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWisp}})
-	roots, err := enumerateWorkClassMoleculeRoots(e.rig, "open", "in_progress")
+	roots, err := enumerateWorkClassMoleculeRoots(beadstest.FederatedLeg(e.rig), "open", "in_progress")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +193,7 @@ func (s templateLeakingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 // both-tiers read would include are never candidates.
 func TestWispGCWorkArmReadsTheIssuesTierOnly(t *testing.T) {
 	store := templateLeakingStore{MemStore: beads.NewMemStore(), proto: beads.Bead{ID: "proto-1", Title: "mol-proto", Type: "molecule", Status: "closed"}}
-	roots, err := enumerateWorkClassMoleculeRoots(store, "closed")
+	roots, err := enumerateWorkClassMoleculeRoots(beadstest.FederatedLeg(store), "closed")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +258,7 @@ func TestWispGCPurgeRefusalIsNotChargedToTheCap(t *testing.T) {
 		}
 	}
 	_ = held
-	entries, err := closedWispGCEntries(store)
+	entries, err := closedWispGCEntries(beadstest.FederatedLeg(store))
 	if err != nil {
 		t.Fatal(err)
 	}

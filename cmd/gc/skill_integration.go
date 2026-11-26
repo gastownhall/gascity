@@ -15,98 +15,103 @@ import (
 
 const sharedSkillCatalogSnapshotEnvVar = "GC_SHARED_SKILL_CATALOG_SNAPSHOT"
 
-// canStage1Materialize reports whether stage-1 skill materialization
-// (supervisor-tick-level writes into the agent's scope root) should
-// run for this agent. Stage 1 happens in the gc controller process on
-// the host filesystem, so it requires only that the agent's runtime
-// be able to SEE that filesystem path — not that it execute
-// PreStart.
-//
-//	tmux, subprocess → eligible. Scope root on the host; agent reads
-//	                   files from that host filesystem.
-//	""               → eligible (workspace default is tmux).
-//	herdr            → eligible. Agents run on the host with the same
-//	                   filesystem view as tmux, so scope-root files are
-//	                   exactly what they read.
-//	acp              → ineligible. In-process agent; scope-root files
-//	                   aren't what it reads from.
-//	k8s              → ineligible. Agent runs in a pod that doesn't
-//	                   share the host scope root.
-//	hybrid           → ineligible in v0.15.1 (per-session routing
-//	                   decides at spawn time whether the session
-//	                   goes local-tmux or remote-k8s; can't predict
-//	                   at supervisor tick without the session name).
-//
-// Separate from isStage2EligibleSession (which gates PreStart
-// injection and has a stricter "runtime actually executes PreStart"
-// requirement). A PR to add PreStart support to the subprocess
-// runtime will collapse the two predicates in a future release.
-func canStage1Materialize(citySessionProvider string, agent *config.Agent) bool {
-	if agent == nil {
-		return false
-	}
-	if agent.Session == "acp" {
-		return false
-	}
-	switch strings.TrimSpace(citySessionProvider) {
-	case "", "tmux", "subprocess", "herdr":
-		return true
-	default:
-		return false
-	}
+// materializationRuntime is the city's session runtime as the skill and MCP
+// materialization gates see it: what the runtime guarantees about the
+// controller's host, read from its registry registration.
+type materializationRuntime struct {
+	// name is the [session] provider selection. Only the legacy admission
+	// path reads it (legacyStage1RuntimeNames, legacyStage2RuntimeNames).
+	name string
+	// host is what the selected runtime guarantees about the host.
+	host runtime.HostCapabilities
 }
 
-// isStage2EligibleSession reports whether skill materialization should
-// run for the given agent's session runtime. Per the skill-
-// materialization spec (§ "Stage 2 runtime gate") and the runtime
-// reality of which providers actually execute PreStart:
+// cityMaterializationRuntime returns the materialization view of cfg's
+// [session] provider.
+func cityMaterializationRuntime(cfg *config.City, cityPath string) materializationRuntime {
+	if cfg == nil {
+		return materializationRuntimeFor(nil, "", cityPath, "")
+	}
+	return materializationRuntimeFor(cfg, cfg.EffectiveCityName(), cityPath, cfg.Session.Provider)
+}
+
+// materializationRuntimeFor returns the materialization view of a session
+// runtime selection name, resolved against cfg's runtimes (the builtins plus
+// its pack-declared runtimes; a nil cfg has only the builtins). The name
+// resolves exactly as provider construction resolves it, so an unknown name
+// reports the tmux fallback it runs on. A city whose pack runtimes fail to
+// register reports no host capabilities: its config load already fails on
+// that (validatePackRuntimeRegistrations), and claiming nothing is the safe
+// reading meanwhile.
+func materializationRuntimeFor(cfg *config.City, cityName, cityPath, name string) materializationRuntime {
+	name = strings.TrimSpace(name)
+	reg, err := runtimeRegistryForCity(cfg)
+	if err != nil {
+		return materializationRuntime{name: name}
+	}
+	return materializationRuntime{name: name, host: reg.HostCapabilities(name, cityName, cityPath)}
+}
+
+// legacyStage1RuntimeNames and legacyStage2RuntimeNames are the selection
+// names the gates admitted before they were keyed on host capabilities
+// (gastownhall/gascity#9006 item 3a). They are the expand half of an
+// expand/contract migration: every name here already passes on its
+// registered capabilities alone, and the sets stay frozen until the contract
+// step deletes them. Never add a name — declare the runtime's
+// runtime.HostCapabilities at its registration (buildRuntimeRegistry).
+var (
+	legacyStage1RuntimeNames = map[string]bool{"": true, "tmux": true, "subprocess": true, "herdr": true}
+	legacyStage2RuntimeNames = map[string]bool{"": true, "tmux": true, "herdr": true}
+)
+
+// canStage1Materialize reports whether stage-1 skill/MCP materialization
+// (supervisor-tick-level writes into the agent's scope root) should run for
+// this agent. Stage 1 happens in the gc controller process on the host
+// filesystem, so it requires only that the agent's runtime read that host
+// filesystem — not that it execute PreStart. By registration today, tmux
+// (the default), subprocess, herdr and an exec runtime whose handshake
+// declares fs.host with locality=local guarantee it; acp, k8s, ssh:, hybrid
+// (whose sessions may route to k8s at spawn time) and every other exec
+// runtime do not.
 //
-//	tmux  → eligible. PreStart runs on the host via tmux/adapter.go
-//	        runPreStart before the tmux session is created.
-//	""    → eligible (workspace default maps to tmux).
-//	herdr → eligible. PreStart runs on the host via the herdr
-//	        provider's runPreStart before the agent is created
-//	        (internal/runtime/herdr/provider.go), mirroring tmux.
-//	        herdr agents run on the host with the same filesystem
-//	        view, so host-materialized skills/MCP are what they read.
-//	acp   → ineligible. Session runs in-process; out of scope v0.15.1.
-//	k8s   → ineligible. PreStart runs inside the pod; gc binary and
-//	        host skill paths aren't available there.
+// Separate from isStage2EligibleSession, which also requires the runtime to
+// execute PreStart on the host.
 //
-// The spec lists subprocess as eligible, but as of v0.15.1 the
-// subprocess runtime in internal/runtime/subprocess does NOT execute
-// cfg.PreStart — it only stages CopyFiles and overlay content before
-// exec'ing the command. Marking subprocess eligible would inject a
-// PreStart entry that never runs, silently dropping materialization.
-// The conservative fix is to exclude subprocess from eligibility here
-// until the subprocess runtime gains PreStart support (tracked as a
-// follow-up for Phase 4 / post-v0.15.1).
-//
-// Hybrid is also ineligible. A default-config hybrid city routes every
-// session to local tmux and would work, but once the user configures
-// RemoteMatch (or GC_HYBRID_REMOTE_MATCH), some sessions route to
-// k8s — and a host-side PreStart would execute on the controller box
-// instead of the pod, materializing into the wrong workdir.
-// Per-session routing-aware eligibility is Phase 4A work.
-//
-// Agent.Session == "acp" overrides the city-level session selector at
-// the per-agent level — even in a tmux city, an ACP agent is
-// ineligible because the session runs in-process.
-func isStage2EligibleSession(citySessionProvider string, agent *config.Agent) bool {
+// Agent.Session == "acp" overrides the city-level runtime per agent: an ACP
+// session runs in-process, and scope-root files aren't what it reads.
+func canStage1Materialize(rt materializationRuntime, agent *config.Agent) bool {
 	if agent == nil {
 		return false
 	}
 	if agent.Session == "acp" {
 		return false
 	}
-	switch strings.TrimSpace(citySessionProvider) {
-	case "", "tmux", "herdr":
-		return true
-	default:
-		// subprocess, k8s, acp, fake, fail, hybrid, exec:<script>, ...
-		// — all conservatively ineligible until individually verified.
+	return rt.host.SharesHostFilesystem || legacyStage1RuntimeNames[rt.name]
+}
+
+// isStage2EligibleSession reports whether stage-2 skill/MCP materialization
+// — delivered as a PreStart entry that writes into the session's work dir —
+// should run for the agent's session runtime (skill-materialization spec,
+// "Stage 2 runtime gate"). The runtime must both execute PreStart on the
+// host and read the host filesystem that entry writes into: a runtime that
+// skips PreStart silently drops materialization, and one whose agents read
+// another filesystem (a pod, a container) gets it in the wrong place. By
+// registration today, tmux (the default), herdr and an exec runtime whose
+// handshake declares fs.host with locality=local qualify; subprocess reads
+// the host filesystem but does not execute PreStart; hybrid does not
+// qualify because a configured RemoteMatch routes some sessions to k8s.
+//
+// Agent.Session == "acp" overrides the city-level runtime per agent: even in
+// a tmux city, an ACP agent is ineligible because the session runs
+// in-process.
+func isStage2EligibleSession(rt materializationRuntime, agent *config.Agent) bool {
+	if agent == nil {
 		return false
 	}
+	if agent.Session == "acp" {
+		return false
+	}
+	return (rt.host.SharesHostFilesystem && rt.host.RunsHostPreStart) || legacyStage2RuntimeNames[rt.name]
 }
 
 // agentScopeRoot returns the canonical absolute filesystem root into
@@ -368,12 +373,21 @@ func buildAssignedSkillsPromptFragment(
 // originTag is non-empty, each bullet trails with " *(origin)*" so
 // shared entries can show whether they came from the city pack, an
 // import binding, or a compatibility bootstrap pack. Descriptions are included when the
-// SKILL.md frontmatter provided one.
+// SKILL.md frontmatter provided one, and the frontmatter name when it differs
+// from the listed name.
 func writeSkillBullets(b *strings.Builder, entries []materialize.SkillEntry, originTag string) {
 	for _, e := range entries {
 		b.WriteString("- `")
 		b.WriteString(e.Name)
 		b.WriteString("`")
+		// An imported skill is listed under its binding-prefixed name, but
+		// its SKILL.md keeps the pack's name, and a provider that registers
+		// skills by frontmatter name loads it only under that one (#8501).
+		if fm := strings.TrimSpace(e.FrontmatterName); fm != "" && fm != e.Name {
+			b.WriteString(" (SKILL.md name: `")
+			b.WriteString(fm)
+			b.WriteString("`)")
+		}
 		if strings.TrimSpace(e.Description) != "" {
 			b.WriteString(" — ")
 			b.WriteString(strings.TrimSpace(e.Description))
