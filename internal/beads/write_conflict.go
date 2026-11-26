@@ -11,12 +11,15 @@ import (
 const (
 	// writeConflictClassSerialization is a Dolt/MySQL serialization conflict.
 	writeConflictClassSerialization = "serialization"
-	// writeConflictClassCAS is a *CASRetriesExhaustedError from the metadata
-	// compare-and-set emulation.
+	// writeConflictClassCAS is a lost compare-and-set round: a
+	// *CASRetriesExhaustedError from the metadata compare-and-set emulation,
+	// or the *PreconditionFailedError a lap of its loop retried.
 	writeConflictClassCAS = "cas"
 	// writeConflictClassTransient is any other error a store's retry loop
 	// treats as worth another attempt (a sqlite busy marker, a catalog
-	// prepare failure, an ambiguous bd connection failure).
+	// prepare failure, an ambiguous bd connection failure). It is also the
+	// class of a nil error, so a caller that has no conflict to name never
+	// reports serialization by default.
 	writeConflictClassTransient = "transient"
 )
 
@@ -24,7 +27,7 @@ const (
 // accepted for another attempt.
 func writeConflictClass(err error) string {
 	switch {
-	case IsCASRetriesExhausted(err):
+	case IsCASRetriesExhausted(err), IsPreconditionFailed(err):
 		return writeConflictClassCAS
 	case IsRetryableConflict(err):
 		return writeConflictClassSerialization
@@ -38,16 +41,20 @@ func writeConflictClass(err error) string {
 // the write ran and budget how many it may run. err is the final error;
 // retryable says whether the store's retry loop would have retried it, so an
 // error the loop gives up on at once (a permanent failure on the last lap)
-// is not reported as exhaustion. operation is a closed store-verb token and
-// id the bead the write targeted, empty when the write spans several.
-func recordWriteBudget(operation, id string, attempts, budget int, err error, retryable bool) {
+// is not reported as exhaustion. lastRetried is the error of the most recent
+// lap the loop retried: it names the class of a write that succeeded on its
+// last lap (err nil), since the loops retry transient and CAS conflicts as
+// well as serialization ones, and is ignored when err is set. operation is a
+// closed store-verb token and id the bead the write targeted, empty when the
+// write spans several.
+func recordWriteBudget(operation, id string, attempts, budget int, err error, retryable bool, lastRetried error) {
 	if attempts < budget {
 		return
 	}
 	switch {
 	case err == nil:
 		telemetry.RecordWriteConflict(context.Background(), operation, id,
-			writeConflictClassSerialization, telemetry.WriteConflictRecoveredFinal, attempts)
+			writeConflictClass(lastRetried), telemetry.WriteConflictRecoveredFinal, attempts)
 	case retryable:
 		telemetry.RecordWriteConflict(context.Background(), operation, id,
 			writeConflictClass(err), telemetry.WriteConflictExhausted, attempts)

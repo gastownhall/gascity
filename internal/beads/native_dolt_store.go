@@ -2689,11 +2689,16 @@ const (
 // conflicted, recovered-final when it succeeded only on that attempt.
 func retryOnNativeDoltSerializationConflict(operation, id string, attempt func() error) error {
 	attempts := 0
+	var lastFailed error
 	err := retryNativeDoltWrite(func() error {
 		attempts++
-		return attempt()
+		err := attempt()
+		if err != nil {
+			lastFailed = err
+		}
+		return err
 	}, isNativeDoltSerializationConflict)
-	recordWriteBudget(operation, id, attempts, nativeWriteAttempts, err, isNativeDoltSerializationConflict(err))
+	recordWriteBudget(operation, id, attempts, nativeWriteAttempts, err, isNativeDoltSerializationConflict(err), lastFailed)
 	return err
 }
 

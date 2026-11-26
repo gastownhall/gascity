@@ -346,7 +346,8 @@ func assertWriteConflictTelemetry(t *testing.T, reader *sdkmetric.ManualReader, 
 // recordWriteBudget reports only a write that ran to the end of its attempt
 // budget: silence below it (the last lap before the budget included), recovered
 // or exhausted at it, exhausted only for an error the retry loop itself would
-// have retried, and classed cas, serialization or transient by the error.
+// have retried, and classed cas, serialization or transient by the error (or,
+// for a write that recovered on its last attempt, by the last retried error).
 func TestRecordWriteBudgetDecisions(t *testing.T) {
 	const budget = 3
 	serialization := errors.New("Error 1213 (40001): serialization failure")
@@ -356,23 +357,28 @@ func TestRecordWriteBudgetDecisions(t *testing.T) {
 		attempts  int
 		err       error
 		retryable bool
+		retried   error  // the last retried lap's error, for a recovered write
 		outcome   string // empty: nothing is recorded
 		class     string // empty: not asserted
 	}{
-		{"first attempt succeeded", 1, nil, false, "", ""},
-		{"recovered before the last attempt", budget - 1, nil, false, "", ""},
-		{"recovered on the last attempt", budget, nil, false, "recovered-final", ""},
-		{"conflict before the last attempt", budget - 1, serialization, true, "", ""},
-		{"exhausted by a serialization conflict", budget, serialization, true, "exhausted", "serialization"},
-		{"exhausted by CAS retries", budget, cas, true, "exhausted", "cas"},
-		{"exhausted by another retryable error", budget, errors.New("failed to prepare catalog"), true, "exhausted", "transient"},
-		{"permanent failure on the last attempt", budget, errors.New("permission denied"), false, "", ""},
-		{"the retry loop's verdict decides, not the error text", budget, serialization, false, "", ""},
+		{"first attempt succeeded", 1, nil, false, nil, "", ""},
+		{"recovered before the last attempt", budget - 1, nil, false, serialization, "", ""},
+		{"recovered on the last attempt after serialization", budget, nil, false, serialization, "recovered-final", "serialization"},
+		{"recovered on the last attempt after a transient error", budget, nil, false, errors.New("database is locked"), "recovered-final", "transient"},
+		{"recovered on the last attempt after a lost CAS round", budget, nil, false, &PreconditionFailedError{Current: 2}, "recovered-final", "cas"},
+		{"recovered on the last attempt with no retried error", budget, nil, false, nil, "recovered-final", "transient"},
+		{"conflict before the last attempt", budget - 1, serialization, true, nil, "", ""},
+		{"exhausted by a serialization conflict", budget, serialization, true, nil, "exhausted", "serialization"},
+		{"exhausted by CAS retries", budget, cas, true, nil, "exhausted", "cas"},
+		{"exhausted by another retryable error", budget, errors.New("failed to prepare catalog"), true, nil, "exhausted", "transient"},
+		{"exhaustion ignores the retried error", budget, serialization, true, errors.New("database is locked"), "exhausted", "serialization"},
+		{"permanent failure on the last attempt", budget, errors.New("permission denied"), false, nil, "", ""},
+		{"the retry loop's verdict decides, not the error text", budget, serialization, false, nil, "", ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			reader := captureWriteConflictMetrics(t)
 			logged := captureWriteConflictLogs(t)
-			recordWriteBudget("update", "ga-1", tt.attempts, budget, tt.err, tt.retryable)
+			recordWriteBudget("update", "ga-1", tt.attempts, budget, tt.err, tt.retryable, tt.retried)
 			points := writeConflictPoints(t, reader)
 			warnings := writeConflictWarnings(logged)
 			if tt.outcome == "" {

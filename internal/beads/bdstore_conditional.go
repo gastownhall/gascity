@@ -486,7 +486,7 @@ func (s *BdStore) runConditionalWrite(id string, expectedRevision int64, args ..
 	for attempt := 1; ; attempt++ {
 		out, err := s.runner(s.dir, "bd", prefixed...)
 		if err == nil {
-			recordWriteBudget(verb+"_if_match", id, attempt, conditionalWriteMaxAttempts, nil, false)
+			recordWriteBudget(verb+"_if_match", id, attempt, conditionalWriteMaxAttempts, nil, false, lastErr)
 			return nil
 		}
 		lastOut, lastErr = out, err
@@ -494,7 +494,7 @@ func (s *BdStore) runConditionalWrite(id string, expectedRevision int64, args ..
 			break
 		}
 		if isBdTransientWriteError(err) && attempt >= conditionalWriteMaxAttempts {
-			recordWriteBudget(verb+"_if_match", id, attempt, conditionalWriteMaxAttempts, err, true)
+			recordWriteBudget(verb+"_if_match", id, attempt, conditionalWriteMaxAttempts, err, true, nil)
 		}
 		if isBdTransientWriteError(err) && attempt < conditionalWriteMaxAttempts {
 			if cur, getErr := s.Get(id); getErr == nil && cur.Revision != expectedRevision {
@@ -564,6 +564,7 @@ func (s *BdStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool
 	if capable, _ := s.conditionalWritesCapable(); !capable {
 		return false, ErrConditionalWriteUnsupported
 	}
+	var lastLoss error // the precondition the previous lap lost to, for telemetry
 	for attempt := 1; ; attempt++ {
 		b, err := s.Get(id)
 		if err != nil {
@@ -584,9 +585,10 @@ func (s *BdStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool
 		err = s.runConditionalWrite(id, b.Revision, args...)
 		switch {
 		case err == nil:
-			recordWriteBudget("set_metadata_cas", id, attempt, casEmulationMaxAttempts, nil, false)
+			recordWriteBudget("set_metadata_cas", id, attempt, casEmulationMaxAttempts, nil, false, lastLoss)
 			return true, nil
 		case IsPreconditionFailed(err):
+			lastLoss = err
 			// The revision moved under us; re-read and re-check the value next
 			// lap. On the final lap, one more read distinguishes the outcomes
 			// before the exhaustion verdict: the interfering write may have
@@ -600,7 +602,7 @@ func (s *BdStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool
 				exhausted := &CASRetriesExhaustedError{
 					ID: id, Key: key, Attempts: attempt, LastRevision: b.Revision,
 				}
-				recordWriteBudget("set_metadata_cas", id, attempt, casEmulationMaxAttempts, exhausted, true)
+				recordWriteBudget("set_metadata_cas", id, attempt, casEmulationMaxAttempts, exhausted, true, nil)
 				return false, exhausted
 			}
 			conditionalWriteSleep(conditionalWriteBackoff(attempt))

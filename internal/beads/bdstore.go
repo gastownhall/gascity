@@ -2564,16 +2564,17 @@ func (s *BdStore) runBDTransientReleaseOutput(args ...string) ([]byte, error) {
 }
 
 func (s *BdStore) runBDTransientWriteOutputWhen(shouldRetry func(error) bool, args ...string) ([]byte, error) {
-	var err error
+	var err, retried error
 	var out []byte
 	operation, id := bdWriteTarget(args)
 	args = s.bdTransientWriteArgs(args)
 	for attempt := 1; attempt <= bdTransientWriteAttempts; attempt++ {
 		out, err = s.runner(s.dir, "bd", args...)
 		if err == nil || !shouldRetry(err) || attempt == bdTransientWriteAttempts {
-			recordWriteBudget(operation, id, attempt, bdTransientWriteAttempts, err, err != nil && shouldRetry(err))
+			recordWriteBudget(operation, id, attempt, bdTransientWriteAttempts, err, err != nil && shouldRetry(err), retried)
 			return out, err
 		}
+		retried = err
 		time.Sleep(time.Duration(attempt) * 25 * time.Millisecond)
 	}
 	return out, err
