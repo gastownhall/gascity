@@ -45,8 +45,9 @@ type reapReport struct {
 
 // reapClosedBeadWorktrees discovers per-bead git worktrees under
 // <worktrees root>/<rig>/, the configured worktrees root
-// (workdir.WorktreesRoot), and removes any whose associated bead is closed
-// and that pass every safety gate. It returns a reapReport describing what was
+// (workdir.WorktreesRoot), and under <rig path>/worktrees/ (where formulas that
+// run a raw `git worktree add` leave them), and removes any whose associated
+// bead is closed and that pass every safety gate. It returns a reapReport describing what was
 // reaped and what was protected.
 //
 // Discovery is authoritative at any nesting depth: for each rig it runs
@@ -154,7 +155,14 @@ func reapClosedBeadWorktrees(
 			// owning repository, so we cannot safely enumerate or remove.
 			continue
 		}
-		rigWorktreeDir := filepath.Join(wtRoot, rigName)
+		// The two places per-bead worktrees live: the city's
+		// .gc/worktrees/<rig>/ tree, and <rig>/worktrees/, where formulas that
+		// run a raw `git worktree add` leave them. Each carries the boundary
+		// it must stay strictly under (defense in depth).
+		scanRoots := []reapScanRoot{
+			{dir: filepath.Join(wtRoot, rigName), boundary: wtRoot},
+			{dir: filepath.Join(rigRoot, "worktrees"), boundary: rigRoot},
+		}
 
 		// discoverWorktreeLiveness is the single shared scan: it enumerates
 		// every worktree git knows about for this rig — including ones
@@ -182,15 +190,11 @@ func reapClosedBeadWorktrees(
 		for _, wt := range worktreeLivenessResults {
 			worktreePath := wt.Path
 
-			// Only per-bead worktrees under this rig's .gc/worktrees/<rig>/
-			// subtree are in scope. This excludes the rig's main working tree
-			// and any worktree checked out elsewhere.
-			if !pathutil.PathWithin(rigWorktreeDir, worktreePath) || pathutil.SamePath(rigWorktreeDir, worktreePath) {
-				continue
-			}
-			// Defense in depth: never act on a path that is not strictly under
-			// the city worktree root.
-			if !isStrictlyUnderDir(wtRoot, worktreePath) {
+			// Only per-bead worktrees under one of the rig's two scan roots
+			// are in scope. This excludes the rig's main working tree and any
+			// worktree checked out elsewhere.
+			scope, inScope := scanRootFor(scanRoots, worktreePath)
+			if !inScope {
 				continue
 			}
 
@@ -202,7 +206,7 @@ func reapClosedBeadWorktrees(
 			}
 
 			// Resolve which bead this worktree belongs to from its path.
-			beadID := extractBeadIDFromWorktreePath(cfg, rigWorktreeDir, worktreePath)
+			beadID := extractBeadIDFromWorktreePath(cfg, scope.dir, worktreePath)
 			if beadID == "" {
 				continue
 			}
@@ -378,6 +382,26 @@ func reapClosedBeadWorktrees(
 		}
 	}
 	return report
+}
+
+// reapScanRoot is a directory whose per-bead worktrees the reaper may act on.
+// boundary is an ancestor of dir that no candidate path may escape.
+type reapScanRoot struct {
+	dir      string
+	boundary string
+}
+
+// scanRootFor returns the scan root worktreePath is strictly inside, and
+// whether there is one. A path equal to a root's dir is not inside it, and a
+// path that is not strictly under that root's boundary is never in scope.
+func scanRootFor(roots []reapScanRoot, worktreePath string) (reapScanRoot, bool) {
+	for _, r := range roots {
+		if pathutil.PathWithin(r.dir, worktreePath) && !pathutil.SamePath(r.dir, worktreePath) &&
+			isStrictlyUnderDir(r.boundary, worktreePath) {
+			return r, true
+		}
+	}
+	return reapScanRoot{}, false
 }
 
 // reapCandidate is a worktree that survived the closed-bead check and the
