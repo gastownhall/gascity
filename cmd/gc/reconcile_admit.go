@@ -96,10 +96,13 @@ const (
 	causeAwaitingBudget = "awaiting-budget"
 	causeCityCap        = "city-cap"
 	causeEndpointGate   = "endpoint-gate"
-	causeCreateCap      = "create-cap"
-	causeFairShare      = "fair-share"
-	causeProbeCap       = "probe-cap"
-	causeRowWriteCap    = "row-write-cap"
+	// causeSessionCapacity defers a start whose row a repeat capacity
+	// refusal backed off (endpointView.SessionBackoff).
+	causeSessionCapacity = "session-capacity"
+	causeCreateCap       = "create-cap"
+	causeFairShare       = "fair-share"
+	causeProbeCap        = "probe-cap"
+	causeRowWriteCap     = "row-write-cap"
 	// causeFinalizePrefix prefixes the cause of a refusal the stop verb's
 	// finalize records (C6b2): a finalize waits on its own backoff only.
 	causeFinalizePrefix = "finalize/"
@@ -405,6 +408,10 @@ func (a *admission) admitOne(it *intent) string {
 	}
 	switch spec.class {
 	case capStarts:
+		if until := a.in.Endpoints[it.Endpoint].SessionBackoff[it.Key.ID]; until.After(a.in.Now) {
+			a.nextBackoff = earliest(a.nextBackoff, until)
+			return causeSessionCapacity
+		}
 		held, cause := a.startCause(it.Key, it.Endpoint, a.bucket.Tokens, 0)
 		if a.starved = a.starved || cause == causeAwaitingBudget; cause != "" {
 			return cause

@@ -57,6 +57,8 @@ type capacityEnv struct {
 	// log collects stdout and stderr; async start goroutines write to it
 	// concurrently with the executor.
 	log syncBuffer
+	// outside numbers outsideSession's IDs.
+	outside int
 }
 
 func newCapacityEnv(t *testing.T, guarded bool, templates ...string) *capacityEnv {
@@ -146,12 +148,28 @@ func (e *capacityEnv) breakerStatus(k endpointKey) resilience.Status {
 // capacityTestEndpoint is the endpoint every "e"-upstream test session uses.
 const capacityTestEndpoint endpointKey = "upstream:e"
 
+// outsideSession is a session ID that belongs to no test session and has
+// never been refused, so its refusal is a first refusal that trips the
+// breaker rather than a session repeat (capacitySessionRepeatWindow).
+func (e *capacityEnv) outsideSession() string {
+	e.outside++
+	return fmt.Sprintf("outside-%d", e.outside)
+}
+
+// liftSessionBackoff advances the clock past sessionID's own capacity
+// backoff, if a repeat refusal set one.
+func (e *capacityEnv) liftSessionBackoff(sessionID string) {
+	if until, held := e.guard.SessionBackoff(capacityTestEndpoint, sessionID); held {
+		e.clk.Advance(until.Sub(e.clk.Now()))
+	}
+}
+
 // openEndpoint trips capacityTestEndpoint with one refusal that belongs to no
 // test session.
 func (e *capacityEnv) openEndpoint(t *testing.T) {
 	t.Helper()
 	const k = capacityTestEndpoint
-	ticket, ok := e.guard.Admit(k, "outside", "outside")
+	ticket, ok := e.guard.Admit(k, e.outsideSession(), "outside")
 	if !ok {
 		t.Fatalf("Admit(%s) denied while closed", k)
 	}
@@ -167,7 +185,7 @@ func (e *capacityEnv) reopen(t *testing.T) {
 	t.Helper()
 	const k = capacityTestEndpoint
 	e.makeProbeDue()
-	ticket, ok := e.guard.Admit(k, "outside", "outside")
+	ticket, ok := e.guard.Admit(k, e.outsideSession(), "outside")
 	if !ok || !ticket.probe {
 		t.Fatalf("Admit(%s) = (%v, probe %v), want the due probe", k, ok, ticket != nil && ticket.probe)
 	}
@@ -674,11 +692,17 @@ func refuseAt(t *testing.T, e *capacityEnv, sessionID, template string) bool {
 	return valve
 }
 
+// replacement is the ID of the ith replacement bead of a template. The valve
+// judges a template by its sessions' first refusals: a repeat refusal of one
+// session backs off that session instead (capacitySessionRepeatWindow), so
+// these tests refuse a fresh bead each time.
+func replacement(template string, i int) string { return fmt.Sprintf("%s-%d", template, i) }
+
 func TestCommitStartResult_CapacityValveReturnsSessionToLegacyAfterPeerSuccesses(t *testing.T) {
 	t.Run("outage refusals never count", func(t *testing.T) {
 		e := newCapacityEnv(t, true)
 		for i := 0; i < 2*capacityBackstopRefusals; i++ {
-			if refuseAt(t, e, "s", "s") {
+			if refuseAt(t, e, replacement("s", i), "s") {
 				t.Fatalf("valve tripped on outage refusal %d with no success anywhere", i+1)
 			}
 		}
@@ -688,7 +712,7 @@ func TestCommitStartResult_CapacityValveReturnsSessionToLegacyAfterPeerSuccesses
 		e := newCapacityEnv(t, true)
 		for i := 0; i < capacityBackstopCloses-1; i++ {
 			peerSuccess(t, e)
-			if refuseAt(t, e, "other", "other") || refuseAt(t, e, "s", "s") {
+			if refuseAt(t, e, replacement("other", i), "other") || refuseAt(t, e, replacement("s", i), "s") {
 				t.Fatalf("valve tripped on round %d although another template was refused too", i+1)
 			}
 		}
@@ -700,7 +724,7 @@ func TestCommitStartResult_CapacityValveReturnsSessionToLegacyAfterPeerSuccesses
 		// count, so the valve is one refusal short.
 		for i := 0; i < capacityValveThreshold; i++ {
 			peerSuccess(t, e)
-			if refuseAt(t, e, "s", "s") {
+			if refuseAt(t, e, replacement("s", i), "s") {
 				t.Fatalf("valve tripped on refusal %d; the first refusal must not count", i+1)
 			}
 		}
@@ -713,7 +737,7 @@ func TestCommitStartResult_CapacityValveReturnsSessionToLegacyAfterPeerSuccesses
 			if i > 0 {
 				peerSuccess(t, e)
 			}
-			if refuseAt(t, e, c.info.ID, "s") {
+			if refuseAt(t, e, replacement("s", i), "s") {
 				t.Fatalf("valve tripped early on refusal %d", i+1)
 			}
 		}
@@ -734,18 +758,21 @@ func TestCommitStartResult_CapacityValveReturnsSessionToLegacyAfterPeerSuccesses
 		}
 	})
 
-	t.Run("two poisoned seats of one template are valved", func(t *testing.T) {
+	t.Run("two poisoned seats of one template are paced, not valved", func(t *testing.T) {
+		// Each seat's first refusal reaches the valve; its repeats back off
+		// the seat alone and never count as its failures.
 		e := newCapacityEnv(t, true)
 		seats := []string{"seat-1", "seat-2"}
-		tripped := -1
-		for i := 0; i < 2*capacityValveThreshold+2 && tripped < 0; i++ {
+		for i := 0; i < 2*capacityValveThreshold+2; i++ {
 			peerSuccess(t, e)
-			if refuseAt(t, e, seats[i%2], "pool") {
-				tripped = i
+			seat := seats[i%2]
+			e.liftSessionBackoff(seat)
+			if refuseAt(t, e, seat, "pool") {
+				t.Fatalf("valve tripped on refusal %d of a seat's repeats", i+1)
 			}
-		}
-		if tripped < 0 {
-			t.Fatal("two always-refused seats of one template masked each other; the valve never tripped")
+			if _, held := e.guard.SessionBackoff(capacityTestEndpoint, seat); i >= 2 && !held {
+				t.Fatalf("refusal %d: %s not backed off after a repeat refusal", i+1, seat)
+			}
 		}
 	})
 
@@ -771,12 +798,12 @@ func TestCommitStartResult_CapacityValveReturnsSessionToLegacyAfterPeerSuccesses
 			if i > 0 {
 				peerSuccess(t, e)
 			}
-			refuseAt(t, e, "s", "s")
+			refuseAt(t, e, replacement("s", i), "s")
 		}
-		succeedAs(t, e, "s2", "s") // another seat of the template got in
+		succeedAs(t, e, "s-ok", "s") // another seat of the template got in
 		for i := 0; i < capacityValveThreshold; i++ {
 			peerSuccess(t, e)
-			if refuseAt(t, e, "s", "s") {
+			if refuseAt(t, e, replacement("s-after", i), "s") {
 				t.Fatalf("valve tripped on refusal %d after the template's own success", i+1)
 			}
 		}
@@ -788,10 +815,10 @@ func TestCommitStartResult_CapacityValveReturnsSessionToLegacyAfterPeerSuccesses
 			peerSuccess(t, e) // the probe closes the endpoint
 			// Admitted while closed, "herd" is part of the herd a close lets
 			// in; "other" then takes the due probe.
-			if refuseAt(t, e, "herd", "herd") {
+			if refuseAt(t, e, replacement("herd", i), "herd") {
 				t.Fatalf("valve tripped on round %d for a template refused only as part of the herd", i+1)
 			}
-			refuseAt(t, e, "other", "other")
+			refuseAt(t, e, replacement("other", i), "other")
 		}
 	})
 
@@ -804,7 +831,7 @@ func TestCommitStartResult_CapacityValveReturnsSessionToLegacyAfterPeerSuccesses
 		for i := 0; i < 2*capacityValveThreshold+2; i++ {
 			peerSuccess(t, e) // the probe closes the endpoint
 			other := fmt.Sprintf("other-%d", i)
-			s, ok := e.guard.Admit(capacityTestEndpoint, "s", "s")
+			s, ok := e.guard.Admit(capacityTestEndpoint, replacement("s", i), "s")
 			o, ok2 := e.guard.Admit(capacityTestEndpoint, other, other)
 			if !ok || !ok2 || s.probe || o.probe {
 				t.Fatalf("round %d: herd not admitted while closed", i+1)
@@ -825,8 +852,8 @@ func TestCommitStartResult_CapacityValveReturnsSessionToLegacyAfterPeerSuccesses
 		tripped := false
 		for i := 0; i < 2*capacityBackstopRefusals && !tripped; i++ {
 			peerSuccess(t, e)
-			refuseAt(t, e, "other", "other") // other templates are refused too
-			tripped = refuseAt(t, e, "bad", "bad")
+			refuseAt(t, e, replacement("other", i), "other") // other templates are refused too
+			tripped = refuseAt(t, e, replacement("bad", i), "bad")
 		}
 		if !tripped {
 			t.Fatal("a template refused on every attempt while others got in was never valved")
@@ -885,13 +912,13 @@ func TestEndpointCapacityGuard_ValveHistoryExpires(t *testing.T) {
 		if i > 0 {
 			peerSuccess(t, e)
 		}
-		refuseAt(t, e, "s", "s")
+		refuseAt(t, e, replacement("s", i), "s")
 	}
 	// One counted refusal short of tripping; after a quiet hour the history
 	// is gone and the next refusal is a first refusal again.
 	e.clk.Advance(capacityValveMemory + time.Minute)
 	peerSuccess(t, e)
-	if refuseAt(t, e, "s", "s") {
+	if refuseAt(t, e, replacement("s", capacityValveThreshold), "s") {
 		t.Fatal("valve tripped on a refusal after the history expired")
 	}
 }
@@ -1896,13 +1923,18 @@ func TestCommitStartResult_CapacityRestoreKeepsContinuationEpoch(t *testing.T) {
 	}
 }
 
+// capacityTestForgetAfter is when an endpoint opened by one session's refusal
+// and then unused is forgotten: once capacityEndpointForgetAfter passed and
+// the refusal aged out of capacitySessionRepeatWindow.
+const capacityTestForgetAfter = max(capacityEndpointForgetAfter, capacitySessionRepeatWindow)
+
 func TestEndpointCapacity_ForgetsEndpointsNoSessionUses(t *testing.T) {
 	e := newCapacityEnv(t, true)
 	e.openEndpoint(t)
-	e.clk.Advance(capacityEndpointForgetAfter - time.Second)
+	e.clk.Advance(capacityTestForgetAfter - time.Second)
 	e.guard.recordTick(e.trace, e.rec, &e.log)
 	if len(e.guard.Snapshot()) != 1 {
-		t.Fatal("endpoint forgotten before capacityEndpointForgetAfter")
+		t.Fatal("endpoint forgotten before capacityEndpointForgetAfter and the session repeat window")
 	}
 
 	e.clk.Advance(2 * time.Second)
@@ -1932,7 +1964,7 @@ func TestEndpointCapacity_KeepsEndpointsSessionsStillUse(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newCapacityEnv(t, true)
 			e.openEndpoint(t)
-			e.clk.Advance(capacityEndpointForgetAfter - time.Minute)
+			e.clk.Advance(capacityTestForgetAfter - time.Minute)
 			tc.lookup(e.guard)
 			e.clk.Advance(2 * time.Minute)
 
@@ -1942,6 +1974,47 @@ func TestEndpointCapacity_KeepsEndpointsSessionsStillUse(t *testing.T) {
 				t.Fatalf("endpoint forgotten although a session looked it up %s ago", time.Minute)
 			}
 		})
+	}
+}
+
+// TestEndpointCapacity_KeepsEndpointsWithRecentSessionRefusals pins that an
+// idle endpoint is not forgotten while a session's refusal history is inside
+// capacitySessionRepeatWindow: forgetting it would turn that session's next
+// refusal into a first refusal that trips the breaker again.
+func TestEndpointCapacity_KeepsEndpointsWithRecentSessionRefusals(t *testing.T) {
+	const k = capacityTestEndpoint
+	if capacitySessionRepeatWindow <= capacityEndpointForgetAfter {
+		t.Skipf("repeat window %s does not outlast the forget delay %s", capacitySessionRepeatWindow, capacityEndpointForgetAfter)
+	}
+	e := newCapacityEnv(t, true)
+	first, ok := e.guard.Admit(k, "boss", "boss")
+	if !ok {
+		t.Fatal("first admission denied on a closed endpoint")
+	}
+	first.Resolve(verdictCapacity)
+
+	e.clk.Advance(capacityEndpointForgetAfter + time.Second)
+	e.guard.recordTick(e.trace, e.rec, &e.log)
+	if len(e.guard.Snapshot()) != 1 {
+		t.Fatal("endpoint forgotten while a session's refusal was inside the repeat window")
+	}
+	e.makeProbeDue()
+	repeat, ok := e.guard.Admit(k, "boss", "boss")
+	if !ok {
+		t.Fatal("repeat admission denied")
+	}
+	repeat.Resolve(verdictCapacity)
+	if !repeat.sessionRepeat {
+		t.Fatal("refusal inside the repeat window after an idle forget delay was read as a first refusal")
+	}
+	if st := e.breakerStatus(k); st.Trips != 1 {
+		t.Fatalf("breaker trips = %d, want 1", st.Trips)
+	}
+
+	e.clk.Advance(capacitySessionRepeatWindow + time.Second)
+	e.guard.recordTick(e.trace, e.rec, &e.log)
+	if snap := e.guard.Snapshot(); len(snap) != 0 {
+		t.Fatalf("Snapshot() = %+v, want the endpoint forgotten once the history aged out", snap)
 	}
 }
 
@@ -1987,11 +2060,363 @@ func TestCapacityRefusal_TickDuringTheStartAccruesNoChurn(t *testing.T) {
 				boot, got.Status, got.Metadata["state"], got.Metadata["sleep_reason"], got.Metadata["last_woke_at"])
 		}
 		e.makeProbeDue()
+		e.liftSessionBackoff(c.info.ID) // later boots repeat the session's refusal
 	}
 	if n := startupHealthCount(t, e.store, "s"); n != 0 {
 		t.Fatalf("startup-health count = %d, want 0", n)
 	}
 	if woken := e.start(context.Background(), e.refreshed(c)); woken != 1 || !e.sp.IsRunning("s") {
 		t.Fatalf("the start after the refusal lifts woke %d, running %v; want the seat back\nlog %q", woken, e.sp.IsRunning("s"), e.log.String())
+	}
+}
+
+// TestEndpointCapacityGuard_SessionRepeatBacksOffSessionNotEndpoint is the
+// guard-level contract of capacitySessionRepeatWindow: a session's first
+// refusal trips the endpoint breaker, a repeat of that session's refusal
+// neither opens nor extends it and backs off the session alone, and a
+// different session's first refusal is the endpoint's capacity signal again.
+func TestEndpointCapacityGuard_SessionRepeatBacksOffSessionNotEndpoint(t *testing.T) {
+	const k = capacityTestEndpoint
+	e := newCapacityEnv(t, true)
+
+	t.Run("first refusal trips the breaker", func(t *testing.T) {
+		first, ok := e.guard.Admit(k, "boss", "boss")
+		if !ok {
+			t.Fatal("first admission denied on a closed endpoint")
+		}
+		if first.Resolve(verdictCapacity) || first.sessionRepeat {
+			t.Fatalf("first refusal: valve=%v repeat=%v, want a plain capacity refusal", first.valve, first.sessionRepeat)
+		}
+		if st := e.breakerStatus(k); st.State != resilience.StateOpen || st.Trips != 1 {
+			t.Fatalf("breaker = %v trips=%d, want open after the session's first refusal", st.State, st.Trips)
+		}
+		if _, held := e.guard.SessionBackoff(k, "boss"); held {
+			t.Fatal("a first refusal backed off the session; the breaker paces it")
+		}
+	})
+
+	t.Run("repeat refusal leaves the breaker alone", func(t *testing.T) {
+		e.makeProbeDue()
+		repeat, ok := e.guard.Admit(k, "boss", "boss")
+		if !ok || !repeat.probe {
+			t.Fatalf("Admit = (%v, probe %v), want the due probe", ok, repeat != nil && repeat.probe)
+		}
+		before := e.breakerStatus(k)
+		if repeat.Resolve(verdictCapacity) {
+			t.Fatal("a session repeat tripped the poison valve")
+		}
+		after := e.breakerStatus(k)
+		if !repeat.sessionRepeat || after.State == resilience.StateOpen || after.Trips != before.Trips || after.BackoffCap != before.BackoffCap {
+			t.Fatalf("repeat=%v breaker %v→%v trips %d→%d cap %s→%s, want the breaker neither opened nor extended",
+				repeat.sessionRepeat, before.State, after.State, before.Trips, after.Trips, before.BackoffCap, after.BackoffCap)
+		}
+		until, held := e.guard.SessionBackoff(k, "boss")
+		if !held || !until.Equal(e.clk.Now().Add(capacitySessionBackoffBase)) || !repeat.sessionBackoffUntil.Equal(until) {
+			t.Fatalf("SessionBackoff = (%s, %v), ticket until %s, want held for %s", until, held, repeat.sessionBackoffUntil, capacitySessionBackoffBase)
+		}
+	})
+
+	t.Run("held session never takes the probe", func(t *testing.T) {
+		if _, ok := e.guard.Admit(k, "boss", "boss"); ok {
+			t.Fatal("a backed-off session was admitted")
+		}
+		peer, ok := e.guard.Admit(k, "peer", "peer")
+		if !ok || !peer.probe {
+			t.Fatalf("Admit(peer) = (%v, probe %v), want the probe the held session left free", ok, peer != nil && peer.probe)
+		}
+		peer.Resolve(verdictSuccess)
+		if st := e.breakerStatus(k); st.State != resilience.StateClosed {
+			t.Fatalf("breaker = %v after the peer's success, want closed", st.State)
+		}
+		if _, held := e.guard.SessionBackoff(k, "boss"); !held {
+			t.Fatal("another session's success lifted the held session's own backoff")
+		}
+	})
+
+	t.Run("different session's first refusal trips again", func(t *testing.T) {
+		other, ok := e.guard.Admit(k, "other", "other")
+		if !ok {
+			t.Fatal("other session denied on a closed endpoint")
+		}
+		other.Resolve(verdictCapacity)
+		if other.sessionRepeat {
+			t.Fatal("another session's first refusal was read as a repeat")
+		}
+		if st := e.breakerStatus(k); st.State != resilience.StateOpen || st.Trips != 2 {
+			t.Fatalf("breaker = %v trips=%d, want open again on a different session's first refusal", st.State, st.Trips)
+		}
+	})
+}
+
+func TestEndpointCapacityGuard_SessionBackoffDoublesToCap(t *testing.T) {
+	want := []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 4 * time.Minute, 5 * time.Minute, 5 * time.Minute}
+	for i, w := range want {
+		if got := capacitySessionBackoff(i + 1); got != w {
+			t.Errorf("capacitySessionBackoff(%d) = %s, want %s", i+1, got, w)
+		}
+	}
+	if capacitySessionRepeatWindow <= capacitySessionBackoffMax {
+		t.Fatalf("repeat window %s must outlast the backoff cap %s, or a held session's next refusal would trip the breaker", capacitySessionRepeatWindow, capacitySessionBackoffMax)
+	}
+
+	const k = capacityTestEndpoint
+	e := newCapacityEnv(t, true)
+	for i := 0; i <= len(want); i++ {
+		e.liftSessionBackoff("boss")
+		ticket, ok := e.guard.Admit(k, "boss", "boss")
+		if !ok {
+			// The first refusal opened the breaker; a repeat never re-opens it.
+			e.makeProbeDue()
+			if ticket, ok = e.guard.Admit(k, "boss", "boss"); !ok {
+				t.Fatalf("refusal %d: admission denied after the backoff lifted", i+1)
+			}
+		}
+		ticket.Resolve(verdictCapacity)
+		if i == 0 {
+			continue
+		}
+		until, held := e.guard.SessionBackoff(k, "boss")
+		if !held || until.Sub(e.clk.Now()) != want[min(i-1, len(want)-1)] {
+			t.Fatalf("repeat %d: backoff %s held=%v, want %s", i, until.Sub(e.clk.Now()), held, want[min(i-1, len(want)-1)])
+		}
+	}
+	if st := e.breakerStatus(k); st.Trips != 1 {
+		t.Fatalf("breaker trips = %d after one first refusal and %d repeats, want 1", st.Trips, len(want))
+	}
+}
+
+func TestEndpointCapacityGuard_SessionRepeatHistoryEnds(t *testing.T) {
+	const k = capacityTestEndpoint
+	refuse := func(t *testing.T, e *capacityEnv, sessionID string) *capacityTicket {
+		t.Helper()
+		e.liftSessionBackoff(sessionID)
+		if e.breakerStatus(k).State != resilience.StateClosed {
+			e.makeProbeDue()
+		}
+		ticket, ok := e.guard.Admit(k, sessionID, "boss")
+		if !ok {
+			t.Fatalf("admission for %s denied", sessionID)
+		}
+		ticket.Resolve(verdictCapacity)
+		return ticket
+	}
+
+	t.Run("quiet window", func(t *testing.T) {
+		e := newCapacityEnv(t, true)
+		refuse(t, e, "boss")
+		e.clk.Advance(capacitySessionRepeatWindow + time.Second)
+		if refuse(t, e, "boss").sessionRepeat {
+			t.Fatal("a refusal after a quiet repeat window was read as a repeat")
+		}
+		if !e.guard.HoldsSessionPendingCreate(k, "boss") {
+			t.Fatal("the fresh refusal left no history for the pending-create hold")
+		}
+	})
+
+	t.Run("own success", func(t *testing.T) {
+		e := newCapacityEnv(t, true)
+		refuse(t, e, "boss")
+		refuse(t, e, "boss")
+		e.liftSessionBackoff("boss")
+		e.makeProbeDue()
+		succeedAs(t, e, "boss", "boss")
+		if _, held := e.guard.SessionBackoff(k, "boss"); held {
+			t.Fatal("the session's own success left it backed off")
+		}
+		if refuse(t, e, "boss").sessionRepeat {
+			t.Fatal("a refusal after the session's own success was read as a repeat")
+		}
+	})
+
+	t.Run("no session id", func(t *testing.T) {
+		e := newCapacityEnv(t, true)
+		refuse(t, e, "")
+		if refuse(t, e, "").sessionRepeat {
+			t.Fatal("a refusal tied to no session was read as a repeat")
+		}
+		if st := e.breakerStatus(k); st.Trips != 2 {
+			t.Fatalf("breaker trips = %d, want every untied refusal to trip it", st.Trips)
+		}
+	})
+}
+
+func TestEndpointCapacityGuard_SessionRefusalsHoldPendingCreate(t *testing.T) {
+	const k = capacityTestEndpoint
+	e := newCapacityEnv(t, true)
+	if e.guard.HoldsSessionPendingCreate(k, "boss") {
+		t.Fatal("an endpoint never refused held a pending create")
+	}
+	ticket, _ := e.guard.Admit(k, "boss", "boss")
+	ticket.Resolve(verdictCapacity)
+	e.makeProbeDue()
+	succeedAs(t, e, "peer", "peer")
+	e.clk.Advance(pendingCreateNeverStartedTimeout + time.Second)
+	if e.guard.HoldsPendingCreate(k) {
+		t.Fatal("endpoint still holds pending creates past its post-close window")
+	}
+	if !e.guard.HoldsSessionPendingCreate(k, "boss") {
+		t.Fatal("a session refused inside the repeat window lost its pending-create hold")
+	}
+	if e.guard.HoldsSessionPendingCreate(k, "peer") {
+		t.Fatal("a session never refused was held")
+	}
+	e.clk.Advance(capacitySessionRepeatWindow)
+	if e.guard.HoldsSessionPendingCreate(k, "boss") {
+		t.Fatal("a session's pending-create hold outlived the repeat window")
+	}
+}
+
+// TestExecutePlannedStarts_SessionRepeatRefusalBacksOffOnlyThatSession is the
+// per-session start-refusal contract: one session's first exit 75 is endpoint
+// capacity, its repeat inside the window neither opens nor extends the
+// endpoint breaker nor accrues startup health, other sessions on the
+// endpoint start during its backoff, and a non-75 start death of the backed-
+// off session still follows startup-health.
+func TestExecutePlannedStarts_SessionRepeatRefusalBacksOffOnlyThatSession(t *testing.T) {
+	e := newCapacityEnv(t, true, "s", "peer", "peer2")
+	boss := asleepSession(t, e, nil)
+	e.sp.StartErrors["s"] = capacityRefusal("s", "HOLD: turn already attempted")
+	peer := e.session(t, "peer", "e", map[string]string{"session_name": "peer", "template": "peer", "state": "asleep", "generation": "1", "continuation_epoch": "1", "instance_token": "tok-peer"})
+	peer2 := e.session(t, "peer2", "e", map[string]string{"session_name": "peer2", "template": "peer2", "state": "asleep", "generation": "1", "continuation_epoch": "1", "instance_token": "tok-peer2"})
+	const k = capacityTestEndpoint
+
+	// 1. First refusal: endpoint capacity.
+	if woken := e.start(context.Background(), e.refreshed(boss)); woken != 0 {
+		t.Fatalf("first refused start woke %d", woken)
+	}
+	if st := e.breakerStatus(k); st.State != resilience.StateOpen || st.Trips != 1 {
+		t.Fatalf("after the first refusal breaker = %v trips=%d, want open", st.State, st.Trips)
+	}
+
+	// 2. Repeat refusal: the probe, refused again by the same session.
+	e.makeProbeDue()
+	if woken := e.start(context.Background(), e.refreshed(boss)); woken != 0 {
+		t.Fatalf("repeat refused start woke %d", woken)
+	}
+	if n := e.sp.CountCalls("Start", "s"); n != 2 {
+		t.Fatalf("provider Start calls = %d, want the repeat to reach the provider", n)
+	}
+	if st := e.breakerStatus(k); st.State == resilience.StateOpen || st.Trips != 1 {
+		t.Fatalf("after the repeat breaker = %v trips=%d, want neither opened nor extended", st.State, st.Trips)
+	}
+	refused := e.records(TraceSiteLifecycleStartCapacityRefused)
+	if len(refused) != 2 || refused[0].Fields["session_repeat"] != false || refused[1].Fields["session_repeat"] != true ||
+		refused[1].Fields["capacity_valve"] != false || refused[1].Fields["session_backoff_until"] == "" {
+		t.Fatalf("capacity_refused records = %v, want a first refusal then a repeat with its backoff", refused)
+	}
+	got := e.bead(t, boss.info.ID)
+	if got.Status != "open" || got.Metadata["state"] != "asleep" || got.Metadata["wake_attempts"] != "" || got.Metadata["quarantined_until"] != "" {
+		t.Fatalf("after the repeat: status=%q state=%q wake_attempts=%q quarantined_until=%q, want the row held like a capacity refusal",
+			got.Status, got.Metadata["state"], got.Metadata["wake_attempts"], got.Metadata["quarantined_until"])
+	}
+	if n := startupHealthCount(t, e.store, "s"); n != 0 {
+		t.Fatalf("startup-health count = %d after a repeat refusal, want 0", n)
+	}
+
+	// 3. During the backoff the session is deferred before any write, and
+	// other sessions on the endpoint start.
+	if woken := e.start(context.Background(), e.refreshed(boss), e.refreshed(peer)); woken != 1 || !e.sp.IsRunning("peer") {
+		t.Fatalf("woke %d, peer running %v; want the peer started while the held session waits", woken, e.sp.IsRunning("peer"))
+	}
+	if n := e.sp.CountCalls("Start", "s"); n != 2 {
+		t.Fatalf("provider Start calls = %d, want the backed-off session deferred", n)
+	}
+	deferred := false
+	for _, r := range e.records(TraceSiteLifecycleStartRun) {
+		if r.OutcomeCode == TraceOutcomeDeferredBySessionCapacity && r.ReasonCode == TraceReasonSessionCapacityBackoff {
+			deferred = true
+		}
+	}
+	if !deferred {
+		t.Fatalf("start_run records = %v, want a deferred_by_session_capacity record", e.records(TraceSiteLifecycleStartRun))
+	}
+
+	// 4. The next repeat after the backoff still leaves the endpoint closed
+	// for everyone else.
+	e.liftSessionBackoff(boss.info.ID)
+	e.start(context.Background(), e.refreshed(boss))
+	if st := e.breakerStatus(k); st.State != resilience.StateClosed || st.Trips != 1 {
+		t.Fatalf("after a later repeat breaker = %v trips=%d, want closed", st.State, st.Trips)
+	}
+	if woken := e.start(context.Background(), e.refreshed(peer2)); woken != 1 {
+		t.Fatalf("peer2 woke %d during the held session's backoff, want 1", woken)
+	}
+
+	// 5. A non-75 start death is the session's own failure: it accrues the
+	// row's failure accounting (an asleep row's wake failure; a pending
+	// create's startup-health episode), which bounds a crash loop.
+	e.liftSessionBackoff(boss.info.ID)
+	e.sp.StartErrors["s"] = fmt.Errorf("launcher crashed")
+	e.start(context.Background(), e.refreshed(boss))
+	if got := e.bead(t, boss.info.ID); got.Metadata["wake_attempts"] != "1" {
+		t.Fatalf("wake_attempts = %q after a non-capacity start failure, want 1", got.Metadata["wake_attempts"])
+	}
+	if st := e.breakerStatus(k); st.State != resilience.StateClosed {
+		t.Fatalf("breaker = %v after a non-capacity failure, want closed", st.State)
+	}
+}
+
+// TestReconcileSessionBeads_HeldSessionSkipsWakeWithoutBudget pins the wake
+// gate: a session in its own capacity backoff is skipped before any write,
+// counted in the per-tick record, while the endpoint stays closed.
+func TestReconcileSessionBeads_HeldSessionSkipsWakeWithoutBudget(t *testing.T) {
+	e := newCapacityEnv(t, true, "s")
+	c := e.pendingCreate(t, "s", "e", nil)
+	const k = capacityTestEndpoint
+	for i := 0; i < 2; i++ {
+		ticket, ok := e.guard.Admit(k, c.info.ID, "s")
+		if !ok {
+			e.makeProbeDue()
+			ticket, _ = e.guard.Admit(k, c.info.ID, "s")
+		}
+		ticket.Resolve(verdictCapacity)
+	}
+	succeedAs(t, e, "peer", "peer")
+	if _, held := e.guard.SessionBackoff(k, c.info.ID); !held {
+		t.Fatal("setup: session not backed off")
+	}
+
+	e.reconcileTraced(e.bead(t, c.info.ID))
+
+	if n := e.sp.CountCalls("Start", "s"); n != 0 {
+		t.Fatalf("provider Start calls = %d, want the held session skipped at the wake gate", n)
+	}
+	if got := e.bead(t, c.info.ID); got.Status != "open" || got.Metadata["last_woke_at"] != "" || got.Metadata["state"] != "start-pending" {
+		t.Fatalf("status=%q last_woke_at=%q state=%q, want no write for a held session", got.Status, got.Metadata["last_woke_at"], got.Metadata["state"])
+	}
+	var tick *SessionReconcilerTraceRecord
+	for _, r := range e.records(TraceSiteEndpointCapacityBreaker) {
+		if r.Fields["endpoint"] == string(k) {
+			r := r
+			tick = &r
+		}
+	}
+	if tick == nil || tick.Fields["deferred_session"] != 1 || tick.Fields["state"] != "closed" {
+		t.Fatalf("endpoint tick record = %+v, want deferred_session=1 on a closed endpoint", tick)
+	}
+}
+
+// TestExecutePlannedStarts_HeldPendingCreateFailureAccruesStartupHealth pins
+// acceptance 4 for a pending create: once its own capacity backoff lapses, a
+// start that dies for any reason other than capacity accrues the session
+// name's startup-health episode; the backoff itself never did.
+func TestExecutePlannedStarts_HeldPendingCreateFailureAccruesStartupHealth(t *testing.T) {
+	e := newCapacityEnv(t, true, "s")
+	c := e.pendingCreate(t, "s", "e", nil)
+	e.sp.StartErrors["s"] = capacityRefusal("s", "")
+	e.start(context.Background(), e.refreshed(c))
+	e.makeProbeDue()
+	e.start(context.Background(), e.refreshed(c))
+	if _, held := e.guard.SessionBackoff(capacityTestEndpoint, c.info.ID); !held {
+		t.Fatal("setup: pending create not backed off after a repeat refusal")
+	}
+	if n := startupHealthCount(t, e.store, "s"); n != 0 {
+		t.Fatalf("startup-health count = %d after two capacity refusals, want 0", n)
+	}
+	e.liftSessionBackoff(c.info.ID)
+	e.sp.StartErrors["s"] = fmt.Errorf("launcher crashed")
+	e.start(context.Background(), e.refreshed(c))
+	if n := startupHealthCount(t, e.store, "s"); n != 1 {
+		t.Fatalf("startup-health count = %d after a non-capacity start failure, want 1", n)
 	}
 }

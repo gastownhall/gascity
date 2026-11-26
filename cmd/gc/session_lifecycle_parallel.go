@@ -3537,7 +3537,11 @@ func recordCapacityRefusedTrace(result startResult, trace *sessionReconcilerTrac
 		"probe":               ticket.probe,
 		"breaker_state_after": ticket.stateAfter.String(),
 		"capacity_valve":      result.capacityValve,
+		"session_repeat":      ticket.sessionRepeat,
 		"error":               formatLifecycleError(result.err),
+	}
+	if ticket.sessionRepeat {
+		fields["session_backoff_until"] = traceTime(ticket.sessionBackoffUntil)
 	}
 	var capErr *runtime.CapacityError
 	if errors.As(result.err, &capErr) {
@@ -5082,6 +5086,16 @@ func executePlannedStartsTraced(
 					}
 					if done != nil {
 						done()
+					}
+					if until, held := capacityGuard.SessionBackoff(endpoint, candidate.info.ID); held {
+						logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), string(TraceOutcomeDeferredBySessionCapacity), time.Time{}, time.Time{}, nil)
+						if trace != nil {
+							trace.RecordDecision(TraceSiteLifecycleStartRun, TraceReasonSessionCapacityBackoff, TraceOutcomeDeferredBySessionCapacity, candidate.tp.TemplateName, candidate.name(), traceRecordPayload{
+								"endpoint":      string(endpoint),
+								"backoff_until": traceTime(until),
+							})
+						}
+						continue
 					}
 					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), string(TraceOutcomeDeferredByEndpointCapacity), time.Time{}, time.Time{}, nil)
 					if trace != nil {

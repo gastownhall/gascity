@@ -211,10 +211,13 @@ const (
 	TraceReasonPinned                TraceReasonCode = "pinned"
 	TraceReasonAssignedWorkExhausted TraceReasonCode = "assigned_work_exhausted"
 	TraceReasonEndpointCapacityOpen  TraceReasonCode = "endpoint_capacity_open"
-	TraceReasonStartGateDeferred     TraceReasonCode = "start_gate_deferred"
-	TraceReasonOnDeathHookPending    TraceReasonCode = "on_death_hook_pending"
-	TraceReasonPrepareBudgetSpent    TraceReasonCode = "prepare_budget_spent"
-	TraceReasonInterruptedClose      TraceReasonCode = "interrupted_close"
+	// TraceReasonSessionCapacityBackoff marks a start deferred because a
+	// repeat capacity refusal backed off its session (capacitySessionRepeatWindow).
+	TraceReasonSessionCapacityBackoff TraceReasonCode = "session_capacity_backoff"
+	TraceReasonStartGateDeferred      TraceReasonCode = "start_gate_deferred"
+	TraceReasonOnDeathHookPending     TraceReasonCode = "on_death_hook_pending"
+	TraceReasonPrepareBudgetSpent     TraceReasonCode = "prepare_budget_spent"
+	TraceReasonInterruptedClose       TraceReasonCode = "interrupted_close"
 )
 
 type TraceOutcomeCode string
@@ -311,6 +314,10 @@ const (
 	// TraceOutcomeDeferredByEndpointCapacity marks a start the endpoint
 	// capacity breaker deferred before any write.
 	TraceOutcomeDeferredByEndpointCapacity TraceOutcomeCode = "deferred_by_endpoint_capacity"
+	// TraceOutcomeDeferredBySessionCapacity marks a start deferred before any
+	// write because a repeat capacity refusal backed off its session; the
+	// endpoint stays open to other sessions.
+	TraceOutcomeDeferredBySessionCapacity TraceOutcomeCode = "deferred_by_session_capacity"
 	// TraceOutcomeDeferredByOnDeathHook marks a start deferred before any
 	// write because the name's on_death hook is queued or running.
 	TraceOutcomeDeferredByOnDeathHook TraceOutcomeCode = "deferred_by_on_death_hook"

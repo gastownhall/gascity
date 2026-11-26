@@ -3256,12 +3256,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// while its endpoint refuses starts, and for a fresh window after
 			// it recovers, instead of rolling back and being recreated.
 			if expired && strings.TrimSpace(infoPostZombie.LastWokeAt) == "" {
-				if endpoint := resolvedEndpointKey(tp, infoPostZombie); capacityGuard.HoldsPendingCreate(endpoint) {
+				if endpoint := resolvedEndpointKey(tp, infoPostZombie); capacityGuard.HoldsSessionPendingCreate(endpoint, infoPostZombie.ID) {
 					expired = false
 					capacityHeld = true
 					if trace != nil {
 						_, st := capacityGuard.Eligible(endpoint)
-						trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonEndpointCapacityOpen, TraceOutcomeDeferred, tp.TemplateName, name, traceRecordPayload{
+						reason := TraceReasonEndpointCapacityOpen
+						if !capacityGuard.HoldsPendingCreate(endpoint) {
+							reason = TraceReasonSessionCapacityBackoff // held by the session's own refusals
+						}
+						trace.RecordDecision(TraceSiteReconcilerPendingCreate, reason, TraceOutcomeDeferred, tp.TemplateName, name, traceRecordPayload{
 							"endpoint": string(endpoint),
 							"state":    st.State.String(),
 						})
@@ -4942,6 +4946,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			endpoint := resolvedEndpointKey(target.tp, target.info)
 			if eligible, _ := capacityGuard.Eligible(endpoint); !eligible {
 				capacityGuard.noteDeferredWake(endpoint)
+				continue
+			}
+			// A session a repeat refusal backed off waits out its own backoff;
+			// the endpoint stays open to every other session.
+			if _, held := capacityGuard.SessionBackoff(endpoint, target.info.ID); held {
+				capacityGuard.noteDeferredSession(endpoint)
 				continue
 			}
 

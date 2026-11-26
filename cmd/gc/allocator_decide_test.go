@@ -497,6 +497,11 @@ func TestAllocator_RollbackCandidatesRequireNotRunning(t *testing.T) {
 	if e := entryOf(t, held.decide(), "gc-1"); e.Reason == reasonRollbackCandidate {
 		t.Errorf("a pending create the breaker holds rolled back: %s/%s", e.Desired, e.Reason)
 	}
+	sessionHeld := newAllocFixture(t, cfg).sessions(expired("gc-1", 1))
+	sessionHeld.in.Endpoints = map[endpointKey]endpointView{"provider:claude": {Gate: gateClosed, SessionHolds: map[string]bool{"gc-1": true}}}
+	if e := entryOf(t, sessionHeld.decide(), "gc-1"); e.Reason == reasonRollbackCandidate {
+		t.Errorf("a pending create its own recent capacity refusals hold rolled back: %s/%s", e.Desired, e.Reason)
+	}
 }
 
 // Kills: rolling back a creating row that holds no pending-create claim

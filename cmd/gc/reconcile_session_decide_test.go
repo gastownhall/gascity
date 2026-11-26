@@ -240,3 +240,30 @@ func TestFreshArmsHoldOnWhatTheyCannotRead(t *testing.T) {
 		}
 	}
 }
+
+// Kills a gather that drops a row's own capacity backoff: a row a repeat
+// refusal backed off carries its backoff end and its pending-create hold on
+// its endpoint's view; a row never refused carries neither.
+func TestGatherGatesCarriesSessionCapacityBackoff(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", Provider: "claude", MaxActiveSessions: intPtr(3)}}}
+	rows := []beads.Bead{poolRow("gc-1", "worker", 1, "asleep"), poolRow("gc-2", "worker", 2, "asleep")}
+	c := readCensus(t, gatherNow, censusLegs(rowLeg, censusStore(rows...)))
+	now := gatherNow
+	g := newEndpointCapacityGuard(func() time.Time { return now })
+	const k endpointKey = "provider:claude"
+	for i := 0; i < 2; i++ {
+		ticket, ok := g.Admit(k, "gc-1", "worker")
+		if !ok {
+			now = now.Add(g.breaker(k).Status().BackoffCap)
+			ticket, _ = g.Admit(k, "gc-1", "worker")
+		}
+		ticket.Resolve(verdictCapacity)
+	}
+	v := gatherGates(g, cfg, c.Canonical())[k]
+	if until := v.SessionBackoff["gc-1"]; !until.Equal(now.Add(capacitySessionBackoffBase)) || !v.SessionHolds["gc-1"] {
+		t.Fatalf("gc-1 view: backoff %s holds %v, want its own backoff and hold", until, v.SessionHolds["gc-1"])
+	}
+	if _, ok := v.SessionBackoff["gc-2"]; ok || v.SessionHolds["gc-2"] {
+		t.Fatalf("gc-2 view: %+v, want a never-refused row unheld", v)
+	}
+}
