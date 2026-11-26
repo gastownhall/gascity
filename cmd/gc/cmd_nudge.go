@@ -2393,7 +2393,7 @@ func resolveNudgeTargetPreferringHookIdentity(identifier string, preferHookIdent
 // ahead of the resolution, which may write (it materializes a configured
 // named session's row): an error from before is returned unresolved.
 func resolveNudgeTargetAfter(identifier string, preferHookIdentity bool, before func(cityPath string, cfg *config.City, store beads.NudgesStore) error, warningWriter ...io.Writer) (nudgeTarget, error) {
-	cityPath, cfg, store, release, err := openNudgeResolution(warningWriter...)
+	cityPath, cfg, store, release, err := openNudgeResolution(nil, warningWriter...)
 	if err != nil {
 		return nudgeTarget{}, err
 	}
@@ -2407,10 +2407,13 @@ func resolveNudgeTargetAfter(identifier string, preferHookIdentity bool, before 
 }
 
 // openNudgeResolution resolves the city, loads its config and opens the nudges
-// store, the three things every target resolution starts from. release ends
-// the routes warm-up the open needs and is called once the resolution is done;
-// it is a no-op when err is set.
-func openNudgeResolution(warningWriter ...io.Writer) (cityPath string, cfg *config.City, store beads.NudgesStore, release func(), err error) {
+// store, the three things every target resolution starts from. openStore opens
+// the store; nil opens it with openNudgeBeadStore, which answers a store that
+// will not open with a zero store (a nil-tolerant caller's "do nothing"), and a
+// caller that must report the cause passes openNudgeBeadStoreErr, whose open
+// failure is returned as err. release ends the routes warm-up the open needs
+// and is called once the resolution is done; it is a no-op when err is set.
+func openNudgeResolution(openStore func(cityPath string) (beads.NudgesStore, error), warningWriter ...io.Writer) (cityPath string, cfg *config.City, store beads.NudgesStore, release func(), err error) {
 	cityPath, err = resolveCity()
 	if err != nil {
 		return "", nil, beads.NudgesStore{}, func() {}, err
@@ -2422,14 +2425,31 @@ func openNudgeResolution(warningWriter ...io.Writer) (cityPath string, cfg *conf
 	// The load ran the builtin readiness pass the routing read needs; resolve
 	// the routes alongside the store open (prewarmCLIStorageRoutes).
 	release = prewarmCLIStorageRoutes(cityPath)
-	return cityPath, cfg, openNudgeBeadStore(cityPath), release, nil
+	if openStore == nil {
+		return cityPath, cfg, openNudgeBeadStore(cityPath), release, nil
+	}
+	store, err = openStore(cityPath)
+	if err != nil {
+		release()
+		return "", nil, beads.NudgesStore{}, func() {}, err
+	}
+	return cityPath, cfg, store, release, nil
 }
 
 // resolveNudgeStatusTarget is resolveNudgeTarget for a caller that only
 // reads (gc nudge status): it never writes a session record or starts a
-// runtime. See resolveNudgeTargetInStore, observeOnly.
+// runtime. See resolveNudgeTargetInStore, observeOnly. A store that will not
+// open is reported as unavailable with the open failure as its cause, so the
+// operator can tell a missing city from a locked database.
 func resolveNudgeStatusTarget(identifier string, warningWriter ...io.Writer) (nudgeTarget, error) {
-	cityPath, cfg, store, release, err := openNudgeResolution(warningWriter...)
+	openStore := func(cityPath string) (beads.NudgesStore, error) {
+		store, err := openNudgeBeadStoreErr(cityPath)
+		if err != nil {
+			return beads.NudgesStore{}, fmt.Errorf("session store unavailable: cannot resolve %q: %w", identifier, err)
+		}
+		return store, nil
+	}
+	cityPath, cfg, store, release, err := openNudgeResolution(openStore, warningWriter...)
 	if err != nil {
 		return nudgeTarget{}, err
 	}

@@ -610,8 +610,11 @@ reserved `on_demand` named session. First-reference behavior is
 command-class specific:
 
 - `gc mail`, sling/workflow routing with a configured-session identity,
-  `gc nudge`, `gc session attach`, and `gc session wake` may materialize
-  the canonical session on first reference
+  `gc nudge` (other than `gc nudge status`), `gc session attach`, and
+  `gc session wake` may materialize the canonical session on first reference
+- `gc nudge status` does not materialize; it is observe-only, and a
+  configured session with no open bead resolves to its configured identity
+  without creating or starting anything
 - `gc session wait` does not materialize; it only targets an already
   existing session bead
 - `gc session logs` does not materialize; if no canonical bead exists it

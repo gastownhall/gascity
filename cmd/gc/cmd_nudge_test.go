@@ -2679,11 +2679,11 @@ dir = "myrig"
 
 func TestCmdNudgeStatusJSON(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
-	// resolveNudgeTarget MATERIALIZES the named session ("mayor"), which under
-	// the default provider spawns a real `tmux -L test-city` server whose
-	// exit-empty-off lifecycle outlives the suite (dip-73cr05). This test
-	// asserts nudge-queue JSON, not runtime behavior — use the fake provider
-	// like every other named-session test here.
+	// Status resolution is observe-only: it never materializes the named
+	// session ("mayor") or starts a runtime. The fake provider stays pinned so
+	// a regression that did start one cannot spawn a real `tmux -L test-city`
+	// server whose exit-empty-off lifecycle outlives the suite (dip-73cr05).
+	// This test asserts nudge-queue JSON, not runtime behavior.
 	t.Setenv("GC_SESSION", "fake")
 	cityDir := t.TempDir()
 	writeNamedSessionCityTOML(t, cityDir)
@@ -2731,10 +2731,11 @@ func TestCmdNudgeStatusSurfacesDispatchSkips(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	cityDir := t.TempDir()
 	writeNamedSessionCityTOML(t, cityDir)
-	// The status read materializes the named session when it is absent; on
-	// the default (tmux) provider that spawns a real server on the test-city
-	// socket, which outlives the run (exit-empty off). Pin the fake provider
-	// — this test asserts the persisted skip counters, not runtime behavior.
+	// The status read is observe-only: an absent named session resolves to its
+	// configured identity without being created or started. The fake provider
+	// stays pinned so a regression that did start one cannot spawn a real
+	// server on the test-city socket, which outlives the run (exit-empty off).
+	// This test asserts the persisted skip counters, not runtime behavior.
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
