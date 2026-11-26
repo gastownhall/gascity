@@ -2,7 +2,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "graphv2",
-    srcs = ["invocation.go"],
+    srcs = [
+        "invocation.go",
+        "source_blockers.go",
+    ],
     importpath = "github.com/gastownhall/gascity/internal/graphv2",
     visibility = ["//:__subpackages__"],
     deps = [
@@ -11,6 +14,7 @@ go_library(
         "//internal/convoy",
         "//internal/formula",
         "//internal/molecule",
+        "//internal/sourceworkflow",
     ],
 )
 
@@ -19,10 +23,12 @@ go_test(
     srcs = [
         "invocation_cleanup_test.go",
         "invocation_test.go",
+        "source_blockers_test.go",
         "testenv_import_test.go",
     ],
     embed = [":graphv2"],
     deps = [
+        "//internal/beadmeta",
         "//internal/beads",
         "//internal/beads/beadstest",
         "//internal/convoy",

@@ -552,7 +552,7 @@ func TestProcessScopeCheckSubjectSkipsFanoutBlocker(t *testing.T) {
 
 // TestProcessScopeCheckSubjectSkipsCrossRootDrainGate pins that a drain item's
 // scope-check, which also blocks on the item root of a predecessor member
-// (drainWorkflowExternalDeps wires that gate onto every step of the item),
+// (molecule.Options.BlockedBy wires that gate onto every step of the item),
 // resolves its own step as the subject even when the gate edge is listed
 // first. Taking the predecessor's failed root as the subject aborted the
 // item's first iteration right after its prepare step passed.
@@ -12133,6 +12133,13 @@ on_exhausted = "hard_fail"
 // workflow root ID.
 func cookTeardownMolecule(t *testing.T, store beads.Store) string {
 	t.Helper()
+	return cookTeardownMoleculeWith(t, store, molecule.Options{})
+}
+
+// cookTeardownMoleculeWith is cookTeardownMolecule with opts, such as a
+// launch's BlockedBy hold, passed to the cook.
+func cookTeardownMoleculeWith(t *testing.T, store beads.Store, opts molecule.Options) string {
+	t.Helper()
 	formulatest.EnableV2ForTest(t)
 	prevGraphApply := molecule.IsGraphApplyEnabled()
 	molecule.SetGraphApplyEnabled(true)
@@ -12142,7 +12149,7 @@ func cookTeardownMolecule(t *testing.T, store beads.Store) string {
 	if err := os.WriteFile(filepath.Join(dir, "teardown-settlement.toml"), []byte(teardownSettlementFormula), 0o644); err != nil {
 		t.Fatalf("writing formula: %v", err)
 	}
-	result, err := molecule.Cook(context.Background(), beadstest.GraphMolecule(store), "teardown-settlement", []string{dir}, molecule.Options{})
+	result, err := molecule.Cook(context.Background(), beadstest.GraphMolecule(store), "teardown-settlement", []string{dir}, opts)
 	if err != nil {
 		t.Fatalf("Cook: %v", err)
 	}
@@ -12230,7 +12237,9 @@ func allBlockersClosed(t *testing.T, store beads.Store, beadID string) bool {
 		t.Fatalf("dep list %s: %v", beadID, err)
 	}
 	for _, dep := range deps {
-		if dep.Type != "blocks" {
+		// bd never blocks on an external ref (beads.ExternalBlockerTarget),
+		// and no bead stands behind one to read.
+		if dep.Type != "blocks" || isExternalDependencyRef(dep.DependsOnID) {
 			continue
 		}
 		if mustGetBead(t, store, dep.DependsOnID).Status != "closed" {

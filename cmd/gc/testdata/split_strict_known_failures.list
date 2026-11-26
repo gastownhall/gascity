@@ -118,6 +118,7 @@ TestFormulaCookAttachGraphV2CreatesFreshRootForBareBeadTarget	fails under the ga
 TestFormulaCookAttachGraphV2RejectsLiveLegacySourceWorkflow	fails under the gate: formula cook succeeded, want source workflow conflict
 TestFormulaCookAttachGraphV2StampsMetaOnTheWorkflowRoot	fails under the gate: workflow root gcg-3: bead "gcg-3" is not in this store: bead not found
 TestFormulaCookAttachGraphV2StampsMetaUnderTheSourceWorkflowLock	fails under the gate: workflow root cc-3: bead "cc-3" is not in this store: bead not found
+TestFormulaCookAttachGraphV2WaitsForSourceBlockers	fails under the gate: gc formula cook graph-work: --attach cc-2: cc-2 lives in this rig's own store (a tree created before the rig's graph beads moved to the city binding), and a graph.v2 formula starts a NEW workflow root, which a split city always creates in the binding; the city-scope cook --attach graph.v2 arm runs only on a single-store city, as for its TestFormulaCookAttach* siblings
 TestFormulaCookAttachInRigScopeIsUnchangedOnASingleStoreCity	fails under the gate: the rig store holds dep wf-1 -> gcg-2 (blocks) whose target it cannot resolve: bead "gcg-2" is not in this store: bead not found
 TestFormulaCookAttachIsIdempotent	fails under the gate: re-cook minted a second workflow root (gcg-2 then gcg-5); the idempotent lookup read a store that does not hold the root
 TestFormulaCookAttachOntoAPreS4RigTreeFollowsResidence	fails under the gate: v1 graft onto a pre-S4 rig tree was refused: exit

@@ -76,6 +76,7 @@ func instantiateViaGraphApply(ctx context.Context, applier beads.GraphApplyStore
 		GraphWorkflow: graphWorkflow,
 		IDMapping:     applied.IDs,
 		Created:       len(applied.IDs),
+		BlockedBy:     opts.BlockedBy,
 	}, nil
 }
 

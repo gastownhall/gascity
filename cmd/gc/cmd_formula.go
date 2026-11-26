@@ -945,11 +945,18 @@ city's work store, copy them into the binding with
 						if err != nil {
 							return fmt.Errorf("attach bead %s: %w", attach, err)
 						}
+						// The workflow routes its own steps, not the attach bead,
+						// so it carries the attach bead's open blockers itself.
+						blockedBy, err := graphv2.SourceBlockers(storeWork, attach)
+						if err != nil {
+							return fmt.Errorf("attach bead %s: %w", attach, err)
+						}
 						result, err = molecule.Instantiate(cmd.Context(), beads.GraphMolecule(beads.GraphStore{Store: placement}), recipe, molecule.Options{
 							Title:            title,
 							Vars:             cookVars,
 							IdempotencyKey:   graphRootKey,
 							PriorityOverride: cloneFormulaCookPriority(source.Priority),
+							BlockedBy:        blockedBy,
 						})
 						if err != nil {
 							if cleanupErr := closeFormulaCookFailedGraphV2Roots(store, recipe); cleanupErr != nil {
@@ -984,6 +991,7 @@ city's work store, copy them into the binding with
 							WorkflowRootID: result.RootID,
 							Created:        result.Created,
 							IDMapping:      result.IDMapping,
+							WaitingOn:      molecule.BlockerIDs(result.BlockedBy),
 						}); err != nil {
 							return err
 						}
@@ -993,6 +1001,9 @@ city's work store, copy them into the binding with
 					_, _ = fmt.Fprintf(stdout, "Attached: %s -> %s (root: %s)\n", attach, result.RootID, result.RootID)
 					_, _ = fmt.Fprintf(stdout, "Root: %s\n", result.RootID)
 					_, _ = fmt.Fprintf(stdout, "Created: %d\n", result.Created)
+					if len(result.BlockedBy) > 0 {
+						_, _ = fmt.Fprintf(stdout, "Waits for: %s\n", strings.Join(molecule.BlockerIDs(result.BlockedBy), ", "))
+					}
 					_ = pokeControlDispatch(cityPath)
 					return nil
 				}
@@ -1243,6 +1254,7 @@ type formulaCookJSONResult struct {
 	WorkflowRootID string            `json:"workflow_root_id,omitempty"`
 	Created        int               `json:"created"`
 	IDMapping      map[string]string `json:"id_mapping,omitempty"`
+	WaitingOn      []string          `json:"waiting_on,omitempty"`
 }
 
 // stampFormulaCookRootMetadata writes the --meta pairs onto the cooked root
@@ -1402,10 +1414,17 @@ func existingFormulaCookGraphV2Root(store beads.Store, recipe *formula.Recipe) (
 	if rootStep != nil {
 		idMapping[rootStep.ID] = matches[0].ID
 	}
+	// A reused workflow waits on what its launch wired, not on what its
+	// source bead's edges say now.
+	blockedBy, err := graphv2.WorkflowBlockers(store, matches[0].ID)
+	if err != nil {
+		return nil, fmt.Errorf("reading what workflow %s waits for: %w", matches[0].ID, err)
+	}
 	return &molecule.Result{
 		RootID:        matches[0].ID,
 		GraphWorkflow: true,
 		IDMapping:     idMapping,
+		BlockedBy:     blockedBy,
 	}, nil
 }
 

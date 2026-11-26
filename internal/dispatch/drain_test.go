@@ -119,6 +119,114 @@ func TestProcessDrainSeparateProjectsMemberDependenciesOntoItemWorkflows(t *test
 	}
 }
 
+// TestProcessDrainItemWorkflowKeepsEachBlockerEdgeType pins that a drain item
+// workflow waits on a member's out-of-manifest blockers through edges of the
+// member's own types, as a sling launch does (graphv2.ReadyBlockingEdges,
+// molecule.Options.BlockedBy): a waits-for edge stays waits-for, so a store
+// that judges it by the spawner's children (bd, native Dolt) holds the item
+// as it holds the member. The expansion's post-launch wiring pass must keep
+// the type too, not retype the edge to blocks.
+func TestProcessDrainItemWorkflowKeepsEachBlockerEdgeType(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	store, drain := seedDrainWorkflow(t)
+	parentRoot := mustGetBead(t, store, drain.Metadata["gc.root_bead_id"])
+	members, err := convoycore.MembersIn(convoycore.MemberClasses{Convoy: beadstest.Work(store)}, parentRoot.Metadata["gc.input_convoy_id"], false)
+	if err != nil {
+		t.Fatalf("Members: %v", err)
+	}
+	member := members[0]
+	blocker := mustCreate(t, store, beads.Bead{Title: "blocker", Type: "task"})
+	spawner := mustCreate(t, store, beads.Bead{Title: "spawner", Type: "task"})
+	child := mustCreate(t, store, beads.Bead{Title: "spawned child", Type: "task"})
+	mustDepAdd(t, store, child.ID, spawner.ID, "parent-child")
+	if err := store.Close(spawner.ID); err != nil {
+		t.Fatalf("Close(spawner): %v", err)
+	}
+	mustDepAdd(t, store, member.ID, blocker.ID, "blocks")
+	mustDepAdd(t, store, member.ID, spawner.ID, "waits-for")
+
+	result, err := ProcessControl(beadstest.Graph(store), drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
+	if err != nil {
+		t.Fatalf("ProcessControl(drain expand): %v", err)
+	}
+	if result.Action != "drain-expanded" {
+		t.Fatalf("result = %+v, want drain-expanded", result)
+	}
+	var rootID string
+	for _, row := range mustDrainManifest(t, mustGetBead(t, store, drain.ID)).Rows {
+		if row.MemberID == member.ID {
+			rootID = row.ItemRootID
+		}
+	}
+	if rootID == "" {
+		t.Fatalf("member %s has no item root", member.ID)
+	}
+	for _, id := range []string{rootID, mustFindDrainItemWorkStep(t, store, rootID).ID} {
+		deps, err := store.DepList(id, "down")
+		if err != nil {
+			t.Fatalf("DepList(%s): %v", id, err)
+		}
+		for _, want := range []beads.Dep{{IssueID: id, DependsOnID: blocker.ID, Type: "blocks"}, {IssueID: id, DependsOnID: spawner.ID, Type: "waits-for"}} {
+			n := 0
+			for _, dep := range deps {
+				if dep.DependsOnID != want.DependsOnID {
+					continue
+				}
+				n++
+				if dep.Type != want.Type {
+					t.Errorf("item bead %s waits on %s through a %q edge, want the member's %q", id, want.DependsOnID, dep.Type, want.Type)
+				}
+			}
+			if n != 1 {
+				t.Errorf("item bead %s has %d edges onto %s, want 1; deps=%+v", id, n, want.DependsOnID, deps)
+			}
+		}
+	}
+}
+
+// TestEnsureDrainWorkflowBlocksOnWiresTheBlockersTypeOffTheTeardownTail pins
+// the expansion's post-launch wiring of a blocker onto an item workflow that
+// already exists: each member but the teardown tail gets an edge of the
+// blocker's own type, as molecule.Options.BlockedBy wires one at launch, and a
+// ready-blocking edge a member already has onto the blocker is left as it is.
+func TestEnsureDrainWorkflowBlocksOnWiresTheBlockersTypeOffTheTeardownTail(t *testing.T) {
+	store := beads.NewMemStore()
+	root := mustCreate(t, store, beads.Bead{Title: "item", Type: "task", Metadata: map[string]string{"gc.kind": "workflow"}})
+	member := func(title string, meta map[string]string) beads.Bead {
+		t.Helper()
+		meta["gc.root_bead_id"] = root.ID
+		return mustCreate(t, store, beads.Bead{Title: title, Type: "task", Metadata: meta})
+	}
+	work := member("work", map[string]string{"gc.step_id": "work"})
+	prewired := member("prewired", map[string]string{"gc.step_id": "prewired"})
+	teardown := member("cleanup", map[string]string{"gc.scope_role": "teardown", "gc.step_id": "cleanup"})
+	attempt := member("cleanup attempt", map[string]string{"gc.step_id": "cleanup"})
+	spawner := mustCreate(t, store, beads.Bead{Title: "spawner", Type: "task"})
+	mustDepAdd(t, store, prewired.ID, spawner.ID, "blocks")
+
+	if err := ensureDrainWorkflowBlocksOn(beadstest.Graph(store), root.ID, molecule.Blocker{ID: spawner.ID, Type: "waits-for"}); err != nil {
+		t.Fatalf("ensureDrainWorkflowBlocksOn: %v", err)
+	}
+	want := map[string]string{root.ID: "waits-for", work.ID: "waits-for", prewired.ID: "blocks", teardown.ID: "", attempt.ID: ""}
+	for id, wantType := range want {
+		deps, err := store.DepList(id, "down")
+		if err != nil {
+			t.Fatalf("DepList(%s): %v", id, err)
+		}
+		got := ""
+		for _, dep := range deps {
+			if dep.DependsOnID == spawner.ID {
+				got = dep.Type
+			}
+		}
+		if got != wantType {
+			t.Errorf("bead %s edge onto %s = %q, want %q", id, spawner.ID, got, wantType)
+		}
+	}
+}
+
 func TestProcessDrainSeparateCreatesDependentItemWorkflowsBlocked(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
 	prevGraphApply := molecule.IsGraphApplyEnabled()
@@ -304,8 +412,8 @@ func TestDrainProjectedBlockerIDsRoutesMemberDepsToOwningStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("drainProjectedBlockerIDs: %v", err)
 	}
-	if len(projection.BlockerIDs) != 1 || projection.BlockerIDs[0] != "root-blocker" {
-		t.Fatalf("blockerIDs = %v, want [root-blocker] (member deps routed to member store, projected onto the blocker's item root)", projection.BlockerIDs)
+	if want := []molecule.Blocker{{ID: "root-blocker", Type: "blocks"}}; !slices.Equal(projection.Blockers, want) {
+		t.Fatalf("blockers = %v, want %v (member deps routed to member store, projected onto the blocker's item root)", projection.Blockers, want)
 	}
 	if len(projection.Gated) != 0 {
 		t.Fatalf("gated = %v, want none: an in-manifest blocker projects onto an item root, which is co-resident with the item workflow by construction", projection.Gated)
@@ -3283,8 +3391,8 @@ func TestDrainProjectedBlockerIDsIsProbeFreeOnASingleStoreCity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("drainProjectedBlockerIDs: %v", err)
 	}
-	if len(projection.BlockerIDs) != 1 || projection.BlockerIDs[0] != blocker.ID {
-		t.Fatalf("blockerIDs = %v, want [%s]", projection.BlockerIDs, blocker.ID)
+	if want := []molecule.Blocker{{ID: blocker.ID, Type: "blocks"}}; !slices.Equal(projection.Blockers, want) {
+		t.Fatalf("blockers = %v, want %v", projection.Blockers, want)
 	}
 	if len(projection.Gated) != 0 {
 		t.Fatalf("gated = %v, want none on a single-store city", projection.Gated)

@@ -254,6 +254,10 @@ type SlingResult struct {
 	MetadataErrors []string // non-fatal metadata write failures
 	BeadWarnings   []string // pre-flight bead state warnings
 	Deprecations   []string // deprecated formula constructs (graph.v2 issue alias)
+	// WaitingOn lists the source bead's blockers a launched graph workflow
+	// waits for: each of its beads but the teardown tail carries the source
+	// bead's own edge onto each (molecule.Options.BlockedBy).
+	WaitingOn []string
 
 	// Batch fields (populated by DoSlingBatch).
 	ContainerType string // "convoy", "epic", etc. (batch only)
@@ -280,6 +284,9 @@ type SlingChildResult struct {
 	WorkflowID  string // if graph workflow attached
 	WispRootID  string // if formula attached
 	FormulaName string // formula used
+	// WaitingOn lists the child's blockers its graph workflow waits for
+	// (SlingResult.WaitingOn).
+	WaitingOn []string
 	// Conflict is the live source workflow that refused the child's launch,
 	// when that is why it failed.
 	Conflict *sourceworkflow.ConflictError
@@ -1471,6 +1478,11 @@ func InstantiateCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe
 	graphWorkflow := graphroute.IsCompiledGraphWorkflow(recipe)
 	rootKey := ""
 	if graphWorkflow {
+		blockedBy, err := graphLaunchBlockedBy(deps, sourceBeadID, opts.BlockedBy)
+		if err != nil {
+			return nil, err
+		}
+		opts.BlockedBy = blockedBy
 		stampGraphV2RootMetadata(recipe, formulaName, opts.Vars, scopeKind, scopeRef)
 		sourceBeadID = ""
 		rootKey = strings.TrimSpace(recipe.Steps[0].Metadata[beadmeta.Graphv2RootKeyMetadataKey])
@@ -1507,6 +1519,12 @@ func materializeCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe
 		return nil, err
 	}
 	privatizeAttachedRootOnlyWisp(recipe, sourceBeadID, deps.StoreRef)
+	if !graphWorkflow {
+		// A v1 molecule routes its source bead, whose own edges already hold
+		// it; only a graph workflow, which routes its own steps, carries the
+		// source bead's blockers.
+		opts.BlockedBy = nil
+	}
 	var replacedRootID string
 	if graphWorkflow {
 		if err := closeFailedGraphV2Roots(graphStore, recipe); err != nil {
