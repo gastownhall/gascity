@@ -22,7 +22,8 @@ import (
 var allProjectedMetadataKeys = []string{
 	"session_name", "state", "template", "alias", "agent_name", "provider",
 	"transport", "command", "work_dir", "session_key", "resume_flag",
-	"resume_style", "resume_command", "continuation_epoch", "sleep_reason",
+	"resume_style", "resume_command", PinnedTranscriptMetadataKey,
+	"continuation_epoch", "sleep_reason",
 	NamedSessionIdentityMetadata, NamedSessionMetadataKey, NamedSessionModeMetadata,
 	"common_name", "pool_slot", "pool_managed", "session_origin",
 	"dependency_only", "manual_session", "resume_failures", "resume_launch",
