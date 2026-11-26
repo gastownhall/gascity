@@ -195,24 +195,33 @@ func parseBeadList(data string) ([]beads.Bead, error) {
 	if err := json.Unmarshal([]byte(data), &ws); err != nil {
 		return nil, fmt.Errorf("parsing JSON: %w", err)
 	}
-	result := make([]beads.Bead, len(ws))
+	result := make([]beads.Bead, 0, len(ws))
 	for i := range ws {
 		b, err := ws[i].toBead()
 		if err != nil {
+			if errors.Is(err, beads.ErrMetadataParse) {
+				// Match the native store: a bead with unparseable metadata is
+				// unreadable, so it is skipped (and cannot be claimed) rather
+				// than failing the whole list.
+				continue
+			}
 			id := ws[i].ID
 			if id == "" {
 				id = fmt.Sprintf("#%d", i)
 			}
 			return nil, fmt.Errorf("parsing bead %s: %w", id, err)
 		}
-		result[i] = b
+		result = append(result, b)
 	}
 	return result, nil
 }
 
 // decodeOptionalBead validates a script's echoed bead when stdout is JSON.
 // Empty output and non-JSON text stay success: update scripts are not
-// required to echo the bead they wrote.
+// required to echo the bead they wrote. A single echoed bead with a non-string
+// gc.exclude_claimants is rejected, as Get and Create reject it. A list of
+// echoed beads is validated the way [parseBeadList] validates one: rows with
+// bad metadata are skipped, so the list branch yields no metadata error.
 func decodeOptionalBead(out string) error {
 	out = strings.TrimSpace(out)
 	if out == "" {
@@ -293,8 +302,8 @@ func cloneTimePtr(v *time.Time) *time.Time {
 //
 // gc.exclude_claimants is a comma-separated identity list. A non-string JSON
 // value must not become its raw text: that text matches no claimant, so the
-// exclusion would fail open. The exec store rejects it with
-// beads.ErrMetadataParse.
+// exclusion would fail open. It is reported as beads.ErrMetadataParse: Get and
+// Create reject the bead, and list reads skip it.
 func coerceMetadata(raw map[string]json.RawMessage) (map[string]string, error) {
 	if len(raw) == 0 {
 		return nil, nil

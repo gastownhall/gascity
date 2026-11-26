@@ -1220,8 +1220,10 @@ esac
 }
 
 // A non-string gc.exclude_claimants must fail closed. Coercing the raw JSON
-// text onto the bead lets sling copy a value that matches no claimant.
-func TestGetAndListRejectNonStringExcludeClaimants(t *testing.T) {
+// text onto the bead lets sling copy a value that matches no claimant. Get
+// rejects the bead; list reads skip it, as the native store does, so one bad
+// row does not fail the whole list.
+func TestGetRejectsAndListSkipsNonStringExcludeClaimants(t *testing.T) {
 	for _, value := range []string{`["reviewer-one"]`, `42`, `null`} {
 		t.Run("get/"+value, func(t *testing.T) {
 			dir := t.TempDir()
@@ -1247,18 +1249,21 @@ esac
 			script := writeScript(t, dir, `
 case "$1" in
   list)
-    echo '[{"id":"EX-1","title":"test","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z","metadata":{"`+beadmeta.ExcludeClaimantsMetadataKey+`":`+value+`}}]'
+    echo '[{"id":"EX-1","title":"test","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z","metadata":{"`+beadmeta.ExcludeClaimantsMetadataKey+`":`+value+`}},{"id":"EX-2","title":"test","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z","metadata":{"`+beadmeta.ExcludeClaimantsMetadataKey+`":"reviewer-one"}}]'
     ;;
   *) exit 2 ;;
 esac
 `)
 			s := NewStore(script)
-			_, err := s.ListOpen()
-			if err == nil || !strings.Contains(err.Error(), beadmeta.ExcludeClaimantsMetadataKey) || !strings.Contains(err.Error(), "must be a string") {
-				t.Fatalf("List %s: got %v, want error naming %s", value, err, beadmeta.ExcludeClaimantsMetadataKey)
+			got, err := s.ListOpen()
+			if err != nil {
+				t.Fatalf("List %s: got error %v, want bad row skipped", value, err)
 			}
-			if !errors.Is(err, beads.ErrMetadataParse) {
-				t.Fatalf("List %s: got %v, want ErrMetadataParse", value, err)
+			if len(got) != 1 || got[0].ID != "EX-2" {
+				t.Fatalf("List %s: got %+v, want only EX-2", value, got)
+			}
+			if got[0].Metadata[beadmeta.ExcludeClaimantsMetadataKey] != "reviewer-one" {
+				t.Fatalf("List %s: EX-2 exclude = %q, want reviewer-one", value, got[0].Metadata[beadmeta.ExcludeClaimantsMetadataKey])
 			}
 		})
 	}
