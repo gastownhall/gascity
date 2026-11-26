@@ -123,7 +123,7 @@ func TestCmdGCIntegrationNudgeStatusPreservesAvailableStore(t *testing.T) {
 							if status.DispatchSkips["not-running"] != 3 {
 								t.Errorf("dispatch diagnostics changed: %v", status.DispatchSkips)
 							}
-							if unmaterialized && status.SessionID != "" {
+							if (unmaterialized || kind == "closed_named") && status.SessionID != "" {
 								t.Errorf("status fabricated a persisted session id: %q", status.SessionID)
 							}
 							if (existingNamed || kind == "explicit_session") && status.SessionID != sessionID {
@@ -194,6 +194,26 @@ func newNudgeStatusReadonlyFixture(t *testing.T) nudgeStatusReadonlyFixture {
 	}
 	if _, err := f.raw.Create(beads.Bead{Title: "unrelated existing task"}); err != nil {
 		t.Fatal(err)
+	}
+	// A legacy session row with an empty type, in every scenario: resolution
+	// scans it, and an observe-only read must not heal its type.
+	legacy, err := f.raw.Create(beads.Bead{
+		Title: "legacy session", Type: "", Labels: []string{session.LabelSession},
+		Metadata: map[string]string{"alias": "otherrig/legacy-worker", "session_name": "legacy-worker", "template": "legacy-worker"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.Type != "" {
+		// The store defaults an empty type on Create; clear it the way a
+		// legacy row carries it.
+		emptyType := ""
+		if err := f.raw.Update(legacy.ID, beads.UpdateOpts{Type: &emptyType}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, err := f.raw.Get(legacy.ID); err != nil || got.Type != "" {
+		t.Fatalf("legacy row must keep an empty type: type=%q err=%v", got.Type, err)
 	}
 	f.store = &nudgeStatusMutationSpy{Store: f.raw}
 	oldOpen, oldBuild := openNudgeBeadStore, buildSessionProviderByName

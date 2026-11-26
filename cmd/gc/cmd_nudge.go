@@ -2532,7 +2532,7 @@ func resolveNudgeTargetInStore(cityPath string, cfg *config.City, store beads.Nu
 		var sessionID string
 		var err error
 		if observeOnly {
-			sessionID, err = resolveSessionIDWithConfig(cityPath, cfg, sessStore, identifier)
+			sessionID, err = resolveSessionIDWithOptions(cityPath, cfg, sessStore, identifier, namedSessionResolveOptions{observeOnly: true})
 		} else {
 			sessionID, err = resolveSessionIDMaterializingNamed(cityPath, cfg, sessStore, identifier, stderr)
 		}
