@@ -14,12 +14,18 @@ go_library(
     visibility = ["//:__subpackages__"],
 )
 
+_WORKLADDER_TEST_DATA = glob(
+    ["**"],
+    exclude = ["BUILD.bazel"],
+)
+
 go_test(
     name = "workladder_test",
     size = "medium",
     srcs = [
         "codec_test.go",
         "decide_test.go",
+        "landing_budget_test.go",
         "notice_test.go",
         "progress_test.go",
         "property_test.go",
@@ -29,17 +35,24 @@ go_test(
         "table_test.go",
         "testenv_import_test.go",
     ],
-    data = glob(
-        ["**"],
-        exclude = ["BUILD.bazel"],
-    ),
+    args = [
+        "-test.short",
+    ],
+    data = _WORKLADDER_TEST_DATA,
     embed = [":workladder"],
+    # The landing suite uses the 10k property budget. Rate-limit sims also run
+    # under -test.short (2k/500 random worlds plus fixed rare-branch seeds).
+    # The 100k ladder proof does not run in CI. Run it explicitly with:
+    # bazel test //internal/workladder:workladder_test \
+    #   --test_arg=-test.short=false --test_timeout=900
+    # The later --test_arg overrides this target's -test.short.
+    #
     # The property sims in heavy_tests.txt are CPU-bound: each runs 10 to
     # 110 s on a typical worker, and a loaded worker stretches one up to about
     # 2.5x (the slowest seen, 269 s). rules_go gives test i of the declaration
     # order to shard i % shard_count. Six shards put two or three sims in one
     # shard, and two of those shards timed out at 300 s (ga-9yad1bw0). The
-    # sims sit at positions 38, 43, 44, 45, 46, 48 and 49, all different mod 9,
+    # sims sit at positions 39, 44, 45, 46, 47, 49 and 50, all different mod 9,
     # so nine shards give each a shard of its own and the slowest sim is the
     # floor of the split. A test added or removed ahead of them shifts those
     # positions: scripts/workladder_shards_test.go fails when two share a shard
