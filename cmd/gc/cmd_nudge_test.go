@@ -9064,3 +9064,71 @@ func TestSplitStaleMailQueuedNudgesKeepsMailReminderWhenUnreadStateUnknown(t *te
 		t.Fatalf("keep = %#v, want only the non-mail item", keep)
 	}
 }
+
+// TestCmdNudgeStatusReportsAnUnopenedStoreAsUnavailable pins what an operator
+// reads when the city's store will not open (ga-y53wjn acceptance 2): gc nudge
+// status says the session store is unavailable rather than that the session was
+// not found, since nothing was read to say it is missing, and it renders no
+// status at all, so an empty queue is never mistaken for a healthy one. Text
+// and --json alike.
+func TestCmdNudgeStatusReportsAnUnopenedStoreAsUnavailable(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	cityDir := t.TempDir()
+	writeNamedSessionCityTOML(t, cityDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	oldOpen := openNudgeBeadStore
+	openNudgeBeadStore = func(string) beads.NudgesStore { return beads.NudgesStore{} }
+	t.Cleanup(func() { openNudgeBeadStore = oldOpen })
+
+	for _, jsonOutput := range []bool{false, true} {
+		var stdout, stderr bytes.Buffer
+		if code := cmdNudgeStatus([]string{"mayor"}, jsonOutput, &stdout, &stderr); code != 1 {
+			t.Fatalf("cmdNudgeStatus(json=%t) = %d, want 1; stdout=%q stderr=%q", jsonOutput, code, stdout.String(), stderr.String())
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("json=%t: an unopened store rendered a status: %q", jsonOutput, stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "session store unavailable") {
+			t.Errorf("json=%t: stderr = %q, want it to say the session store is unavailable", jsonOutput, stderr.String())
+		}
+		if strings.Contains(stderr.String(), "session not found") {
+			t.Errorf("json=%t: stderr = %q, an unopened store must not read as a missing session", jsonOutput, stderr.String())
+		}
+	}
+}
+
+// TestResolveNudgeTargetInStoreAnswersAZeroStoreByCaller pins the two answers a
+// zero nudges store gets (ga-y53wjn acceptance 2 and 4): an observe-only caller
+// (gc nudge status) is told the store is unavailable, since nothing was read to
+// say the session is missing, while every other caller keeps the
+// session-not-found answer it always had.
+func TestResolveNudgeTargetInStoreAnswersAZeroStoreByCaller(t *testing.T) {
+	cityDir := t.TempDir()
+	for _, tc := range []struct {
+		name        string
+		observeOnly bool
+	}{
+		{name: "observe-only status read", observeOnly: true},
+		{name: "mutating or delivering verb", observeOnly: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := resolveNudgeTargetInStore(cityDir, &config.City{}, beads.NudgesStore{}, "mayor", false, tc.observeOnly, nil)
+			if err == nil {
+				t.Fatal("a zero store resolved a target")
+			}
+			notFound := errors.Is(err, session.ErrSessionNotFound)
+			if tc.observeOnly {
+				if notFound || !strings.Contains(err.Error(), "session store unavailable") || !strings.Contains(err.Error(), `"mayor"`) {
+					t.Fatalf("observe-only err = %v, want session store unavailable naming %q and not session-not-found", err, "mayor")
+				}
+				return
+			}
+			if !notFound {
+				t.Fatalf("err = %v, want session.ErrSessionNotFound for a caller that is not observe-only", err)
+			}
+		})
+	}
+}
