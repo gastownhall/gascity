@@ -159,6 +159,73 @@ func TestBdStoreWriteConflictTelemetry(t *testing.T) {
 	}
 }
 
+// A recovered write reports the most recent retried conflict, while exhaustion
+// reports the final error. Recovery before the budget stays silent.
+func TestBdStoreRecoveredFinalClass(t *testing.T) {
+	serialization := errors.New("Error 1213 (40001): serialization failure: this transaction conflicts with a committed transaction")
+	catalog := errors.New("failed to prepare catalog")
+	busy := errors.New("database is locked (5) (SQLITE_BUSY)")
+	for _, tt := range []struct {
+		name    string
+		laps    []error
+		want    []writeConflictPoint
+		warning map[string]string
+	}{
+		{
+			name: "transient_catalog",
+			laps: []error{catalog, catalog, nil},
+			want: []writeConflictPoint{{operation: "update", class: "transient", outcome: "recovered-final", count: 1}},
+		},
+		{
+			name: "mixed_serialization_then_busy",
+			laps: []error{serialization, busy, nil},
+			want: []writeConflictPoint{{operation: "update", class: "transient", outcome: "recovered-final", count: 1}},
+		},
+		{
+			name: "mixed_busy_then_serialization",
+			laps: []error{busy, serialization, nil},
+			want: []writeConflictPoint{{operation: "update", class: "serialization", outcome: "recovered-final", count: 1}},
+		},
+		{
+			name: "serialization_only",
+			laps: []error{serialization, serialization, nil},
+			want: []writeConflictPoint{{operation: "update", class: "serialization", outcome: "recovered-final", count: 1}},
+		},
+		{
+			name:    "exhausted_uses_final_error",
+			laps:    []error{serialization, serialization, catalog},
+			want:    []writeConflictPoint{{operation: "update", class: "transient", outcome: "exhausted", count: 1}},
+			warning: map[string]string{"operation": "update", "bead_id": "ga-session", "class": "transient", "attempts": "3"},
+		},
+		{
+			name: "below_budget_stays_silent",
+			laps: []error{catalog, nil},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := captureWriteConflictMetrics(t)
+			logged := captureWriteConflictLogs(t)
+			calls := 0
+			runner := func(_, _ string, _ ...string) ([]byte, error) {
+				calls++
+				if calls > len(tt.laps) {
+					t.Fatalf("write call %d exceeds scripted history of %d calls", calls, len(tt.laps))
+				}
+				if err := tt.laps[calls-1]; err != nil {
+					return nil, err
+				}
+				return []byte(`{"id":"ga-session"}`), nil
+			}
+			err := NewBdStore("/city", runner).SetMetadataBatch("ga-session", map[string]string{"state": "active"})
+			wantErr := tt.laps[len(tt.laps)-1]
+			if calls != len(tt.laps) || !errors.Is(err, wantErr) {
+				t.Fatalf("write result = (%d calls, %v), want (%d calls, %v)", calls, err, len(tt.laps), wantErr)
+			}
+			assertWriteConflictTelemetry(t, reader, logged, tt.want, tt.warning)
+		})
+	}
+}
+
 func assertExhaustedWarning(t *testing.T, exporter *writeConflictLogExporter, id, operation string, want bool) {
 	t.Helper()
 	exporter.mu.Lock()
@@ -254,17 +321,15 @@ func writeConflictWarnings(exporter *writeConflictLogExporter) []map[string]stri
 }
 
 // assertWriteConflictTelemetry checks everything a write left behind. want is
-// the exact set of counter points (none for nil); an empty class in a wanted
-// point matches any class, because a write that recovered on its last attempt
-// has no error to classify. warned is the one structured warning's attributes
-// (none for nil).
+// the exact set of counter points, including each point's class (none for nil).
+// warned is the one structured warning's attributes (none for nil).
 func assertWriteConflictTelemetry(t *testing.T, reader *sdkmetric.ManualReader, logged *writeConflictLogExporter, want []writeConflictPoint, warned map[string]string) {
 	t.Helper()
 	got := writeConflictPoints(t, reader)
 	match := len(got) == len(want)
 	for i := 0; match && i < len(got); i++ {
 		match = got[i].operation == want[i].operation && got[i].outcome == want[i].outcome &&
-			got[i].count == want[i].count && (want[i].class == "" || got[i].class == want[i].class)
+			got[i].count == want[i].count && got[i].class == want[i].class
 	}
 	if !match {
 		t.Errorf("write-conflict counter = %v, want %v", got, want)
@@ -440,10 +505,47 @@ func TestBdStoreConditionalWriteTelemetry(t *testing.T) {
 			var warned map[string]string
 			if !recovered {
 				warned = map[string]string{"operation": "update_if_match", "bead_id": "ga-1", "class": "serialization", "attempts": fmt.Sprint(conditionalWriteMaxAttempts)}
-			} else {
-				want[0].class = ""
 			}
 			assertWriteConflictTelemetry(t, reader, logged, want, warned)
+		})
+	}
+	for _, tt := range []struct {
+		name    string
+		laps    []error
+		outcome string
+		warning map[string]string
+	}{
+		{
+			name:    "recovered-final after a catalog error",
+			laps:    []error{errors.New("failed to prepare catalog"), errors.New("failed to prepare catalog"), nil},
+			outcome: "recovered-final",
+		},
+		{
+			name:    "exhausted after serialization laps",
+			laps:    []error{conflict, conflict, errors.New("failed to prepare catalog")},
+			outcome: "exhausted",
+			warning: map[string]string{"operation": "update_if_match", "bead_id": "ga-1", "class": "transient", "attempts": "3"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := captureWriteConflictMetrics(t)
+			logged := captureWriteConflictLogs(t)
+			w := &scriptedBd{id: "ga-1", revision: 1, status: "open"}
+			w.writeHook = func(w *scriptedBd, _ string, _ int64) ([]byte, error, bool) {
+				if w.writeCalls > len(tt.laps) {
+					t.Fatalf("write call %d exceeds scripted history of %d calls", w.writeCalls, len(tt.laps))
+				}
+				err := tt.laps[w.writeCalls-1]
+				return nil, err, err != nil
+			}
+			title := "renamed"
+			err := NewBdStore("/city", w.runner).UpdateIfMatch("ga-1", 1, UpdateOpts{Title: &title})
+			wantErr := tt.laps[len(tt.laps)-1]
+			if w.writeCalls != len(tt.laps) || !errors.Is(err, wantErr) {
+				t.Fatalf("write result = (%d calls, %v), want (%d calls, %v)", w.writeCalls, err, len(tt.laps), wantErr)
+			}
+			want := []writeConflictPoint{{operation: "update_if_match", class: "transient", outcome: tt.outcome, count: 1}}
+			assertWriteConflictTelemetry(t, reader, logged, want, tt.warning)
 		})
 	}
 }
@@ -474,9 +576,7 @@ func TestBdStoreCASEmulationTelemetry(t *testing.T) {
 			}
 			want := []writeConflictPoint{{operation: "set_metadata_cas", class: "cas", outcome: name, count: 1}}
 			var warned map[string]string
-			if won {
-				want[0].class = ""
-			} else {
+			if !won {
 				warned = map[string]string{"operation": "set_metadata_cas", "bead_id": "ga-1", "class": "cas", "attempts": fmt.Sprint(casEmulationMaxAttempts)}
 			}
 			assertWriteConflictTelemetry(t, reader, logged, want, warned)
