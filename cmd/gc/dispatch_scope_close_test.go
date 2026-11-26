@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -57,7 +58,7 @@ func TestScopeCloseWatcherRecordsOnlyClosedScopeMembers(t *testing.T) {
 	}}}
 
 	for i := 0; i < 3; i++ {
-		if _, err := watcher.Next(); err != nil && err != errFakeWatcherDone {
+		if _, err := watcher.Next(); err != nil && !errors.Is(err, errFakeWatcherDone) {
 			t.Fatalf("Next %d: %v", i, err)
 		}
 	}
