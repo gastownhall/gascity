@@ -95,7 +95,22 @@ func TestScopeHasCompleteStorageBinding(t *testing.T) {
 		})
 	}
 }
-
+func TestSanitizeDoltDatabaseNameHyphenatedPrefixes(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"dzero-cas", "dzero_cas"},
+		{"chat-chronicle", "chat_chronicle"},
+		{"pounce-p2p", "pounce_p2p"},
+		{"001", "r001"},
+		{"a.b", "a_b"},
+		{"adama", "adama"},
+		{"butlerian", "butlerian"},
+	}
+	for _, tc := range cases {
+		if got := sanitizeDoltDatabaseName(tc.in); got != tc.want {
+			t.Errorf("sanitizeDoltDatabaseName(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
 func TestScopeSkipsManagedDoltForInitChecksCompleteBindingFirst(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	scopeRoot := t.TempDir()

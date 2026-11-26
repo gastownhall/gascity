@@ -935,12 +935,29 @@ func defaultScopeDoltDatabase(cityPath, dir, prefix string) string {
 // sanitizeDoltDatabaseName rewrites a rig prefix into a name Dolt will
 // accept as a database identifier. Dolt rejects names that start with a
 // digit (e.g. a prefix derived from an all-numeric rig directory name like
-// t.TempDir()'s "001"), so such names get a non-digit prefix.
+// t.TempDir()'s "001"), so such names get a non-digit prefix. Names are
+// also lowercased to [a-z0-9_]: '-' and '.' (e.g. hyphenated rig prefixes
+// like "dzero-cas") become '_' (adama/hyphen-db-name; see adama-qhf).
 func sanitizeDoltDatabaseName(name string) string {
 	if name != "" && name[0] >= '0' && name[0] <= '9' {
-		return "r" + name
+		name = "r" + name
 	}
-	return name
+	var b strings.Builder
+	for i, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r == '_', r >= '0' && r <= '9' && i > 0:
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r + ('a' - 'A'))
+		default:
+			b.WriteRune('_')
+		}
+	}
+	s := b.String()
+	if s != "" && s[0] >= '0' && s[0] <= '9' {
+		return "r" + s
+	}
+	return s
 }
 
 func isReservedManagedDoltDatabase(name string) bool {
