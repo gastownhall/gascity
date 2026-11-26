@@ -389,13 +389,16 @@ func renormalizeFederatedCommand(federated string) string {
 	federated = replaceFragment(federated,
 		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(true, true),
 		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(false, true))
+	// The single-store side is compared at bd-1.0.5 semantics, where the
+	// crash-recovery read carries --include-ephemeral; the fragments must match.
+	singleStore := QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}}
 	for _, shellVar := range []string{"id", "cand"} {
 		federated = replaceFragment(federated,
 			assignedInProgressTierCommand(shellVar, QueryTopology{FederatedReady: true}),
-			assignedInProgressTierCommand(shellVar, QueryTopology{}))
+			assignedInProgressTierCommand(shellVar, singleStore))
 		federated = replaceFragment(federated,
 			assignedInProgressCandidatesTierCommand(shellVar, QueryTopology{FederatedReady: true}),
-			assignedInProgressCandidatesTierCommand(shellVar, QueryTopology{}))
+			assignedInProgressCandidatesTierCommand(shellVar, singleStore))
 	}
 	// Both topologies fail a read the same way; only the reader the failure
 	// clause names differs.

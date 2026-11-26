@@ -819,6 +819,10 @@ func assignedInProgressRead(shellVar string, topo QueryTopology, args string, li
 	if topo.FederatedReady {
 		reader = gcReadyCommand + ` --status in_progress`
 		args = ` --exclude-type=` + mailMessageBeadType + args
+	} else if topo.includeEphemeralReady() {
+		// bd-1.0.5 leaves a claimed wisp's ephemeral field null, so plain
+		// `bd list` omits it and the crash-recovery tier never resumes it.
+		args += " --include-ephemeral"
 	}
 	return `r=$(` + reader + ` --assignee="$` + shellVar + `"` + args + ` --json --limit=` + strconv.Itoa(limit) + `)` +
 		workQueryReadFailure(reader) + `; ` +
