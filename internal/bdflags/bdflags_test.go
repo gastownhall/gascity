@@ -4,6 +4,7 @@ import (
 	"errors"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -597,16 +598,17 @@ func TestScanUnknownFlagsKeepsScanningAfterInvocationEnds(t *testing.T) {
 
 // positionalBudgets is each manifest subcommand's leading-positional budget,
 // taken from its `bd <sub> --help` Usage line. Variadic [id...] subcommands
-// (update, close, reopen, delete, show, mol burn, dep list) are bounded at one
-// id on purpose: an open-ended budget would let prose after "bd update"
-// absorb every following word, which is the bleed the budget exists to stop.
+// (update, close, reopen, delete, show, mol burn) are bounded at one id on
+// purpose: an open-ended budget would let prose after "bd update" absorb every
+// following word, which is the bleed the budget exists to stop. dep list is
+// bounded at two because its documented batch form names two ids.
 var positionalBudgets = map[string]int{
 	"create": 1,                                                  // bd create [title]
 	"update": 1, "close": 1, "reopen": 1, "delete": 1, "show": 1, // [id...]
 	"ready": 0, "list": 0, // flags only
 	"mol current": 1, "mol pour": 1, "mol wisp": 1, "mol burn": 1,
 	"gate check": 0, "gate list": 1,
-	"dep add": 2, "dep list": 1, "dep remove": 2,
+	"dep add": 2, "dep list": 2, "dep remove": 2,
 }
 
 // TestScanUnknownFlagsPositionalBudgetPerSubcommand drives every manifest
@@ -637,5 +639,196 @@ func TestScanUnknownFlagsPositionalBudgetPerSubcommand(t *testing.T) {
 		if findings := ScanUnknownFlags([]byte(over)); len(findings) != 0 {
 			t.Errorf("ScanUnknownFlags(%q) = %v, want no findings (%d positionals exceeds the budget of %d)", over, findings, n+1, n)
 		}
+	}
+}
+
+// TestPositionalCountTableHasEveryManifestSubcommand fails when a manifest
+// subcommand has no explicit row in the production budget table.
+// PositionalCount defaults an unlisted key to one id, which would silently
+// mis-bound a subcommand that takes none or two; the test-local table above
+// cannot see that, so this one reads the production table itself.
+func TestPositionalCountTableHasEveryManifestSubcommand(t *testing.T) {
+	for _, sub := range Subcommands() {
+		if _, ok := positionalCountBySub[sub]; !ok {
+			t.Errorf("manifest subcommand %q has no explicit entry in positionalCountBySub; the default of 1 would mask it", sub)
+		}
+	}
+	for sub, want := range positionalBudgets {
+		if got := PositionalCount(sub); got != want {
+			t.Errorf("PositionalCount(%q) = %d, want %d", sub, got, want)
+		}
+	}
+}
+
+// TestParseHelpFlagsToSetsPflagPluralTypesAreValues pins every pflag type word
+// bd's help prints after a value flag. The plural slice types ("strings",
+// "ints", ...) used to fall through isValueToken, so --add-label, --label and
+// the like were filed as boolean flags.
+func TestParseHelpFlagsToSetsPflagPluralTypesAreValues(t *testing.T) {
+	for _, typ := range []string{"strings", "ints", "uints", "int32s", "float64s", "durations", "stringToString", "stringArray", "stringSlice"} {
+		parsed := discoveredFlags{value: map[string]bool{}, bool: map[string]bool{}}
+		parseHelpFlagsToSets("Flags:\n      --add-label "+typ+"   Add labels (repeatable)\n", &parsed)
+		if !parsed.value["--add-label"] || parsed.bool["--add-label"] {
+			t.Errorf("type word %q: --add-label value=%v bool=%v, want value only", typ, parsed.value["--add-label"], parsed.bool["--add-label"])
+		}
+	}
+	parsed := discoveredFlags{value: map[string]bool{}, bool: map[string]bool{}}
+	parseHelpFlagsToSets("Flags:\n      --claim   Atomically claim the issue\n", &parsed)
+	if !parsed.bool["--claim"] || parsed.value["--claim"] {
+		t.Errorf("a flag with no type word must stay boolean: bool=%v value=%v", parsed.bool["--claim"], parsed.value["--claim"])
+	}
+}
+
+// stubBdHelp makes live discovery return help text that types the label flags
+// as pflag prints them, and restores the real runner and cache afterwards.
+func stubBdHelp(t *testing.T) {
+	t.Helper()
+	orig := runBdHelpForSubcommand
+	parseDiscoveredOnce = sync.Map{}
+	runBdHelpForSubcommand = func(sub string) ([]byte, error) {
+		switch sub {
+		case "update":
+			return []byte(`Flags:
+      --add-label strings      Add labels (repeatable)
+      --remove-label strings   Remove labels (repeatable)
+      --set-labels strings     Set labels, replacing all existing
+  -s, --status string          New status
+Global Flags:
+      --json                   Output in JSON format`), nil
+		case "ready":
+			return []byte(`Flags:
+      --exclude-label strings   Exclude issues with these labels
+  -l, --label strings           Filter by labels (AND)
+  -n, --limit int               Maximum issues to show
+Global Flags:
+      --json                    Output in JSON format`), nil
+		}
+		return nil, errors.New("no help for " + sub)
+	}
+	t.Cleanup(func() {
+		runBdHelpForSubcommand = orig
+		parseDiscoveredOnce = sync.Map{}
+	})
+}
+
+// TestScanUnknownFlagsStringsTypedValueFlagsKeepScanning is the reviewer's
+// regression (round 1, A): with bd reachable, discovery typed the label flags
+// as booleans, their values were read as stray positionals, and the budget
+// ended the invocation before the typo. Hermetic, so it sees what an
+// unreachable-bd run cannot.
+func TestScanUnknownFlagsStringsTypedValueFlagsKeepScanning(t *testing.T) {
+	stubBdHelp(t)
+	cases := []struct {
+		line, sub, want string
+	}{
+		{"bd update abc --add-label x --remove-labelx y", "update", "--remove-labelx"},
+		{"bd update abc --add-label x --remove-label y --set-labels z --bogus", "update", "--bogus"},
+		{"bd ready --exclude-label a,b --limitx 0 --json", "ready", "--limitx"},
+		{"bd ready -l a --exclude-label b --bogus", "ready", "--bogus"},
+	}
+	for _, tc := range cases {
+		findings := ScanUnknownFlags([]byte(tc.line))
+		if len(findings) != 1 || findings[0].Flag != tc.want || findings[0].Subcommand != tc.sub {
+			t.Errorf("ScanUnknownFlags(%q) = %v, want exactly one finding %s on %q", tc.line, findings, tc.want, tc.sub)
+		}
+	}
+	for _, line := range []string{
+		"bd update abc --add-label x --remove-label y --json",
+		"bd ready --exclude-label a,b --limit 0 --json",
+	} {
+		if findings := ScanUnknownFlags([]byte(line)); len(findings) != 0 {
+			t.Errorf("ScanUnknownFlags(%q) = %v, want no findings", line, findings)
+		}
+	}
+}
+
+// TestScanUnknownFlagsQuotedTitleIsOneArgument is round 1 (B): a quoted
+// multi-word title is one argument wherever it appears, not only after a flag,
+// so its words no longer exhaust the budget before --json.
+func TestScanUnknownFlagsQuotedTitleIsOneArgument(t *testing.T) {
+	for _, line := range []string{
+		`bd create "Fix the auth timeout bug" -t task --json`,
+		`bd create 'Fix the auth timeout bug' -t task --json`,
+		`gc bd create "Fix the auth timeout bug" --json`,
+	} {
+		if findings := ScanUnknownFlags([]byte(line)); len(findings) != 0 {
+			t.Errorf("ScanUnknownFlags(%q) = %v, want no findings", line, findings)
+		}
+	}
+	line := `bd create "Fix the auth timeout bug" -t task --jsonx`
+	findings := ScanUnknownFlags([]byte(line))
+	if len(findings) != 1 || findings[0].Flag != "--jsonx" || findings[0].Subcommand != "create" {
+		t.Errorf("ScanUnknownFlags(%q) = %v, want exactly one finding --jsonx on create", line, findings)
+	}
+}
+
+// TestScanUnknownFlagsQuotedCommandStringIsStillScanned guards the other side
+// of (B): a quoted run that is itself a bd command (an example passed to
+// another tool) must stay scannable, not be swallowed as one title token.
+func TestScanUnknownFlagsQuotedCommandStringIsStillScanned(t *testing.T) {
+	for _, line := range []string{
+		`echo "bd list --bogus"`,
+		`run 'gc bd list --bogus'`,
+	} {
+		findings := ScanUnknownFlags([]byte(line))
+		if len(findings) != 1 || findings[0].Flag != "--bogus" || findings[0].Subcommand != "list" {
+			t.Errorf("ScanUnknownFlags(%q) = %v, want exactly one finding --bogus on list", line, findings)
+		}
+	}
+}
+
+// TestScanUnknownFlagsCommandSubstitutionIsNotAPositional is round 1 (B): a
+// balanced $(...) expands to arguments the scanner cannot see, so it is one
+// opaque token that neither ends the invocation nor spends the budget (ready
+// takes none).
+func TestScanUnknownFlagsCommandSubstitutionIsNotAPositional(t *testing.T) {
+	for _, line := range []string{
+		`bd ready --exclude-label hold:mayor,hold:external $(quiet-window ready-args 2>/dev/null) --limit 0 --json`,
+		`bd ready $(quiet-window ready-args) --json`,
+	} {
+		if findings := ScanUnknownFlags([]byte(line)); len(findings) != 0 {
+			t.Errorf("ScanUnknownFlags(%q) = %v, want no findings", line, findings)
+		}
+	}
+	line := `bd ready --exclude-label hold:mayor $(quiet-window ready-args 2>/dev/null) --limitx 0 --json`
+	findings := ScanUnknownFlags([]byte(line))
+	if len(findings) != 1 || findings[0].Flag != "--limitx" || findings[0].Subcommand != "ready" {
+		t.Errorf("ScanUnknownFlags(%q) = %v, want exactly one finding --limitx on ready", line, findings)
+	}
+}
+
+// TestScanUnknownFlagsDepListTakesTwoIDs is round 1 (C): bd's own help and the
+// fleet templates document `bd dep list <id> <id>` ("deps for both issues").
+func TestScanUnknownFlagsDepListTakesTwoIDs(t *testing.T) {
+	if line := "bd dep list <id> <id> --type=blocks --json"; len(ScanUnknownFlags([]byte(line))) != 0 {
+		t.Errorf("ScanUnknownFlags(%q) = %v, want no findings", line, ScanUnknownFlags([]byte(line)))
+	}
+	line := "bd dep list <a> <b> --bogus"
+	findings := ScanUnknownFlags([]byte(line))
+	if len(findings) != 1 || findings[0].Flag != "--bogus" || findings[0].Subcommand != "dep list" {
+		t.Errorf("ScanUnknownFlags(%q) = %v, want exactly one finding --bogus on dep list", line, findings)
+	}
+}
+
+// TestTokenizeJoinLookaheadIsBounded pins the cost bound on joining quoted and
+// $(...) runs: a closer further away than 64 fields is not searched
+// for, so a line of many unmatched openers costs linear time instead of
+// rescanning to the end of the line for each one.
+func TestTokenizeJoinLookaheadIsBounded(t *testing.T) {
+	const maxJoinFields = 64 // the production lookahead bound
+	filler := strings.Repeat("w ", maxJoinFields+10)
+	for _, line := range []string{
+		`--title "a ` + filler + `b"`,
+		`bd ready $(a ` + filler + `b)`,
+	} {
+		tokens := tokenize(line)
+		for _, tok := range tokens {
+			if len(strings.Fields(tok)) > maxJoinFields {
+				t.Errorf("tokenize(%.30q...) joined %d fields into one token, want at most %d", line, len(strings.Fields(tok)), maxJoinFields)
+			}
+		}
+	}
+	if got := tokenize(`bd create "one two three" --json`); !reflect.DeepEqual(got, []string{"bd", "create", "one two three", "--json"}) {
+		t.Errorf("tokenize joined a short quoted title wrongly: %q", got)
 	}
 }
