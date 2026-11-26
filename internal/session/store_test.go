@@ -2,7 +2,9 @@ package session
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -357,77 +359,62 @@ func TestRecordCurrentBeadEmitsSingleKeySetMetadata(t *testing.T) {
 	}
 }
 
-// TestSetCurrentClaimEmitsSingleKeySetMetadata proves SetCurrentClaim stamps the
-// claimed work-bead id as a single-key SetMetadata of
-// beadmeta.CurrentClaimBeadIDMetadataKey — the same shape as RecordCurrentBead,
-// and deliberately a DIFFERENT key so the self-claim lane and the reconciler's
-// wake-time assignment lane cannot clobber each other.
-func TestSetCurrentClaimEmitsSingleKeySetMetadata(t *testing.T) {
-	b := sessionBeadFixture("s-1", "open", nil)
-	is, rec := recordingStore(t, b)
+// TestReserveCurrentClaimWritesTheClaimKey proves the reserve writes
+// beadmeta.CurrentClaimBeadIDMetadataKey — deliberately a DIFFERENT key from
+// RecordCurrentBead's, so the self-claim lane and the reconciler's wake-time
+// assignment lane cannot clobber each other.
+func TestReserveCurrentClaimWritesTheClaimKey(t *testing.T) {
+	is, mem, _ := currentClaimFixture(t, "")
 
-	wrote, err := is.SetCurrentClaim("s-1", "gcg-42")
+	outcome, err := is.ReserveCurrentClaim("s-1", "", "gcg-42")
 	if err != nil {
-		t.Fatalf("SetCurrentClaim: %v", err)
+		t.Fatalf("ReserveCurrentClaim: %v", err)
 	}
-	if !wrote {
-		t.Fatal("SetCurrentClaim reported no write for a fresh stamp")
+	if outcome != CurrentClaimSwapped {
+		t.Fatalf("ReserveCurrentClaim = %q, want %q", outcome, CurrentClaimSwapped)
 	}
-	c := rec.CallsForOp("SetMetadata")
-	if len(c) != 1 {
-		t.Fatalf("SetMetadata calls = %d, want 1 (ops=%v)", len(c), opsOf(rec.Calls()))
+	if got := currentClaimPointer(t, mem); got != "gcg-42" {
+		t.Errorf("pointer = %q, want gcg-42", got)
 	}
-	if c[0].ID != "s-1" || c[0].Key != beadmeta.CurrentClaimBeadIDMetadataKey || c[0].Value != "gcg-42" {
-		t.Errorf("SetCurrentClaim call = (%q,%q,%q), want (s-1,%q,gcg-42)",
-			c[0].ID, c[0].Key, c[0].Value, beadmeta.CurrentClaimBeadIDMetadataKey)
+	b, err := mem.Get("s-1")
+	if err != nil {
+		t.Fatalf("reading session bead: %v", err)
 	}
-	if c[0].Key == CurrentBeadIDKey {
-		t.Errorf("SetCurrentClaim wrote the reconciler's %q key", CurrentBeadIDKey)
-	}
-	if n := len(rec.CallsForOp("SetMetadataBatch")); n != 0 {
-		t.Errorf("SetCurrentClaim emitted %d batch writes, want a single-key write", n)
+	if v, ok := b.Metadata[CurrentBeadIDKey]; ok {
+		t.Errorf("ReserveCurrentClaim wrote the reconciler's %q key (%q)", CurrentBeadIDKey, v)
 	}
 }
 
-// TestSetCurrentClaimSkipsWhenUnchanged pins the idempotence guard: the claim
-// path re-stamps on every hook tick through its adoption branches, so an
-// already-current value must issue no write at all.
-func TestSetCurrentClaimSkipsWhenUnchanged(t *testing.T) {
+// TestDropCurrentClaimClearsAnyValue proves the cascades' unfenced clear empties
+// the pointer whatever it names through one single-key SetMetadata, and writes
+// nothing when it is already empty.
+func TestDropCurrentClaimClearsAnyValue(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: "gcg-42"})
 	is, rec := recordingStore(t, b)
 
-	wrote, err := is.SetCurrentClaim("s-1", "gcg-42")
-	if err != nil {
-		t.Fatalf("SetCurrentClaim: %v", err)
-	}
-	if wrote {
-		t.Error("SetCurrentClaim reported a write for an unchanged value")
-	}
-	if n := len(rec.CallsForOp("SetMetadata")); n != 0 {
-		t.Errorf("unchanged stamp emitted %d writes, want 0", n)
-	}
-}
-
-// TestSetCurrentClaimClearsWithEmptyValue proves the release side of the stamp:
-// clearing writes an empty value through the same single-key op, so a session
-// that no longer owns work stops naming a bead it cannot close.
-func TestSetCurrentClaimClearsWithEmptyValue(t *testing.T) {
-	b := sessionBeadFixture("s-1", "open", map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: "gcg-42"})
-	is, rec := recordingStore(t, b)
-
-	if _, err := is.SetCurrentClaim("s-1", ""); err != nil {
-		t.Fatalf("SetCurrentClaim clear: %v", err)
+	if err := is.DropCurrentClaim("s-1"); err != nil {
+		t.Fatalf("DropCurrentClaim: %v", err)
 	}
 	c := rec.CallsForOp("SetMetadata")
 	if len(c) != 1 || c[0].Key != beadmeta.CurrentClaimBeadIDMetadataKey || c[0].Value != "" {
 		t.Fatalf("clear = %#v, want one SetMetadata(%s,\"\")", c, beadmeta.CurrentClaimBeadIDMetadataKey)
+	}
+	if n := len(rec.CallsForOp("SetMetadataBatch")); n != 0 {
+		t.Errorf("DropCurrentClaim emitted %d batch writes, want a single-key write", n)
 	}
 	got, err := is.CurrentClaimBeadID("s-1")
 	if err != nil {
 		t.Fatalf("CurrentClaimBeadID: %v", err)
 	}
 	if got != "" {
-		t.Errorf("CurrentClaimBeadID after clear = %q, want empty", got)
+		t.Errorf("CurrentClaimBeadID after drop = %q, want empty", got)
+	}
+
+	if err := is.DropCurrentClaim("s-1"); err != nil {
+		t.Fatalf("DropCurrentClaim (empty): %v", err)
+	}
+	if n := len(rec.CallsForOp("SetMetadata")); n != 1 {
+		t.Errorf("dropping an empty pointer wrote; SetMetadata calls = %d, want 1", n)
 	}
 }
 
@@ -464,8 +451,11 @@ func TestCurrentClaimRefusesANonSessionBead(t *testing.T) {
 	rec := beadstest.NewRecordingStore(mem)
 	is := NewStore(beads.SessionStore{Store: rec})
 
-	if _, err := is.SetCurrentClaim("wb-1", "gcg-42"); !errors.Is(err, ErrSessionNotFound) {
-		t.Fatalf("SetCurrentClaim on a non-session bead = %v, want ErrSessionNotFound", err)
+	if _, err := is.ReserveCurrentClaim("wb-1", "", "gcg-42"); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("ReserveCurrentClaim on a non-session bead = %v, want ErrSessionNotFound", err)
+	}
+	if err := is.DropCurrentClaim("wb-1"); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("DropCurrentClaim on a non-session bead = %v, want ErrSessionNotFound", err)
 	}
 	if n := len(rec.CallsForOp("SetMetadata")); n != 0 {
 		t.Errorf("refused stamp still wrote %d times", n)
@@ -781,5 +771,411 @@ func TestStoreBacked(t *testing.T) {
 	var nilDoor *Store
 	if nilDoor.Backed() {
 		t.Error("a nil door reports backed")
+	}
+}
+
+// currentClaimFixture seeds one session bead whose current-claim pointer reads
+// pointer ("" leaves the key absent) into a MemStore, which offers metadata
+// CAS, behind an OpRecordingStore so a test can count the ops a writer issued.
+func currentClaimFixture(t *testing.T, pointer string) (*Store, *beads.MemStore, *beadstest.OpRecordingStore) {
+	t.Helper()
+	var meta map[string]string
+	if pointer != "" {
+		meta = map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: pointer}
+	}
+	mem := beads.NewMemStoreFrom(1, []beads.Bead{sessionBeadFixture("s-1", "open", meta)}, nil)
+	rec := beadstest.NewOpRecordingStore(mem)
+	return NewStore(beads.SessionStore{Store: rec}), mem, rec
+}
+
+// currentClaimPointer reads the raw pointer straight off the backing store.
+func currentClaimPointer(t *testing.T, mem *beads.MemStore) string {
+	t.Helper()
+	b, err := mem.Get("s-1")
+	if err != nil {
+		t.Fatalf("reading session bead: %v", err)
+	}
+	return b.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey]
+}
+
+// currentClaimWrites counts the metadata writes a recorder saw, the
+// compare-and-set included.
+func currentClaimWrites(rec *beadstest.OpRecordingStore) map[string]int {
+	out := map[string]int{}
+	for _, op := range rec.Ops() {
+		switch op.Kind {
+		case beadstest.OpSetMetadata, beadstest.OpSetMetadataBatch, beadstest.OpCompareAndSetMetadataKey:
+			out[op.Kind]++
+		}
+	}
+	return out
+}
+
+// TestReserveCurrentClaimSwapThenConflict is AC-1: two reserves that both read
+// the pointer as "X" race on a store that offers metadata CAS. The first swaps
+// it to its bead; the second is told it lost and writes nothing, so the pointer
+// keeps naming the first claim.
+func TestReserveCurrentClaimSwapThenConflict(t *testing.T) {
+	is, mem, rec := currentClaimFixture(t, "X")
+
+	first, err := is.ReserveCurrentClaim("s-1", "X", "A")
+	if err != nil {
+		t.Fatalf("first ReserveCurrentClaim: %v", err)
+	}
+	if first != CurrentClaimSwapped {
+		t.Fatalf("first reserve = %q, want %q", first, CurrentClaimSwapped)
+	}
+	rec.Reset()
+	second, err := is.ReserveCurrentClaim("s-1", "X", "B")
+	if err != nil {
+		t.Fatalf("second ReserveCurrentClaim: %v", err)
+	}
+	if second != CurrentClaimConflict {
+		t.Fatalf("second reserve = %q, want %q", second, CurrentClaimConflict)
+	}
+	if w := currentClaimWrites(rec); w[beadstest.OpSetMetadata] != 0 || w[beadstest.OpSetMetadataBatch] != 0 {
+		t.Errorf("losing reserve wrote unconditionally: %v", w)
+	}
+	if got := currentClaimPointer(t, mem); got != "A" {
+		t.Fatalf("pointer = %q, want A (the winner's stamp)", got)
+	}
+}
+
+// TestReserveCurrentClaimRefusesEmptyBeadID pins that a reserve must name the
+// bead it claims: clearing the pointer is ClearCurrentClaim's job, so an empty
+// reserve cannot launder a clear past the expected-value fence.
+func TestReserveCurrentClaimRefusesEmptyBeadID(t *testing.T) {
+	is, mem, rec := currentClaimFixture(t, "X")
+
+	if _, err := is.ReserveCurrentClaim("s-1", "X", ""); err == nil {
+		t.Fatal("ReserveCurrentClaim with an empty bead id = nil error, want a refusal")
+	}
+	if writes := currentClaimWrites(rec); len(writes) != 0 {
+		t.Fatalf("issued writes: %v, want none", writes)
+	}
+	if p := currentClaimPointer(t, mem); p != "X" {
+		t.Fatalf("pointer = %q, want %q", p, "X")
+	}
+}
+
+// casInterleavingStore runs between before the first compare-and-set of the
+// current-claim key to trigger lands, standing in for a second claim process
+// that read the same pointer and swapped first. It offers the metadata CAS
+// capability itself, forwarding to the wrapped MemStore.
+type casInterleavingStore struct {
+	beads.Store
+	trigger string
+	between func()
+	fired   bool
+}
+
+func (s *casInterleavingStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
+	if !s.fired && key == beadmeta.CurrentClaimBeadIDMetadataKey && next == s.trigger {
+		s.fired = true
+		s.between()
+	}
+	return s.Store.(beads.MetadataCASWriter).CompareAndSetMetadataKey(id, key, expected, next)
+}
+
+// TestReserveCurrentClaimInterleavedClaimersExactlyOneWins is the #6110
+// reproduction: claimer A has read the pointer and is about to write when
+// claimer B reads the same value and writes first. Exactly one of them may be
+// told its stamp landed, and the pointer names that one.
+func TestReserveCurrentClaimInterleavedClaimersExactlyOneWins(t *testing.T) {
+	mem := beads.NewMemStoreFrom(1, []beads.Bead{sessionBeadFixture("s-1", "open", nil)}, nil)
+	wrapped := &casInterleavingStore{Store: mem, trigger: "gcg-A"}
+	is := NewStore(beads.SessionStore{Store: wrapped})
+
+	var outB CurrentClaimOutcome
+	var errB error
+	wrapped.between = func() { outB, errB = is.ReserveCurrentClaim("s-1", "", "gcg-B") }
+	outA, errA := is.ReserveCurrentClaim("s-1", "", "gcg-A")
+	if !wrapped.fired {
+		t.Fatal("interleaving hook never fired; the test did not exercise the race")
+	}
+	if errA != nil || errB != nil {
+		t.Fatalf("reserve errors: A=%v B=%v", errA, errB)
+	}
+	if outA != CurrentClaimConflict || outB != CurrentClaimSwapped {
+		t.Fatalf("outcomes A=%q B=%q, want A conflict and B swapped", outA, outB)
+	}
+	if got := currentClaimPointer(t, mem); got != "gcg-B" {
+		t.Fatalf("pointer = %q, want gcg-B (the one claimer told it won)", got)
+	}
+}
+
+// TestReserveCurrentClaimConcurrentSingleWinner races sixteen reserves that all
+// read the pointer as "X": exactly one swaps, every other one conflicts, and the
+// pointer names the winner.
+func TestReserveCurrentClaimConcurrentSingleWinner(t *testing.T) {
+	is, mem, _ := currentClaimFixture(t, "X")
+	const n = 16
+	outcomes := make([]CurrentClaimOutcome, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			outcomes[i], errs[i] = is.ReserveCurrentClaim("s-1", "X", fmt.Sprintf("b%d", i))
+		}(i)
+	}
+	wg.Wait()
+	winner := ""
+	for i := 0; i < n; i++ {
+		if errs[i] != nil {
+			t.Fatalf("reserve %d: %v", i, errs[i])
+		}
+		switch outcomes[i] {
+		case CurrentClaimSwapped:
+			if winner != "" {
+				t.Fatalf("two reserves swapped: %s and b%d", winner, i)
+			}
+			winner = fmt.Sprintf("b%d", i)
+		case CurrentClaimConflict:
+		default:
+			t.Fatalf("reserve %d = %q, want swapped or conflict", i, outcomes[i])
+		}
+	}
+	if winner == "" {
+		t.Fatal("no reserve swapped")
+	}
+	if got := currentClaimPointer(t, mem); got != winner {
+		t.Fatalf("pointer = %q, want the winner %s", got, winner)
+	}
+}
+
+// TestClearCurrentClaimLeavesLaterStamp is AC-2: a rollback that clears the
+// pointer against its own stamp "A" after another claim replaced it with "B" is
+// told it lost, writes nothing, and leaves the later winner's stamp in place.
+func TestClearCurrentClaimLeavesLaterStamp(t *testing.T) {
+	is, mem, rec := currentClaimFixture(t, "B")
+
+	outcome, err := is.ClearCurrentClaim("s-1", "A")
+	if err != nil {
+		t.Fatalf("ClearCurrentClaim: %v", err)
+	}
+	if outcome != CurrentClaimConflict {
+		t.Fatalf("clear = %q, want %q", outcome, CurrentClaimConflict)
+	}
+	if w := currentClaimWrites(rec); w[beadstest.OpSetMetadata] != 0 || w[beadstest.OpSetMetadataBatch] != 0 {
+		t.Errorf("losing clear wrote unconditionally: %v", w)
+	}
+	if got := currentClaimPointer(t, mem); got != "B" {
+		t.Fatalf("pointer = %q, want B (the later winner's stamp)", got)
+	}
+}
+
+// TestClearCurrentClaimClearsOwnStamp is the control for AC-2: a clear whose
+// expected value is still the pointer empties it.
+func TestClearCurrentClaimClearsOwnStamp(t *testing.T) {
+	is, mem, _ := currentClaimFixture(t, "A")
+
+	outcome, err := is.ClearCurrentClaim("s-1", "A")
+	if err != nil {
+		t.Fatalf("ClearCurrentClaim: %v", err)
+	}
+	if outcome != CurrentClaimSwapped {
+		t.Fatalf("clear = %q, want %q", outcome, CurrentClaimSwapped)
+	}
+	if got := currentClaimPointer(t, mem); got != "" {
+		t.Fatalf("pointer = %q, want empty", got)
+	}
+}
+
+// TestClearCurrentClaimRefusesEmptyExpected: a clear must name the stamp it
+// removes, or it is the unconditional clear that erases a later winner.
+func TestClearCurrentClaimRefusesEmptyExpected(t *testing.T) {
+	is, mem, rec := currentClaimFixture(t, "B")
+
+	if _, err := is.ClearCurrentClaim("s-1", " "); err == nil {
+		t.Fatal("ClearCurrentClaim with an empty expected value succeeded, want an error")
+	}
+	if w := currentClaimWrites(rec); len(w) != 0 {
+		t.Errorf("refused clear issued writes: %v", w)
+	}
+	if got := currentClaimPointer(t, mem); got != "B" {
+		t.Fatalf("pointer = %q, want B", got)
+	}
+}
+
+// TestReserveCurrentClaimUnchangedWritesNothing is AC-3: the claim path
+// re-serves an adopted bead on every hook tick, so a reserve for the bead the
+// pointer already names reports CurrentClaimUnchanged and issues no write of
+// any kind — not even a compare-and-set — whatever the expected value.
+func TestReserveCurrentClaimUnchangedWritesNothing(t *testing.T) {
+	for _, expected := range []string{"A", "X", ""} {
+		t.Run("expected="+expected, func(t *testing.T) {
+			is, mem, rec := currentClaimFixture(t, "A")
+
+			outcome, err := is.ReserveCurrentClaim("s-1", expected, "A")
+			if err != nil {
+				t.Fatalf("ReserveCurrentClaim: %v", err)
+			}
+			if outcome != CurrentClaimUnchanged {
+				t.Fatalf("reserve = %q, want %q", outcome, CurrentClaimUnchanged)
+			}
+			if w := currentClaimWrites(rec); len(w) != 0 {
+				t.Errorf("unchanged reserve issued writes: %v", w)
+			}
+			if got := currentClaimPointer(t, mem); got != "A" {
+				t.Fatalf("pointer = %q, want A", got)
+			}
+		})
+	}
+}
+
+// legacyCurrentClaimFixture builds the session store over a backing store that
+// cannot fence the pointer: either the wrapper hides the metadata-CAS
+// capability entirely, or the CAS it offers refuses with
+// beads.ErrConditionalWriteUnsupported (DoltLite's read store refuses every
+// conditional verb).
+func legacyCurrentClaimFixture(t *testing.T, pointer string, refusingCAS bool) (*Store, *beads.MemStore, *beadstest.OpRecordingStore) {
+	t.Helper()
+	var meta map[string]string
+	if pointer != "" {
+		meta = map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: pointer}
+	}
+	mem := beads.NewMemStoreFrom(1, []beads.Bead{sessionBeadFixture("s-1", "open", meta)}, nil)
+	rec := beadstest.NewOpRecordingStore(mem)
+	if refusingCAS {
+		mem.DisableConditionalWrites = true
+		return NewStore(beads.SessionStore{Store: rec}), mem, rec
+	}
+	// An interface-embedding wrapper promotes no optional capability and
+	// declares no resolution target, so the CAS is out of reach.
+	return NewStore(beads.SessionStore{Store: struct{ beads.Store }{rec}}), mem, rec
+}
+
+// TestReserveCurrentClaimLegacyStore is AC-4: on a store without metadata CAS
+// the reserve still compares against the caller's expected value, writing one
+// single-key SetMetadata when the pointer holds it and nothing when it does not.
+func TestReserveCurrentClaimLegacyStore(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		refusingCAS bool
+	}{
+		{name: "no CAS capability"},
+		{name: "CAS refuses as unsupported", refusingCAS: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Run("pointer holds expected", func(t *testing.T) {
+				is, mem, rec := legacyCurrentClaimFixture(t, "X", tc.refusingCAS)
+				got, err := is.ReserveCurrentClaim("s-1", "X", "A")
+				if err != nil {
+					t.Fatalf("ReserveCurrentClaim: %v", err)
+				}
+				if got != CurrentClaimLegacy {
+					t.Fatalf("reserve = %q, want %q", got, CurrentClaimLegacy)
+				}
+				writes := currentClaimWrites(rec)
+				if writes[beadstest.OpSetMetadata] != 1 || writes[beadstest.OpSetMetadataBatch] != 0 {
+					t.Fatalf("issued writes: %v, want exactly one SetMetadata", writes)
+				}
+				if p := currentClaimPointer(t, mem); p != "A" {
+					t.Fatalf("pointer = %q, want %q", p, "A")
+				}
+			})
+			t.Run("pointer moved off expected", func(t *testing.T) {
+				is, mem, rec := legacyCurrentClaimFixture(t, "B", tc.refusingCAS)
+				got, err := is.ReserveCurrentClaim("s-1", "X", "A")
+				if err != nil {
+					t.Fatalf("ReserveCurrentClaim: %v", err)
+				}
+				if got != CurrentClaimConflict {
+					t.Fatalf("reserve = %q, want %q", got, CurrentClaimConflict)
+				}
+				writes := currentClaimWrites(rec)
+				if writes[beadstest.OpSetMetadata] != 0 || writes[beadstest.OpSetMetadataBatch] != 0 {
+					t.Fatalf("issued writes: %v, want none", writes)
+				}
+				if p := currentClaimPointer(t, mem); p != "B" {
+					t.Fatalf("pointer = %q, want %q", p, "B")
+				}
+			})
+		})
+	}
+}
+
+// TestClearCurrentClaimLegacyStore pins the rollback clear on a store without
+// metadata CAS: it writes the empty value with one SetMetadata only while the
+// raw stored value still equals the stamp it was asked to remove, and a stale
+// clear writes nothing and leaves the later stamp.
+func TestClearCurrentClaimLegacyStore(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		refusingCAS bool
+	}{
+		{name: "no CAS capability"},
+		{name: "CAS refuses as unsupported", refusingCAS: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Run("pointer holds own stamp", func(t *testing.T) {
+				is, mem, rec := legacyCurrentClaimFixture(t, "A", tc.refusingCAS)
+				got, err := is.ClearCurrentClaim("s-1", "A")
+				if err != nil {
+					t.Fatalf("ClearCurrentClaim: %v", err)
+				}
+				if got != CurrentClaimLegacy {
+					t.Fatalf("clear = %q, want %q", got, CurrentClaimLegacy)
+				}
+				writes := currentClaimWrites(rec)
+				if writes[beadstest.OpSetMetadata] != 1 || writes[beadstest.OpSetMetadataBatch] != 0 {
+					t.Fatalf("issued writes: %v, want exactly one SetMetadata", writes)
+				}
+				if p := currentClaimPointer(t, mem); p != "" {
+					t.Fatalf("pointer = %q, want empty", p)
+				}
+			})
+			t.Run("later stamp", func(t *testing.T) {
+				is, mem, rec := legacyCurrentClaimFixture(t, "B", tc.refusingCAS)
+				got, err := is.ClearCurrentClaim("s-1", "A")
+				if err != nil {
+					t.Fatalf("ClearCurrentClaim: %v", err)
+				}
+				if got != CurrentClaimConflict {
+					t.Fatalf("clear = %q, want %q", got, CurrentClaimConflict)
+				}
+				writes := currentClaimWrites(rec)
+				if writes[beadstest.OpSetMetadata] != 0 || writes[beadstest.OpSetMetadataBatch] != 0 {
+					t.Fatalf("issued writes: %v, want none", writes)
+				}
+				if p := currentClaimPointer(t, mem); p != "B" {
+					t.Fatalf("pointer = %q, want %q", p, "B")
+				}
+			})
+		})
+	}
+}
+
+// TestReserveCurrentClaimRawExpected pins that expected is compared against the
+// raw stored value, on both the fenced and the legacy path: a pointer stored as
+// " X" is matched by " X", not by its trimmed form.
+func TestReserveCurrentClaimRawExpected(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		build func(t *testing.T) (*Store, *beads.MemStore)
+	}{
+		{name: "fenced", build: func(t *testing.T) (*Store, *beads.MemStore) {
+			is, mem, _ := currentClaimFixture(t, " X")
+			return is, mem
+		}},
+		{name: "legacy", build: func(t *testing.T) (*Store, *beads.MemStore) {
+			is, mem, _ := legacyCurrentClaimFixture(t, " X", false)
+			return is, mem
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			is, mem := tc.build(t)
+			if got, err := is.ReserveCurrentClaim("s-1", "X", "A"); err != nil || got != CurrentClaimConflict {
+				t.Fatalf("reserve with trimmed expected = %q, %v; want %q", got, err, CurrentClaimConflict)
+			}
+			if got, err := is.ReserveCurrentClaim("s-1", " X", "A"); err != nil || (got != CurrentClaimSwapped && got != CurrentClaimLegacy) {
+				t.Fatalf("reserve with raw expected = %q, %v; want a write", got, err)
+			}
+			if p := currentClaimPointer(t, mem); p != "A" {
+				t.Fatalf("pointer = %q, want %q", p, "A")
+			}
+		})
 	}
 }

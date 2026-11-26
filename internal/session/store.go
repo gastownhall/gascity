@@ -608,47 +608,143 @@ func (s *Store) RecordCurrentBead(id, beadID string) error {
 	return s.setMetadataValue(id, CurrentBeadIDKey, beadID)
 }
 
-// SetCurrentClaim stamps the work bead this session claimed for itself through
-// `gc hook --claim` (beadmeta.CurrentClaimBeadIDMetadataKey) — or clears the
-// stamp when beadID is empty. It reports whether a write was actually issued.
+// DropCurrentClaim empties the session's current-claim pointer
+// (beadmeta.CurrentClaimBeadIDMetadataKey) whatever it names. It is the
+// unfenced clear for the close, retire and reassign cascades, where the
+// session loses all its work at once; a claim run giving back its own bead
+// uses ClearCurrentClaim, which leaves a later claim's pointer in place.
 //
-// It is deliberately a different key from RecordCurrentBead's: that one records
-// a controller-side assignment the reconciler made at wake time, this one
-// records a claim the session made for itself, and a shared key would let the
-// two lanes overwrite each other. Callers must clear it on every path that takes
-// the work back off the session — a stale stamp names a bead the session no
-// longer owns.
-//
-// The read is validatedBead, so the id is resolved EXACTLY (the bead store's
-// Get surfaces a prefix collision as beads.ErrIDCollision) and a non-session
-// bead is refused before any write: bd's fuzzy id resolver would otherwise let a
-// post-claim update land on a prefix-colliding session bead, which is why the
-// claim path historically refused to decorate the session bead at all
-// (cmd/gc/cmd_hook_claim.go publishHookClaimRunMap). The write targets the
-// canonical bead id the read returned, never the caller's raw identifier.
-//
-// The current value is compared first and an unchanged value writes nothing: the
-// claim path re-runs on every hook tick through its adoption branches, so an
-// unconditional write would emit one bead.updated per tick per in-progress bead.
-// It emits a single-key SetMetadata, not a batch, matching RecordCurrentBead.
-func (s *Store) SetCurrentClaim(id, beadID string) (bool, error) {
+// The read is validatedBead, so the id is resolved EXACTLY and a non-session
+// bead is refused before any write; the write targets the canonical bead id the
+// read returned. An already-empty pointer writes nothing. It emits a
+// single-key SetMetadata, not a batch, matching RecordCurrentBead.
+func (s *Store) DropCurrentClaim(id string) error {
 	b, err := s.validatedBead(id)
 	if err != nil {
-		return false, err
+		return err
 	}
+	if strings.TrimSpace(b.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey]) == "" {
+		return nil
+	}
+	return s.writeCurrentClaimPointer(b.ID, "")
+}
+
+// writeCurrentClaimPointer is the one unconditional write of the current-claim
+// pointer: one single-key SetMetadata of value on the session bead id, a
+// canonical id the caller's validatedBead read returned. Its two callers are
+// DropCurrentClaim's cascade clear and swapCurrentClaim's compare-then-write
+// on a store without metadata CAS; every other pointer write is the fenced
+// beads.ApplyMetadataCAS.
+func (s *Store) writeCurrentClaimPointer(id, value string) error {
+	return s.setMetadataValue(id, beadmeta.CurrentClaimBeadIDMetadataKey, value)
+}
+
+// CurrentClaimOutcome classifies one fenced write of a session's current-claim
+// pointer (beadmeta.CurrentClaimBeadIDMetadataKey). Conflict is an ordinary race
+// result, not an error: another claim moved the pointer off the value the caller
+// expected, and nothing was written.
+type CurrentClaimOutcome string
+
+const (
+	// CurrentClaimSwapped means the pointer held the expected value and a
+	// metadata compare-and-set replaced it.
+	CurrentClaimSwapped CurrentClaimOutcome = "swapped"
+	// CurrentClaimUnchanged means the pointer already held the requested value;
+	// nothing was written by this call.
+	CurrentClaimUnchanged CurrentClaimOutcome = "unchanged"
+	// CurrentClaimConflict means the pointer held neither the expected nor the
+	// requested value; nothing was written.
+	CurrentClaimConflict CurrentClaimOutcome = "conflict"
+	// CurrentClaimLegacy means the store offers no metadata compare-and-set,
+	// the pointer held the expected value when read, and an unconditional
+	// single-key write replaced it. The compare and the write are not atomic.
+	CurrentClaimLegacy CurrentClaimOutcome = "legacy"
+)
+
+// ReserveCurrentClaim points the session's current-claim pointer at beadID,
+// fenced on expected: the RAW pointer value the caller read before it decided
+// to claim (Info.CurrentClaimBeadID, never a trimmed form). Two claims of one
+// session that both read the same value cannot both win: the write is a
+// key-level compare-and-set (beads.ApplyMetadataCAS), so exactly one swaps and
+// the other is told CurrentClaimConflict and writes nothing.
+//
+// The id is resolved EXACTLY and a non-session bead is refused before any
+// write (validatedBead), and the write targets the canonical id that read
+// returned: bd's fuzzy id resolver would otherwise let the post-claim stamp land
+// on a prefix-colliding session bead.
+//
+// On a store without metadata CAS the reserve compares expected against the
+// value it just read and writes one single-key SetMetadata, reporting
+// CurrentClaimLegacy; the compare and the write are then not atomic.
+//
+// A transport error is returned as-is and never classified: the caller cannot
+// know whether it committed. Retrying with the same expected value is safe, as
+// a committed attempt reads back as CurrentClaimUnchanged.
+func (s *Store) ReserveCurrentClaim(id, expected, beadID string) (CurrentClaimOutcome, error) {
 	beadID = strings.TrimSpace(beadID)
-	if strings.TrimSpace(b.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey]) == beadID {
-		return false, nil
+	if beadID == "" {
+		return "", fmt.Errorf("reserving current claim on session %q: empty bead id", id)
 	}
-	if err := s.setMetadataValue(b.ID, beadmeta.CurrentClaimBeadIDMetadataKey, beadID); err != nil {
-		return false, err
+	return s.swapCurrentClaim(id, expected, beadID)
+}
+
+// ClearCurrentClaim empties the session's current-claim pointer only while it
+// still holds expected: the stamp the caller itself wrote. It is the rollback
+// half of ReserveCurrentClaim, so a claim that gives its bead back can only
+// erase its own stamp; if a later claim has since moved the pointer it returns
+// CurrentClaimConflict and writes nothing, and that later stamp stands. An empty
+// expected value is an error: a clear must name the stamp it removes.
+func (s *Store) ClearCurrentClaim(id, expected string) (CurrentClaimOutcome, error) {
+	if strings.TrimSpace(expected) == "" {
+		return "", fmt.Errorf("clearing current claim on session %q: empty expected bead id", id)
 	}
-	return true, nil
+	return s.swapCurrentClaim(id, expected, "")
+}
+
+// swapCurrentClaim is the fenced write shared by the current-claim writers: it
+// moves the pointer from expected to next, and writes nothing when the pointer
+// already holds next.
+func (s *Store) swapCurrentClaim(id, expected, next string) (CurrentClaimOutcome, error) {
+	b, err := s.validatedBead(id)
+	if err != nil {
+		return "", err
+	}
+	// The claim path re-serves an adopted bead on every hook tick; a pointer
+	// that already names it is left alone, so the re-serve emits no
+	// bead.updated.
+	if strings.TrimSpace(b.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey]) == next {
+		return CurrentClaimUnchanged, nil
+	}
+	outcome, err := beads.ApplyMetadataCAS(s.store, b.ID, beadmeta.CurrentClaimBeadIDMetadataKey, expected, next)
+	if errors.Is(err, beads.ErrConditionalWriteUnsupported) {
+		// A store that cannot fence the pointer (no metadata CAS, or one that
+		// refuses every conditional verb) still honors expected: compare it
+		// against the value just read, then write once.
+		if b.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey] != expected {
+			return CurrentClaimConflict, nil
+		}
+		if err := s.writeCurrentClaimPointer(b.ID, next); err != nil {
+			return "", err
+		}
+		return CurrentClaimLegacy, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	switch outcome {
+	case beads.MetadataCASSwapped:
+		return CurrentClaimSwapped, nil
+	case beads.MetadataCASAlreadyNext:
+		return CurrentClaimUnchanged, nil
+	case beads.MetadataCASConflict:
+		return CurrentClaimConflict, nil
+	}
+	return "", fmt.Errorf("writing current claim on session %q: unknown metadata CAS outcome %q", b.ID, outcome)
 }
 
 // CurrentClaimBeadID returns the id of the work bead this session most recently
 // claimed through `gc hook --claim` ("" when unset). It is the read half of
-// SetCurrentClaim and the front door for `gc hook current`.
+// ReserveCurrentClaim and the front door for `gc hook current`.
 //
 // It shares Get's validation and error contract (both route through
 // validatedBead): a present-but-non-session bead is ErrSessionNotFound and an

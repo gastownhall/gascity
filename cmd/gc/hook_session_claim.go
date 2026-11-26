@@ -43,20 +43,21 @@ func sessionCurrentClaimFrontDoor() (*session.Store, error) {
 	return cliSessionFrontDoor(store, cfg, cityPath), nil
 }
 
-// hookStampSessionCurrentClaim records beadID as the work bead the session
-// identified by sessionID is currently running. It is the production
-// implementation of the hookClaimOps.StampSessionClaim seam.
+// hookReserveSessionCurrentClaim points the current-claim pointer of the
+// session identified by sessionID at beadID while it still holds expected. It
+// is the production implementation of the hookClaimOps.ReserveSessionClaim
+// seam.
 //
-// The write goes through session.Store.SetCurrentClaim, which resolves the id
-// EXACTLY and refuses a non-session bead before writing anything: bd's fuzzy id
-// resolver would otherwise let a post-claim update land on a prefix-colliding
-// session if the intended one disappeared concurrently, which is why the claim
-// path decorates the session bead only through this guarded seam (see
-// publishHookClaimRunMap, which stays a file-based sidecar for exactly that
-// reason). SetCurrentClaim also compare-and-skips, so the per-tick adoption
-// re-run issues no write once the value is current.
-func hookStampSessionCurrentClaim(sessionID, beadID string) error {
-	return stampSessionCurrentClaimVia(sessionCurrentClaimFrontDoor, sessionID, beadID)
+// The write goes through session.Store.ReserveCurrentClaim, which resolves the
+// id EXACTLY and refuses a non-session bead before writing anything: bd's fuzzy
+// id resolver would otherwise let a post-claim update land on a
+// prefix-colliding session if the intended one disappeared concurrently, which
+// is why the claim path decorates the session bead only through this guarded
+// seam (see publishHookClaimRunMap, which stays a file-based sidecar for
+// exactly that reason). A pointer already naming beadID is left unwritten, so
+// the per-tick adoption re-run issues no write once the value is current.
+func hookReserveSessionCurrentClaim(sessionID string, expected hookClaimExpected, beadID string) (session.CurrentClaimOutcome, error) {
+	return reserveSessionCurrentClaimVia(sessionCurrentClaimFrontDoor, sessionID, expected, beadID)
 }
 
 // sessionFrontGetter yields the session front door a session seam reads or
@@ -64,14 +65,63 @@ func hookStampSessionCurrentClaim(sessionID, beadID string) error {
 // hookCity's sessionFront shares one across an invocation.
 type sessionFrontGetter func() (*session.Store, error)
 
-// stampSessionCurrentClaimVia is hookStampSessionCurrentClaim through front.
-func stampSessionCurrentClaimVia(front sessionFrontGetter, sessionID, beadID string) error {
+// reserveSessionCurrentClaimVia is hookReserveSessionCurrentClaim through
+// front. An unknown expected value (the run's pre-query read failed) is read
+// here, so the reserve is fenced from this read instead.
+func reserveSessionCurrentClaimVia(front sessionFrontGetter, sessionID string, expected hookClaimExpected, beadID string) (session.CurrentClaimOutcome, error) {
 	sessFront, err := front()
 	if err != nil {
-		return err
+		return "", err
 	}
-	_, err = sessFront.SetCurrentClaim(sessionID, beadID)
-	return err
+	if !expected.Known {
+		info, err := sessFront.Get(sessionID)
+		if err != nil {
+			return "", fmt.Errorf("reading current claim of session %s: %w", sessionID, err)
+		}
+		expected = hookClaimExpected{Value: info.CurrentClaimBeadID, Known: true}
+	}
+	return sessFront.ReserveCurrentClaim(sessionID, expected.Value, beadID)
+}
+
+// hookClaimPreReadCurrentClaim reads the current-claim pointer of the session
+// identified by sessionID before the claim's work query: the value the claim's
+// reserve is fenced on. The row the instance-token fence verified (fenced) is
+// used when it is that session's, so the token path costs no extra read;
+// otherwise the pointer is read through front. A failed read is reported on
+// stderr and returns an unknown value, which makes the reserve read the
+// pointer itself. A run with no session id has no pointer to read.
+func hookClaimPreReadCurrentClaim(front sessionFrontGetter, sessionID string, fenced *session.Info, stderr io.Writer) hookClaimExpected {
+	if sessionID == "" {
+		return hookClaimExpected{}
+	}
+	if fenced != nil && fenced.ID == sessionID {
+		return hookClaimExpected{Value: fenced.CurrentClaimBeadID, Known: true}
+	}
+	sessFront, err := front()
+	if err == nil {
+		var info session.Info
+		if info, err = sessFront.Get(sessionID); err == nil {
+			return hookClaimExpected{Value: info.CurrentClaimBeadID, Known: true}
+		}
+	}
+	fmt.Fprintf(stderr, "gc hook --claim: reading current claim of session %s before the work query: %v\n", sessionID, err) //nolint:errcheck
+	return hookClaimExpected{}
+}
+
+// hookClearSessionCurrentClaim empties the current-claim pointer of the
+// session identified by sessionID while it still names expected. It is the
+// production implementation of the hookClaimOps.ClearSessionClaim seam.
+func hookClearSessionCurrentClaim(sessionID, expected string) (session.CurrentClaimOutcome, error) {
+	return clearSessionCurrentClaimVia(sessionCurrentClaimFrontDoor, sessionID, expected)
+}
+
+// clearSessionCurrentClaimVia is hookClearSessionCurrentClaim through front.
+func clearSessionCurrentClaimVia(front sessionFrontGetter, sessionID, expected string) (session.CurrentClaimOutcome, error) {
+	sessFront, err := front()
+	if err != nil {
+		return "", err
+	}
+	return sessFront.ClearCurrentClaim(sessionID, expected)
 }
 
 // hookSessionDrainPending reports whether the session identified by sessionID is
@@ -123,7 +173,7 @@ func sessionDrainPendingVia(front sessionFrontGetter, sessionID string) (bool, e
 // is the first actor that knows the concrete tree, and the session bead is the
 // only place that records it: GC_WORK_DIR is not in the env of a pool session.
 //
-// The id is resolved EXACTLY, for the same reason SetCurrentClaim does: the bd
+// The id is resolved EXACTLY, for the same reason ReserveCurrentClaim does: the bd
 // fuzzy resolver would otherwise let a prefix collision hand back the checkout of
 // a different session, and this value is stamped onto the work bead as durable
 // execution identity. Every failure yields "" -- an unset gc.work_dir is the

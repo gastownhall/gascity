@@ -413,7 +413,7 @@ type Info struct {
 	CurrentlyProcessingBeadID string // currently_processing_bead_id (raw)
 	// CurrentClaimBeadID is the RAW current_claim_bead_id metadata
 	// (beadmeta.CurrentClaimBeadIDMetadataKey): the work the session claimed
-	// for itself (SetCurrentClaim), which CurrentClaimBeadID reads live.
+	// for itself (ReserveCurrentClaim), which CurrentClaimBeadID reads live.
 	CurrentClaimBeadID string // current_claim_bead_id (raw)
 	// WorkStartedRaw and WorkLadderRaw are the RAW work cells (WorkStartedKey,
 	// WorkLadderKey; work_cells.go), so a fenced write's decide sees both:

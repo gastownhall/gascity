@@ -200,7 +200,10 @@ func (l *startedLog) ops(output string, row *startedRow, record hookRecordWorkSt
 			l.add("step_started:" + step.ID)
 			l.stepStarted = append(l.stepStarted, step.ID)
 		},
-		StampSessionClaim: func(_, beadID string) error { l.add("current:" + beadID); return nil },
+		ReserveSessionClaim: func(_ string, _ hookClaimExpected, beadID string) (session.CurrentClaimOutcome, error) {
+			l.add("current:" + beadID)
+			return session.CurrentClaimSwapped, nil
+		},
 		EmitClaimReleased: func(hookClaimReleaseRecord) {},
 		PublishRunMap:     func(string, string, ...string) error { return nil },
 		StampWorkMeta:     func(context.Context, string, []string, string, string, map[string]string) error { return nil },
@@ -519,6 +522,64 @@ func TestUndeliveredClaimForgetsStartedBeforeRelease(t *testing.T) {
 	}
 	if row.cell(t).Names(startedStoreRef, "work-1", 7) {
 		t.Fatalf("work_started %+v still names the released claim", row.cell(t))
+	}
+}
+
+// TestUnreservedClaimKeepsItsStartedRecord: a claim whose current-claim
+// reserve refuses the hand-over (refuseUnreservedHookClaim) keeps its
+// work_started entry, whether this run wrote it or an earlier hand-over did,
+// and forgets nothing. An adopted claim that lost the pointer stays the
+// session's assignment for the next claim to serve, and a minted claim a
+// sibling run of the session holds is that run's to deliver: the drain-ack
+// keeps either as the seat's started work. Kills a forget on either refusal.
+func TestUnreservedClaimKeepsItsStartedRecord(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		work    string
+		earlier bool // an earlier, delivered hand-over recorded the claim
+		outcome session.CurrentClaimOutcome
+		via     string
+	}{
+		{"adopted, lost, recorded by this run", startedAssignedWork, false, session.CurrentClaimConflict, session.WorkStartedViaAdopt},
+		{"adopted, lost, recorded earlier", startedAssignedWork, true, session.CurrentClaimConflict, session.WorkStartedViaAdopt},
+		{"minted, held by a sibling run", startedRoutedWork, false, session.CurrentClaimUnchanged, session.WorkStartedViaClaim},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			row := newStartedRow(t, nil)
+			opts := startedOpts(startedEnv(startedToken, "7"))
+			opts.CurrentClaimExpected = hookClaimExpected{Value: "X", Known: true}
+			if c.earlier {
+				var stdout, stderr bytes.Buffer
+				if code := doHookClaim("q", "/rig", opts, (&startedLog{}).ops(c.work, row, nil), &stdout, &stderr); code != 0 {
+					t.Fatalf("earlier hand-over: code %d; stderr=%s", code, stderr.String())
+				}
+			}
+			writes := row.store.rowWrites
+
+			l := &startedLog{}
+			ops := l.ops(c.work, row, nil)
+			ops.ReserveSessionClaim = func(_ string, _ hookClaimExpected, beadID string) (session.CurrentClaimOutcome, error) {
+				l.add("current:" + beadID)
+				return c.outcome, nil
+			}
+			stdout := &orderedWriter{l: l}
+			var stderr bytes.Buffer
+			code := doHookClaim("q", "/rig", opts, ops, stdout, &stderr)
+
+			if code != 1 || l.index("result") >= 0 || l.index("current:work-1") < 0 {
+				t.Fatalf("code %d, effects %v; want the reserve to refuse the hand-over; stderr=%s", code, l.log, stderr.String())
+			}
+			if l.index("forget:") >= 0 || len(l.releases) != 0 || l.acked {
+				t.Fatalf("effects %v; want nothing forgotten, released or acknowledged", l.log)
+			}
+			cell := row.cell(t)
+			if len(cell.Claims) != 1 || cell.Claims[0].Bead != "work-1" || cell.Claims[0].Via != c.via {
+				t.Fatalf("work_started = %+v, want the one %s entry for work-1 kept", cell.Claims, c.via)
+			}
+			if c.earlier && row.store.rowWrites != writes {
+				t.Fatalf("conditional row writes = %d, want %d: the earlier entry was rewritten", row.store.rowWrites, writes)
+			}
+		})
 	}
 }
 

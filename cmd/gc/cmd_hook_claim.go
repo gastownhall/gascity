@@ -65,6 +65,12 @@ const (
 // It is not a hookClaimReason* constant: those are the drain reasons.
 const hookClaimWorkReasonStartedClaimHeld = "started_claim_held"
 
+// hookClaimWorkReasonReadyAssignment is the work-action reason for an open
+// bead already assigned to this session that the claim promoted
+// (claimFirstReadyHookAssignment): minted by this run's claim, but the
+// session's assignment before it.
+const hookClaimWorkReasonReadyAssignment = "ready_assignment"
+
 // Reasons carried on a bead.claim_released event: which unwind gave the claim
 // back. Each describes a claim this process WON and could not hand to a live
 // consumer.
@@ -77,6 +83,10 @@ const (
 	// hookClaimReleaseReasonDraining: the session's row read draining when the
 	// claim re-read it after its CAS landed.
 	hookClaimReleaseReasonDraining = "session_draining"
+	// hookClaimReleaseReasonCurrentClaimLost: another claim of the same
+	// session moved its current-claim pointer off the value this run read
+	// before its work query, so that claim, not this one, is the session's.
+	hookClaimReleaseReasonCurrentClaimLost = "current_claim_lost"
 )
 
 var hookClaimMutationTimeout = 10 * time.Second
@@ -176,19 +186,38 @@ type hookClaimReleaseRecord struct {
 	Reason   string
 }
 
+// hookClaimExpected is the session's current-claim pointer as a claim run read
+// it before its work query: the raw stored value (session.Info's
+// CurrentClaimBeadID), and whether the read succeeded. The run's reserve is
+// fenced on it, so two runs of one session that both read it before either
+// reserves cannot both win. Unknown makes the reserve read the pointer itself.
+type hookClaimExpected struct {
+	Value string
+	Known bool
+}
+
+// namesOther reports whether the read is known and named something other than
+// beadID, a trimmed bead id: the pointer the read saw was not beadID's.
+func (e hookClaimExpected) namesOther(beadID string) bool {
+	return e.Known && strings.TrimSpace(e.Value) != beadID
+}
+
 type hookClaimOptions struct {
 	Assignee string
 	// SessionID is this session's durable bead ID. Assignee is deliberately the
 	// alias/agent form that read paths query through GC_AGENT, but a continuation
 	// pin means "run this on THIS session", which only a session identity can
 	// express. See continuationPinAssignee.
-	SessionID          string
-	IdentityCandidates []string
-	RouteTargets       []string
-	Env                []string
-	StoreRef           string
-	DrainAck           bool
-	JSON               bool
+	SessionID string
+	// CurrentClaimExpected is this session's current-claim pointer as read
+	// before the work query, the value the reserve is fenced on.
+	CurrentClaimExpected hookClaimExpected
+	IdentityCandidates   []string
+	RouteTargets         []string
+	Env                  []string
+	StoreRef             string
+	DrainAck             bool
+	JSON                 bool
 	// StrictDrainAck reports that the city runs the v2 session reconciler
 	// (cityRunsV2), under which a drain-ack is row-bound and can be refused.
 	// It only picks the drain-pending hint, so it is asked only when that
@@ -298,11 +327,17 @@ type hookClaimOps struct {
 	// (gc.work_branch and/or the durable session back-reference gc.session_id /
 	// gc.session_name) onto the claimed bead in ONE update. Best-effort.
 	StampWorkMeta hookStampWorkMetaFunc
-	// StampSessionClaim records the claimed bead id on the CLAIMING SESSION's own
-	// bead — the reverse direction from StampWorkMeta, and the only route by
-	// which the step's shell can later learn which bead it is running.
-	// Best-effort.
-	StampSessionClaim hookStampSessionClaimFunc
+	// ReserveSessionClaim points the CLAIMING SESSION's current-claim pointer
+	// at the claimed bead id — the reverse direction from StampWorkMeta, and the
+	// only route by which the step's shell can later learn which bead it is
+	// running — fenced on the pointer value the run read before its work query.
+	// Conflict means another claim of the session holds the pointer.
+	ReserveSessionClaim hookReserveSessionClaimFunc
+	// ClearSessionClaim empties the claiming session's current-claim pointer
+	// only while it still names expected, the bead this invocation reserved:
+	// the rollback half of ReserveSessionClaim. It reports Conflict and writes
+	// nothing when another claim has since moved the pointer.
+	ClearSessionClaim hookClearSessionClaimFunc
 	// ReadWorkMeta is the post-stamp authoritative readback used only to
 	// establish the durable lifecycle-start emission point.
 	ReadWorkMeta func(context.Context, string, []string, string, string) (beads.Bead, error)
@@ -419,7 +454,8 @@ type (
 	hookResolveWorkBranchFunc     func(tree hookClaimWorkTree) string
 	hookResolveSessionWorkDirFunc func(sessionID string) string
 	hookStampWorkMetaFunc         func(ctx context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error
-	hookStampSessionClaimFunc     func(sessionID, beadID string) error
+	hookReserveSessionClaimFunc   func(sessionID string, expected hookClaimExpected, beadID string) (session.CurrentClaimOutcome, error)
+	hookClearSessionClaimFunc     func(sessionID, expected string) (session.CurrentClaimOutcome, error)
 	hookPublishRunMapFunc         func(runID, beadID string, sessionKeys ...string) error
 	hookProvisionWorktreeFunc     func(beads.Bead, hookClaimOptions, hookClaimOps, string, io.Writer) (hookProvisionedWorktree, beads.Bead, error)
 	hookClaimReleaseFunc          func(ctx context.Context, dir string, env []string, beadID, assignee string) (bool, error)
@@ -713,8 +749,11 @@ func (ops *hookClaimOps) applyDefaults() {
 	if ops.StampWorkMeta == nil {
 		ops.StampWorkMeta = hookStampWorkMetaWithBdStore
 	}
-	if ops.StampSessionClaim == nil {
-		ops.StampSessionClaim = hookStampSessionCurrentClaim
+	if ops.ReserveSessionClaim == nil {
+		ops.ReserveSessionClaim = hookReserveSessionCurrentClaim
+	}
+	if ops.ClearSessionClaim == nil {
+		ops.ClearSessionClaim = hookClearSessionCurrentClaim
 	}
 	if ops.PublishRunMap == nil {
 		ops.PublishRunMap = writeRunMap
@@ -1070,7 +1109,7 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 			OK:            true,
 			Command:       hookClaimCommandName,
 			Action:        "work",
-			Reason:        "ready_assignment",
+			Reason:        hookClaimWorkReasonReadyAssignment,
 			BeadID:        claimed.ID,
 			Assignee:      claimed.Assignee,
 			Route:         hookClaimRoute(claimed),
@@ -1692,10 +1731,15 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 		}
 		return writeHookClaimDrain(hookClaimLabel, hookClaimReasonStaleSession, opts.JSON, opts.DrainAck, tolerateDrainAckRefusal(ops.DrainAck), stdout, stderr)
 	}
+	// The current-claim reserve: before the step-started event and the
+	// result line, so a claim another run of the session holds the pointer
+	// against emits neither (refuseUnreservedHookClaim).
+	if reserve := reserveHookSessionCurrentClaim(bead, opts, ops, stderr); reserve != hookCurrentClaimReserved {
+		return refuseUnreservedHookClaim(reserve, result.Reason, bead, opts, ops, dir, started, minted, stderr)
+	}
 	if stamped && hookClaimLifecycleCandidate(durable, opts) {
 		ops.EmitExecutionStepStarted(durable, dir, opts.Env, opts.Assignee)
 	}
-	stampHookSessionCurrentClaim(bead, opts, ops, stderr)
 	publishHookClaimRunMap(bead, opts, ops, stderr)
 	assigned, err := preassignHookContinuationGroup(bead, opts, ops, dir)
 	if err != nil {
@@ -1718,7 +1762,7 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 			fmt.Fprintf(stderr, "gc hook --claim: %s\n", cause) //nolint:errcheck
 			return 1
 		}
-		// stampHookSessionCurrentClaim above advertised this bead as the session's
+		// reserveHookSessionCurrentClaim above advertised this bead as the session's
 		// current claim before the result write; a minted claim is now being given
 		// back, so clear the stamp as part of the same rollback surface as
 		// ops.Release. Clear BEFORE the release (matching the session_beads.go
@@ -1726,7 +1770,7 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 		// bead this session no longer owns — the "close somebody else's bead" hazard
 		// this back-channel exists to prevent. The straddle path (F-B) needs no clear
 		// because it returns before the stamp.
-		clearHookSessionCurrentClaim(opts, ops, stderr)
+		clearHookSessionCurrentClaim(bead, opts, ops, stderr)
 		return unwindUndeliveredHookClaim(hookClaimReleaseReasonUndelivered, cause, bead, opts, ops, dir, started, stderr)
 	}
 	// Enqueue a per-session continuation nudge when the hook just claimed a
@@ -1822,6 +1866,37 @@ func refuseHookClaimBeingReleased(bead beads.Bead, opts hookClaimOptions, ops ho
 		}
 	}
 	return 0
+}
+
+// refuseUnreservedHookClaim answers a claim whose current-claim reserve did not
+// let it be delivered (reserveHookSessionCurrentClaim): no result line, no
+// step_started, --drain-ack not consumed, exit 1. reason is the result reason
+// the claim would have been delivered with.
+//
+//   - hookCurrentClaimLost: another claim of the session holds the pointer. A
+//     bead this run minted from routed work is given back
+//     (current_claim_lost). A bead that was already this session's
+//     assignment stays assigned for the next claim to serve again: an adopted
+//     one, and a ready assignment this run promoted (a pinned continuation
+//     sibling, or work slung to the session), whose release would clear the
+//     assignee the session was pinned by.
+//   - hookCurrentClaimHeldBySibling: another claim run of the session reserved
+//     this same bead after this run's pre-query read, so that run delivers it.
+//     This run neither delivers it nor gives it back, and leaves the pointer
+//     and the bead's work_started entry, both of which name the claim that run
+//     serves.
+func refuseUnreservedHookClaim(reserve hookCurrentClaimVerdict, reason string, bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, started hookStartedKey, minted bool, stderr io.Writer) int {
+	sessionID := hookClaimSessionID(opts.Env)
+	if reserve == hookCurrentClaimHeldBySibling {
+		fmt.Fprintf(stderr, "gc hook --claim: another claim of session %s reserved %s as its current claim after this one read the pointer; leaving %s to that claim\n", sessionID, bead.ID, bead.ID) //nolint:errcheck
+		return 1
+	}
+	cause := fmt.Sprintf("another claim of session %s took its current claim while %s was being claimed", sessionID, bead.ID)
+	if minted && reason != hookClaimWorkReasonReadyAssignment {
+		return unwindUndeliveredHookClaim(hookClaimReleaseReasonCurrentClaimLost, cause+"; giving it back", bead, opts, ops, dir, started, stderr)
+	}
+	fmt.Fprintf(stderr, "gc hook --claim: %s; leaving it assigned\n", cause) //nolint:errcheck
+	return 1
 }
 
 // writeHookClaimResultLine writes the one line that carries a claim result to
@@ -3437,7 +3512,7 @@ func emitExecutionStepStarted(rec events.Recorder, step beads.Bead, dir string, 
 	_ = executionevent.EmitLifecycle(rec, beads.GraphStore{Store: hookClaimBdStore(dir, env, assignee)}, events.ExecutionStepStarted, step, eventActor())
 }
 
-// stampHookSessionCurrentClaim records the claimed bead id on the CLAIMING
+// reserveHookSessionCurrentClaim records the claimed bead id on the CLAIMING
 // SESSION's own bead (beadmeta.CurrentClaimBeadIDMetadataKey), the reverse
 // direction from stampHookClaimIdentity's work-bead back-reference.
 //
@@ -3456,30 +3531,81 @@ func emitExecutionStepStarted(rec events.Recorder, step beads.Bead, dir string, 
 // control-dispatcher session running a control step needs to name its own bead
 // exactly as much as any other worker does.
 //
-// Best-effort: the write is guarded and compare-and-skipped inside
-// session.Store.SetCurrentClaim, and a failure is reported on stderr but never
-// fails the claim. The loud refusal for a step that cannot name its bead belongs
-// at the point of use, not here.
-func stampHookSessionCurrentClaim(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, stderr io.Writer) {
+// The write is fenced on opts.CurrentClaimExpected, the pointer as this run
+// read it before its work query (session.Store.ReserveCurrentClaim), and it
+// reports whether the claim may be delivered (hookCurrentClaimVerdict).
+//
+// A pointer that already names the bead writes nothing and reads back
+// unchanged. On the run's own pre-query read naming that bead, that is the
+// adoption re-serve, and the claim is delivered. On a first attempt whose
+// pre-query read named something else, no write of this run can have put it
+// there, and only another claim run of the session reserves a bead id: that
+// run reserved this bead after this run's read and delivers it, so this run
+// must not (hookCurrentClaimHeldBySibling). An unknown pre-query read cannot
+// tell the two apart, and the claim is delivered.
+//
+// An error is retried with the same expected value, which is safe because an
+// attempt that committed reads back as unchanged, so an unchanged after an
+// error is delivered. A reserve that never answers is reported on stderr and
+// the claim delivered: the loud refusal for a step that cannot name its bead
+// belongs at the point of use, not here.
+func reserveHookSessionCurrentClaim(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, stderr io.Writer) hookCurrentClaimVerdict {
 	sessionID := hookClaimSessionID(opts.Env)
 	beadID := strings.TrimSpace(bead.ID)
 	if sessionID == "" || beadID == "" {
-		return
+		return hookCurrentClaimReserved
 	}
-	if err := ops.StampSessionClaim(sessionID, beadID); err != nil {
-		fmt.Fprintf(stderr, "gc hook --claim: recording current claim %s on session %s: %v\n", beadID, sessionID, err) //nolint:errcheck
+	var err error
+	for attempt := 0; attempt < hookCurrentClaimReserveAttempts; attempt++ {
+		var outcome session.CurrentClaimOutcome
+		outcome, err = ops.ReserveSessionClaim(sessionID, opts.CurrentClaimExpected, beadID)
+		if err != nil {
+			continue
+		}
+		switch {
+		case outcome == session.CurrentClaimConflict:
+			return hookCurrentClaimLost
+		case outcome == session.CurrentClaimUnchanged && attempt == 0 && opts.CurrentClaimExpected.namesOther(beadID):
+			return hookCurrentClaimHeldBySibling
+		}
+		return hookCurrentClaimReserved
 	}
+	fmt.Fprintf(stderr, "gc hook --claim: recording current claim %s on session %s: %v\n", beadID, sessionID, err) //nolint:errcheck
+	return hookCurrentClaimReserved
 }
+
+// hookCurrentClaimVerdict is what a claim's current-claim reserve decided
+// (reserveHookSessionCurrentClaim).
+type hookCurrentClaimVerdict int
+
+const (
+	// hookCurrentClaimReserved: the pointer names this claim, or the reserve
+	// could not decide; the claim is delivered.
+	hookCurrentClaimReserved hookCurrentClaimVerdict = iota
+	// hookCurrentClaimLost: another claim of the session moved the pointer off
+	// the value this run read before its work query, to another bead.
+	hookCurrentClaimLost
+	// hookCurrentClaimHeldBySibling: another claim run of the session reserved
+	// this same bead after this run's pre-query read; that run delivers it.
+	hookCurrentClaimHeldBySibling
+)
+
+// hookCurrentClaimReserveAttempts bounds the reserve's retries of a store
+// error before the claim is delivered without it.
+const hookCurrentClaimReserveAttempts = 3
 
 // clearHookSessionCurrentClaim removes the session-side current-claim stamp when
 // a claim this invocation recorded is being given back, so a released bead is
 // never left advertised as the session's current claim. It is the inverse of
-// stampHookSessionCurrentClaim and deliberately routes the clear through the same
-// ops.StampSessionClaim seam — an empty bead id, which session.Store.SetCurrentClaim
-// treats as a clear — so it reaches the SAME relocation-aware session front door the
-// stamp used. Clearing through the store-cascade helper instead
-// (clearSessionCurrentClaim, sessionFrontDoor(store)) would risk missing a relocated
-// session binding the stamp wrote to.
+// reserveHookSessionCurrentClaim and reaches the SAME relocation-aware session
+// front door the stamp used (ops.ClearSessionClaim). Clearing through the
+// store-cascade helper instead (clearSessionCurrentClaim, sessionFrontDoor(store))
+// would risk missing a relocated session binding the stamp wrote to.
+//
+// The clear is ownership-checked: it empties the pointer only while it still
+// names bead. Another claim run of the same session may have stamped its own
+// bead since, and that later stamp is the one `gc hook current` must keep
+// reporting, so a conflict leaves it and says so on stderr.
 //
 // Best-effort with the stamp's own error handling: a failure is reported on stderr
 // but changes no exit code, because on this path the compensating action is
@@ -3487,13 +3613,18 @@ func stampHookSessionCurrentClaim(bead beads.Bead, opts hookClaimOptions, ops ho
 // clears BEFORE releasing so a freed bead is never simultaneously claimable by
 // another seat and still named by this session (the ordering session_beads.go's
 // cascade already relies on).
-func clearHookSessionCurrentClaim(opts hookClaimOptions, ops hookClaimOps, stderr io.Writer) {
+func clearHookSessionCurrentClaim(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, stderr io.Writer) {
 	sessionID := hookClaimSessionID(opts.Env)
-	if sessionID == "" {
+	beadID := strings.TrimSpace(bead.ID)
+	if sessionID == "" || beadID == "" {
 		return
 	}
-	if err := ops.StampSessionClaim(sessionID, ""); err != nil {
-		fmt.Fprintf(stderr, "gc hook --claim: clearing current claim on session %s: %v\n", sessionID, err) //nolint:errcheck
+	outcome, err := ops.ClearSessionClaim(sessionID, beadID)
+	switch {
+	case err != nil:
+		fmt.Fprintf(stderr, "gc hook --claim: clearing current claim %s on session %s: %v\n", beadID, sessionID, err) //nolint:errcheck
+	case outcome == session.CurrentClaimConflict:
+		fmt.Fprintf(stderr, "gc hook --claim: leaving current claim on session %s: it no longer names %s\n", sessionID, beadID) //nolint:errcheck
 	}
 }
 
@@ -3503,9 +3634,9 @@ func clearHookSessionCurrentClaim(opts hookClaimOptions, ops hookClaimOps, stder
 // prefix-colliding session if the intended session disappears concurrently.
 // The run map is independent, best-effort telemetry and preserves useful
 // correlation without issuing that unsafe second store mutation. (The one
-// session-bead write the claim does make, stampHookSessionCurrentClaim, goes
+// session-bead write the claim does make, reserveHookSessionCurrentClaim, goes
 // through the session front door's exact-id/session-bead-validated
-// SetCurrentClaim, which refuses the fuzzy redirect this comment describes
+// ReserveCurrentClaim, which refuses the fuzzy redirect this comment describes
 // rather than risking it.)
 func publishHookClaimRunMap(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, stderr io.Writer) {
 	sessionBeadID := hookClaimSessionID(opts.Env)

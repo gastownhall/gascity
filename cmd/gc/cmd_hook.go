@@ -618,6 +618,9 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			StartedFence: hookStartedFenceOf(os.Environ()),
 			// The fenced row, so the worktree check costs no extra read.
 			PoolSeat: hookClaimPoolSeatFor(cityPath, cityName, cfg.Rigs, fencedSession, &a),
+			// Read before the work query, so the reserve is fenced against
+			// any other claim of this session made while the query ran.
+			CurrentClaimExpected: hookClaimPreReadCurrentClaim(city.sessionFront, hookClaimSessionID(queryEnv), fencedSession, stderr),
 		}
 		var provisionWorktree hookProvisionWorktreeFunc
 		if opts.Worktree {

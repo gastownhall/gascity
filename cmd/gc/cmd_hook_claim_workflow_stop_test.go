@@ -140,7 +140,7 @@ func (f *hookWorkflowStopFixture) ops() hookClaimOps {
 			return f.store
 		},
 		StampWorkMeta:            func(context.Context, string, []string, string, string, map[string]string) error { return nil },
-		StampSessionClaim:        func(string, string) error { return nil },
+		ReserveSessionClaim:      noopReserveSessionClaim,
 		PublishRunMap:            func(string, string, ...string) error { return nil },
 		EmitExecutionStepStarted: func(beads.Bead, string, []string, string) {},
 		EmitClaimRejected:        func(string, string, string) {},

@@ -55,6 +55,5 @@ func clearSessionCurrentClaim(store beads.Store, sessionID string) error {
 	if store == nil || sessionID == "" {
 		return nil
 	}
-	_, err := sessionFrontDoor(store).SetCurrentClaim(sessionID, "")
-	return err
+	return sessionFrontDoor(store).DropCurrentClaim(sessionID)
 }

@@ -86,7 +86,7 @@ func (r *excludeTestRecorder) ops(t *testing.T, output string) hookClaimOps {
 			return nil
 		},
 		StampWorkMeta:            func(context.Context, string, []string, string, string, map[string]string) error { return nil },
-		StampSessionClaim:        func(string, string) error { return nil },
+		ReserveSessionClaim:      noopReserveSessionClaim,
 		PublishRunMap:            func(string, string, ...string) error { return nil },
 		EmitClaimRejected:        func(string, string, string) {},
 		EmitClaimReleased:        func(hookClaimReleaseRecord) {},

@@ -101,8 +101,8 @@ func TestHookCitySeamsShareOneSessionFrontDoor(t *testing.T) {
 		t.Fatalf("DrainPending = %v, %v; want false for an active session", pending, err)
 	}
 	_ = ops.ResolveSessionWorkDir(sessionID)
-	if err := ops.StampSessionClaim(sessionID, "gc-claimed"); err != nil {
-		t.Fatalf("StampSessionClaim: %v", err)
+	if outcome, err := ops.ReserveSessionClaim(sessionID, hookClaimExpected{}, "gc-claimed"); err != nil || outcome != session.CurrentClaimSwapped {
+		t.Fatalf("ReserveSessionClaim = %q, %v; want swapped", outcome, err)
 	}
 	if got := opens.Load(); got != 1 {
 		t.Fatalf("three session seams opened the city store %d times, want 1", got)

@@ -690,9 +690,9 @@ func TestHookClaimUnwindFailureIsSurfaced(t *testing.T) {
 // Without the clear a later `gc hook current --id-only` hands the shell a bead the
 // session no longer owns, and `gc bd close $BEAD_ID` closes another session's
 // in-progress work — the exact "close somebody else's bead" hazard the stamp exists
-// to prevent. The clear routes through the same StampSessionClaim seam as the stamp
-// (an empty id), and it must land BEFORE the release so a freed bead is never both
-// claimable elsewhere and still named here.
+// to prevent. The clear names the stamp it removes (ClearSessionClaim with the
+// claimed bead as expected), and it must land BEFORE the release so a freed bead is
+// never both claimable elsewhere and still named here.
 func TestHookClaimClearsSessionCurrentClaimOnUndeliveredUnwind(t *testing.T) {
 	for _, jsonOut := range []bool{true, false} {
 		name := "json"
@@ -709,7 +709,8 @@ func TestHookClaimClearsSessionCurrentClaimOnUndeliveredUnwind(t *testing.T) {
 				return beads.Bead{ID: id, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.session_id": "mc-sess1"}}, nil
 			}
 			sessSpy := &sessionClaimSpy{}
-			ops.StampSessionClaim = sessSpy.fn
+			ops.ReserveSessionClaim = sessSpy.reserve
+			ops.ClearSessionClaim = sessSpy.clear
 			// The release override proves clear-before-release: by the time the work
 			// bead is given back, the stamp must already have been cleared.
 			ops.Release = func(_ context.Context, _ string, _ []string, beadID, _ string) (bool, error) {
@@ -739,6 +740,9 @@ func TestHookClaimClearsSessionCurrentClaimOnUndeliveredUnwind(t *testing.T) {
 			if len(sessSpy.beadIDs) != 2 || sessSpy.beadIDs[0] != "work-1" || sessSpy.beadIDs[1] != "" {
 				t.Fatalf("session-claim seam writes = %v, want [work-1 \"\"] (stamp then clear)", sessSpy.beadIDs)
 			}
+			if len(sessSpy.cleared) != 1 || sessSpy.cleared[0] != "work-1" {
+				t.Fatalf("clear named %v, want [work-1]: a rollback clears only its own stamp", sessSpy.cleared)
+			}
 			if sessSpy.sessionID != "mc-sess1" {
 				t.Fatalf("session-claim seam sessionID = %q, want mc-sess1", sessSpy.sessionID)
 			}
@@ -755,7 +759,8 @@ func TestHookClaimStraddleLeavesSessionClaimUntouched(t *testing.T) {
 	rec := &turnBoundClaimRecorder{}
 	ops := rec.ops(t, turnBoundRoutedWork)
 	sessSpy := &sessionClaimSpy{}
-	ops.StampSessionClaim = sessSpy.fn
+	ops.ReserveSessionClaim = sessSpy.reserve
+	ops.ClearSessionClaim = sessSpy.clear
 	clock := time.Now()
 	ops.Now = func() time.Time { return clock }
 	ops.InvokedAt = clock

@@ -88,7 +88,7 @@ func affinityClaimOps(t *testing.T, candidates []beads.Bead, claimed, reclaimed 
 		RestampAdopted: func(context.Context, string, []string, string, string, string) (bool, error) {
 			return true, nil
 		},
-		StampSessionClaim: func(string, string) error { return nil },
+		ReserveSessionClaim: noopReserveSessionClaim,
 		RecordWorkStarted: func(string, hookStartedFence, hookStartedKey, string) (hookStartedResult, error) {
 			return hookStartedRecorded, nil
 		},
