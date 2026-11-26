@@ -783,10 +783,11 @@ could not acquire init lock for database '<db>' (<lock file>) within <N>s; a con
 database '<db>' has a schema_migrations cursor in progress but it never settled; refusing to force-reinitialize (data-safety).
 ```
 
-Cause: initializers of one database take turns. Each holds a per-database lock
-file while it migrates the schema or resets state, so a reset never lands on
-another initializer's migration in flight. Three settings govern that, and each
-error points at one:
+Cause: initializers of one database coordinate through a per-database lock
+file. A schema migration holds it shared, so migrations can overlap. A
+destructive step (resetting an interrupted bootstrap or forcing a reinit) holds
+it exclusive, so a reset never lands on another initializer's migration in
+flight. Three settings govern that, and each error points at one:
 
 | Variable | Default | What it controls |
 |---|---|---|
@@ -800,9 +801,10 @@ error points at one:
 - The third means the database was left partway through a migration. The wait
   is progress-based: every observed advance of the cursor resets the cap, so a
   migration that keeps advancing is waited out in full. A migration that stops
-  advancing is given up on sooner, after 8 consecutive unchanged reads, which
-  takes a few seconds. The cap itself only bounds a wait whose cursor reads keep
-  failing outright.
+  advancing is given up on sooner, after 8 consecutive reads that show no
+  advance. A read that fails counts as one of those. With the default backoff
+  that takes a few seconds. The cap bounds the wait only when the reads
+  themselves are slow enough to reach it first.
 
 Fix: inspect the store before changing anything. From the affected city or rig
 directory:
