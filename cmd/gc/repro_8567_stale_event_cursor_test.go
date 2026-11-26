@@ -165,3 +165,63 @@ func TestRepro_8567_EventCheckStartClampsStaleCursorToHead(t *testing.T) {
 		t.Fatalf("start = %d, head = %d; a never-run order should start at head, not replay history", start, head)
 	}
 }
+
+// TestRepro_8567_StaleLabelHeldThenResumesOnValidRunRecord follows the
+// reviewer's per-tick shape (PR #8605 review): the run record's stale
+// seq:999999 must not pin the cursor, and must not be clamped to the head on
+// every tick either. While every seq label is above the head the check is
+// held (no event is skipped past). Once a run records a seq at or below the
+// head, the cursor comes from that label, and the next new event fires.
+func TestRepro_8567_StaleLabelHeldThenResumesOnValidRunRecord(t *testing.T) {
+	const orderName = "digest"
+	a := orders.Order{Name: orderName, Trigger: "event", On: "digest.ready"}
+
+	mem := beads.NewMemStore()
+	if _, err := mem.Create(beads.Bead{
+		Title:  "run",
+		Labels: []string{orders.RunLabel(orderName), "order:" + orderName, "seq:999999", "order-tracking"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ep := events.NewFake()
+	for i := 0; i < 3; i++ {
+		ep.Record(events.Event{Type: "digest.ready"})
+	}
+
+	// Tick 1 (head 3): only a stale label exists. The check is held.
+	_, stale, err := bdEventCursorAtHead(orderName, ep, mem)
+	if err != nil {
+		t.Fatalf("tick 1: bdEventCursorAtHead: %v", err)
+	}
+	if !stale {
+		t.Fatalf("tick 1: stale = false, want true (every seq label is above head 3)")
+	}
+
+	// A run fires at head 4 and records seq:4, which is at or below the head.
+	if _, err := mem.Create(beads.Bead{
+		Title:  "run",
+		Labels: []string{orders.RunLabel(orderName), "order:" + orderName, "seq:4", "order-tracking"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ep.Record(events.Event{Type: "digest.ready"}) // seq 4
+
+	cursor, stale, err := bdEventCursorAtHead(orderName, ep, mem)
+	if err != nil {
+		t.Fatalf("tick 2: bdEventCursorAtHead: %v", err)
+	}
+	if stale {
+		t.Fatalf("tick 2: stale = true, want false: seq:4 is at or below head 4")
+	}
+	if cursor != 4 {
+		t.Fatalf("tick 2: cursor = %d, want 4 (the max valid label, not the stale 999999 and not clamped)", cursor)
+	}
+
+	// A genuinely new event after the valid run must fire.
+	ep.Record(events.Event{Type: "digest.ready"}) // seq 5
+	result := orders.CheckTriggerWithOptions(a, time.Now(), nil, ep, func(string) uint64 { return cursor }, orders.TriggerOptions{})
+	if !result.Due {
+		t.Fatalf("tick 3: Due = false (%q), want true: event 5 is new after the valid run", result.Reason)
+	}
+}

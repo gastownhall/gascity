@@ -1008,10 +1008,16 @@ func (m *memoryOrderDispatcher) fireCandidate(ctx context.Context, cand *orderDi
 	cursorFn := orders.CursorAcross(orderFrontDoorsForStores(storesForGate))
 	var eventHead uint64
 	if a.Trigger == "event" {
-		cursor, err := bdCursorAcrossStores(a.ScopedName(), storesForGate...)
+		cursor, stale, err := bdEventCursorAtHead(a.ScopedName(), m.ep, storesForGate...)
 		if err != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: reading event cursor for %s: %v", a.ScopedName(), err)
 			return false
+		}
+		if stale {
+			// Every run record is above the head (#8567): start from the
+			// order's own floor, as for an order that has not run, instead of
+			// the stale label.
+			cursor = 0
 		}
 		start, head, err := m.eventCheckStart(scoped, cursor)
 		if err != nil {
