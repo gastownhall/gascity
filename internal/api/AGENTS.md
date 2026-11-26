@@ -69,6 +69,21 @@ and other API edits wait out those bounded stalls.
 a sanctioned bypass of the worker boundary. Do not add others; see
 `internal/worker/AGENTS.md`.
 
+## External-message outbound files
+
+`POST /extmsg/outbound-file` uses the same domain authorization, delivery-context,
+transcript and event pipeline as text outbound. Only confirmed file delivery
+fans out peer notices. The adapter owns opening `file_path` and enforcing its
+allowed root; gc forwards the path without reading it or persisting it in the
+transcript. File receipts use `FileID`, the provider's file reference, rather
+than claiming a message timestamp. The transcript records that reference and
+filename. File outbound accepts `Idempotency-Key` or the body's `idempotency_key`
+and replays its typed result through the city's in-memory idempotency cache,
+including failed-delivery receipts. A replay never uploads or fans out again;
+conflicting header/body keys or same-key changed bodies are refused. The key is
+also forwarded to the adapter. Cache expiry and process restarts end gc's replay
+protection; durable delivery deduplication remains the adapter's responsibility.
+
 ## Dashboard and API-schema gates
 
 - `make dashboard-check` passes for any change touching `internal/api/`,

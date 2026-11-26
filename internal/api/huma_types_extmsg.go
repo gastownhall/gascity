@@ -49,6 +49,18 @@ type ExtMsgOutboundOutput struct {
 	Body extmsg.OutboundResult
 }
 
+// ExtMsgOutboundFileInput uploads a file from the adapter's filesystem.
+type ExtMsgOutboundFileInput struct {
+	CityScope
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Replay key for this server's idempotency cache; defaults to the body's idempotency_key."`
+	Body           extmsg.PublishFileRequest
+}
+
+// ExtMsgOutboundFileOutput contains the file receipt and outbound records.
+type ExtMsgOutboundFileOutput struct {
+	Body extmsg.OutboundFileResult
+}
+
 // ExtMsgBindingListInput is the Huma input for GET /v0/city/{cityName}/extmsg/bindings.
 type ExtMsgBindingListInput struct {
 	CityScope
