@@ -9070,7 +9070,7 @@ func TestSplitStaleMailQueuedNudgesKeepsMailReminderWhenUnreadStateUnknown(t *te
 // status says the session store is unavailable rather than that the session was
 // not found, since nothing was read to say it is missing, and it renders no
 // status at all, so an empty queue is never mistaken for a healthy one. Text
-// and --json alike.
+// and --json alike retain the underlying open failure (ga-c3oyx3m8).
 func TestCmdNudgeStatusReportsAnUnopenedStoreAsUnavailable(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	cityDir := t.TempDir()
@@ -9079,25 +9079,42 @@ func TestCmdNudgeStatusReportsAnUnopenedStoreAsUnavailable(t *testing.T) {
 		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
 	t.Setenv("GC_CITY", cityDir)
-	oldOpen := openNudgeBeadStore
-	openNudgeBeadStore = func(string) beads.NudgesStore { return beads.NudgesStore{} }
-	t.Cleanup(func() { openNudgeBeadStore = oldOpen })
+	const cause = "injected status store-open failure: storage binding refused"
+	oldOpen := openNudgeWorkStore
+	openNudgeWorkStore = func(string, string) (beads.Store, error) { return nil, errors.New(cause) }
+	t.Cleanup(func() { openNudgeWorkStore = oldOpen })
 
-	for _, jsonOutput := range []bool{false, true} {
-		var stdout, stderr bytes.Buffer
-		if code := cmdNudgeStatus([]string{"mayor"}, jsonOutput, &stdout, &stderr); code != 1 {
-			t.Fatalf("cmdNudgeStatus(json=%t) = %d, want 1; stdout=%q stderr=%q", jsonOutput, code, stdout.String(), stderr.String())
-		}
-		if stdout.Len() != 0 {
-			t.Errorf("json=%t: an unopened store rendered a status: %q", jsonOutput, stdout.String())
-		}
-		if !strings.Contains(stderr.String(), "session store unavailable") {
-			t.Errorf("json=%t: stderr = %q, want it to say the session store is unavailable", jsonOutput, stderr.String())
-		}
-		if strings.Contains(stderr.String(), "session not found") {
-			t.Errorf("json=%t: stderr = %q, an unopened store must not read as a missing session", jsonOutput, stderr.String())
-		}
+	for _, tc := range []struct {
+		name       string
+		jsonOutput bool
+	}{
+		{name: "text"},
+		{name: "json", jsonOutput: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := cmdNudgeStatus([]string{"mayor"}, tc.jsonOutput, &stdout, &stderr); code != 1 {
+				t.Fatalf("cmdNudgeStatus = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Errorf("an unopened store rendered a status: %q", stdout.String())
+			}
+			for _, want := range []string{"session store unavailable", `"mayor"`, cause} {
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("stderr = %q, want %q", stderr.String(), want)
+				}
+			}
+			if strings.Contains(stderr.String(), "session not found") {
+				t.Errorf("stderr = %q, an unopened store must not read as a missing session", stderr.String())
+			}
+		})
 	}
+	t.Run("other_verbs_keep_nil_store_contract", func(t *testing.T) {
+		_, err := resolveNudgeTarget("mayor")
+		if !errors.Is(err, session.ErrSessionNotFound) {
+			t.Fatalf("non-status resolution = %v, want session.ErrSessionNotFound after the same open failure", err)
+		}
+	})
 }
 
 // TestResolveNudgeTargetInStoreAnswersAZeroStoreByCaller pins the two answers a
