@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	goruntime "runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -729,7 +730,7 @@ func TestCheckTriggerEventWithCursor(t *testing.T) {
 	})
 	a := Order{Name: "convoy-check", Trigger: "event", On: "bead.closed"}
 	// Cursor at seq 2 → only seq 3 matches.
-	cursorFn := func(_ string) uint64 { return 2 }
+	cursorFn := func(_ string) []uint64 { return []uint64{2} }
 	result := CheckTrigger(a, time.Time{}, neverRan, ep, cursorFn)
 	if !result.Due {
 		t.Errorf("Due = false, want true; reason: %s", result.Reason)
@@ -745,11 +746,15 @@ func TestCheckTriggerEventCursorPastAll(t *testing.T) {
 		{Type: "bead.closed"},
 	})
 	a := Order{Name: "convoy-check", Trigger: "event", On: "bead.closed"}
-	// Cursor past all events → not due.
-	cursorFn := func(_ string) uint64 { return 5 }
+	// A run stamp past the log's head (2) is one the log cannot contain: the
+	// log restarted below it, so the check discards it and reads from 0.
+	cursorFn := func(_ string) []uint64 { return []uint64{5} }
 	result := CheckTrigger(a, time.Time{}, neverRan, ep, cursorFn)
-	if result.Due {
-		t.Errorf("Due = true, want false (cursor past all events)")
+	if !result.Due {
+		t.Fatalf("Due = false, want true (a stamp past the head is discarded); reason: %s", result.Reason)
+	}
+	if want := (CursorReset{Stamp: 5, Head: 2, Cursor: 0}); result.CursorReset == nil || *result.CursorReset != want {
+		t.Fatalf("CursorReset = %+v, want %+v", result.CursorReset, want)
 	}
 }
 
@@ -799,8 +804,10 @@ func TestCheckTriggerEventReadsEventsStrandedInARotation(t *testing.T) {
 		Fake:     events.NewFake(),
 		stranded: []events.Event{{Seq: 3, Type: "bead.closed"}},
 	}
+	ep.Record(events.Event{Type: "bead.created"})
+	ep.Record(events.Event{Type: "bead.created"})
 	a := Order{Name: "convoy-check", Trigger: "event", On: "bead.closed"}
-	result := CheckTrigger(a, time.Time{}, neverRan, ep, func(string) uint64 { return 2 })
+	result := CheckTrigger(a, time.Time{}, neverRan, ep, func(string) []uint64 { return []uint64{2} })
 	if !result.Due {
 		t.Fatalf("Due = false, want true for the event stranded in the rotating file; reason: %s", result.Reason)
 	}
@@ -936,9 +943,9 @@ func TestCheckTriggerEventRigScoped(t *testing.T) {
 	})
 
 	var queriedName string
-	cursorFn := func(name string) uint64 {
+	cursorFn := func(name string) []uint64 {
 		queriedName = name
-		return 0
+		return nil
 	}
 
 	a := Order{Name: "convoy-check", Rig: "my-rig", Trigger: "event", On: "bead.closed"}
@@ -1223,7 +1230,7 @@ func TestCheckTriggerCronBadTZFailsClosed(t *testing.T) {
 }
 
 // TestCheckEventStart pins where a standalone event check starts: an order
-// that has run reads past its run cursor; one that has never run reads past
+// that has run reads past its run stamps; one that has never run reads past
 // the event head, so it opens none of the history below it and is due only on
 // an event recorded later (ga-1clac5).
 func TestCheckEventStart(t *testing.T) {
@@ -1233,11 +1240,11 @@ func TestCheckEventStart(t *testing.T) {
 	}
 	a := Order{Name: "convoy-check", Trigger: "event", On: "bead.closed"}
 
-	start, err := CheckEventStart(ep, 0)
-	if err != nil || start != 3 {
-		t.Fatalf("never run: CheckEventStart = %d, %v; want the head 3", start, err)
+	start, err := CheckEventStart(ep, nil)
+	if err != nil || !slices.Equal(start, []uint64{3}) {
+		t.Fatalf("never run: CheckEventStart = %v, %v; want the head [3]", start, err)
 	}
-	startFn := func(string) uint64 { return start }
+	startFn := func(string) []uint64 { return start }
 	if got := CheckTrigger(a, time.Time{}, neverRan, ep, startFn); got.Due {
 		t.Fatalf("never run, history only: result = %+v, want not due", got)
 	}
@@ -1246,13 +1253,16 @@ func TestCheckEventStart(t *testing.T) {
 		t.Fatalf("never run, new event: result = %+v, want due on the one new event", got)
 	}
 
-	if start, err := CheckEventStart(ep, 2); err != nil || start != 2 {
-		t.Fatalf("has run: CheckEventStart = %d, %v; want its run cursor 2", start, err)
+	if start, err := CheckEventStart(ep, []uint64{0}); err != nil || !slices.Equal(start, []uint64{4}) {
+		t.Fatalf("only a zero stamp: CheckEventStart = %v, %v; want the head [4]", start, err)
 	}
-	if start, err := CheckEventStart(nil, 0); err != nil || start != 0 {
-		t.Fatalf("no provider: CheckEventStart = %d, %v; want 0", start, err)
+	if start, err := CheckEventStart(ep, []uint64{2, 500}); err != nil || !slices.Equal(start, []uint64{2, 500}) {
+		t.Fatalf("has run: CheckEventStart = %v, %v; want its run stamps [2 500]", start, err)
 	}
-	if _, err := CheckEventStart(events.NewFailFake(), 0); err == nil {
+	if start, err := CheckEventStart(nil, nil); err != nil || start != nil {
+		t.Fatalf("no provider: CheckEventStart = %v, %v; want nil", start, err)
+	}
+	if _, err := CheckEventStart(events.NewFailFake(), nil); err == nil {
 		t.Fatal("unreadable head: CheckEventStart returned no error")
 	}
 }

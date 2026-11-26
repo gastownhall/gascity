@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -391,6 +392,10 @@ type memoryOrderDispatcher struct {
 	// run. Guarded by cacheMu; memory only, carried across rebuilds by
 	// carryEventFloorsFrom.
 	eventSeeds map[string]uint64
+	// eventCursorResets holds, per scoped event order, the discarded run
+	// stamp of the cursor reset it last warned about (noteEventCursorReset),
+	// so an episode warns once. Guarded by cacheMu; memory only.
+	eventCursorResets map[string]uint64
 
 	dispatchCtx    context.Context
 	dispatchCancel context.CancelFunc
@@ -1021,18 +1026,18 @@ func (m *memoryOrderDispatcher) fireCandidate(ctx context.Context, cand *orderDi
 	cursorFn := orders.CursorAcross(orderFrontDoorsForStores(storesForGate))
 	var eventHead uint64
 	if a.Trigger == "event" {
-		cursor, err := bdCursorAcrossStores(a.ScopedName(), storesForGate...)
+		stamps, err := bdCursorAcrossStores(a.ScopedName(), storesForGate...)
 		if err != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: reading event cursor for %s: %v", a.ScopedName(), err)
 			return false
 		}
-		start, head, err := m.eventCheckStart(scoped, cursor)
+		start, head, err := m.eventCheckStart(scoped, stamps)
 		if err != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: reading event head for %s: %v", a.ScopedName(), err)
 			return false
 		}
 		eventHead = head
-		cursorFn = func(string) uint64 {
+		cursorFn = func(string) []uint64 {
 			return start
 		}
 	}
@@ -1069,6 +1074,17 @@ func (m *memoryOrderDispatcher) fireCandidate(ctx context.Context, cand *orderDi
 		logDispatchError(m.stderr, "gc: order dispatch: reading last run for %s: %v", a.ScopedName(), lastRunErr)
 		return false
 	}
+	if a.Trigger == "event" {
+		m.noteEventCursorReset(scoped, result)
+		// An event check that could not read the log never proves that no
+		// event matched: it is reported and moves nothing (no run, no floor,
+		// no suppression streak cleared), and the next pass reads the same
+		// events again.
+		if result.ReadFailed {
+			logDispatchError(m.stderr, "gc: order dispatch: %s %s", a.ScopedName(), result.Reason)
+			return false
+		}
+	}
 	if !result.Due {
 		// The streak counts consecutive refusals of a DUE order, so an
 		// undue tick ends the episode. Without this a condition order that
@@ -1090,15 +1106,9 @@ func (m *memoryOrderDispatcher) fireCandidate(ctx context.Context, cand *orderDi
 		if a.Trigger == "condition" && result.TimedOut {
 			logDispatchError(m.stderr, "gc: order dispatch: %s %s — raise check_timeout if the check needs a slow store read", a.ScopedName(), result.Reason)
 		}
-		// An event check that could not read the log never proves that no
-		// event matched: it is reported and moves nothing, and the next pass
-		// reads the same events again.
+		// The check read the log through eventHead and matched nothing there.
 		if a.Trigger == "event" {
-			if result.ReadFailed {
-				logDispatchError(m.stderr, "gc: order dispatch: %s %s", a.ScopedName(), result.Reason)
-			} else {
-				m.advanceEventFloor(scoped, eventHead)
-			}
+			m.advanceEventFloor(scoped, eventHead)
 		}
 		return false
 	}
@@ -1682,35 +1692,37 @@ func (m *memoryOrderDispatcher) reportInapplicable(a orders.Order, target execSt
 	})
 }
 
-// eventCheckStart returns the seq an event order's trigger check reads past,
-// and the event head read before the check, which a check that matches
+// eventCheckStart returns the stamps an event order's trigger check reads
+// past, and the event head read before the check, which a check that matches
 // nothing has read through (advanceEventFloor).
 //
-// cursor is the order's run cursor, the seq:<n> its last run stamped. The
-// check starts at the larger of it and the order's floor, so it reads only
-// the events recorded since its previous check. Without the floor, an order on
-// an event that stays absent re-reads from its last run on every pass, and one
+// stamps are the order's run stamps, the seq:<n> labels its runs stamped. The
+// check reads past the highest of them and the order's floor that the event
+// log can contain (orders checkEvent discards a stamp above the log's head, so
+// a log that restarted below a run stamp is read again), so it reads only the
+// events recorded since its previous check. Without the floor, an order on an
+// event that stays absent re-reads from its last run on every pass, and one
 // that has never run re-reads the whole event history, every archive included.
 //
-// An order that has never run starts where the controller began watching it
-// (watchEventOrders), however many passes its first check waits: an event
-// recorded since then fires it, history recorded before then is not replayed.
-// Floors and starts are memory only. A controller restart forgets them, so an
-// order that has run resumes from its run cursor, catching up on events
-// recorded while no controller watched, and one that has not starts where the
-// new controller began watching.
-func (m *memoryOrderDispatcher) eventCheckStart(scoped string, cursor uint64) (start, head uint64, err error) {
+// An order that has never run (no stamp above 0) starts where the controller
+// began watching it (watchEventOrders), however many passes its first check
+// waits: an event recorded since then fires it, history recorded before then
+// is not replayed. Floors and starts are memory only. A controller restart
+// forgets them, so an order that has run resumes from its run stamps,
+// catching up on events recorded while no controller watched, and one that
+// has not starts where the new controller began watching.
+func (m *memoryOrderDispatcher) eventCheckStart(scoped string, stamps []uint64) (start []uint64, head uint64, err error) {
 	if m.ep == nil {
-		return cursor, 0, nil
+		return stamps, 0, nil
 	}
 	head, err = m.ep.LatestSeq()
 	if err != nil {
-		return 0, 0, err
+		return nil, 0, err
 	}
 	m.cacheMu.Lock()
 	defer m.cacheMu.Unlock()
 	floor, seen := m.eventFloors[scoped]
-	if !seen && cursor == 0 {
+	if !seen && orders.MaxStamp(stamps) == 0 {
 		floor = head
 		if seed, watched := m.eventSeeds[scoped]; watched {
 			floor = seed
@@ -1720,7 +1732,35 @@ func (m *memoryOrderDispatcher) eventCheckStart(scoped string, cursor uint64) (s
 		}
 		m.eventFloors[scoped] = floor
 	}
-	return max(cursor, floor), head, nil
+	return append(slices.Clone(stamps), floor), head, nil
+}
+
+// noteEventCursorReset warns when an event order's check discarded a run
+// stamp above the event log's head (orders.CursorReset): the log may have been
+// lost or replaced while the bead store kept the order's run records. It
+// warns once per episode, an order and its highest discarded stamp; a check
+// that read the log without discarding a stamp ends the episode, and a failed
+// read that found no reset leaves it as it was.
+func (m *memoryOrderDispatcher) noteEventCursorReset(scoped string, result orders.TriggerResult) {
+	reset := result.CursorReset
+	m.cacheMu.Lock()
+	if reset == nil {
+		if !result.ReadFailed {
+			delete(m.eventCursorResets, scoped)
+		}
+		m.cacheMu.Unlock()
+		return
+	}
+	if warned, ok := m.eventCursorResets[scoped]; ok && warned == reset.Stamp {
+		m.cacheMu.Unlock()
+		return
+	}
+	if m.eventCursorResets == nil {
+		m.eventCursorResets = make(map[string]uint64)
+	}
+	m.eventCursorResets[scoped] = reset.Stamp
+	m.cacheMu.Unlock()
+	logDispatchError(m.stderr, "gc: order dispatch: warning: event order %s has a run stamped seq %d above the event log head %d, which the log cannot contain (it may have been lost or replaced); reading events after seq %d", scoped, reset.Stamp, reset.Head, reset.Cursor)
 }
 
 // watchEventOrders records the event head as the start of every event order

@@ -157,8 +157,8 @@ type ListQuery struct {
 	// dropped boundary tie shares the surviving rows' created_at, so the max is
 	// unchanged (e.g. the order dispatcher's RecentRunsAll/LastRun, which reduce to
 	// max(created_at)). A caller that reduces over a DIFFERENT column must NOT set
-	// it: the order dispatcher's event cursor (Cursor/bdCursor) reduces to max(seq)
-	// via MaxSeqFromLabels, and because seq is forward-only the max-seq run is the
+	// it: the order dispatcher's event cursor (Cursor/bdCursor) reduces over seq
+	// stamps via SeqsFromLabels, and because seq is forward-only the max-seq run is the
 	// newest largest-id row — exactly the tie member a bounded id-ASC read drops —
 	// so a bounded backing read there would regress the cursor and replay events. It
 	// has no effect on SortCreatedAsc (whose backing id ASC tie-break already

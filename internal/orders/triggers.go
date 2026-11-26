@@ -29,9 +29,16 @@ type TriggerResult struct {
 	// TimedOut is true only when a condition check was killed by its check_timeout deadline.
 	TimedOut bool
 	// ReadFailed is true only when an event check could not read the event
-	// log: Due is then false because the read failed, not because no event
-	// matched.
+	// log (its head or its events): Due is then false because the read
+	// failed, not because no event matched.
 	ReadFailed bool
+	// Err is the contextual read error behind ReadFailed, nil otherwise.
+	Err error
+	// CursorReset is set when an event check discarded a run stamp above the
+	// event log's head (the log restarted below it): the check read from the
+	// highest stamp the log can contain instead. Nil when nothing was
+	// discarded.
+	CursorReset *CursorReset
 	// LastRun is the last execution time (zero if never run).
 	LastRun time.Time
 }
@@ -40,9 +47,26 @@ type TriggerResult struct {
 // Returns zero time and nil error if never run.
 type LastRunFunc func(name string) (time.Time, error)
 
-// CursorFunc returns the event cursor (highest seq) for a named order.
-// Returns 0 if no cursor exists.
-type CursorFunc func(orderName string) uint64
+// CursorFunc returns the event seq stamps (seq:<N> labels) of a named order's
+// run records, in any order; nil when it has none. The event check reduces
+// them to its cursor against the event log's head (see CursorReset).
+type CursorFunc func(orderName string) []uint64
+
+// CursorReset describes an event check that found run stamps above the event
+// log's head, as when the log was lost or replaced while the bead store kept
+// its run records: Stamp is the highest discarded stamp, Head the log's head,
+// and Cursor the seq the check read past (the highest stamp at or below Head,
+// or 0).
+type CursorReset struct {
+	Stamp  uint64
+	Head   uint64
+	Cursor uint64
+}
+
+// String names the discarded stamp, the head and the cursor read from.
+func (r CursorReset) String() string {
+	return fmt.Sprintf("cursor reset: run stamp seq %d is above the event log head %d; reading after seq %d", r.Stamp, r.Head, r.Cursor)
+}
 
 // TriggerOptions carries execution context for triggers that run subprocesses.
 type TriggerOptions struct {
@@ -483,15 +507,31 @@ func mergeConditionEnv(environ, extra []string) []string {
 }
 
 // checkEvent checks if matching events exist after the last cursor position.
+// It reads the order's run stamps, then the event log's head, then the events,
+// in that order: a stamp written after the head was read could otherwise be
+// mistaken for one above it. Stamps above the head are discarded
+// (boundCursor), so a log that restarted below them is read from the highest
+// stamp it can contain. A head or list read failure returns not due with
+// ReadFailed and Err set.
 // Events emitted by order-tracking beads (controller bookkeeping) are excluded
 // to prevent event orders from self-firing on their own tracking-bead lifecycle.
 func checkEvent(a Order, ep events.Provider, cursorFn CursorFunc) TriggerResult {
 	if ep == nil {
 		return TriggerResult{Due: false, Reason: "event: no events provider"}
 	}
-	var cursor uint64
+	var stamps []uint64
 	if cursorFn != nil {
-		cursor = cursorFn(a.ScopedName())
+		stamps = cursorFn(a.ScopedName())
+	}
+	head, err := ep.LatestSeq()
+	if err != nil {
+		err = fmt.Errorf("reading event head for order %s: %w", a.ScopedName(), err)
+		return TriggerResult{Due: false, ReadFailed: true, Err: err, Reason: "event: " + err.Error()}
+	}
+	cursor, discarded := boundCursor(stamps, head)
+	var reset *CursorReset
+	if discarded > 0 {
+		reset = &CursorReset{Stamp: discarded, Head: head, Cursor: cursor}
 	}
 
 	matched, err := listEventsWithInFlight(ep, events.Filter{
@@ -499,7 +539,13 @@ func checkEvent(a Order, ep events.Provider, cursorFn CursorFunc) TriggerResult 
 		AfterSeq: cursor,
 	})
 	if err != nil {
-		return TriggerResult{Due: false, ReadFailed: true, Reason: fmt.Sprintf("event: read error: %v", err)}
+		return TriggerResult{
+			Due:         false,
+			ReadFailed:  true,
+			Err:         fmt.Errorf("listing %s events for order %s after seq %d: %w", a.On, a.ScopedName(), cursor, err),
+			CursorReset: reset,
+			Reason:      withCursorReset(fmt.Sprintf("event: read error: %v", err), reset),
+		}
 	}
 	var count int
 	for _, e := range matched {
@@ -510,15 +556,40 @@ func checkEvent(a Order, ep events.Provider, cursorFn CursorFunc) TriggerResult 
 		}
 	}
 	if count == 0 {
-		return TriggerResult{Due: false, Reason: "event: no matching events"}
+		return TriggerResult{Due: false, CursorReset: reset, Reason: withCursorReset("event: no matching events", reset)}
 	}
-	return TriggerResult{Due: true, Reason: fmt.Sprintf("event: %d %s event(s)", count, a.On)}
+	return TriggerResult{Due: true, CursorReset: reset, Reason: withCursorReset(fmt.Sprintf("event: %d %s event(s)", count, a.On), reset)}
 }
 
-// CheckEventStart returns the seq a standalone event check (gc order check,
-// the orders/check API) reads past for an order whose run cursor is
-// runCursor: the cursor itself once the order has run, or the event head for
-// an order that has never run.
+// withCursorReset appends reset's facts to reason; reason is unchanged when
+// no stamp was discarded.
+func withCursorReset(reason string, reset *CursorReset) string {
+	if reset == nil {
+		return reason
+	}
+	return reason + " (" + reset.String() + ")"
+}
+
+// boundCursor reduces an order's run stamps to the event cursor a log whose
+// head is head can honor: cursor is the highest stamp at or below head (0 when
+// none is), and discarded the highest stamp above it (0 when none is). A stamp
+// equal to head is kept, so the events through head stay consumed.
+func boundCursor(stamps []uint64, head uint64) (cursor, discarded uint64) {
+	for _, seq := range stamps {
+		if seq > head {
+			discarded = max(discarded, seq)
+			continue
+		}
+		cursor = max(cursor, seq)
+	}
+	return cursor, discarded
+}
+
+// CheckEventStart returns the stamps a standalone event check (gc order
+// check, the orders/check API) reads past for an order whose run stamps are
+// runStamps: the stamps themselves once the order has run, or the event head
+// for an order that has never run (no stamp above 0). checkEvent bounds the
+// returned stamps by the head it reads.
 //
 // An event order fires on the matching events recorded after the controller
 // began watching it; history recorded before then is never replayed (the
@@ -529,15 +600,15 @@ func checkEvent(a Order, ep events.Provider, cursorFn CursorFunc) TriggerResult 
 // it on the controller's next pass. Without this, every check of a never-run
 // order re-read the whole event history, every archive included, and
 // reported due on history the controller would never fire on.
-func CheckEventStart(ep events.Provider, runCursor uint64) (uint64, error) {
-	if runCursor > 0 || ep == nil {
-		return runCursor, nil
+func CheckEventStart(ep events.Provider, runStamps []uint64) ([]uint64, error) {
+	if ep == nil || MaxStamp(runStamps) > 0 {
+		return runStamps, nil
 	}
 	head, err := ep.LatestSeq()
 	if err != nil {
-		return 0, fmt.Errorf("reading event head: %w", err)
+		return nil, fmt.Errorf("reading event head: %w", err)
 	}
-	return head, nil
+	return []uint64{head}, nil
 }
 
 // listEventsWithInFlight reads the events filter matches, including those
@@ -571,18 +642,35 @@ func payloadHasLabel(payload json.RawMessage, label string) bool {
 	return false
 }
 
-// MaxSeqFromLabels extracts the highest seq:<N> value from bead labels.
-// Used by CLI callers to compute the event cursor from BdStore results.
+// MaxSeqFromLabels extracts the highest seq:<N> value from bead labels,
+// unbounded by any event log head: the raw high-water mark of the stamps.
 func MaxSeqFromLabels(labelSets [][]string) uint64 {
-	var maxSeq uint64
+	return MaxStamp(SeqsFromLabels(labelSets))
+}
+
+// MaxStamp is the highest of stamps, unbounded by any event log head; 0 when
+// there are none.
+func MaxStamp(stamps []uint64) uint64 {
+	var highest uint64
+	for _, seq := range stamps {
+		highest = max(highest, seq)
+	}
+	return highest
+}
+
+// SeqsFromLabels extracts every valid seq:<N> value from bead labels, in
+// label order: an order's run stamps, which checkEvent bounds by the event
+// log's head. Labels whose value is not an unsigned integer are skipped.
+func SeqsFromLabels(labelSets [][]string) []uint64 {
+	var seqs []uint64
 	for _, labels := range labelSets {
 		for _, l := range labels {
 			if strings.HasPrefix(l, "seq:") {
-				if n, err := strconv.ParseUint(l[4:], 10, 64); err == nil && n > maxSeq {
-					maxSeq = n
+				if n, err := strconv.ParseUint(l[4:], 10, 64); err == nil {
+					seqs = append(seqs, n)
 				}
 			}
 		}
 	}
-	return maxSeq
+	return seqs
 }

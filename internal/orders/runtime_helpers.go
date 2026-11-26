@@ -70,21 +70,19 @@ func LastRunFuncWithEventFallback(fn LastRunFunc, ep events.Provider) LastRunFun
 	}
 }
 
-// CursorAcross returns a CursorFunc merging the event seq cursor for a named
+// CursorAcross returns a CursorFunc collecting the event seq stamps of a named
 // order across a federation of order front doors. Each *Store performs its own
-// MIXED orders+graph Cursor read; the max seq across scopes wins. nil entries
-// are skipped.
+// MIXED orders+graph CursorStamps read; the stamps of every scope are
+// returned together. nil entries are skipped.
 func CursorAcross(stores []*Store) CursorFunc {
-	return func(name string) uint64 {
-		var latest uint64
+	return func(name string) []uint64 {
+		var stamps []uint64
 		for _, s := range stores {
 			if s == nil {
 				continue
 			}
-			if seq := uint64(s.Cursor(name)); seq > latest {
-				latest = seq
-			}
+			stamps = append(stamps, s.CursorStamps(name)...)
 		}
-		return latest
+		return stamps
 	}
 }

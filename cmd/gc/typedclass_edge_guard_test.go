@@ -100,6 +100,7 @@ var typedClassCodecNeedles = []codecNeedle{
 	{"sessions", "PollerKeyFromBead(", "session.Store poller-key accessor (internal/session/poller_key.go)"},
 	{"orders", "RunFromTrackingBead(", "orders.Store.Get/RecentRuns (internal/orders)"},
 	{"orders", "MaxSeqFromLabels(", "orders.Store.Cursor (internal/orders)"},
+	{"orders", "SeqsFromLabels(", "orders.Store.CursorStamps (internal/orders)"},
 	{"nudges", "DecodeShadow(", "nudgequeue.Store.Find/StaleShadowsBefore (internal/nudgequeue)"},
 	{"nudges", ".FindBead(", "nudgequeue.Store.Find (internal/nudgequeue)"},
 	{"nudges", ".FindBeadIncludingTerminal(", "nudgequeue.Store.FindIncludingTerminal (internal/nudgequeue)"},
@@ -184,7 +185,10 @@ var typedClassCodecCensus = map[string]map[string]int{
 	"RunFromTrackingBead(": {
 		"internal/api/huma_handlers_orders.go": 1,
 	},
-	"MaxSeqFromLabels(": {
+	// MaxSeqFromLabels( is all-zero in the interior: the event cursor readers
+	// take every run stamp (SeqsFromLabels) and the event check bounds them by
+	// the event log's head, so the needle stays policed as a tripwire.
+	"SeqsFromLabels(": {
 		"cmd/gc/cmd_order.go":                  1,
 		"internal/api/huma_handlers_orders.go": 1,
 	},
