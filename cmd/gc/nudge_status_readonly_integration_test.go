@@ -22,7 +22,8 @@ import (
 // TestCmdGCIntegrationNudgeStatusPreservesAvailableStore verifies repeated
 // command reads preserve session records, runtime state and queue snapshots.
 func TestCmdGCIntegrationNudgeStatusPreservesAvailableStore(t *testing.T) {
-	for _, kind := range []string{"unmaterialized_named", "unmaterialized_named_empty_queue", "existing_named", "existing_named_empty_queue", "closed_named", "explicit_session", "unknown", "unavailable_read"} {
+	const openCause = "injected status store-open failure: storage binding refused"
+	for _, kind := range []string{"unmaterialized_named", "unmaterialized_named_empty_queue", "existing_named", "existing_named_empty_queue", "closed_named", "explicit_session", "unknown", "unavailable_read", "unavailable_open"} {
 		t.Run(kind, func(t *testing.T) {
 			f := newNudgeStatusReadonlyFixture(t)
 			target := "status-reader"
@@ -67,6 +68,11 @@ func TestCmdGCIntegrationNudgeStatusPreservesAvailableStore(t *testing.T) {
 			if kind == "unavailable_read" {
 				f.store.readErr = errors.New("store unavailable: injected read failure")
 			}
+			if kind == "unavailable_open" {
+				openNudgeWorkStore = func(string, string) (beads.Store, error) {
+					return nil, errors.New(openCause)
+				}
+			}
 			f.seedQueue(t, sessionID, emptyQueue)
 			before := f.records(t)
 			queueBefore := f.queueBytes(t)
@@ -80,7 +86,7 @@ func TestCmdGCIntegrationNudgeStatusPreservesAvailableStore(t *testing.T) {
 				}
 				cmd.SetArgs(args)
 				err := cmd.Execute()
-				if kind == "unknown" || kind == "unavailable_read" {
+				if kind == "unknown" || kind == "unavailable_read" || kind == "unavailable_open" {
 					if err == nil {
 						t.Errorf("failed target rendered a healthy status: err=%v stdout=%q", err, stdout.String())
 					}
@@ -96,11 +102,21 @@ func TestCmdGCIntegrationNudgeStatusPreservesAvailableStore(t *testing.T) {
 						}
 					}
 					want := "session not found"
-					if kind == "unavailable_read" {
+					if kind == "unavailable_read" || kind == "unavailable_open" {
 						want = "store unavailable"
 					}
 					if !bytes.Contains([]byte(diagnostic), []byte(want)) {
 						t.Errorf("diagnostic must distinguish %s: %q", kind, diagnostic)
+					}
+					if kind == "unavailable_open" {
+						for _, fragment := range []string{openCause, fmt.Sprintf("%q", target)} {
+							if !bytes.Contains([]byte(diagnostic), []byte(fragment)) {
+								t.Errorf("store-open diagnostic lost %q (json=%t): %q", fragment, jsonOutput, diagnostic)
+							}
+						}
+						if bytes.Contains([]byte(diagnostic), []byte("session not found")) {
+							t.Errorf("unopened store reported a missing session (json=%t): %q", jsonOutput, diagnostic)
+						}
 					}
 				} else {
 					if err != nil || stderr.Len() != 0 {
@@ -216,17 +232,19 @@ func newNudgeStatusReadonlyFixture(t *testing.T) nudgeStatusReadonlyFixture {
 		t.Fatalf("legacy row must keep an empty type: type=%q err=%v", got.Type, err)
 	}
 	f.store = &nudgeStatusMutationSpy{Store: f.raw}
-	oldOpen, oldBuild := openNudgeBeadStore, buildSessionProviderByName
-	openNudgeBeadStore = func(root string) beads.NudgesStore {
-		if root != f.root {
-			t.Fatalf("status escaped test city: %q", root)
+	oldOpen, oldBuild := openNudgeWorkStore, buildSessionProviderByName
+	// Both opening forms reach this seam, so the mutation spy also covers a
+	// resolver that preserves store-open errors.
+	openNudgeWorkStore = func(root, cityPath string) (beads.Store, error) {
+		if root != f.root || cityPath != f.root {
+			t.Fatalf("status escaped test city: root=%q city=%q", root, cityPath)
 		}
-		return beads.NudgesStore{Store: f.store}
+		return f.store, nil
 	}
 	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
 		return f.provider, nil
 	}
-	t.Cleanup(func() { openNudgeBeadStore, buildSessionProviderByName = oldOpen, oldBuild })
+	t.Cleanup(func() { openNudgeWorkStore, buildSessionProviderByName = oldOpen, oldBuild })
 	return f
 }
 
