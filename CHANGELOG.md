@@ -2173,6 +2173,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   operator, idle or `gc stop` suspend no longer counts as a rapid crash or
   churn that cleared `session_key`, so the next wake resumes. (thanks @csells)
 
+### Security
+
+- **The bd init lock directory under `/tmp` is no longer taken on trust.**
+  With `GC_DOLT_INIT_LOCK_DIR` unset, init keeps its lock in the predictable
+  `/tmp/gc-beads-bd-init-locks-<uid>` (#9508 made that path independent of
+  `TMPDIR`), where another local user could create the directory, or a
+  symlink in its place, before this user's first init. Init now creates the
+  directory private (mode `0700`), tightens an existing one this user owns
+  that an earlier init left at `0755`, and fails with the usual
+  `could not open init lock` error, naming the file and the reason, when the
+  directory is a symlink or is not owned by this user, or when its lock file
+  is a symlink or is not owned by this user, instead of locking or writing
+  through it. A lock file that is a symlink is refused in a directory named
+  by `GC_DOLT_INIT_LOCK_DIR` too; that directory's owner, mode and umask are
+  left alone. If init now stops on a leftover, see "Store Initialization
+  Fails on an Init Lock or a Migration That Never Settles" in
+  Troubleshooting.
+
 ## [1.5.1] - 2026-10-24
 
 ### Upgrading Notes

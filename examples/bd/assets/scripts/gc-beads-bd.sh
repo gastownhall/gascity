@@ -51,7 +51,14 @@
 #       initializer's in-flight migration (default:
 #       /tmp/gc-beads-bd-init-locks-<uid>, one directory per OS user,
 #       because a lock directory or file another user or a sudo run created
-#       is not writable by this one). Where flock is installed, an init
+#       is not writable by this one). The default directory is created
+#       private (0700), an existing one this user owns is tightened to
+#       0700, and init refuses one that is a symlink or not owned by this
+#       user, and a lock file in it that is a symlink or not owned by this
+#       user, rather than lock through what another local user planted in
+#       /tmp. A directory named here is left as it is (no owner, mode or
+#       umask changes), but a lock file in it that is a symlink is refused
+#       too. Where flock is installed, an init
 #       that takes the lock must be able to create its lock file here, and
 #       fails naming the file when it cannot. An init that only adopts an
 #       existing database that does not look like an interrupted bootstrap

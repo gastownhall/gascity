@@ -791,12 +791,17 @@ flight. Three settings govern that, and each error points at one:
 
 | Variable | Default | What it controls |
 |---|---|---|
-| `GC_DOLT_INIT_LOCK_DIR` | `/tmp/gc-beads-bd-init-locks-<uid>` | The directory holding the lock files. The default is one directory per OS user. It does not depend on the city path or on `TMPDIR`, so every initializer of a database finds the same file. |
+| `GC_DOLT_INIT_LOCK_DIR` | `/tmp/gc-beads-bd-init-locks-<uid>` | The directory holding the lock files. The default is one directory per OS user, created with mode `0700`. It does not depend on the city path or on `TMPDIR`, so every initializer of a database finds the same file. A directory you name here is yours to manage: init does not change its owner or mode. |
 | `GC_DOLT_INIT_LOCK_TIMEOUT_MS` | `60000` | How long init waits for a lock another initializer holds before it gives up with an error. |
 | `GC_DOLT_SCHEMA_SETTLE_TIMEOUT_MS` | `120000` | The longest init waits between observed advances of a mid-migration database's `schema_migrations` cursor. |
 
 - The first error means this OS user cannot create the lock directory or file,
-  for example because another user or a `sudo` run created it.
+  for example because another user or a `sudo` run created it. It also covers
+  an entry init will not lock through, with one of these in place of
+  `<error>`: the default directory or a lock file `is a symbolic link`, the
+  default directory `is not a directory owned by this user`, or a lock file in
+  it `is not owned by this user`. Another local user could have planted any of
+  these in the shared `/tmp`.
 - The second means another initializer has held the lock past the wait budget.
 - The third means the database was left partway through a migration. The wait
   is progress-based: every observed advance of the cursor resets the cap, so a
@@ -822,6 +827,14 @@ command. Then, by error:
   share a lock only when every one of them names the same directory they can
   all write to. Initializers that see different `/tmp` directories, such as a
   service with a private `/tmp`, share no lock at all.
+- **A symbolic link, or an entry this user does not own, in the default lock
+  directory:** look at who made it with `ls -ld` on the path in the error. If
+  it is a leftover of a `sudo` run or of another user, remove it as the user who
+  owns it (or as root) and rerun, or set `GC_DOLT_INIT_LOCK_DIR` to a directory
+  of your own. A default directory this user owns that an earlier init left
+  world-readable (`0755`) needs no action: init tightens it to `0700`. A
+  symbolic link as the lock file is refused in a directory you named in
+  `GC_DOLT_INIT_LOCK_DIR` too; replace it with a regular file or remove it.
 - **Could not acquire the lock:** raise `GC_DOLT_INIT_LOCK_TIMEOUT_MS` only when
   `bd dolt status` shows the other initializer is making progress.
 - **Cursor never settled:** raising `GC_DOLT_SCHEMA_SETTLE_TIMEOUT_MS` does not
