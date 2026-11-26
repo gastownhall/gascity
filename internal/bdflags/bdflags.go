@@ -306,6 +306,7 @@ var positionalCountBySub = map[string]int{
 	"mol current": 1, "mol pour": 1, "mol wisp": 1, "mol burn": 1,
 	"gate check": 0, "gate list": 1,
 	"dep add": 2, "dep list": 2, "dep remove": 2,
+	"comment": 2, "comments": 1, "comments add": 2, // <id> [text...]; [issue-id]; [issue-id] [text...]
 }
 
 // PositionalCount returns how many leading bare (non-flag) arguments sub
