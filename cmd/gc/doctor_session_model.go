@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -67,7 +68,7 @@ func (c *sessionModelDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 
 	var findings []string
 	for _, b := range all {
-		if session.IsSessionBeadOrRepairable(b) || b.Status == "closed" {
+		if session.IsSessionBeadOrRepairable(b) || beadmail.IsMessageBead(b) || b.Status == "closed" {
 			continue
 		}
 		assignee := strings.TrimSpace(b.Assignee)
@@ -78,20 +79,20 @@ func (c *sessionModelDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 				} else if isRetiredSessionModelOwner(owner) {
 					findings = append(findings, fmt.Sprintf("retired-bead-owner: %s is assigned to retired session bead %s", b.ID, assignee))
 				}
-			} else if looksLikeSessionBeadID(assignee) {
-				findings = append(findings, fmt.Sprintf("missing-bead-owner: %s is assigned to missing session bead %s", b.ID, assignee))
 			} else {
 				matches := legacySessionTokenMatches(assignee, openSessionAlias, openSessionName)
+				historical := legacySessionTokenMatches(assignee, openSessionAliasHistory, nil)
 				switch {
 				case len(matches) > 1:
 					findings = append(findings, fmt.Sprintf("ambiguous-legacy-session-token: %s assignee %q matches %d open sessions", b.ID, assignee, len(matches)))
-				case len(matches) == 0 && config.FindAgent(c.cfg, assignee) != nil:
+				case len(matches) == 1:
+					// A known alias or runtime name takes precedence over ID shape.
+				case len(historical) > 0:
+					findings = append(findings, fmt.Sprintf("historical-alias-owner: %s assignee %q matches retired session alias on %s; update to bead ID/current alias", b.ID, assignee, historical[0].ID))
+				case config.FindAgent(c.cfg, assignee) != nil:
 					findings = append(findings, fmt.Sprintf("legacy-token-matches-config-only: %s assignee %q matches config but no session", b.ID, assignee))
-				case len(matches) == 0:
-					historical := legacySessionTokenMatches(assignee, openSessionAliasHistory, nil)
-					if len(historical) > 0 {
-						findings = append(findings, fmt.Sprintf("historical-alias-owner: %s assignee %q matches retired session alias on %s; update to bead ID/current alias", b.ID, assignee, historical[0].ID))
-					}
+				case looksLikeSessionBeadID(assignee) || looksLikeConfiguredBeadID(c.cfg, assignee) || looksLikeConfiguredBeadID(c.cfg, strings.Replace(assignee, "-wisp-", "-", 1)):
+					findings = append(findings, fmt.Sprintf("missing-bead-owner: %s is assigned to missing session bead %s", b.ID, assignee))
 				}
 			}
 		}
@@ -197,7 +198,13 @@ func isRetiredSessionModelOwner(b beads.Bead) bool {
 }
 
 func looksLikeSessionBeadID(s string) bool {
-	return strings.HasPrefix(s, "gc-") || strings.HasPrefix(s, "bd-") || strings.HasPrefix(s, "mc-")
+	// Qualified identities are aliases, never bead IDs or runtime names.
+	if strings.Contains(s, "/") {
+		return false
+	}
+	// Retain older session ID shapes, including long or hyphenated suffixes.
+	return looksLikeBeadID(s) || looksLikeBeadID(strings.Replace(s, "-wisp-", "-", 1)) || (isBeadIDCandidate(s) &&
+		(strings.HasPrefix(s, "gc-") || strings.HasPrefix(s, "bd-") || strings.HasPrefix(s, "mc-")))
 }
 
 func legacySessionTokenMatches(token string, byAlias, bySessionName map[string][]beads.Bead) []beads.Bead {
