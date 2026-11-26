@@ -65,6 +65,7 @@ var startOutcomeClassification = map[string]startOutcomeClass{
 	"deferred_by_on_death_hook":     {reason: "clause (a): its own runtime name's on_death hook is pending"},
 	"deferred_by_runtime_lease":     {reason: "clause (a): its own runtime name is leased by another holder"},
 	"deferred_by_endpoint_capacity": {reason: "own hold: endpointCapacityGuard.HoldsPendingCreate already keeps the row"},
+	"deferred_by_session_capacity":  {reason: "own hold: endpointCapacityGuard.HoldsSessionPendingCreate already keeps the row"},
 	"user_held":                     {reason: "clause (a): the session's own state, held by the user"},
 	"context_canceled":              {reason: "the cancel rule: a canceled run commits nothing"},
 
@@ -680,6 +681,7 @@ func startGateNegativeDrivers() map[string]func(t *testing.T) {
 		"deferred_by_on_death_hook":     driveOnDeathHookRecordsNothing,
 		"deferred_by_runtime_lease":     driveRuntimeLeaseRecordsNothing,
 		"deferred_by_endpoint_capacity": driveEndpointCapacityRecordsNothing,
+		"deferred_by_session_capacity":  driveSessionCapacityRecordsNothing,
 	}
 }
 
@@ -688,6 +690,7 @@ var startGateRequiredNegatives = []string{
 	"deferred_by_on_death_hook",
 	"deferred_by_runtime_lease",
 	"deferred_by_endpoint_capacity",
+	"deferred_by_session_capacity",
 }
 
 func TestStartOutcomeClassificationDrivers(t *testing.T) {
@@ -967,6 +970,30 @@ func driveEndpointCapacityRecordsNothing(t *testing.T) {
 	e.start(context.Background(), a)
 	if e.sp.IsRunning("a") || !strings.Contains(e.log.String(), "outcome=deferred_by_endpoint_capacity") {
 		t.Fatalf("premise: a was not deferred by its endpoint:\n%s", e.log.String())
+	}
+	requireCommitted(t, memo)
+}
+
+// A session a repeat capacity refusal backed off has its own hold on the row
+// (endpointCapacityGuard.HoldsSessionPendingCreate); the memo records nothing.
+func driveSessionCapacityRecordsNothing(t *testing.T) {
+	e := newCapacityEnv(t, true, "a")
+	memo := newStartDeferralMemo()
+	e.startOptions = append(e.startOptions, withStartDeferralMemo(memo), withStartDeferralSeen(neverStartedSet()))
+	a := e.pendingCreate(t, "a", "e", nil)
+	for i := 0; i < 2; i++ {
+		ticket, ok := e.guard.Admit(capacityTestEndpoint, a.info.ID, "a")
+		if !ok {
+			e.makeProbeDue()
+			ticket, _ = e.guard.Admit(capacityTestEndpoint, a.info.ID, "a")
+		}
+		ticket.Resolve(verdictCapacity)
+	}
+	peerSuccess(t, e)
+
+	e.start(context.Background(), a)
+	if e.sp.IsRunning("a") || !strings.Contains(e.log.String(), "outcome=deferred_by_session_capacity") {
+		t.Fatalf("premise: a was not deferred by its own capacity backoff:\n%s", e.log.String())
 	}
 	requireCommitted(t, memo)
 }

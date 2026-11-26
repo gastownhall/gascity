@@ -109,12 +109,43 @@ const (
 
 // capacityEndpointForgetAfter is how long an endpoint may go unused by any
 // session before recordTick forgets it, so a key orphaned by a config reload
-// does not stay non-closed forever.
+// does not stay non-closed forever. An endpoint holding a session refusal
+// still inside capacitySessionRepeatWindow is kept until that history ages
+// out, so the session's next refusal stays a repeat.
 const capacityEndpointForgetAfter = 10 * time.Minute
 
 // capacityValveMemory bounds how long a session's refusal history is kept
 // without a new refusal.
 const capacityValveMemory = time.Hour
+
+// capacitySessionRepeatWindow is how long after a session's refusal another
+// refusal of that same session counts as a repeat. A session's first refusal
+// is the endpoint's capacity signal (RUNTIME-CONTRACT-008) and feeds the
+// breaker and the poison valve. A repeat is not: it neither records a failure
+// on the endpoint's breaker nor reaches the valve, so it can neither open nor
+// extend the breaker nor send the session to startup-health. It backs off that
+// session alone (capacitySessionBackoff). The window runs from the session's
+// previous refusal and is longer than capacitySessionBackoffMax, so a session
+// that keeps being refused stays a repeat; its next refusal after a quiet
+// window, or after a success of its own, is a first refusal again.
+const capacitySessionRepeatWindow = 15 * time.Minute
+
+// capacitySessionBackoffBase and capacitySessionBackoffMax bound a refused
+// session's own backoff: capacitySessionBackoffBase after its first repeat,
+// doubling per repeat up to capacitySessionBackoffMax.
+const (
+	capacitySessionBackoffBase = 30 * time.Second
+	capacitySessionBackoffMax  = 5 * time.Minute
+)
+
+// capacitySessionBackoff is the backoff after a session's nth repeat refusal.
+func capacitySessionBackoff(repeats int) time.Duration {
+	d := capacitySessionBackoffBase
+	for i := 1; i < repeats && d < capacitySessionBackoffMax; i++ {
+		d *= 2
+	}
+	return min(d, capacitySessionBackoffMax)
+}
 
 // breakerStateChangedEventType is the event emitted on every capacity
 // breaker transition. Its payload is breakerStateChangedPayload. Like
@@ -220,9 +251,44 @@ type endpointCapacityState struct {
 	// valve holds each refused template's valve history. It is keyed by
 	// template (per endpoint), so replacement beads keep the count and two
 	// seats of one template cannot mask each other.
-	valve         map[string]capacityValveState
-	deferredWake  int
-	deferredAdmit int
+	valve map[string]capacityValveState
+	// sessions holds each refused session's repeat history, keyed by session
+	// ID (capacitySessionRepeatWindow). Only a session's first refusal in its
+	// window reaches the breaker and the valve.
+	sessions        map[string]capacitySessionState
+	deferredWake    int
+	deferredAdmit   int
+	deferredSession int
+}
+
+// capacitySessionState is one refused session's repeat history.
+type capacitySessionState struct {
+	// lastRefusalAt is when the session was last refused; repeats counts its
+	// refusals since its first in the window.
+	lastRefusalAt time.Time
+	repeats       int
+	// until is when the session's own backoff ends; zero after a first
+	// refusal, which the breaker paces.
+	until time.Time
+}
+
+// holdsSessionHistory reports whether any session refused on st is still
+// inside its repeat window at now. Forgetting such an endpoint would drop the
+// history, so the session's next refusal would trip the breaker again.
+//
+// Caller must hold g.mu.
+func (st *endpointCapacityState) holdsSessionHistory(now time.Time) bool {
+	for _, s := range st.sessions {
+		if s.recent(now) {
+			return true
+		}
+	}
+	return false
+}
+
+// recent reports whether s's history is inside the repeat window at now.
+func (s capacitySessionState) recent(now time.Time) bool {
+	return now.Sub(s.lastRefusalAt) <= capacitySessionRepeatWindow
 }
 
 type capacityValveState struct {
@@ -270,6 +336,7 @@ func (g *endpointCapacityGuard) stateLocked(k endpointKey) *endpointCapacityStat
 			refusals:      make(map[string]int),
 			windowRefused: make(map[string]struct{}),
 			valve:         make(map[string]capacityValveState),
+			sessions:      make(map[string]capacitySessionState),
 		}
 		g.endpoints[k] = st
 	}
@@ -327,6 +394,11 @@ func (g *endpointCapacityGuard) Admit(k endpointKey, sessionID, template string)
 		return nil, true
 	}
 	g.noteSeen(k)
+	if _, held := g.SessionBackoff(k, sessionID); held {
+		// Checked before the breaker, so a held session never takes the probe.
+		g.noteDeferredSession(k)
+		return nil, false
+	}
 	g.probeMu.Lock()
 	allowed, probe := g.breaker(k).AllowProbe()
 	var t *capacityTicket
@@ -350,6 +422,66 @@ func (g *endpointCapacityGuard) noteDeferredAdmit(k endpointKey) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.stateLocked(k).deferredAdmit++
+}
+
+// SessionBackoff reports when sessionID's own backoff on k ends, and whether
+// it is still running: a repeat refusal backed the session off
+// (capacitySessionRepeatWindow) and it must not start before then. Other
+// sessions on k are unaffected. A nil guard, an empty key or an empty session
+// ID is never held.
+func (g *endpointCapacityGuard) SessionBackoff(k endpointKey, sessionID string) (time.Time, bool) {
+	if g == nil || k == "" || sessionID == "" {
+		return time.Time{}, false
+	}
+	now := g.now()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	st := g.endpoints[k]
+	if st == nil {
+		return time.Time{}, false
+	}
+	s, ok := st.sessions[sessionID]
+	if !ok || !s.until.After(now) {
+		return time.Time{}, false
+	}
+	return s.until, true
+}
+
+// noteDeferredSession counts a start on k deferred because its session is in
+// its own backoff, for the per-tick record.
+func (g *endpointCapacityGuard) noteDeferredSession(k endpointKey) {
+	if g == nil || k == "" {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.stateLocked(k).deferredSession++
+}
+
+// sessionRefusedRecently reports whether sessionID was refused on k inside
+// the repeat window.
+func (g *endpointCapacityGuard) sessionRefusedRecently(k endpointKey, sessionID string) bool {
+	if g == nil || k == "" || sessionID == "" {
+		return false
+	}
+	now := g.now()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	st := g.endpoints[k]
+	if st == nil {
+		return false
+	}
+	s, ok := st.sessions[sessionID]
+	return ok && s.recent(now)
+}
+
+// HoldsSessionPendingCreate is HoldsPendingCreate for one session's
+// never-started pending create: it also holds while the session itself was
+// refused inside the repeat window, so a row the breaker no longer gates is
+// not rolled back and recreated under a new ID, whose first refusal would
+// trip the breaker again.
+func (g *endpointCapacityGuard) HoldsSessionPendingCreate(k endpointKey, sessionID string) bool {
+	return g.HoldsPendingCreate(k) || g.sessionRefusedRecently(k, sessionID)
 }
 
 // HoldsPendingCreate reports whether never-started pending creates on k must
@@ -386,7 +518,7 @@ func endpointHoldForRows(cfg *config.City, g *endpointCapacityGuard) func(sessio
 		if agent := findAgentByTemplate(cfg, info.Template); agent != nil {
 			tp.Upstream = agent.Upstream
 		}
-		return g.HoldsPendingCreate(resolvedEndpointKey(tp, info))
+		return g.HoldsSessionPendingCreate(resolvedEndpointKey(tp, info), info.ID)
 	}
 }
 
@@ -454,14 +586,23 @@ func (g *endpointCapacityGuard) resolve(t *capacityTicket, v startVerdict) bool 
 		st := g.stateLocked(t.key)
 		st.successes++
 		delete(st.valve, t.template)
+		delete(st.sessions, t.sessionID)
 		g.mu.Unlock()
 	case verdictCapacity:
 		g.mu.Lock()
-		valve = g.stateLocked(t.key).noteRefusal(t.sessionID, t.template, t.probe, now)
+		st := g.stateLocked(t.key)
+		t.sessionRepeat, t.sessionBackoffUntil = st.noteSessionRefusal(t.sessionID, now)
+		if t.sessionRepeat {
+			// Probe rotation still ranks the session; the valve never sees it.
+			st.refusals[t.sessionID]++
+		} else {
+			valve = st.noteRefusal(t.sessionID, t.template, t.probe, now)
+		}
 		g.mu.Unlock()
-		if valve {
-			// Others keep getting in and this template does not: its refusal
-			// is not evidence about the endpoint.
+		if t.sessionRepeat || valve {
+			// A repeat is this session's, not the endpoint's: it backs off the
+			// session alone. A valve trip means others keep getting in and
+			// this template does not. Neither is evidence about the endpoint.
 			g.releaseProbe(t)
 		} else {
 			g.dropProbe(t)
@@ -472,6 +613,31 @@ func (g *endpointCapacityGuard) resolve(t *capacityTicket, v startVerdict) bool 
 	}
 	t.stateAfter = b.State()
 	return valve
+}
+
+// noteSessionRefusal records a refusal of sessionID and reports whether it
+// repeats a refusal of that session inside capacitySessionRepeatWindow, with
+// the session's backoff deadline for a repeat. Histories past the window are
+// dropped. A refusal with no session ID is never a repeat.
+//
+// Caller must hold g.mu.
+func (st *endpointCapacityState) noteSessionRefusal(sessionID string, now time.Time) (repeat bool, until time.Time) {
+	for id, s := range st.sessions {
+		if !s.recent(now) {
+			delete(st.sessions, id)
+		}
+	}
+	if sessionID == "" {
+		return false, time.Time{}
+	}
+	s, seen := st.sessions[sessionID]
+	s.lastRefusalAt = now
+	if seen {
+		s.repeats++
+		s.until = now.Add(capacitySessionBackoff(s.repeats))
+	}
+	st.sessions[sessionID] = s
+	return seen, s.until
 }
 
 // noteRefusal records a refusal of sessionID, an instance of template, and
@@ -601,32 +767,33 @@ func (g *endpointCapacityGuard) recordTick(trace *sessionReconcilerTraceCycle, r
 	}
 	g.forgetUnusedEndpoints()
 	statuses := g.Snapshot()
-	type deferrals struct{ wake, admit int }
+	type deferrals struct{ wake, admit, session int }
 	counts := make(map[endpointKey]deferrals)
 	g.mu.Lock()
 	for k, st := range g.endpoints {
-		if st.deferredWake > 0 || st.deferredAdmit > 0 {
-			counts[k] = deferrals{wake: st.deferredWake, admit: st.deferredAdmit}
+		if st.deferredWake > 0 || st.deferredAdmit > 0 || st.deferredSession > 0 {
+			counts[k] = deferrals{wake: st.deferredWake, admit: st.deferredAdmit, session: st.deferredSession}
 		}
-		st.deferredWake, st.deferredAdmit = 0, 0
+		st.deferredWake, st.deferredAdmit, st.deferredSession = 0, 0, 0
 	}
 	g.mu.Unlock()
 	if trace != nil {
 		for _, st := range statuses {
 			d := counts[st.Key]
-			if st.State == resilience.StateClosed && d.wake == 0 && d.admit == 0 {
+			if st.State == resilience.StateClosed && d.wake == 0 && d.admit == 0 && d.session == 0 {
 				continue
 			}
 			trace.RecordControllerOperation(TraceSiteEndpointCapacityBreaker, TraceReasonEndpointCapacityOpen, endpointStateOutcome(st.State), "endpoint_capacity_breaker", 0, traceRecordPayload{
-				"endpoint":        string(st.Key),
-				"state":           st.State.String(),
-				"trips":           st.Trips,
-				"backoff_cap_ms":  st.BackoffCap.Milliseconds(),
-				"next_probe_at":   traceTime(st.NextProbeAt),
-				"open_since":      traceTime(st.OpenSince),
-				"deferred_wake":   d.wake,
-				"deferred_admit":  d.admit,
-				"probe_in_flight": st.ProbeInFlight,
+				"endpoint":         string(st.Key),
+				"state":            st.State.String(),
+				"trips":            st.Trips,
+				"backoff_cap_ms":   st.BackoffCap.Milliseconds(),
+				"next_probe_at":    traceTime(st.NextProbeAt),
+				"open_since":       traceTime(st.OpenSince),
+				"deferred_wake":    d.wake,
+				"deferred_admit":   d.admit,
+				"deferred_session": d.session,
+				"probe_in_flight":  st.ProbeInFlight,
 			})
 		}
 	}
@@ -640,7 +807,7 @@ func (g *endpointCapacityGuard) forgetUnusedEndpoints() {
 	var forget []endpointKey
 	g.mu.Lock()
 	for k, st := range g.endpoints {
-		if now.Sub(st.lastSeen) >= capacityEndpointForgetAfter {
+		if now.Sub(st.lastSeen) >= capacityEndpointForgetAfter && !st.holdsSessionHistory(now) {
 			forget = append(forget, k)
 			delete(g.endpoints, k)
 		}
@@ -687,11 +854,18 @@ type capacityTicket struct {
 	once       sync.Once
 	valve      bool
 	stateAfter resilience.State
+	// sessionRepeat reports that the refusal repeated one of this session's
+	// inside capacitySessionRepeatWindow, so it backed off the session until
+	// sessionBackoffUntil and left the breaker alone.
+	sessionRepeat       bool
+	sessionBackoffUntil time.Time
 }
 
 // Resolve applies the attempt's verdict to the endpoint breaker and reports
 // whether the poison valve returned this session to normal failure
-// accounting. Idempotent and nil-safe.
+// accounting. A session's repeat refusal never trips the valve: it backs off
+// the session alone and keeps the capacity commit arm. Idempotent and
+// nil-safe.
 func (t *capacityTicket) Resolve(v startVerdict) (valveTripped bool) {
 	if t == nil {
 		return false

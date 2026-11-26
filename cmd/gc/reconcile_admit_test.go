@@ -691,3 +691,24 @@ func TestDriftBackoffResetsWithItsEpisode(t *testing.T) {
 		})
 	}
 }
+
+// Kills a start admitted for a row a repeat capacity refusal backed off
+// (endpointView.SessionBackoff): it defers with causeSessionCapacity and
+// arms the pass's next backoff, while another row on the same closed
+// endpoint is admitted; a lapsed backoff admits the row again.
+func TestAdmitDefersSessionCapacityBackoff(t *testing.T) {
+	until := admitT0.Add(30 * time.Second)
+	in := admitIn(4, 4)
+	in.Endpoints = map[endpointKey]endpointView{"provider:a": {Gate: gateClosed, SessionBackoff: map[string]time.Time{admitRow(1).ID: until}}}
+	res := admit(in, []intent{startOn(1, "provider:a", 0), startOn(2, "provider:a", time.Second)})
+	if got := keysOf(res.Admitted); fmt.Sprint(got) != "[start:gc-2]" || causesOf(res.Deferred)["start:gc-1"] != causeSessionCapacity {
+		t.Fatalf("admitted %v deferred %v, want gc-1 held by its own backoff and gc-2 admitted", got, causesOf(res.Deferred))
+	}
+	if !res.NextBackoff.Equal(until) {
+		t.Fatalf("NextBackoff = %s, want the held row's backoff end %s", res.NextBackoff, until)
+	}
+	in.Now = until
+	if res := admit(in, []intent{startOn(1, "provider:a", 0)}); len(res.Admitted) != 1 {
+		t.Fatalf("admitted %v deferred %v, want the row admitted once its backoff lapsed", keysOf(res.Admitted), causesOf(res.Deferred))
+	}
+}

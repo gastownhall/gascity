@@ -326,7 +326,7 @@ func operatorSuspendCauses(cfg *config.City, cityPath string, rows []censusRow, 
 
 // gatherGates reads each endpoint's breaker the pass may act on: every
 // census row's (rowEndpoint) and every configured agent's, with the
-// census rows' refusals this episode.
+// census rows' refusals this episode and their own capacity backoffs.
 func gatherGates(g *endpointCapacityGuard, cfg *config.City, rows []censusRow) map[endpointKey]endpointView {
 	gates := make(map[endpointKey]endpointView)
 	view := func(k endpointKey) endpointView {
@@ -352,6 +352,18 @@ func gatherGates(g *endpointCapacityGuard, cfg *config.City, rows []censusRow) m
 				v.Refusals = make(map[string]int)
 			}
 			v.Refusals[row.Key.ID] = n
+		}
+		if until, held := g.SessionBackoff(k, row.Key.ID); held {
+			if v.SessionBackoff == nil {
+				v.SessionBackoff = make(map[string]time.Time)
+			}
+			v.SessionBackoff[row.Key.ID] = until
+		}
+		if g.sessionRefusedRecently(k, row.Key.ID) {
+			if v.SessionHolds == nil {
+				v.SessionHolds = make(map[string]bool)
+			}
+			v.SessionHolds[row.Key.ID] = true
 		}
 		gates[k] = v
 	}

@@ -136,6 +136,14 @@ type endpointView struct {
 	// Refusals are the endpoint's refusals this episode by row ID: probe
 	// rotation puts the most refused last (endpointCapacityGuard).
 	Refusals map[string]int
+	// SessionBackoff is when each row a repeat capacity refusal backed off
+	// may start again (endpointCapacityGuard.SessionBackoff), by row ID. The
+	// endpoint's gate stays open to every other row.
+	SessionBackoff map[string]time.Time
+	// SessionHolds are the rows refused inside the repeat window, by row ID:
+	// their never-started pending creates are held like HoldsPendingCreate's
+	// (endpointCapacityGuard.HoldsSessionPendingCreate).
+	SessionHolds map[string]bool
 }
 
 // allocDecision is one pass's output.
@@ -336,7 +344,7 @@ func (p *decidePass) classifyRows() {
 		notRunning := observed && (o.Liveness == livenessGone || o.Liveness == livenessOccupied)
 		// A guarded endpoint the pass has no view of holds (fail closed).
 		ep, viewed := p.in.Endpoints[e.Endpoint]
-		endpointHolds := e.Endpoint != "" && (!viewed || ep.HoldsPendingCreate)
+		endpointHolds := e.Endpoint != "" && (!viewed || ep.HoldsPendingCreate || ep.SessionHolds[info.ID])
 		switch {
 		case k.Leg != c.sessionsLeg():
 			p.none[k] = reasonCensusOnly

@@ -750,7 +750,9 @@ func TestPoisonValveRefusalIsPacedByTheRow(t *testing.T) {
 	k0 := endpointKey("provider:test-agent")
 	advance := func() { now = now.Add(guard.breaker(k0).Status().BackoffCap + time.Second) }
 	for i := 0; i < 3; i++ { // worker refused, other succeeds: the valve counts
-		tk, ok := guard.Admit(k0, "gc-1", "worker")
+		// Replacement beads of the template: a repeat refusal of one bead
+		// backs off that bead instead of reaching the valve.
+		tk, ok := guard.Admit(k0, fmt.Sprintf("gc-1-%d", i), "worker")
 		if !ok {
 			t.Fatalf("round %d: worker not admitted (%v)", i, guard.breaker(k0).Status().State)
 		}
