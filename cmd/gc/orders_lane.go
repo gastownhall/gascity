@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,9 +23,10 @@ import (
 //
 // What the lane owns, and why it can:
 //
-//   - The live dispatcher (cr.od), the retired dispatchers awaiting drain, and
-//     the dispatch-side watchdog clocks are held under passMu. A pass holds it
-//     for its whole length; nothing else dispatches.
+//   - The live dispatcher (cr.od) and the retired dispatchers awaiting drain
+//     are held under passMu. A pass holds it for its whole length; nothing
+//     else dispatches. The store watchdogs and their clocks are not the
+//     lane's: each runs on its own store watchdog lane.
 //   - The order-set bookkeeping (cr.orderSet, cr.orderSetSignature,
 //     cr.orderRescanLast) and a staged replacement dispatcher are held under
 //     setMu, because a config reload on the controller goroutine writes them.
@@ -42,8 +42,8 @@ import (
 //
 // A reload publishes its config and then, when it stages a dispatcher, bumps
 // the order-set generation under setMu. Each pass reads the generation and the
-// one config snapshot everything in the pass reads — the trace, the periodic
-// rescan and the watchdogs — as a pair under setMu (orderPassConfig), so no
+// one config snapshot everything in the pass reads — the trace and the
+// periodic rescan — as a pair under setMu (orderPassConfig), so no
 // stage lands between them, and the rescan stages its result only if the
 // generation is unchanged. A rescan whose pair predates a stage is therefore
 // discarded, and one whose pair follows it reads the reloaded config. Without
@@ -68,8 +68,7 @@ type ordersLane struct {
 	// the lane ends its episode only when it sees pressure drop or forces a
 	// pass. A tick forced every few seconds under pressure must not reset the
 	// lane's count, or the lane would never reach its own forced pass.
-	fsPressureSkips  int
-	fsPressureLogged bool
+	fsPressure fsPressureEpisode
 
 	// Last pass that reached dispatch, for the tick trace (statusMu). A pass
 	// the FS gate skipped does not count, so a lane starved by pressure shows
@@ -182,7 +181,7 @@ func (cr *CityRuntime) runOrdersLanePass(ctx context.Context, cityRoot, reason s
 		}
 	}()
 
-	if cr.ordersLaneShouldSkipForFSPressureLocked(lane, trace, reason) {
+	if lane.fsPressure.shouldSkip(cr.stderr, trace, ordersLaneSafeTickTrigger+":"+reason, "order dispatch") {
 		completion = TraceCompletionCompleted
 		return
 	}
@@ -240,39 +239,6 @@ func (cr *CityRuntime) beginOrdersLaneTrace(cfg *config.City, reason string) *se
 	}, cfg, nil)
 }
 
-// ordersLaneShouldSkipForFSPressureLocked is the tick's pressure gate applied to the
-// lane (passMu must be held): skip while pressure is high, but force a pass after
-// maxConsecutiveFSPressureSkips so orders cannot starve. It logs once per
-// episode and records the decision on the lane's trace; the supervisor
-// skipped-tick event stays the tick's, so its counts keep meaning ticks.
-func (cr *CityRuntime) ordersLaneShouldSkipForFSPressureLocked(lane *ordersLane, trace *sessionReconcilerTraceCycle, reason string) bool {
-	status, ok := currentFSPressureStatus(cr.stderr)
-	if !ok || !status.High {
-		lane.fsPressureSkips = 0
-		lane.fsPressureLogged = false
-		return false
-	}
-	trigger := ordersLaneSafeTickTrigger + ":" + reason
-	if lane.fsPressureSkips >= maxConsecutiveFSPressureSkips {
-		if cr.stderr != nil {
-			fmt.Fprintf(cr.stderr, "supervisor: FS pressure high (some avg60=%.2f > threshold=%.1f), forcing order dispatch after %d skipped passes\n", //nolint:errcheck // best-effort stderr
-				status.Avg60, status.Threshold, lane.fsPressureSkips)
-		}
-		recordFSPressureForcedTickTrace(trace, trigger, status, lane.fsPressureSkips)
-		lane.fsPressureSkips = 0
-		lane.fsPressureLogged = false
-		return false
-	}
-	lane.fsPressureSkips++
-	if !lane.fsPressureLogged && cr.stderr != nil {
-		fmt.Fprintf(cr.stderr, "supervisor: FS pressure high (some avg60=%.2f > threshold=%.1f), skipping order dispatch\n", //nolint:errcheck // best-effort stderr
-			status.Avg60, status.Threshold)
-	}
-	lane.fsPressureLogged = true
-	recordFSPressureSkippedTickTrace(trace, trigger, status, lane.fsPressureSkips)
-	return true
-}
-
 // dispatchOrders runs one dispatch outside the lane goroutine — the startup
 // pass, which must precede the cold-start session reconcile (MAINT-008). It
 // takes the same lock a lane pass does.
@@ -291,8 +257,8 @@ func (cr *CityRuntime) dispatchOrdersLocked(ctx context.Context, cityRoot string
 		return
 	}
 	// A suspended city gets no order pass at all: dispatch already skips it,
-	// and the tracking and mail watchdogs below would read every scope's
-	// store, restarting the proxies suspension retired.
+	// and the rescan and index migration below would read the city's stores,
+	// restarting the proxies suspension retired.
 	if effectiveCitySuspended(cfg, loadSuspensionStateBestEffort(cr.cityPath)) {
 		return
 	}
@@ -306,9 +272,9 @@ func (cr *CityRuntime) dispatchOrdersLocked(ctx context.Context, cityRoot string
 	// while the previous pass held the lock — before anything dispatches
 	// against the outgoing dispatcher.
 	cr.installPendingOrderDispatcherLocked(ctx)
-	cr.runOrderTrackingSweepWatchdog(cfg, now)
-	cr.runOrderTrackingRetentionWatchdog(cfg, now)
-	cr.runNudgeMailSweepWatchdog(cfg, now)
+	// The store watchdogs do not run here: each has a lane of its own
+	// (store_watchdog_lanes.go), so a slow prune or sweep never holds passMu,
+	// dispatch, or dispatcher installation.
 	if cr.od != nil {
 		cr.od.dispatch(ctx, cityRoot, now)
 	}

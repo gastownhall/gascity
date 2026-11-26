@@ -730,7 +730,7 @@ func TestNudgeMailSweepWatchdogPaysLeftoverDebts(t *testing.T) {
 		stderr:              io.Discard,
 		logPrefix:           "gc test",
 	}
-	cr.runNudgeMailSweepWatchdog(cr.cfg, time.Now().Add(nudgeShadowPayLease+time.Second))
+	cr.runNudgeMailSweepWatchdog(context.Background(), cr.cfg, time.Now().Add(nudgeShadowPayLease+time.Second))
 
 	if got := loadNudgeStateForTest(t, h.city).Retired; len(got) != 0 {
 		t.Fatalf("retired after the watchdog = %v, want the debt paid", nqCharItems(got))
