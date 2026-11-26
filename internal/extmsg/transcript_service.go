@@ -3,6 +3,7 @@ package extmsg
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -73,6 +74,13 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 				return err
 			}
 			if existing != nil {
+				// A replay of a message whose earlier Append stored the entry
+				// but failed before (or while) advancing next_sequence. Cover
+				// the entry so range readers see it and no later Append reuses
+				// its sequence.
+				if err := s.advanceNextSequenceLocked(state, existing.Sequence+1); err != nil {
+					return err
+				}
 				out = *existing
 				return nil
 			}
@@ -85,58 +93,217 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 		if err != nil {
 			return err
 		}
-		sequence := state.NextSequence
-		fields := encodeMetadataFields(input.Metadata, map[string]string{
-			"schema_version":         strconv.Itoa(schemaVersion),
-			"scope_id":               ref.ScopeID,
-			"provider":               ref.Provider,
-			"account_id":             ref.AccountID,
-			"conversation_id":        ref.ConversationID,
-			"parent_conversation_id": ref.ParentConversationID,
-			"conversation_kind":      string(ref.Kind),
-			"sequence":               strconv.FormatInt(sequence, 10),
-			"kind":                   string(kind),
-			"provenance":             string(provenance),
-			"provider_message_id":    providerMessageID,
-			"explicit_target":        normalizeHandle(input.ExplicitTarget),
-			"reply_to_message_id":    strings.TrimSpace(input.ReplyToMessageID),
-			"source_session_id":      strings.TrimSpace(input.SourceSessionID),
-			"created_at":             formatTime(createdAt),
-			"actor_json":             actorJSON,
-			"attachments_json":       attachmentsJSON,
-		})
-		labels := []string{
-			labelTranscriptBase,
-			transcriptConversationLabel(ref),
-			transcriptBucketLabel(ref, transcriptBucket(sequence)),
+		entry := func(sequence int64) beads.Bead {
+			fields := encodeMetadataFields(input.Metadata, map[string]string{
+				"schema_version":         strconv.Itoa(schemaVersion),
+				"scope_id":               ref.ScopeID,
+				"provider":               ref.Provider,
+				"account_id":             ref.AccountID,
+				"conversation_id":        ref.ConversationID,
+				"parent_conversation_id": ref.ParentConversationID,
+				"conversation_kind":      string(ref.Kind),
+				"sequence":               strconv.FormatInt(sequence, 10),
+				"kind":                   string(kind),
+				"provenance":             string(provenance),
+				"provider_message_id":    providerMessageID,
+				"explicit_target":        normalizeHandle(input.ExplicitTarget),
+				"reply_to_message_id":    strings.TrimSpace(input.ReplyToMessageID),
+				"source_session_id":      strings.TrimSpace(input.SourceSessionID),
+				"created_at":             formatTime(createdAt),
+				"actor_json":             actorJSON,
+				"attachments_json":       attachmentsJSON,
+			})
+			labels := []string{
+				labelTranscriptBase,
+				transcriptConversationLabel(ref),
+				transcriptBucketLabel(ref, transcriptBucket(sequence)),
+			}
+			if providerMessageID != "" {
+				labels = append(labels, transcriptProviderMessageLabel(ref, providerMessageID))
+			}
+			return beads.Bead{
+				ID:          transcriptEntryID(state.ID, sequence),
+				Title:       fmt.Sprintf("%s#%d", conversationTitle(ref), sequence),
+				Type:        "task",
+				Description: text,
+				Labels:      append([]string{"gc:extmsg-transcript"}, labels...),
+				Metadata:    fields,
+			}
 		}
-		if providerMessageID != "" {
-			labels = append(labels, transcriptProviderMessageLabel(ref, providerMessageID))
-		}
-		created, err := s.store.Create(beads.Bead{
-			Title:       fmt.Sprintf("%s#%d", conversationTitle(ref), sequence),
-			Type:        "task",
-			Description: text,
-			Labels:      append([]string{"gc:extmsg-transcript"}, labels...),
-			Metadata:    fields,
-		})
+		created, err := s.createEntryLocked(state, providerMessageID, entry)
 		if err != nil {
-			return fmt.Errorf("create transcript entry: %w", err)
-		}
-		next := sequence + 1
-		updates := map[string]string{
-			"next_sequence": strconv.FormatInt(next, 10),
-		}
-		if state.EarliestAvailableSequence <= 0 {
-			updates["earliest_available_sequence"] = "1"
-		}
-		if err := s.store.SetMetadataBatch(state.ID, updates); err != nil {
-			return fmt.Errorf("update transcript state: %w", err)
+			return err
 		}
 		out, err = decodeTranscriptBead(created)
 		return err
 	})
 	return out, err
+}
+
+// maxTranscriptAppendAttempts bounds how many occupied sequences one Append
+// steps past. Each step finds an entry another writer stored but whose
+// next_sequence advance this writer had not yet seen, so the bound is only
+// reached when that many entries land between one state read and the create.
+const maxTranscriptAppendAttempts = 64
+
+// transcriptEntryID returns the pinned bead ID of the transcript entry at
+// sequence in the conversation whose transcript-state bead is stateID. The
+// state bead's ID was minted by the store that holds the transcript, so the
+// entry ID lies in that store's namespace. Pinning the ID makes the store's
+// primary key the uniqueness guard for (conversation, sequence): a second
+// writer that reads the same next_sequence, through another lock pool or
+// another process, has its create refused instead of storing a duplicate.
+func transcriptEntryID(stateID string, sequence int64) string {
+	return stateID + "-" + strconv.FormatInt(sequence, 10)
+}
+
+// createEntryLocked stores the entry entry(seq) builds at the first free
+// sequence from state.NextSequence on, then advances next_sequence past it.
+//
+// Each sequence is read at its pinned ID before the create, so a create never
+// reaches a taken ID on a store that would overwrite one instead of refusing
+// it. A taken ID that holds another message means another writer stored that
+// sequence without this writer seeing its next_sequence advance: Append
+// advances next_sequence over that entry, so range readers see it, and moves
+// to the next sequence. A taken ID that holds this message (same provider
+// message ID) is this message's own entry, stored by an earlier attempt whose
+// provider-message index read missed it; Append returns it.
+//
+// A create the store refuses is classified by reading the pinned ID again. A
+// free ID returns the create error. An ID holding another message is a lost
+// race and moves on. An ID holding this message returns the create error even
+// though the entry is stored, because the store reported the write as failed;
+// next_sequence is advanced over the entry first, and a replay of the message
+// resolves it through the provider-message index. Without a provider message
+// ID the two cannot be told apart, so the create error is returned rather
+// than risk storing the message a second time.
+//
+// A store that stores the entry under an ID it minted instead of the pinned
+// one (the lenient in-memory test double, or a file store that does not honor
+// pinned IDs) keeps that entry. Such a store has no primary key to refuse a
+// second entry for the sequence, so it gets the next_sequence advance and
+// nothing more.
+func (s *transcriptService) createEntryLocked(state ConversationTranscriptStateRecord, providerMessageID string, entry func(sequence int64) beads.Bead) (beads.Bead, error) {
+	sequence := state.NextSequence
+	if sequence < 1 {
+		sequence = 1
+	}
+	ownedBy := func(occupant beads.Bead) bool {
+		return providerMessageID != "" && strings.TrimSpace(occupant.Metadata["provider_message_id"]) == providerMessageID
+	}
+	for attempt := 0; attempt < maxTranscriptAppendAttempts; attempt++ {
+		want := entry(sequence)
+		occupant, found, err := s.readEntryLocked(want.ID)
+		if err != nil {
+			return beads.Bead{}, err
+		}
+		if found {
+			if err := s.advanceNextSequenceLocked(state, sequence+1); err != nil {
+				return beads.Bead{}, err
+			}
+			if ownedBy(occupant) {
+				return occupant, nil
+			}
+			sequence++
+			continue
+		}
+		created, createErr := s.store.Create(want)
+		if createErr == nil {
+			if err := s.advanceNextSequenceLocked(state, sequence+1); err != nil {
+				return beads.Bead{}, err
+			}
+			return created, nil
+		}
+		createErr = fmt.Errorf("create transcript entry %s: %w", want.ID, createErr)
+		occupant, found, err = s.readEntryLocked(want.ID)
+		switch {
+		case err != nil:
+			return beads.Bead{}, errors.Join(createErr, err)
+		case !found:
+			return beads.Bead{}, createErr
+		}
+		if err := s.advanceNextSequenceLocked(state, sequence+1); err != nil {
+			return beads.Bead{}, errors.Join(createErr, err)
+		}
+		if providerMessageID == "" || ownedBy(occupant) {
+			return beads.Bead{}, createErr
+		}
+		sequence++
+	}
+	return beads.Bead{}, fmt.Errorf("create transcript entry: sequences %d through %d are all taken", sequence-maxTranscriptAppendAttempts, sequence-1)
+}
+
+// readEntryLocked reads the bead at a transcript entry's pinned ID. found is
+// false when no bead has that ID. A bead there that is not a transcript entry
+// is an invariant violation: nothing else may claim a pinned entry ID.
+func (s *transcriptService) readEntryLocked(id string) (b beads.Bead, found bool, err error) {
+	b, err = s.store.Get(id)
+	switch {
+	case errors.Is(err, beads.ErrNotFound):
+		return beads.Bead{}, false, nil
+	case err != nil:
+		return beads.Bead{}, false, fmt.Errorf("read transcript entry %s: %w", id, err)
+	case !hasLabel(b, "gc:extmsg-transcript"):
+		return beads.Bead{}, false, fmt.Errorf("%w: transcript entry id %s names a bead that is not a transcript entry", ErrInvariantViolation, id)
+	}
+	return b, true, nil
+}
+
+// advanceNextSequenceLocked raises the conversation's next_sequence to at
+// least next and never lowers it. A writer that finds next_sequence already
+// past next leaves it alone, so a slow writer cannot hide an entry a faster
+// one has already made visible. The raise is a compare-and-set when the store
+// offers one, which keeps it monotonic across processes; otherwise it is a
+// read then a write under the caller's binding lock.
+func (s *transcriptService) advanceNextSequenceLocked(state ConversationTranscriptStateRecord, next int64) error {
+	if state.EarliestAvailableSequence <= 0 {
+		if err := s.store.SetMetadata(state.ID, "earliest_available_sequence", "1"); err != nil {
+			return fmt.Errorf("update transcript state: %w", err)
+		}
+	}
+	want := strconv.FormatInt(next, 10)
+	read := func() (raw string, current int64, err error) {
+		b, err := s.store.Get(state.ID)
+		if err != nil {
+			return "", 0, fmt.Errorf("update transcript state: read %s: %w", state.ID, err)
+		}
+		return b.Metadata["next_sequence"], parseInt64(b.Metadata, "next_sequence"), nil
+	}
+	if cas, ok := beads.MetadataCASWriterFor(s.store); ok {
+		for attempt := 0; attempt < maxTranscriptAppendAttempts; attempt++ {
+			raw, current, err := read()
+			if err != nil {
+				return err
+			}
+			if current >= next {
+				return nil
+			}
+			swapped, err := cas.CompareAndSetMetadataKey(state.ID, "next_sequence", raw, want)
+			if errors.Is(err, beads.ErrConditionalWriteUnsupported) {
+				break
+			}
+			if err != nil {
+				return fmt.Errorf("update transcript state: %w", err)
+			}
+			if swapped {
+				return nil
+			}
+			if attempt == maxTranscriptAppendAttempts-1 {
+				return fmt.Errorf("update transcript state: next_sequence on %s kept moving below %d", state.ID, next)
+			}
+		}
+	}
+	_, current, err := read()
+	if err != nil {
+		return err
+	}
+	if current >= next {
+		return nil
+	}
+	if err := s.store.SetMetadataBatch(state.ID, map[string]string{"next_sequence": want}); err != nil {
+		return fmt.Errorf("update transcript state: %w", err)
+	}
+	return nil
 }
 
 func (s *transcriptService) List(ctx context.Context, input ListTranscriptInput) ([]ConversationTranscriptRecord, error) {
