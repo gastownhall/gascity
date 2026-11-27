@@ -303,6 +303,54 @@ func TestFederatedClaimClaimsRoutedWorkFoundBySlowLegs(t *testing.T) {
 	}
 }
 
+// federatedClaimLegs builds the store list of a multi-leg city: the agent's
+// own store first, then one leg per rig (named, so failures name their leg).
+func federatedClaimLegs(rigs int) []hookStore {
+	legs := []hookStore{{dir: "/own", env: []string{"BEADS_DIR=/own"}}}
+	for _, name := range []string{"alpha", "beta"}[:rigs] {
+		legs = append(legs, hookStore{dir: "/" + name, env: []string{"BEADS_DIR=/" + name}, rig: name})
+	}
+	return legs
+}
+
+// TestFederatedClaimRunsNoReadBetweenSelectionAndCAS pins the read count of a
+// single-pass federated claim: exactly one work-query read per leg. The claim
+// acts on the discovery output directly (#5693) — the CAS re-checks the row it
+// takes — so between selecting a store and attempting its claim there is no
+// further read, on any topology. hookClaimReadsPerTick is pinned to the same
+// number so the two cannot drift.
+func TestFederatedClaimRunsNoReadBetweenSelectionAndCAS(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		legs int // rig legs beyond the agent's own store
+	}{
+		{name: "two legs", legs: 1},
+		{name: "three legs", legs: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newFailureHookHarness()
+			legs := federatedClaimLegs(tc.legs)
+			for _, st := range legs {
+				h.script(st.dir, hookRunnerAnswer{out: "[]"})
+			}
+			h.script(legs[len(legs)-1].dir, hookRunnerAnswer{out: routedRowJSON("work-1")})
+			clock := newClaimFanoutClock(time.Second)
+
+			code, result, stderr, rec := runClaimFanout(t, clock, h, legs)
+
+			if code != 0 || result.Action != "work" || result.BeadID != "work-1" {
+				t.Fatalf("exit=%d result=%+v, want exit 0 claiming work-1; stderr=%s", code, result, stderr)
+			}
+			if rec.reads != len(legs) {
+				t.Fatalf("work-query reads = %d, want exactly one per leg (%d): nothing runs between selection and the CAS", rec.reads, len(legs))
+			}
+			if got := hookClaimReadsPerTick(legs); got != len(legs) {
+				t.Fatalf("hookClaimReadsPerTick = %d, want %d (one read per leg)", got, len(legs))
+			}
+		})
+	}
+}
+
 // End to end through the claim loop: a read that would recover on retry, but
 // only after the window closed, must not be retried into a claim. The
 // invocation keeps the failed-read contract: no drain result, no drain-ack, no
