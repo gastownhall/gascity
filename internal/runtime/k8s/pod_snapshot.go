@@ -30,13 +30,20 @@ const podSnapshotFetchTimeout = 10 * time.Second
 type podSnapshot struct {
 	ttl time.Duration
 
-	mu      sync.Mutex
-	listing *podListing // the published listing; nil before the first success
+	mu sync.Mutex
+	// generation advances on every invalidate. A listing is served and
+	// published only while the generation its LIST started in is current, so
+	// a LIST that was in flight across an invalidation answers only the read
+	// that started it.
+	generation uint64
+	listing    *podListing // the published listing; nil before the first success
 }
 
 // podListing is one snapshot LIST, projected to what the observation reads
 // need.
 type podListing struct {
+	// generation is the snapshot generation the LIST started in.
+	generation uint64
 	// startedAt is when the LIST started, on the provider clock; the listing
 	// is served until startedAt+ttl.
 	startedAt time.Time
@@ -57,14 +64,15 @@ func newPodSnapshot(ttl time.Duration) *podSnapshot {
 	return &podSnapshot{ttl: ttl}
 }
 
-// invalidate drops the published listing, so the next read lists again. A
-// nil snapshot (the provider lists per session) has nothing to drop.
+// invalidate opens a new generation, so the next read lists again and no LIST
+// started before the call is published. It never waits for an in-flight LIST.
+// A nil snapshot (the provider lists per session) has nothing to invalidate.
 func (s *podSnapshot) invalidate() {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
-	s.listing = nil
+	s.generation++
 	s.mu.Unlock()
 }
 
@@ -73,30 +81,34 @@ func projectPod(pod *corev1.Pod) snapshotPod {
 	return snapshotPod{name: pod.Name, phase: pod.Status.Phase, deleting: pod.DeletionTimestamp != nil}
 }
 
-// podListing returns a listing no older than the snapshot's TTL, listing the
-// gc-agent pods when the published one is missing or expired.
+// podListing returns a listing of the current generation no older than the
+// snapshot's TTL, listing the gc-agent pods when the published one is
+// missing, expired or from an earlier generation.
 func (p *Provider) podListing() (*podListing, error) {
 	s := p.snapshot
 	s.mu.Lock()
-	if l := s.listing; l != nil && p.clock().Sub(l.startedAt) < s.ttl {
+	gen := s.generation
+	if l := s.listing; l != nil && l.generation == gen && p.clock().Sub(l.startedAt) < s.ttl {
 		s.mu.Unlock()
 		return l, nil
 	}
 	s.mu.Unlock()
 
-	l, err := p.listAgentPods()
+	l, err := p.listAgentPods(gen)
 	if err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
-	s.listing = l
+	if s.generation == gen {
+		s.listing = l
+	}
 	s.mu.Unlock()
 	return l, nil
 }
 
-// listAgentPods takes one listing of every gc-agent pod, in any phase: the
-// label scope ListRunning uses.
-func (p *Provider) listAgentPods() (*podListing, error) {
+// listAgentPods takes one listing of every gc-agent pod, in any phase (the
+// label scope ListRunning uses), for snapshot generation gen.
+func (p *Provider) listAgentPods(gen uint64) (*podListing, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), podSnapshotFetchTimeout)
 	defer cancel()
 	startedAt := p.clock()
@@ -104,7 +116,7 @@ func (p *Provider) listAgentPods() (*podListing, error) {
 	if err != nil {
 		return nil, fmt.Errorf("k8s pod snapshot: listing gc-agent pods: %w", err)
 	}
-	l := &podListing{startedAt: startedAt, bySession: make(map[string][]snapshotPod)}
+	l := &podListing{generation: gen, startedAt: startedAt, bySession: make(map[string][]snapshotPod)}
 	for i := range pods {
 		label := pods[i].Labels["gc-session"]
 		if label == "" {

@@ -30,17 +30,23 @@ type listCall struct {
 // countingOps wraps fakeK8sOps for the snapshot tests: it serializes access to
 // the fake (which is not goroutine-safe), records every listPods call's
 // selectors and every exec's target pod. listPods returns pods sorted by name,
-// because the fake lists in map order.
+// because the fake lists in map order. A listPods call whose index has a gate
+// reads the fake's pods when it starts, then blocks until the gate is closed,
+// so a test can hold a LIST in flight while it mutates the fake.
 type countingOps struct {
 	mu       sync.Mutex
 	inner    *fakeK8sOps
 	lists    []listCall
 	execs    int
 	execPods []string
+	gates    map[int]chan struct{}
+	// started, when non-nil, receives each listPods call's index once the
+	// call has read the fake. Set it before any read runs.
+	started chan int
 }
 
 func newCountingOps() *countingOps {
-	return &countingOps{inner: newFakeK8sOps()}
+	return &countingOps{inner: newFakeK8sOps(), gates: make(map[int]chan struct{})}
 }
 
 func (c *countingOps) createPod(ctx context.Context, pod *corev1.Pod) (*corev1.Pod, error) {
@@ -63,10 +69,18 @@ func (c *countingOps) deletePod(ctx context.Context, name string, grace int64) e
 
 func (c *countingOps) listPods(ctx context.Context, selector, fieldSelector string) ([]corev1.Pod, error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	idx := len(c.lists)
 	c.lists = append(c.lists, listCall{selector: selector, fieldSelector: fieldSelector})
 	pods, err := c.inner.listPods(ctx, selector, fieldSelector)
 	sort.Slice(pods, func(i, j int) bool { return pods[i].Name < pods[j].Name })
+	gate := c.gates[idx]
+	c.mu.Unlock()
+	if c.started != nil {
+		c.started <- idx
+	}
+	if gate != nil {
+		<-gate
+	}
 	return pods, err
 }
 
@@ -76,6 +90,16 @@ func (c *countingOps) execInPod(ctx context.Context, pod, container string, cmd 
 	c.execs++
 	c.execPods = append(c.execPods, pod)
 	return c.inner.execInPod(ctx, pod, container, cmd, stdin)
+}
+
+// gate makes the idx-th listPods call block, after reading the fake, until
+// the returned channel is closed.
+func (c *countingOps) gate(idx int) chan struct{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ch := make(chan struct{})
+	c.gates[idx] = ch
+	return ch
 }
 
 func (c *countingOps) listCalls() []listCall {
@@ -377,5 +401,56 @@ func TestPodSnapshotInvalidatedByLifecycle(t *testing.T) {
 				t.Errorf("LISTs after the op = %+v, want one fresh {selector: app=gc-agent}", lists[before:])
 			}
 		})
+	}
+}
+
+// TestPodSnapshotDoesNotServePreInvalidationListing: a LIST in flight when
+// the snapshot is invalidated may predate the change the invalidation
+// announced. A read that starts after the invalidation lists for itself and
+// is answered from its own LIST, and when the older LIST lands it answers
+// only the read that started it: later reads are served from the newer
+// listing, with no further LIST.
+func TestPodSnapshotDoesNotServePreInvalidationListing(t *testing.T) {
+	ops := newCountingOps()
+	addRunningPod(ops.inner, "a", "a")
+	ops.started = make(chan int, 8)
+	releaseFirst := ops.gate(0)
+	p, _ := newSnapshotProvider(ops)
+
+	readA := make(chan bool, 1)
+	go func() { readA <- p.IsRunning("a") }()
+	if idx := <-ops.started; idx != 0 {
+		t.Fatalf("first LIST index = %d, want 0", idx)
+	}
+	// LIST 1 has read the fake (a running) and is held in flight.
+
+	p.snapshot.invalidate()
+	ops.withFake(func(f *fakeK8sOps) {
+		delete(f.pods, "a")
+		addRunningPod(f, "b", "b")
+	})
+
+	// Read B starts after the invalidation.
+	if p.IsRunning("a") {
+		t.Error("read B: IsRunning(a) = true, want false from its own post-invalidation LIST")
+	}
+	if n := ops.listCount(); n != 2 {
+		t.Fatalf("LISTs after read B = %d, want 2: read B must not wait for the pre-invalidation LIST", n)
+	}
+
+	close(releaseFirst)
+	if !<-readA {
+		t.Error("read A: IsRunning(a) = false, want true from the LIST it started")
+	}
+
+	// Read C is served from LIST 2, never from the late LIST 1.
+	if p.IsRunning("a") {
+		t.Error("read C: IsRunning(a) = true: the pre-invalidation listing was published")
+	}
+	if !p.IsRunning("b") {
+		t.Error("read C: IsRunning(b) = false, want true from LIST 2")
+	}
+	if n := ops.listCount(); n != 2 {
+		t.Fatalf("LISTs after read C = %d, want 2 (served from LIST 2)", n)
 	}
 }
