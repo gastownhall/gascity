@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"strings"
 	"time"
 )
 
@@ -69,18 +72,38 @@ func (ops *hookClaimOps) claimReadContext() (context.Context, context.CancelFunc
 	return context.WithDeadlineCause(context.Background(), deadline, errHookClaimReadBudgetSpent)
 }
 
-// hookClaimReadGuard holds every claim-path read of one invocation to its read
-// budget, whatever runner performs it. It is the enforcement that holds for any
-// runner, a fake one included; claimReadContext additionally kills a production
-// subprocess at the deadline.
-type hookClaimReadGuard struct {
-	ops *hookClaimOps
-	run hookStoreRunner
+// Read-trace outcomes: what one claim-path read answered.
+const (
+	hookClaimReadWork      = "work"
+	hookClaimReadEmpty     = "empty"
+	hookClaimReadError     = "error"
+	hookClaimReadBudgetCut = "budget-cut"
+)
+
+// hookClaimRead is one claim-path read as the trace reports it: which leg, when
+// it started (invocation age), how long it took, and what it answered.
+type hookClaimRead struct {
+	leg      string
+	start    time.Duration
+	duration time.Duration
+	outcome  string
 }
 
-// newHookClaimReadGuard wraps run for the invocation ops describes.
-func newHookClaimReadGuard(ops *hookClaimOps, run hookStoreRunner) *hookClaimReadGuard {
-	return &hookClaimReadGuard{ops: ops, run: run}
+// hookClaimReadGuard holds every claim-path read of one invocation to its read
+// budget, whatever runner performs it, and records each read for the read
+// trace. It is the enforcement that holds for any runner, a fake one included;
+// claimReadContext additionally kills a production subprocess at the deadline.
+type hookClaimReadGuard struct {
+	ops    *hookClaimOps
+	run    hookStoreRunner
+	stores []hookStore
+	reads  []hookClaimRead
+}
+
+// newHookClaimReadGuard wraps run for the invocation ops describes over the
+// fan-out stores, whose first entry is the agent's own store.
+func newHookClaimReadGuard(ops *hookClaimOps, run hookStoreRunner, stores []hookStore) *hookClaimReadGuard {
+	return &hookClaimReadGuard{ops: ops, run: run, stores: stores}
 }
 
 // read is the guarded runner. A read never starts once the budget is spent,
@@ -88,14 +111,73 @@ func newHookClaimReadGuard(ops *hookClaimOps, run hookStoreRunner) *hookClaimRea
 // timed-out read: work it carries cannot reach a CAS inside the window. A read
 // that failed keeps its own error.
 func (g *hookClaimReadGuard) read(command, dir string, env []string) (string, error) {
+	start := g.ops.invocationAge()
 	if g.ops.claimReadBudgetSpentAfter(0) {
+		g.record(dir, start, hookClaimReadBudgetCut)
 		return "", g.budgetError(command, "not started")
 	}
 	out, err := g.run(command, dir, env)
-	if err == nil && g.ops.claimReadBudgetSpentAfter(0) {
+	switch {
+	case err == nil && g.ops.claimReadBudgetSpentAfter(0):
+		g.record(dir, start, hookClaimReadBudgetCut)
 		return "", g.budgetError(command, "answered past the deadline")
+	case errors.Is(err, errHookClaimReadBudgetSpent):
+		g.record(dir, start, hookClaimReadBudgetCut)
+	case err != nil:
+		g.record(dir, start, hookClaimReadError)
+	case workQueryHasReadyWork(normalizeWorkQueryOutput(strings.TrimSpace(out))):
+		g.record(dir, start, hookClaimReadWork)
+	default:
+		g.record(dir, start, hookClaimReadEmpty)
 	}
 	return out, err
+}
+
+// record appends one read, started at invocation age start and ending now.
+func (g *hookClaimReadGuard) record(dir string, start time.Duration, outcome string) {
+	g.reads = append(g.reads, hookClaimRead{
+		leg:      g.legLabel(dir),
+		start:    start,
+		duration: g.ops.invocationAge() - start,
+		outcome:  outcome,
+	})
+}
+
+// legLabel names the store at dir: "own" for the agent's own store,
+// "rig:<name>" for a rig leg, else the store's dir.
+func (g *hookClaimReadGuard) legLabel(dir string) string {
+	for i, st := range g.stores {
+		if st.dir != dir {
+			continue
+		}
+		if i == 0 {
+			return "own"
+		}
+		if st.rig != "" {
+			return "rig:" + st.rig
+		}
+		return "store:" + dir
+	}
+	return "store:" + dir
+}
+
+// writeTrace prints the invocation's one read-trace line, ending with how the
+// claim ended (tail). It is written only for an invocation that ends without
+// claiming for a reason other than every leg answering empty, so the reads that
+// spent its window are on record next to the failure.
+func (g *hookClaimReadGuard) writeTrace(stderr io.Writer, tail string) {
+	entries := make([]string, 0, len(g.reads)+1)
+	for _, r := range g.reads {
+		entries = append(entries, fmt.Sprintf("%s +%s %s %s", r.leg, hookClaimTraceDuration(r.start), hookClaimTraceDuration(r.duration), r.outcome))
+	}
+	entries = append(entries, tail)
+	_, _ = fmt.Fprintf(stderr, "gc hook --claim: reads (budget %s of %s window): %s\n",
+		hookClaimTraceDuration(g.ops.claimReadBudget()), hookClaimTraceDuration(g.ops.claimWindowOrDefault()), strings.Join(entries, "; "))
+}
+
+// hookClaimTraceDuration renders a read-trace duration at 100ms resolution.
+func hookClaimTraceDuration(d time.Duration) string {
+	return d.Round(100 * time.Millisecond).String()
 }
 
 // budgetError is the error for a read the budget cut. It keeps the "timed out
