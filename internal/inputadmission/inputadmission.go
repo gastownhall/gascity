@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/workflowstop"
 )
 
 // Reason names the input fact that withholds a step.
@@ -74,11 +75,14 @@ type Source struct {
 }
 
 // Subject reports whether row is subject to input admission at all: an open
-// row (new execution; an in_progress row is existing ownership) that names a
-// workflow root, through gc.root_bead_id or by carrying gc.input_convoy_id
-// itself.
+// row (new execution; an in_progress row is existing ownership) that is not a
+// control kind (dispatcher bookkeeping, drain expansion and finalization keep
+// running) and names a workflow root, through gc.root_bead_id or by carrying
+// gc.input_convoy_id itself.
 func Subject(row beads.Bead) bool {
-	return row.Status == "open" && rootIDOf(row) != ""
+	return row.Status == "open" &&
+		!beadmeta.IsControlKind(strings.TrimSpace(row.Metadata[beadmeta.KindMetadataKey])) &&
+		rootIDOf(row) != ""
 }
 
 // rootIDOf is the workflow root row belongs to: its gc.root_bead_id when that
@@ -119,6 +123,7 @@ type Judge struct {
 	mu      sync.Mutex
 	roots   map[string]rootFact
 	convoys map[string]convoyFact
+	stopped map[string]bool
 }
 
 type rootFact struct {
@@ -138,6 +143,7 @@ func New(sources []Source, now time.Time) *Judge {
 		now:     now,
 		roots:   make(map[string]rootFact),
 		convoys: make(map[string]convoyFact),
+		stopped: make(map[string]bool),
 	}
 }
 
@@ -191,11 +197,60 @@ func (j *Judge) Judge(ctx context.Context, own int, rows []beads.Bead) (map[stri
 		if !verdict.withheld {
 			continue
 		}
+		stopped, err := j.workflowStopped(own, rootID, row)
+		if err != nil {
+			return nil, fmt.Errorf("judging input admission of %s (workflow root %s): %w", row.ID, rootID, err)
+		}
+		if stopped {
+			continue
+		}
 		w := verdict.withhold
 		w.RootID = rootID
 		out[row.ID] = w
 	}
 	return out, nil
+}
+
+// workflowStopped reports, once per root, whether row's workflow has stopped
+// (workflowstop.StoppedWorkflowAncestor): a stopped workflow's rows, its
+// teardown tail among them, are served as they would be without input
+// admission, so cancellation, teardown and retirement run unchanged. The
+// ancestry is read across every source, own first.
+func (j *Judge) workflowStopped(own int, rootID string, row beads.Bead) (bool, error) {
+	if v, done := j.stopped[rootID]; done {
+		return v, nil
+	}
+	stop, err := workflowstop.StoppedWorkflowAncestor(sourcesGetter{j: j, own: own}, row)
+	if err != nil {
+		return false, err
+	}
+	j.stopped[rootID] = stop.Stopped()
+	return stop.Stopped(), nil
+}
+
+// sourcesGetter reads a bead live from the first source, own first, that
+// holds it, and answers beads.ErrNotFound when none does.
+type sourcesGetter struct {
+	j   *Judge
+	own int
+}
+
+// Get reads id from the Judge's sources.
+func (g sourcesGetter) Get(id string) (beads.Bead, error) {
+	for _, i := range g.j.order(g.own) {
+		src := g.j.sources[i]
+		if src.Reader == nil {
+			continue
+		}
+		b, err := beads.LiveFor(src.Reader).Get(id)
+		if err == nil {
+			return b, nil
+		}
+		if !errors.Is(err, beads.ErrNotFound) {
+			return beads.Bead{}, fmt.Errorf("%s store: %w", src.Label, err)
+		}
+	}
+	return beads.Bead{}, fmt.Errorf("bead %s: %w", id, beads.ErrNotFound)
 }
 
 // order is the sources in the order a root is looked up: own first.

@@ -103,18 +103,7 @@ func TestNativeInputAdmissionWithholdsEveryInputFact(t *testing.T) {
 		"future defer_until":  {DeferUntil: &future},
 		"indefinite deferral": {IndefinitelyDeferred: true},
 	}
-	cities := map[string]func(t *testing.T) (work, graph beads.Store, legs []Leg){
-		"unified": func(*testing.T) (beads.Store, beads.Store, []Leg) {
-			store := beads.NewMemStore()
-			return store, store, []Leg{testLeg("city", store)}
-		},
-		"split": func(t *testing.T) (beads.Store, beads.Store, []Leg) {
-			work := beads.NewMemStore()
-			binding := sqliteBinding(t)
-			return work, binding, splitLegs(work, binding)
-		},
-	}
-	for city, open := range cities {
+	for city, open := range openCities {
 		for fact, input := range facts {
 			t.Run(city+"/"+fact, func(t *testing.T) {
 				work, graph, legs := open(t)
@@ -175,5 +164,76 @@ func TestNativeInputAdmissionPrerequisiteAddedAfterMaterialization(t *testing.T)
 				t.Fatalf("Ready = %v lacks step %s after prerequisite %s closed; want it readmitted", ids, wf.step.ID, blocker.ID)
 			}
 		})
+	}
+}
+
+// openCities are the two city shapes the admission tests run on: one store,
+// and split work/graph stores.
+var openCities = map[string]func(t *testing.T) (work, graph beads.Store, legs []Leg){
+	"unified": func(*testing.T) (beads.Store, beads.Store, []Leg) {
+		store := beads.NewMemStore()
+		return store, store, []Leg{testLeg("city", store)}
+	},
+	"split": func(t *testing.T) (beads.Store, beads.Store, []Leg) {
+		work := beads.NewMemStore()
+		binding := sqliteBinding(t)
+		return work, binding, splitLegs(work, binding)
+	},
+}
+
+// TestNativeInputAdmissionLeavesExemptRowsServed is AC-7: under a held input,
+// a control-kind row of the workflow, every row of a stopped workflow (a
+// closed, canceled or cancel-requested root, the teardown tail included) and an
+// in_progress step a session owns are served exactly as without input
+// admission.
+func TestNativeInputAdmissionLeavesExemptRowsServed(t *testing.T) {
+	setRoot := func(t *testing.T, graph beads.Store, rootID string, opts beads.UpdateOpts) {
+		t.Helper()
+		if err := graph.Update(rootID, opts); err != nil {
+			t.Fatalf("updating root %s: %v", rootID, err)
+		}
+	}
+	cases := map[string]func(t *testing.T, graph beads.Store, wf nativeWorkflow) (served string, q Query){
+		"control kind": func(t *testing.T, graph beads.Store, wf nativeWorkflow) (string, Query) {
+			finalize := mustCreate(t, graph, beads.Bead{Title: "finalize", Type: "task", Metadata: map[string]string{
+				"gc.kind": "workflow-finalize", "gc.root_bead_id": wf.root.ID, "gc.routed_to": "gascity/pool",
+			}})
+			return finalize.ID, poolQuery
+		},
+		"canceled root": func(t *testing.T, graph beads.Store, wf nativeWorkflow) (string, Query) {
+			setRoot(t, graph, wf.root.ID, beads.UpdateOpts{Metadata: map[string]string{"gc.outcome": "canceled"}})
+			return wf.step.ID, poolQuery
+		},
+		"cancel requested root": func(t *testing.T, graph beads.Store, wf nativeWorkflow) (string, Query) {
+			setRoot(t, graph, wf.root.ID, beads.UpdateOpts{Metadata: map[string]string{"gc.cancel_requested": "true"}})
+			return wf.step.ID, poolQuery
+		},
+		"closed root": func(t *testing.T, graph beads.Store, wf nativeWorkflow) (string, Query) {
+			closeBead(t, graph, wf.root.ID)
+			return wf.step.ID, poolQuery
+		},
+		"teardown tail of canceled root": func(t *testing.T, graph beads.Store, wf nativeWorkflow) (string, Query) {
+			teardown := mustCreate(t, graph, beads.Bead{Title: "teardown", Type: "task", Metadata: map[string]string{
+				"gc.root_bead_id": wf.root.ID, "gc.scope_role": "teardown", "gc.routed_to": "gascity/pool",
+			}})
+			setRoot(t, graph, wf.root.ID, beads.UpdateOpts{Metadata: map[string]string{"gc.outcome": "canceled"}})
+			return teardown.ID, poolQuery
+		},
+		"in_progress step owned by a session": func(t *testing.T, graph beads.Store, wf nativeWorkflow) (string, Query) {
+			setInProgress(t, graph, wf.step.ID, "worker-1")
+			return wf.step.ID, Query{Assignee: "worker-1", Status: "in_progress"}
+		},
+	}
+	for city, open := range openCities {
+		for name, arrange := range cases {
+			t.Run(city+"/"+name, func(t *testing.T) {
+				work, graph, legs := open(t)
+				wf := newNativeWorkflow(t, work, graph, beads.Bead{Labels: []string{"hold:external"}})
+				served, q := arrange(t, graph, wf)
+				if ids := readyIDs(t, legs, q); !slices.Contains(ids, served) {
+					t.Fatalf("Ready(%+v) = %v lacks %s under held input %s; want it served as without input admission", q, ids, served, wf.input.ID)
+				}
+			})
+		}
 	}
 }
