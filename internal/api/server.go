@@ -131,6 +131,13 @@ type Server struct {
 	// statusBuildSlot in handler_status.go.
 	statusBuilds map[string]*statusBuildSlot
 
+	// listBuilds holds each shared list view's running and queued build by
+	// key, guarded by responseCacheMu: the builds a list endpoint's
+	// cache-miss readers share, so a burst of readers on a slow city waits
+	// out one build (plus the one queued behind it) instead of stacking
+	// identical ones. See listBuildSlot in list_build_sharing.go.
+	listBuilds map[string]*listBuildSlot
+
 	// storeHealth caches the on-disk size walk and maintenance-log read
 	// for /v0/status's StoreHealth block. Refreshed on expiry; missing
 	// store directories produce a zero-value entry so repeated requests

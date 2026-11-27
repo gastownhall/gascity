@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -20,25 +22,94 @@ import (
 // agent-get). Split out of huma_handlers_sessions.go to isolate read-side
 // logic from mutations and streaming.
 
-func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInput) (*ListOutput[sessionResponse], error) {
-	index := s.latestIndex()
+// sessionListBuildResult is one session-list build's output: the page rows
+// and the totals the wire response reports. It is deep-copied per waiter
+// (shareListBuild), so its fields are all JSON-roundtrip-safe wire values.
+type sessionListBuildResult struct {
+	Index         uint64
+	Items         []sessionResponse
+	Total         int
+	NextCursor    string
+	Partial       bool
+	PartialErrors []string
+}
+
+// sessionListOutput assembles the wire output from a built page and the
+// per-request freshness read against the live session store.
+func sessionListOutput(result sessionListBuildResult, freshness cacheFreshness) *ListOutput[sessionResponse] {
+	return &ListOutput[sessionResponse]{
+		Index:        result.Index,
+		CacheAgeS:    freshness.ageS,
+		CacheRefresh: freshness.refresh,
+		Body: ListBody[sessionResponse]{
+			Items:         result.Items,
+			Total:         result.Total,
+			NextCursor:    result.NextCursor,
+			Partial:       result.Partial,
+			PartialErrors: result.PartialErrors,
+		},
+	}
+}
+
+func (s *Server) humaHandleSessionList(ctx context.Context, input *SessionListInput) (*ListOutput[sessionResponse], error) {
 	store := s.state.Stores().Sessions()
 	if store == (beads.SessionStore{}) {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 	// Validate the cursor before the read-model listing and per-session
 	// runtime enrichment — a garbage cursor gets its 400 without paying the
-	// full probe cost (matching the convoy and mail handlers).
+	// full probe cost (matching the convoy and mail handlers). On the shared
+	// path every reader pays this validation, so a garbage cursor never
+	// waits for a build it cannot use.
 	seek, err := keysetSeek(input.Cursor)
 	if err != nil {
 		return nil, err
 	}
-	mgr := s.sessionManager(store)
 	cfg := s.state.Config()
+
+	if !input.Peek {
+		// Concurrent cache-miss readers share one detached build per key
+		// (shareListBuild), keyed on the query fields plus the config
+		// generation. Unlike the agent list there is no response cache
+		// here: the freshness headers below are read per request against
+		// the live store, so a build is shared without freezing them. The
+		// 503 store check above runs per reader, so a reader that arrives
+		// when the store is gone is refused without waiting. A build reads
+		// the store, the manager and the event index when it starts
+		// (buildSessionListPage).
+		key := cacheKeyFor("sessions", input) + "#cfg=" + strconv.FormatUint(s.configGeneration(cfg), 10)
+		result, err := shareListBuild(ctx, s, key, func(_ context.Context) (sessionListBuildResult, error) {
+			return s.buildSessionListPage(cfg, input, seek)
+		})
+		if err != nil {
+			return nil, err
+		}
+		return sessionListOutput(result, cacheAgeSeconds(store)), nil
+	}
+
+	// ?peek=true reads live pane output that a shared build would freeze.
+	result, err := s.buildSessionListPage(cfg, input, seek)
+	if err != nil {
+		return nil, err
+	}
+	return sessionListOutput(result, cacheAgeSeconds(store)), nil
+}
+
+// buildSessionListPage resolves and enriches one session-list page. It reads
+// the session store, the manager and the event index when it runs, so a
+// shared build started for one reader reports the state of its own start;
+// seek is the cursor the caller already validated.
+func (s *Server) buildSessionListPage(cfg *config.City, input *SessionListInput, seek *keysetKey) (sessionListBuildResult, error) {
+	index := s.latestIndex()
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
+		return sessionListBuildResult{}, apierr.ServiceUnavailable.Msg("no bead store configured")
+	}
+	mgr := s.sessionManager(store)
 
 	listings, partialErrors, err := sessionReadModelListings(session.NewStore(store), input.State)
 	if err != nil {
-		return nil, apierr.Internal.Msg(err.Error())
+		return sessionListBuildResult{}, apierr.Internal.Msg(err.Error())
 	}
 	sessions, responseByID := filterEnrichReadModel(mgr, listings, input.State, input.Template)
 
@@ -93,18 +164,13 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	if input.WakeReasons {
 		s.setSessionListWakeReasons(page, pageSessions, listings)
 	}
-	freshness := cacheAgeSeconds(store)
-	return &ListOutput[sessionResponse]{
-		Index:        index,
-		CacheAgeS:    freshness.ageS,
-		CacheRefresh: freshness.refresh,
-		Body: ListBody[sessionResponse]{
-			Items:         page,
-			Total:         total,
-			NextCursor:    nextCursor,
-			Partial:       len(partialErrors) > 0,
-			PartialErrors: partialErrors,
-		},
+	return sessionListBuildResult{
+		Index:         index,
+		Items:         page,
+		Total:         total,
+		NextCursor:    nextCursor,
+		Partial:       len(partialErrors) > 0,
+		PartialErrors: partialErrors,
 	}, nil
 }
 

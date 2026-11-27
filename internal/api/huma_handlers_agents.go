@@ -93,10 +93,6 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	bucket := responseCacheTimeBucket(started)
 
 	cfg := s.state.Config()
-	sp := s.state.SessionProvider()
-	cityName := s.state.CityName()
-	sessTmpl := cfg.Workspace.SessionTemplate
-	wantPeek := input.Peek
 
 	// Raw config drives accurate provenance detection (pack-derived vs.
 	// city-native). Optional capability: when absent, agentOrigin falls
@@ -118,7 +114,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	// blocking queries share one slot that can hold a body built before that
 	// event. ?peek=true reads live pane output and is never cached either.
 	cacheKey := ""
-	if !wantPeek && !blocking {
+	if !input.Peek && !blocking {
 		// Cache key derived from input struct tags — adding a new query
 		// param to AgentListInput automatically participates in the key.
 		// The list projects the config, whose swaps do not advance the
@@ -129,15 +125,56 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 		}
 	}
 
-	// Active graph-resident work, indexed once per request by agent session
-	// name (nil on a single-store city). Computed after the cache-hit return
-	// so a cached response never pays for the graph-store list.
+	if cacheKey != "" {
+		// Concurrent cache-miss readers share one detached build per key
+		// (listBuildSlot): the first starts it, later arrivals join the
+		// build queued behind it, and the build that starts reads the
+		// state when it starts — no reader is answered from a build that
+		// read the state before its admission. cfg and the request are
+		// captured here; the runtime provider, the event index and the
+		// bead stores are read by the build itself (buildAgentListEntry).
+		// The completed entry is cached here, once per build, under the
+		// build's own time bucket.
+		entry, err := shareListBuild(ctx, s, cacheKey, func(buildCtx context.Context) (agentListCacheEntry, error) {
+			entry := s.buildAgentListEntry(buildCtx, cfg, rawCfg, input)
+			// A partial list reflects a transient backend failure; don't
+			// serve it from cache once the backend recovers.
+			if !entry.Body.Partial {
+				s.storeAgentList(cacheKey, responseCacheTimeBucket(entry.Started), entry)
+			}
+			return entry, nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		return &ListOutput[agentResponse]{Index: entry.Index, Body: entry.Body}, nil
+	}
+
+	// Blocking and ?peek=true reads build inline: the body must reflect the
+	// event the request waited for, and peek reads live pane output that a
+	// shared build would freeze.
+	entry := s.buildAgentListEntry(ctx, cfg, rawCfg, input)
+	return &ListOutput[agentResponse]{Index: entry.Index, Body: entry.Body}, nil
+}
+
+// buildAgentListEntry builds one agent-list cache entry: the full body, the
+// event index captured before the build and its build time. It reads the
+// session provider, the city name and the event index when it runs, so a
+// shared build started for one reader reports the state of its own start.
+func (s *Server) buildAgentListEntry(ctx context.Context, cfg, rawCfg *config.City, input *AgentListInput) agentListCacheEntry {
+	index := s.latestIndex()
+	started := time.Now()
+
+	sp := s.state.SessionProvider()
+	cityName := s.state.CityName()
+	sessTmpl := cfg.Workspace.SessionTemplate
+
+	// Active graph-resident work, indexed once per build by agent session
+	// name (nil on a single-store city).
 	graphWork := s.graphActiveWorkBySession()
 
 	// The per-row active-bead join reads each reached bead store once per
-	// request, not once per identity per row (activeBeadIndex). Built after
-	// the cache-hit return like graphWork: a cached response never pays for
-	// the join either.
+	// build, not once per identity per row (activeBeadIndex).
 	activeBeads := s.newActiveBeadIndex()
 
 	// Optional batch extensions: providers whose per-session attribute reads
@@ -312,7 +349,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 			}
 			resp.State = computeAgentState(suspended, quarantined, effectiveRunning, resp.ActiveBead, lastActivity, program)
 
-			if wantPeek && running {
+			if input.Peek && running {
 				if output, err := sp.Peek(sessionName, 5); err == nil {
 					resp.LastOutput = output
 				}
@@ -340,16 +377,8 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 		Partial:       len(partialErrors) > 0,
 		PartialErrors: partialErrors,
 	}
-	// A partial list reflects a transient backend failure; don't serve it
-	// from cache once the backend recovers.
-	if cacheKey != "" && !body.Partial {
-		s.storeAgentList(cacheKey, bucket, agentListCacheEntry{Index: index, Started: started, BuildTime: time.Since(started), Body: body})
-	}
 
-	return &ListOutput[agentResponse]{
-		Index: index,
-		Body:  body,
-	}, nil
+	return agentListCacheEntry{Index: index, Started: started, BuildTime: time.Since(started), Body: body}
 }
 
 // humaHandleAgent is the Huma-typed handler for
