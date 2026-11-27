@@ -683,7 +683,8 @@ func standardAssignedWorkQueryScript(topo QueryTopology) string {
 // standardAssignedInProgressWorkQueryScript behavior: callers asking for that
 // tier alone still receive the anchor.
 func standardAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo QueryTopology) string {
-	return `gc_assigned_workflow_anchor_json=""; ` +
+	return workflowWorkDoneFunctionScript(topo) +
+		`gc_assigned_workflow_anchor_json=""; ` +
 		identityLoopHead() +
 		assignedInProgressTierCommand("id", topo) +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
@@ -827,7 +828,8 @@ func assignedInProgressRead(shellVar string, topo QueryTopology, args string, li
 
 // standardAssignedInProgressWorkQueryScript is the crash-recovery tier.
 func standardAssignedInProgressWorkQueryScript(topo QueryTopology) string {
-	return identityLoopHead() +
+	return workflowWorkDoneFunctionScript(topo) +
+		identityLoopHead() +
 		assignedInProgressTierCommand("id", topo) +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
 		inProgressBlockedByEnrichmentScript(topo.FederatedReady, true) +
@@ -902,9 +904,14 @@ func inProgressBlockedByEnrichmentScript(federated bool, checkHold bool) string 
 	return inProgressBlockedByEnrichmentScriptWithServeAction(
 		federated,
 		checkHold,
-		`printf "%s" "$r" && exit 0; `,
+		true,
+		serveCandidateAction,
 	)
 }
+
+// serveCandidateAction is the non-deferring serve: print the gated row and end
+// the query.
+const serveCandidateAction = `printf "%s" "$r" && exit 0; `
 
 func inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(federated bool, checkHold bool) string {
 	graphAnchorJQ := `.[0] | select(` + graphWorkflowAnchorJQPredicate() + `) | .id // empty`
@@ -913,12 +920,107 @@ func inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(federated bool, che
 		`if [ -n "$graph_anchor_id" ]; then ` +
 		`[ -n "$gc_assigned_workflow_anchor_json" ] || gc_assigned_workflow_anchor_json="$r"; ` +
 		`else printf "%s" "$r" && exit 0; fi; `
-	return inProgressBlockedByEnrichmentScriptWithServeAction(federated, checkHold, serveAction)
+	return inProgressBlockedByEnrichmentScriptWithServeAction(federated, checkHold, true, serveAction)
 }
 
 func graphWorkflowAnchorJQPredicate() string {
 	return `(` + jqMeta(beadmeta.KindMetadataKey) + ` == "` + beadmeta.KindWorkflow + `") and (` +
 		jqMeta(beadmeta.FormulaContractMetadataKey) + ` == "graph.v2")`
+}
+
+// workflowWorkDoneFunction names the shell function, defined once at the head
+// of every in_progress tier script, that answers whether a workflow root's work
+// is done and it is only waiting for workflow-finalize to close it (#5983).
+const workflowWorkDoneFunction = "gc_workflow_work_done"
+
+// workflowMemberReadLimit bounds each read of a workflow root's members. A read
+// that comes back full cannot prove that no live member exists past it, so the
+// root is served.
+const workflowMemberReadLimit = 20
+
+// trimmedKindJQ reads the row's gc.kind trimmed, the way every kind read in Go
+// compares it.
+func trimmedKindJQ() string {
+	return `(` + jqMeta(beadmeta.KindMetadataKey) + ` | tostring | gsub("^\\s+|\\s+$"; ""))`
+}
+
+// kindInSetJQ renders a jq boolean, evaluated with the row in scope, that is
+// true when the row's trimmed gc.kind is one of kinds.
+func kindInSetJQ(kinds []string) string {
+	conds := make([]string, len(kinds))
+	for i, k := range kinds {
+		conds[i] = fmt.Sprintf(`$gc_kind == %q`, k)
+	}
+	return `(` + trimmedKindJQ() + ` as $gc_kind | ` + strings.Join(conds, " or ") + `)`
+}
+
+// workflowMemberStatusJQ reads a member row's status, lowercased.
+const workflowMemberStatusJQ = `((.status // "") | tostring | ascii_downcase)`
+
+// workflowWorkRanJQ is the evidence half of the completeness verdict, run over
+// the slurped closed-member read: some member other than the root ($root) is
+// closed and is a worker step, not workflow topology. Without that evidence a
+// root is served, because a root-only workflow has no members (the root is the
+// work) and members a reader cannot see must never read as done.
+func workflowWorkRanJQ() string {
+	return `if length == 0 or any(.[]; type != "array") then error("workflow member read is not a JSON array") else ` +
+		`any(.[][]; (.id // "") != $root and ` + workflowMemberStatusJQ + ` == "closed" and (` + kindInSetJQ(beadmeta.WorkflowTopologyKinds) + ` | not)) end`
+}
+
+// workflowWorkLiveJQ is the liveness half, run over the slurped live-member
+// reads: a member other than the root that is not closed and is not one of the
+// kinds that stay open while a finished workflow waits for finalize
+// (beadmeta.AwaitingFinalizeInertKinds). A read that came back full also
+// counts as live, because the members past it are unknown.
+func workflowWorkLiveJQ() string {
+	return `if length == 0 or any(.[]; type != "array") then error("workflow member read is not a JSON array") else ` +
+		`any(.[]; length >= ` + strconv.Itoa(workflowMemberReadLimit) + `) or ` +
+		`any(.[][]; (.id // "") != $root and ` + workflowMemberStatusJQ + ` != "closed" and (` + kindInSetJQ(beadmeta.AwaitingFinalizeInertKinds) + ` | not)) end`
+}
+
+// workflowWorkDoneFunctionScript defines gc_workflow_work_done <root-id>. It
+// returns 0 only on a positive verdict that the workflow's work is done: some
+// worker step closed (workflowWorkRanJQ) and no live member remains
+// (workflowWorkLiveJQ). Members are the rows stamped gc.root_bead_id=<root>,
+// because a workflow root carries no dependency rows to its steps.
+//
+// The closed read runs first, so a fresh or root-only root costs exactly one
+// read. Each jq check reads statuses explicitly, so the verdict never depends
+// on the reader's default status set. On a federated topology the reads go
+// through `gc ready --status`, one per status, because the members of a
+// relocated workflow are not in the store `bd` reaches.
+//
+// Every failure returns 1, which serves the root: the gate keeps its fail-open
+// contract.
+func workflowWorkDoneFunctionScript(topo QueryTopology) string {
+	memberFilter := ` --metadata-field "` + beadmeta.RootBeadIDMetadataKey + `=$1"`
+	limit := ` --json --limit=` + strconv.Itoa(workflowMemberReadLimit)
+	read := func(status string) string {
+		if topo.FederatedReady {
+			return gcReadyCommand + ` --status ` + status + memberFilter + limit
+		}
+		if status == "" {
+			return `bd list` + memberFilter + limit
+		}
+		return `bd list` + memberFilter + ` --status=` + status + limit
+	}
+	verdict := func(printfArgs, jq string) string {
+		return `$(printf ` + printfArgs + ` | jq -rs --arg root "$1" ` + shellquote.Quote(jq) + ` 2>/dev/null)`
+	}
+	script := workflowWorkDoneFunction + `() { ` +
+		`gc_wf_closed=$(` + read("closed") + `) || return 1; ` +
+		`gc_wf_ran=` + verdict(`"%s" "$gc_wf_closed"`, workflowWorkRanJQ()) + ` || return 1; ` +
+		`[ "$gc_wf_ran" = "true" ] || return 1; `
+	if topo.FederatedReady {
+		script += `gc_wf_open=$(` + read("open") + `) || return 1; ` +
+			`gc_wf_in_progress=$(` + read("in_progress") + `) || return 1; ` +
+			`gc_wf_blocked=$(` + read("blocked") + `) || return 1; ` +
+			`gc_wf_live=` + verdict(`"%s\n%s\n%s\n" "$gc_wf_open" "$gc_wf_in_progress" "$gc_wf_blocked"`, workflowWorkLiveJQ()) + ` || return 1; `
+	} else {
+		script += `gc_wf_open=$(` + read("") + `) || return 1; ` +
+			`gc_wf_live=` + verdict(`"%s" "$gc_wf_open"`, workflowWorkLiveJQ()) + ` || return 1; `
+	}
+	return script + `[ "$gc_wf_live" = "false" ]; }; `
 }
 
 // serveOrdinaryInProgressCandidateScript selects the first non-anchor row from
@@ -933,7 +1035,13 @@ func serveOrdinaryInProgressCandidateScript(federated bool, checkHold bool) stri
 		`fi; `
 }
 
-func inProgressBlockedByEnrichmentScriptWithServeAction(federated bool, checkHold bool, serveAction string) string {
+// inProgressBlockedByEnrichmentScriptWithServeAction is the serve gate shared
+// by every in_progress tier form and by the bd-1.0.4 assigned-ready wisp probe.
+// A row passes when it has no open blocker, carries no dispatch hold (when
+// checkHold is set) and, when checkWorkflowDone is set, is not a workflow root
+// whose work is done (gc_workflow_work_done). Only the in_progress tier scripts
+// define gc_workflow_work_done, so only they set checkWorkflowDone.
+func inProgressBlockedByEnrichmentScriptWithServeAction(federated bool, checkHold bool, checkWorkflowDone bool, serveAction string) string {
 	// The tier stores its candidate row in $r and its enriched copy in
 	// $r_enriched; both callers use those names.
 	const shellVar = "r"
@@ -970,6 +1078,20 @@ func inProgressBlockedByEnrichmentScriptWithServeAction(federated bool, checkHol
 		holdCond = ` && [ "$nheld" = "0" ]`
 	}
 
+	doneCheck := ""
+	doneCond := ""
+	if checkWorkflowDone {
+		// The kind is read off the row the tier already holds, so a row that is
+		// not a workflow root costs no member read. Unparseable rows read no
+		// kind and keep the fail-open serve.
+		doneCheck = `nwfdone=0; ` +
+			`if [ "$nblocked" = "0" ]` + holdCond + ` && [ -n "$bid" ]; then ` +
+			`gc_wf_kind=$(printf "%s" "` + v + `" | jq -r ` + shellquote.Quote(`.[0] | `+trimmedKindJQ()) + ` 2>/dev/null); ` +
+			`if [ "$gc_wf_kind" = "` + beadmeta.KindWorkflow + `" ] && ` + workflowWorkDoneFunction + ` "$bid"; then nwfdone=1; fi; ` +
+			`fi; `
+		doneCond = ` && [ "$nwfdone" = "0" ]`
+	}
+
 	return `bid=$(printf "%s" "` + v + `" | jq -r ".[0].id // empty" 2>/dev/null); ` +
 		carried +
 		`bb="[]"; ` +
@@ -978,7 +1100,8 @@ func inProgressBlockedByEnrichmentScriptWithServeAction(federated bool, checkHol
 		`nblocked=$(printf "%s" "$bb" | jq -r ` + shellquote.Quote(openBlockerCountJQ) + ` 2>/dev/null); ` +
 		`[ -z "$nblocked" ] && nblocked=0; ` +
 		holdCheck +
-		`if [ "$nblocked" = "0" ]` + holdCond + `; then ` +
+		doneCheck +
+		`if [ "$nblocked" = "0" ]` + holdCond + doneCond + `; then ` +
 		enrichedVar + `=$(printf "%s" "` + v + `" | jq -c --argjson bb "$bb" ` +
 		shellquote.Quote(enrichJQ) + ` 2>/dev/null); ` +
 		`[ -n "` + e + `" ] && [ "` + e + `" != "[]" ] && ` + shellVar + `="` + e + `"; ` +
@@ -1020,7 +1143,8 @@ func legacyControlAssignedWorkQueryScript(topo QueryTopology) string {
 }
 
 func legacyControlAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo QueryTopology) string {
-	return `gc_assigned_workflow_anchor_json=""; ` +
+	return workflowWorkDoneFunctionScript(topo) +
+		`gc_assigned_workflow_anchor_json=""; ` +
 		identityLoopHead() +
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
@@ -1041,7 +1165,8 @@ func legacyControlAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo Que
 }
 
 func legacyControlAssignedInProgressWorkQueryScript(topo QueryTopology) string {
-	return identityLoopHead() +
+	return workflowWorkDoneFunctionScript(topo) +
+		identityLoopHead() +
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
@@ -1158,7 +1283,9 @@ func ephemeralAssignedReadyProbeScript(shellVar string, topo QueryTopology) stri
 		// fallback. checkHold=false: the selector above already excludes
 		// held candidates before the `.[:1]` truncation, so the
 		// post-truncation nheld check here would always read zero.
-		inProgressBlockedByEnrichmentScript(false, false) +
+		// checkWorkflowDone=false: this is the open tier, which never
+		// defines gc_workflow_work_done.
+		inProgressBlockedByEnrichmentScriptWithServeAction(false, false, false, serveCandidateAction) +
 		`fi; `
 }
 

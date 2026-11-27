@@ -364,10 +364,19 @@ func singleStoreReadCount(command string) int {
 		strings.Count(command, bdListInProgressCommand)
 }
 
+// withoutWorkflowWorkDoneFunction drops the gc_workflow_work_done definition
+// from a generated command. Its member reads are one per status on the
+// federated reader and one per read on `bd list`, so the read counts are taken
+// without it; renormalizeFederatedCommand proves the rest of it matches.
+func withoutWorkflowWorkDoneFunction(command string, federated bool) string {
+	return strings.ReplaceAll(command,
+		singleQuoteEscaped(workflowWorkDoneFunctionScript(QueryTopology{FederatedReady: federated})), "")
+}
+
 // renormalizeFederatedCommand maps a federated command back onto the
 // single-store one by undoing ONLY the differences the swap is allowed to make:
-// the reader words, their failure clauses, and the crash-recovery tier's
-// presence-key prelude.
+// the reader words, their failure clauses, the crash-recovery tier's
+// presence-key prelude, and the workflow member reads of gc_workflow_work_done.
 //
 // The last one is undone by generating both forms from the production function
 // itself rather than by pasting its text here. That keeps the guard honest as
@@ -383,6 +392,9 @@ func renormalizeFederatedCommand(federated string) string {
 	replaceFragment := func(in, from, to string) string {
 		return strings.ReplaceAll(in, singleQuoteEscaped(from), singleQuoteEscaped(to))
 	}
+	federated = replaceFragment(federated,
+		workflowWorkDoneFunctionScript(QueryTopology{FederatedReady: true}),
+		workflowWorkDoneFunctionScript(QueryTopology{}))
 	federated = replaceFragment(federated,
 		inProgressBlockedByEnrichmentScript(true, true),
 		inProgressBlockedByEnrichmentScript(false, true))
@@ -415,9 +427,9 @@ func TestFederatedSwapChangesOnlyTheReader(t *testing.T) {
 			bd105 := BeadsConfig{BDCompatibility: BeadsBDCompatibility105}
 			single := v.forTopo(shape.agent, QueryTopology{Beads: bd105})
 			federated := v.forTopo(shape.agent, QueryTopology{Beads: bd105, FederatedReady: true})
-			if n := singleStoreReadCount(single); n == 0 {
+			if n := singleStoreReadCount(withoutWorkflowWorkDoneFunction(single, false)); n == 0 {
 				t.Fatalf("%s/%s: single-store command contains no read to swap", shape.name, v.name)
-			} else if got := strings.Count(federated, gcReadyCommand); got != n {
+			} else if got := strings.Count(withoutWorkflowWorkDoneFunction(federated, true), gcReadyCommand); got != n {
 				t.Errorf("%s/%s: single-store command has %d swappable reads, federated has %d %q", shape.name, v.name, n, got, gcReadyCommand)
 			}
 			if strings.Contains(federated, bdReadyCommand) {

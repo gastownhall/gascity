@@ -226,6 +226,7 @@ go_test(
         "workquery_graph_anchor_test.go",
         "workquery_hold_label_test.go",
         "workquery_inprogress_blocked_test.go",
+        "workquery_inprogress_completed_root_test.go",
         "workquery_inprogress_federated_test.go",
         "workquery_inprogress_federation_test.go",
         "workquery_inprogress_hold_test.go",
