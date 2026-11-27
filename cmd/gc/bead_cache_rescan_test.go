@@ -112,3 +112,56 @@ func TestSupervisorReloadDropsOutOfProcessCloseBeforeTheCadence(t *testing.T) {
 		t.Fatalf("cache emitted no bead.closed for %s", id)
 	}
 }
+
+// TestSupervisorReloadRequestsEveryCityCacheRescan: a reload asks each
+// distinct cache of every started city for one re-scan (the city cache, a
+// policy-wrapped rig cache shared by two rigs and a relocated class cache),
+// asks a city that is not started for none, and still wakes the allocator.
+func TestSupervisorReloadRequestsEveryCityCacheRescan(t *testing.T) {
+	city := beads.NewCachingStoreForTest(beads.NewMemStore(), nil)
+	work := beads.NewCachingStoreForTest(beads.NewMemStore(), nil)
+	relocated := beads.NewCachingStoreForTest(beads.NewMemStore(), nil)
+	idle := beads.NewCachingStoreForTest(beads.NewMemStore(), nil)
+	started := &controllerState{
+		cityBeadStore: city,
+		beadStores: map[string]beads.Store{
+			"r":  &beadPolicyStore{Store: work},
+			"r2": &beadPolicyStore{Store: work},
+		},
+		storageRoutes: splitRoutes(relocated),
+		pokeCh:        make(chan struct{}, 1),
+	}
+	stopped := &controllerState{beadStores: map[string]beads.Store{"r": idle}, pokeCh: make(chan struct{}, 1)}
+
+	if got := started.requestBeadCacheRescans(); got != 3 {
+		t.Fatalf("requestBeadCacheRescans = %d, want 3 distinct caches", got)
+	}
+	before := map[string]int64{}
+	for name, cache := range map[string]*beads.CachingStore{"city": city, "work": work, "relocated": relocated, "idle": idle} {
+		before[name] = cache.Stats().ReconcileRequests
+	}
+
+	pokeStartedCitiesOnReload(reloadSnapshot(
+		startedCity("started", started),
+		&cityView{Name: "stopped", Started: false, cs: stopped},
+	), io.Discard)
+
+	for name, cache := range map[string]*beads.CachingStore{"city": city, "work": work, "relocated": relocated} {
+		if got := cache.Stats().ReconcileRequests - before[name]; got != 1 {
+			t.Errorf("%s cache: reload made %d reconcile requests, want 1", name, got)
+		}
+	}
+	if got := idle.Stats().ReconcileRequests - before["idle"]; got != 0 {
+		t.Errorf("a city that is not started got %d reconcile requests, want 0", got)
+	}
+	select {
+	case <-started.pokeCh:
+	default:
+		t.Error("the started city got no allocator wake")
+	}
+	select {
+	case <-stopped.pokeCh:
+		t.Error("a city that is not started was woken")
+	default:
+	}
+}
