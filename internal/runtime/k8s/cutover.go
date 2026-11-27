@@ -2,6 +2,7 @@ package k8s
 
 import (
 	"context"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -36,6 +37,28 @@ func NewSeamBacked(opts ...Option) (runtime.Provider, error) {
 	}
 	rt, tp := raw.Seams()
 	return &seamBackedProvider{Provider: runtime.NewProviderFromSeams(rt, tp), raw: raw}, nil
+}
+
+// IsRunning passes through to the underlying provider, whose pod snapshot
+// serves it, instead of the seam adapter's Runtime.Open.
+func (s *seamBackedProvider) IsRunning(name string) bool {
+	return s.raw.IsRunning(name)
+}
+
+// IsAttached passes through to the underlying provider. The seam path's
+// attach → Observe fan-out probes liveness twice more and reads activity and
+// processes for an answer the raw read gives alone: without a live tmux
+// session display-message fails, so the raw answer is false exactly when the
+// attach would have failed.
+func (s *seamBackedProvider) IsAttached(name string) bool {
+	return s.raw.IsAttached(name)
+}
+
+// GetLastActivity passes through to the underlying provider, which reads zero
+// without a running pod or tmux session, as the seam path's failed attach
+// does, and otherwise the same poke-discounted activity Observe reports.
+func (s *seamBackedProvider) GetLastActivity(name string) (time.Time, error) {
+	return s.raw.GetLastActivity(name)
 }
 
 // SleepCapability passes through to the underlying provider (non-seam).

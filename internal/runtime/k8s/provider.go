@@ -54,7 +54,8 @@ type Provider struct {
 	postStartSettle    time.Duration       // settle time before post-start liveness check
 	stderr             io.Writer           // warning output (default os.Stderr)
 	pokes              runtime.PokeLedger  // gc's own input, discounted from GetLastActivity
-	now                func() time.Time    // the poke ledger's clock; nil is time.Now
+	now                func() time.Time    // the poke ledger's and pod snapshot's clock; nil is time.Now
+	snapshot           *podSnapshot        // pod listing shared by the observation reads; nil lists per session
 }
 
 type schedulingFields struct {
@@ -128,6 +129,7 @@ func NewProvider() (*Provider, error) {
 		tolerations:        scheduling.tolerations,
 		affinity:           scheduling.affinity,
 		priorityClassName:  scheduling.priorityClassName,
+		snapshot:           newPodSnapshot(podSnapshotTTL),
 	}, nil
 }
 
@@ -496,24 +498,30 @@ func (p *Provider) Interrupt(name string) error {
 	return nil
 }
 
-// IsRunning reports whether the session has a running pod with a live tmux session.
+// IsRunning reports whether the session has a running pod with a live tmux
+// session. The pod is resolved from the pod snapshot, so the answer may lag
+// pod changes this process did not make by up to the snapshot TTL.
 func (p *Provider) IsRunning(name string) bool {
 	ctx := context.Background()
-	podName, err := p.findRunningPod(ctx, name)
+	podName, err := p.observedRunningPod(ctx, name)
 	if err != nil {
 		return false
 	}
-	// Pod Running + tmux session alive.
-	_, err = p.ops.execInPod(ctx, podName, "agent",
+	return p.tmuxSessionAlive(ctx, podName)
+}
+
+// tmuxSessionAlive reports whether the in-pod tmux session answers.
+func (p *Provider) tmuxSessionAlive(ctx context.Context, podName string) bool {
+	_, err := p.ops.execInPod(ctx, podName, "agent",
 		[]string{"tmux", "has-session", "-t", tmuxSession}, nil)
 	return err == nil
 }
 
 // IsAttached reports whether a user terminal is connected to the tmux
-// session inside the pod.
+// session inside the pod (pod resolved from the pod snapshot).
 func (p *Provider) IsAttached(name string) bool {
 	ctx := context.Background()
-	podName, err := p.findRunningPod(ctx, name)
+	podName, err := p.observedRunningPod(ctx, name)
 	if err != nil {
 		return false
 	}
@@ -547,30 +555,25 @@ func (p *Provider) Attach(name string) error {
 	return cmd.Run()
 }
 
-// ProcessAlive checks if the named processes are running inside the pod.
+// ProcessAlive checks if the named processes are running inside the pod
+// (pod resolved from the pod snapshot).
 func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 	if len(processNames) == 0 {
 		return true
 	}
 	ctx := context.Background()
-	label := SanitizeLabel(name)
 
-	pods, err := p.ops.listPods(ctx, "gc-session="+label, "")
-	if err != nil || len(pods) == 0 {
+	pod, found, err := p.observedPod(ctx, name)
+	if err != nil || !found {
 		return false
 	}
-	pod := &pods[0]
-
-	// Check deletionTimestamp — pod in graceful shutdown is not alive.
-	if pod.DeletionTimestamp != nil {
-		return false
-	}
-	if pod.Status.Phase != corev1.PodRunning {
+	// A pod in graceful shutdown is not alive.
+	if pod.deleting || pod.phase != corev1.PodRunning {
 		return false
 	}
 
 	for _, pname := range processNames {
-		_, err := p.ops.execInPod(ctx, pod.Name, "agent",
+		_, err := p.ops.execInPod(ctx, pod.name, "agent",
 			[]string{"pgrep", "-f", pname}, nil)
 		if err == nil {
 			return true
@@ -609,15 +612,15 @@ func (p *Provider) SendKeys(name string, keys ...string) error {
 // clock, so the echo is matched there and only the grace runs on the
 // provider's ([runtime.PokeLedger]).
 func (p *Provider) poke(ctx context.Context, name string, send func() error) error {
-	commit := p.pokes.Begin(name, p.rawActivity(ctx, name))
+	commit := p.pokes.Begin(name, p.rawActivity(ctx, name, p))
 	if err := send(); err != nil {
 		return err
 	}
-	commit(p.clock(), p.rawActivity(ctx, name))
+	commit(p.clock(), p.rawActivity(ctx, name, p))
 	return nil
 }
 
-// clock is the poke ledger's time source.
+// clock is the time source of the poke ledger and the pod snapshot.
 func (p *Provider) clock() time.Time {
 	if p.now != nil {
 		return p.now()
@@ -724,15 +727,16 @@ func (p *Provider) ListRunningShared() bool { return true }
 // #{window_activity} of the session's windows, less the keystroke echo of
 // gc's own nudges and keys (see [Provider.poke]). #{session_activity} is
 // pinned at creation/attach time for a detached session and does not advance
-// when the agent prints output.
+// when the agent prints output. The pod is resolved from the pod snapshot.
 func (p *Provider) GetLastActivity(name string) (time.Time, error) {
-	return p.pokes.Discount(name, p.rawActivity(context.Background(), name), p.clock()), nil
+	return p.pokes.Discount(name, p.rawActivity(context.Background(), name, observationConn{p: p}), p.clock()), nil
 }
 
 // rawActivity reads the session's raw activity clock, the newest
-// #{window_activity} of the in-pod tmux session's windows (zero if unknown).
-func (p *Provider) rawActivity(ctx context.Context, name string) time.Time {
-	activity, err := runtime.ReadTmuxWindowActivity(ctx, p, name, tmuxSession)
+// #{window_activity} of the in-pod tmux session's windows (zero if unknown),
+// over conn.
+func (p *Provider) rawActivity(ctx context.Context, name string, conn runtime.ExecProvider) time.Time {
+	activity, err := runtime.ReadTmuxWindowActivity(ctx, conn, name, tmuxSession)
 	if err != nil {
 		return time.Time{}
 	}
@@ -861,6 +865,12 @@ func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte
 	if err != nil {
 		return nil, -1, fmt.Errorf("k8s exec %q: %w", name, err)
 	}
+	return p.execResolved(ctx, podName, argv)
+}
+
+// execResolved runs argv in podName's "agent" container with [Provider.Exec]'s
+// result contract: a non-zero exit is the command's own code with a nil error.
+func (p *Provider) execResolved(ctx context.Context, podName string, argv []string) ([]byte, int, error) {
 	out, err := p.ops.execInPod(ctx, podName, "agent", argv, nil)
 	if err != nil {
 		var exitErr execerr.ExitError

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"testing"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -318,5 +320,134 @@ func TestCutoverForwardsListingAttestation(t *testing.T) {
 		if !errors.Is(err, fake.listErr) {
 			t.Errorf("%s ListRunning on a failed pod list = (%q, %v), want the list error", label, names, err)
 		}
+	}
+}
+
+// sessionListProbe is what one session-list enrichment reads for a session.
+type sessionListProbe struct {
+	running      bool
+	attached     bool
+	lastActivity time.Time
+	runningAgain bool
+}
+
+// runSessionListProbes runs the session-list probe sequence (IsRunning,
+// IsAttached, GetLastActivity, IsRunning) for every name.
+func runSessionListProbes(t *testing.T, sp runtime.Provider, names []string) []sessionListProbe {
+	t.Helper()
+	out := make([]sessionListProbe, 0, len(names))
+	for _, name := range names {
+		var probe sessionListProbe
+		probe.running = sp.IsRunning(name)
+		probe.attached = sp.IsAttached(name)
+		activity, err := sp.GetLastActivity(name)
+		if err != nil {
+			t.Fatalf("GetLastActivity(%q): %v", name, err)
+		}
+		probe.lastActivity = activity
+		probe.runningAgain = sp.IsRunning(name)
+		out = append(out, probe)
+	}
+	return out
+}
+
+// TestSessionListProbesShareOnePodListing pins issue #4390: the probes one
+// session-list request makes for each session (IsRunning, IsAttached,
+// GetLastActivity, IsRunning) went through the seam adapter's attach fan-out,
+// about 10 pod LISTs and 10 execs per session, all behind client-go's rate
+// limiter. Through the seam-backed provider and its pod snapshot, every probe
+// within one TTL shares a single app=gc-agent LIST and pays only its own exec,
+// and every answer equals the snapshot-disabled seam path's.
+func TestSessionListProbesShareOnePodListing(t *testing.T) {
+	const genuine = int64(1709300000)
+	live := func(name string) probeSession {
+		return probeSession{name: name, pod: true, tmux: true, attached: "0", activity: genuine}
+	}
+	for _, tc := range []struct {
+		name      string
+		sessions  []probeSession
+		poke      string // when set, this session is nudged before the probes
+		wantExecs int
+	}{
+		{
+			name:      "three live sessions",
+			sessions:  []probeSession{live("a"), live("b"), live("c")},
+			wantExecs: 12,
+		},
+		{
+			name:      "tmux dead in a Running pod",
+			sessions:  []probeSession{live("a"), {name: "b", pod: true}, live("c")},
+			wantExecs: 12,
+		},
+		{
+			name:      "no pod at all",
+			sessions:  []probeSession{{name: "a"}, {name: "b"}, {name: "c"}},
+			wantExecs: 0,
+		},
+		{
+			name: "attached versus detached",
+			sessions: []probeSession{
+				{name: "a", pod: true, tmux: true, attached: "1", activity: genuine},
+				live("b"),
+				{name: "c", pod: true, tmux: true, attached: "1", activity: genuine + 5},
+			},
+			wantExecs: 12,
+		},
+		{
+			name:      "poke-discounted activity",
+			sessions:  []probeSession{live("a"), live("b"), live("c")},
+			poke:      "b",
+			wantExecs: 12,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			names := make([]string, 0, len(tc.sessions))
+			for _, s := range tc.sessions {
+				names = append(names, s.name)
+			}
+			start := time.Unix(genuine, 0).Add(time.Hour)
+
+			ops := newProbeOps(tc.sessions)
+			raw, clock := newSnapshotProvider(ops)
+			clock.set(start)
+			sp := &seamBackedProvider{Provider: runtime.NewProviderFromSeams(raw.Seams()), raw: raw}
+
+			refOps := newProbeOps(tc.sessions)
+			refRaw := newProviderWithOps(refOps)
+			refRaw.now = clock.now
+			ref := runtime.NewProviderFromSeams(refRaw.Seams())
+
+			if tc.poke != "" {
+				if err := raw.Nudge(tc.poke, runtime.TextContent("wake up")); err != nil {
+					t.Fatalf("Nudge: %v", err)
+				}
+				if err := refRaw.Nudge(tc.poke, runtime.TextContent("wake up")); err != nil {
+					t.Fatalf("reference Nudge: %v", err)
+				}
+				// Past the grace an unanswered poke's echo is discounted.
+				clock.set(start.Add(runtime.PokeGrace + time.Second))
+			}
+			ops.reset()
+
+			got := runSessionListProbes(t, sp, names)
+
+			if lists := ops.listCalls(); len(lists) != 1 || lists[0] != (listCall{selector: "app=gc-agent"}) {
+				t.Errorf("pod LISTs = %+v, want exactly one {selector: app=gc-agent}", lists)
+			}
+			if execs := ops.execCount(); execs != tc.wantExecs {
+				t.Errorf("execs = %d, want %d", execs, tc.wantExecs)
+			}
+			want := runSessionListProbes(t, ref, names)
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("snapshot probes = %+v,\nsnapshot-disabled seam path = %+v", got, want)
+			}
+			if tc.poke != "" {
+				for i, name := range names {
+					if name == tc.poke && !got[i].lastActivity.Equal(time.Unix(genuine, 0)) {
+						t.Errorf("poked session's LastActivity = %v, want the genuine %v", got[i].lastActivity, time.Unix(genuine, 0))
+					}
+				}
+			}
+		})
 	}
 }
