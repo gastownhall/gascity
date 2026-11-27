@@ -68,6 +68,44 @@ describe('deriveActiveWorkers', () => {
     expect(result.workers[0]?.session.id).toBe('gc-1');
   });
 
+  it('counts native pool sessions whose names carry no worker/polecat suffix', () => {
+    const sessions = [
+      // City-scoped pool (no rig): grouped under its pool name.
+      session({
+        id: 'vc-wisp-jcc7qo',
+        template: 'cursor',
+        session_name: 'cursor-vc-wisp-jcc7qo',
+        pool: 'cursor',
+        agent_kind: 'pool',
+      }),
+      session({
+        id: 'vc-wisp-aaa1bb',
+        template: 'claude-reviewer',
+        session_name: 'claude-reviewer-vc-wisp-aaa1bb',
+        rig: '/home/ds/gascity',
+        pool: 'claude-reviewer',
+        agent_kind: 'pool',
+      }),
+      // Not counted: orchestration, an inactive pool slot, and a non-worker role.
+      session({ id: 'vc-mayor', template: 'mayor', rig: '', agent_kind: 'role' }),
+      session({
+        id: 'vc-wisp-zzz9yy',
+        template: 'cursor',
+        pool: 'cursor',
+        agent_kind: 'pool',
+        state: 'asleep',
+      }),
+      session({ id: 'vc-rev', template: 'reviewer', rig: 'gascity', agent_kind: 'role' }),
+    ];
+    const result = deriveActiveWorkers(sessions, []);
+    expect(result.total).toBe(2);
+    expect(result.workers.map((w) => w.worker).sort()).toEqual(['claude-reviewer', 'cursor']);
+    expect(result.byRig).toEqual([
+      { rig: 'cursor', count: 1 },
+      { rig: 'gascity', count: 1 },
+    ]);
+  });
+
   it('attaches an in-progress bead when its assignee embeds the worker session id', () => {
     const sessions = [session({ id: 'gc-335825', template: 'polecat', rig: '/home/ds/gascity' })];
     const beads = [bead({ id: 'gc-5rarj', title: 'fix the thing', assignee: 'polecat-gc-335825' })];
