@@ -3060,13 +3060,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							// for as long as the seat stays wedged (ga-jrnou).
 							outcome = TraceOutcomeNoChange
 						}
-						payload := traceRecordPayload{}
+						var payload traceRecordPayload
 						if assignedWorkStoresMisaligned {
-							payload["assigned_work_stores_misaligned"] = true
-							payload["assigned_work_bead_cnt"] = len(assignedWorkBeads)
-							payload["assigned_work_store_cnt"] = len(reconcileOpts.assignedWorkStores)
+							payload = traceRecordPayload{
+								"assigned_work_stores_misaligned": true,
+								"assigned_work_bead_cnt":          len(assignedWorkBeads),
+								"assigned_work_store_cnt":         len(reconcileOpts.assignedWorkStores),
+							}
 						}
 						if preservedIdentity != "" {
+							if payload == nil {
+								payload = traceRecordPayload{}
+							}
 							payload["preserved_identity"] = preservedIdentity
 						}
 						trace.RecordDecision(TraceSiteReconcilerCloseOrphan, TraceReasonCode(reason), outcome, template, name, payload)
