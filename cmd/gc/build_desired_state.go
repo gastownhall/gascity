@@ -2609,6 +2609,10 @@ type collectedDemand struct {
 	UnassignedRoutedPartial bool
 	// NamedPartials are defaultNamedSessionDemand's partial templates.
 	NamedPartials map[string]bool
+	// BlindSpawnAllowance is, per template the spawn-churn guard holds, how
+	// many seats beyond its named work beads the merge may count
+	// (pool_spawn_churn.go). A template it does not list is not limited.
+	BlindSpawnAllowance map[string]int
 }
 
 // mergedDemand is one pass's demand: the merged scale-check counts and
@@ -2785,6 +2789,7 @@ func mergeCollectedDemand(cfg *config.City, in collectedDemand) mergedDemand {
 		// control demand that justifies starting a cold dispatcher (gc-ft31x.2).
 		poolPartialRetentionTemplates = markControlDispatcherTemplatesPartial(cfg, poolPartialRetentionTemplates)
 	}
+	clampBlindSpawnDemand(cfg, in.BlindSpawnAllowance, scaleCheckCounts, scaleCheckDemandByTemplate)
 	ready, readyRefs := selectReadyUnassignedRoutedWork(in.UnassignedRouted, in.UnassignedRoutedRefs, scaleCheckDemandByTemplate)
 	namedScaleCheckPartialTemplates := mergeScaleCheckPartialTemplates(nil, in.NamedPartials)
 	scaleCheckPartialTemplates := mergeScaleCheckPartialTemplates(nil, poolPartialRetentionTemplates)

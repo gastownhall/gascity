@@ -561,6 +561,7 @@ go_library(
         "pool_platform_windows.go",
         "pool_session_name.go",
         "pool_slot_workdir.go",
+        "pool_spawn_churn.go",
         "pool_trigger_live_seat.go",
         "prime_auto_handoff_inject.go",
         "prime_platform_note_other.go",

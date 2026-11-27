@@ -14801,3 +14801,72 @@ func TestRealizePoolDesiredSessionsSeatShellCarriesNoTriggerBeadID(t *testing.T)
 		})
 	}
 }
+
+// blindSpawnDemandCity is two pools whose custom scale_check reports more
+// seats than the work beads the cold-wake probe names: "churny" and its
+// sibling "steady".
+func blindSpawnDemandCity() *config.City {
+	return &config.City{Agents: []config.Agent{
+		{Name: "churny", ScaleCheck: "echo 3", MaxActiveSessions: intPtr(5)},
+		{Name: "steady", ScaleCheck: "echo 3", MaxActiveSessions: intPtr(5)},
+	}}
+}
+
+// blindSpawnCollected is one pass's collected demand for blindSpawnDemandCity:
+// each template's custom count 3, and one named work bead each.
+func blindSpawnCollected() collectedDemand {
+	return collectedDemand{
+		CustomCounts:      map[string]int{"churny": 3, "steady": 3},
+		DefaultProbed:     true,
+		DefaultCounts:     map[string]int{"churny": 1, "steady": 1},
+		DefaultDemand:     map[string]scaleCheckDemand{"churny": {Count: 1, WorkBeadIDs: []string{"gc-c1"}}, "steady": {Count: 1, WorkBeadIDs: []string{"gc-s1"}}},
+		ColdWakeTemplates: map[string]bool{"churny": true, "steady": true},
+	}
+}
+
+// blindAndBoundNewRequests counts template's new-tier requests that name a
+// work bead (bound) and that name none (blind).
+func blindAndBoundNewRequests(states []PoolDesiredState, template string) (blind, bound int) {
+	for _, s := range states {
+		for _, r := range s.Requests {
+			if r.Template != template || r.Tier != "new" {
+				continue
+			}
+			if r.WorkBeadID == "" {
+				blind++
+			} else {
+				bound++
+			}
+		}
+	}
+	return blind, bound
+}
+
+// With no blind-spawn allowance for a template, the merge keeps its custom
+// count N though it names only K < N work beads, and the planner emits N-K
+// blind new requests, as it always has.
+func TestMergeCollectedDemandKeepsBlindDemandWithoutAnAllowance(t *testing.T) {
+	cfg := blindSpawnDemandCity()
+	for _, tc := range []struct {
+		name      string
+		allowance map[string]int
+	}{
+		{name: "no allowance"},
+		{name: "another template's allowance", allowance: map[string]int{"elsewhere": 0}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := blindSpawnCollected()
+			in.BlindSpawnAllowance = tc.allowance
+			merged := mergeCollectedDemand(cfg, in)
+			for _, template := range []string{"churny", "steady"} {
+				if got := merged.ScaleCheckCounts[template]; got != 3 {
+					t.Fatalf("ScaleCheckCounts[%s] = %d, want the custom count 3", template, got)
+				}
+				states := computePoolDesiredStatesParkedAt(cfg, nil, nil, nil, merged.ScaleCheckCounts, merged.ScaleCheckDemand, time.Now(), nil, nil)
+				if blind, bound := blindAndBoundNewRequests(states, template); blind != 2 || bound != 1 {
+					t.Fatalf("%s new requests: blind=%d bound=%d, want blind=2 bound=1", template, blind, bound)
+				}
+			}
+		})
+	}
+}
