@@ -475,6 +475,8 @@ go_library(
         "hook_session_claim.go",
         "hooks.go",
         "host_pressure.go",
+        "host_pressure_linux.go",
+        "host_pressure_other.go",
         "idle_nudge.go",
         "idle_tracker.go",
         "import_state_doctor_check.go",

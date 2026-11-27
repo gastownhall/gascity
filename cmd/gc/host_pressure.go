@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/events"
@@ -28,6 +29,13 @@ var hostPressurePath = "/proc/pressure/cpu"
 // a fake without touching the real /proc.
 var hostPressureReadFile = os.ReadFile
 
+// The CPU gate's once-per-process warnings: an unreadable PSI file and an
+// invalid threshold.
+var (
+	hostPressureReadErrorWarned        atomic.Bool
+	hostPressureInvalidThresholdWarned atomic.Bool
+)
+
 // hostPressure is one reading of host CPU pressure against the threshold.
 type hostPressure struct {
 	Avg10     float64
@@ -37,26 +45,37 @@ type hostPressure struct {
 
 // readHostPressure reads the CPU PSI "some avg10" and compares it with the
 // threshold. High means avg10 is above the threshold, so a threshold of 100
-// never holds. A file that cannot be read or parsed reads as not high, so
-// the hold fails open.
-func readHostPressure(_ io.Writer) hostPressure {
-	threshold := hostPressureThreshold()
+// never holds. Off Linux, and when the file cannot be read or parsed, the
+// reading is not high, so the hold fails open; an unreadable file warns once
+// per process on stderr.
+func readHostPressure(stderr io.Writer) hostPressure {
+	if !hostPressureSupported {
+		return hostPressure{}
+	}
+	threshold := hostPressureThreshold(stderr)
 	avg10, err := readPSIAvg(hostPressureReadFile, hostPressurePath, "avg10")
 	if err != nil {
+		if stderr != nil && hostPressureReadErrorWarned.CompareAndSwap(false, true) {
+			fmt.Fprintf(stderr, "gc: CPU pressure unavailable at %s: %v; starting sessions without the CPU pressure hold\n", hostPressurePath, err) //nolint:errcheck // best-effort stderr
+		}
 		return hostPressure{Threshold: threshold}
 	}
 	return hostPressure{Avg10: avg10, Threshold: threshold, High: avg10 > threshold}
 }
 
 // hostPressureThreshold is the configured CPU pressure threshold, in [0,100];
-// an unset or invalid value is the default.
-func hostPressureThreshold() float64 {
+// an unset value is the default, and an invalid one the default with a
+// once-per-process warning on stderr.
+func hostPressureThreshold(stderr io.Writer) float64 {
 	raw := os.Getenv(hostPressureThresholdEnv)
 	if raw == "" {
 		return defaultHostPressureThreshold
 	}
 	v, err := strconv.ParseFloat(raw, 64)
 	if err != nil || math.IsNaN(v) || v < 0 || v > 100 {
+		if stderr != nil && hostPressureInvalidThresholdWarned.CompareAndSwap(false, true) {
+			fmt.Fprintf(stderr, "gc: invalid %s=%q (want a number from 0 to 100), using default %.1f\n", hostPressureThresholdEnv, raw, defaultHostPressureThreshold) //nolint:errcheck // best-effort stderr
+		}
 		return defaultHostPressureThreshold
 	}
 	return v

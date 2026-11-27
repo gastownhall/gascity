@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -115,5 +116,87 @@ func TestLegacyHostPressureHoldDefersEveryCandidate(t *testing.T) {
 	}
 	if got := strings.Count(e.log.String(), string(TraceOutcomeDeferredByHostPressure)); got != 2 {
 		t.Fatalf("log names %s %d time(s), want 2\n%s", TraceOutcomeDeferredByHostPressure, got, e.log.String())
+	}
+}
+
+// resetHostPressureWarnings clears the once-per-process warnings for a test.
+func resetHostPressureWarnings(t *testing.T) {
+	t.Helper()
+	hostPressureReadErrorWarned.Store(false)
+	hostPressureInvalidThresholdWarned.Store(false)
+	t.Cleanup(func() {
+		hostPressureReadErrorWarned.Store(false)
+		hostPressureInvalidThresholdWarned.Store(false)
+	})
+}
+
+// AC-6: a missing or unparseable CPU PSI file never holds a start and warns
+// once per process, however many passes read it.
+func TestHostPressureFailsOpenWithOneWarning(t *testing.T) {
+	for name, tc := range map[string]struct {
+		body []byte
+		err  error
+	}{
+		"missing":     {err: os.ErrNotExist},
+		"unparseable": {body: []byte("some avg10=garbage avg60=1.00\n")},
+		"no some":     {body: []byte("full avg10=90.00 avg60=90.00\n")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			resetHostPressureWarnings(t)
+			fakeCPUPressure(t, tc.body, tc.err)
+			var stderr strings.Builder
+			for i := 0; i < 3; i++ {
+				p := readHostPressure(&stderr)
+				if h := decideStartHold(startHoldInput{HostPressure: p}); h.held() {
+					t.Fatalf("pass %d: hold %+v over an unreadable PSI file", i, h)
+				}
+			}
+			if n := strings.Count(stderr.String(), "\n"); n != 1 || !strings.Contains(stderr.String(), hostPressurePath) {
+				t.Fatalf("stderr has %d line(s), want one naming %s:\n%s", n, hostPressurePath, stderr.String())
+			}
+		})
+	}
+}
+
+// AC-6: an invalid threshold warns once per process and uses the default; a
+// threshold of 100 never holds.
+func TestHostPressureThresholdEdges(t *testing.T) {
+	for _, raw := range []string{"abc", "150", "-1", "NaN"} {
+		t.Run(raw, func(t *testing.T) {
+			resetHostPressureWarnings(t)
+			t.Setenv(hostPressureThresholdEnv, raw)
+			fakeCPUPressure(t, cpuPSI("60.00"), nil)
+			var stderr strings.Builder
+			for i := 0; i < 3; i++ {
+				if p := readHostPressure(&stderr); p.Threshold != defaultHostPressureThreshold || !p.High {
+					t.Fatalf("threshold %q: reading %+v, want the default %v holding", raw, p, defaultHostPressureThreshold)
+				}
+			}
+			if n := strings.Count(stderr.String(), "\n"); n != 1 || !strings.Contains(stderr.String(), hostPressureThresholdEnv) {
+				t.Fatalf("stderr has %d line(s), want one naming %s:\n%s", n, hostPressureThresholdEnv, stderr.String())
+			}
+		})
+	}
+	t.Run("100", func(t *testing.T) {
+		resetHostPressureWarnings(t)
+		t.Setenv(hostPressureThresholdEnv, "100")
+		fakeCPUPressure(t, cpuPSI("100.00"), nil)
+		var stderr strings.Builder
+		if p := readHostPressure(&stderr); p.High || stderr.Len() != 0 {
+			t.Fatalf("threshold 100: reading %+v stderr %q, want never high, no warning", p, stderr.String())
+		}
+	})
+}
+
+// AC-6: on a platform without PSI the CPU gate never holds and never warns.
+func TestHostPressureOffLinuxNeverHolds(t *testing.T) {
+	resetHostPressureWarnings(t)
+	saved := hostPressureSupported
+	t.Cleanup(func() { hostPressureSupported = saved })
+	hostPressureSupported = false
+	fakeCPUPressure(t, cpuPSI("99.00"), nil)
+	var stderr strings.Builder
+	if p := readHostPressure(&stderr); p.High || stderr.Len() != 0 {
+		t.Fatalf("off Linux: reading %+v stderr %q, want never high, no warning", p, stderr.String())
 	}
 }
