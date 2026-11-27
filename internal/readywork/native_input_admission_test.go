@@ -289,3 +289,41 @@ func TestNativeInputAdmissionLegGateOnUnifiedCity(t *testing.T) {
 		t.Fatalf("Gate = %v, want %s (free input) and not %s (input %s held)", ids, free.step.ID, held.step.ID, held.input.ID)
 	}
 }
+
+// TestNativeInputAdmissionAdmitsOpenOrOwnedInput is AC-2: an input that is
+// open with no unsatisfied ready-blocking dependency (a planning input, or one
+// whose only edge does not block readiness), or that a session already works,
+// does not withhold the step although the input is still open.
+func TestNativeInputAdmissionAdmitsOpenOrOwnedInput(t *testing.T) {
+	cases := map[string]func(t *testing.T, work beads.Store, input beads.Bead){
+		"open planning input": func(*testing.T, beads.Store, beads.Bead) {},
+		"open input with a non-blocking edge": func(t *testing.T, work beads.Store, input beads.Bead) {
+			other := mustCreate(t, work, beads.Bead{Title: "related", Type: "task"})
+			if err := work.DepAdd(input.ID, other.ID, "relates-to"); err != nil {
+				t.Fatalf("DepAdd relates-to: %v", err)
+			}
+		},
+		"open input with a closed prerequisite": func(t *testing.T, work beads.Store, input beads.Bead) {
+			done := mustCreate(t, work, beads.Bead{Title: "done", Type: "task"})
+			if err := work.DepAdd(input.ID, done.ID, "blocks"); err != nil {
+				t.Fatalf("DepAdd blocks: %v", err)
+			}
+			closeBead(t, work, done.ID)
+		},
+		"in_progress input": func(t *testing.T, work beads.Store, input beads.Bead) {
+			setInProgress(t, work, input.ID, "worker-1")
+		},
+	}
+	for city, open := range openCities {
+		for name, arrange := range cases {
+			t.Run(city+"/"+name, func(t *testing.T) {
+				work, graph, legs := open(t)
+				wf := newNativeWorkflow(t, work, graph, beads.Bead{})
+				arrange(t, work, wf.input)
+				if ids := readyIDs(t, legs, poolQuery); !slices.Contains(ids, wf.step.ID) {
+					t.Fatalf("Ready = %v lacks step %s whose input %s is admissible (%s); want it served", ids, wf.step.ID, wf.input.ID, name)
+				}
+			})
+		}
+	}
+}
