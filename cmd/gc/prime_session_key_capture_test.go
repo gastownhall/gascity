@@ -2,13 +2,17 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // primeCaptureTestStore stands up a file-backed city store the same way
@@ -337,5 +341,155 @@ func TestPrimeHookCapturesClaudeIDAfterSyncOnLiveKeylessRow(t *testing.T) {
 	persistPrimeHookProviderSessionKey(claudeSessionID, &stderr)
 	if got := reloadSessionKey(t, cityDir, id); got != claudeSessionID {
 		t.Fatalf("session_key = %q, want the hook's id %q; stderr=%s", got, claudeSessionID, stderr.String())
+	}
+}
+
+func reloadCopilotTranscript(t *testing.T, cityDir, id string) string {
+	t.Helper()
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("get session bead: %v", err)
+	}
+	return strings.TrimSpace(b.Metadata[session.MetadataKeyCopilotTranscript])
+}
+
+// copilotCaptureEnv is the environment of the stock sessionStart hook of one
+// managed Copilot incarnation. GC_HOOK_EVENT_NAME is deliberately empty: the
+// capture must not depend on, or select, the SessionStart prime path.
+func copilotCaptureEnv(t *testing.T, id, name, epoch, token string) {
+	t.Helper()
+	isolateProviderSessionEnv(t)
+	t.Setenv("GC_SESSION_ID", id)
+	t.Setenv("GC_SESSION_NAME", name)
+	t.Setenv("GC_RUNTIME_EPOCH", epoch)
+	t.Setenv("GC_INSTANCE_TOKEN", token)
+	t.Setenv("GC_HOOK_EVENT_NAME", "")
+}
+
+func TestReadPrimeHookContextCopilotSessionID(t *testing.T) {
+	t.Setenv("GC_HOOK_EVENT_NAME", "")
+	setPrimeHookStdinJSON(t, map[string]string{"sessionId": "copilot-session", "source": "startup"})
+	ctx := readPrimeHookContext()
+	if ctx.CopilotSessionID != "copilot-session" || ctx.ProviderSessionID != "" || primeHookSessionStart(ctx) {
+		t.Fatalf("Copilot context = %#v; want the id kept apart from the provider key and no SessionStart", ctx)
+	}
+}
+
+func TestReadPrimeHookContextConflictingCopilotAliases(t *testing.T) {
+	t.Setenv("GC_HOOK_EVENT_NAME", "")
+	setPrimeHookStdinJSON(t, map[string]string{"sessionId": "one", "session_id": "another"})
+	ctx := readPrimeHookContext()
+	if ctx.CopilotSessionID != "" || ctx.ProviderSessionID != "another" {
+		t.Fatalf("conflicting aliases = %#v; want no Copilot id and the generic key untouched", ctx)
+	}
+}
+
+func TestPersistPrimeHookCopilotTranscript(t *testing.T) {
+	cityDir := t.TempDir()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_CITY", cityDir)
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"t\"\n[beads]\nprovider = \"file\"\nconditional_writes = \"auto\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := createCaptureSessionBead(t, store, "copilot")
+	if err := store.SetMetadataBatch(id, map[string]string{"session_name": "copilot-seat", "state": "creating", "generation": "2", "instance_token": "fixture-token"}); err != nil {
+		t.Fatal(err)
+	}
+	copilotCaptureEnv(t, id, "copilot-seat", "2", "fixture-token")
+	// A generic inherited provider id cannot replace the Copilot hook's id.
+	t.Setenv("GC_PROVIDER_SESSION_ID", "unrelated-provider-key")
+	var stderr bytes.Buffer
+	persistPrimeHookCopilotTranscriptAtCity("copilot-session", cityDir, &stderr)
+	if got := reloadCopilotTranscript(t, cityDir, id); got != "2:copilot-session" || stderr.Len() != 0 {
+		t.Fatalf("captured %q; stderr=%s", got, stderr.String())
+	}
+	if got := reloadSessionKey(t, cityDir, id); got != "" {
+		t.Fatalf("session_key = %q; capturing a transcript identity must not write the launch key", got)
+	}
+	persistPrimeHookCopilotTranscriptAtCity("conflicting-session", cityDir, &stderr)
+	if got := reloadCopilotTranscript(t, cityDir, id); got != "2:copilot-session" {
+		t.Fatalf("replaced identity: %q", got)
+	}
+	if !strings.Contains(stderr.String(), "not recorded") {
+		t.Fatalf("a refused capture on a managed session must be diagnosed; stderr=%q", stderr.String())
+	}
+	t.Setenv("GC_INSTANCE_TOKEN", "stale-token")
+	stderr.Reset()
+	persistPrimeHookCopilotTranscriptAtCity("stale-session", cityDir, &stderr)
+	if got := reloadCopilotTranscript(t, cityDir, id); got != "2:copilot-session" {
+		t.Fatalf("stale incarnation replaced identity: %q", got)
+	}
+	if strings.Contains(stderr.String(), "fixture-token") || strings.Contains(stderr.String(), "stale-token") {
+		t.Fatalf("diagnostic leaked a token: %q", stderr.String())
+	}
+}
+
+// The generic provider-key path must keep refusing a Copilot id from hook
+// stdin: Copilot's launch and resume stay keyed off session_key alone.
+func TestPersistPrimeHookProviderSessionKeyIgnoresCopilotStdin(t *testing.T) {
+	cityDir, store := primeCaptureTestStore(t)
+	id := createCaptureSessionBead(t, store, "copilot")
+	copilotCaptureEnv(t, id, "copilot-seat", "2", "fixture-token")
+	var stderr bytes.Buffer
+	persistPrimeHookProviderSessionKey("copilot-session", &stderr)
+	if got := reloadSessionKey(t, cityDir, id); got != "" {
+		t.Fatalf("generic path wrote session_key %q for Copilot", got)
+	}
+	if got := reloadCopilotTranscript(t, cityDir, id); got != "" {
+		t.Fatalf("generic path wrote copilot_transcript %q", got)
+	}
+}
+
+// A human-launched Copilot in a directory gc staged carries no gc identity; its
+// hook stderr is shown in the provider UI, so the capture must stay silent.
+func TestPersistPrimeHookCopilotTranscriptUnmanagedIsSilent(t *testing.T) {
+	isolateProviderSessionEnv(t)
+	for _, name := range append([]string{"GC_SESSION_NAME", "GC_RUNTIME_EPOCH", "GC_INSTANCE_TOKEN"}, hookIdentityEnv...) {
+		t.Setenv(name, "")
+	}
+	var stderr bytes.Buffer
+	persistPrimeHookCopilotTranscriptAtCity("copilot-session", t.TempDir(), &stderr)
+	if stderr.Len() != 0 {
+		t.Fatalf("unmanaged invocation wrote diagnostics: %q", stderr.String())
+	}
+}
+
+func TestPrimeHookCopilotRelocatedSessionStore(t *testing.T) {
+	cityDir, work := primeCaptureTestStore(t)
+	binding := beads.NewMemStore()
+	if err := beads.StampOpenedStore(binding, "MemStore", gate.Auto, false, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	seedSplitRoutes(t, cityDir, binding)
+	id := createCaptureSessionBead(t, binding, "copilot")
+	if err := binding.SetMetadataBatch(id, map[string]string{"session_name": "copilot-seat", "state": "active", "generation": "2", "instance_token": "fixture-token"}); err != nil {
+		t.Fatal(err)
+	}
+	copilotCaptureEnv(t, id, "copilot-seat", "2", "fixture-token")
+	var stderr bytes.Buffer
+	persistPrimeHookCopilotTranscriptAtCity("copilot-session", cityDir, &stderr)
+	got, err := binding.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata[session.MetadataKeyCopilotTranscript] != "2:copilot-session" || got.Metadata["session_key"] != "" {
+		t.Fatalf("relocated capture = %q (session_key %q); stderr=%s", got.Metadata[session.MetadataKeyCopilotTranscript], got.Metadata["session_key"], stderr.String())
+	}
+	if _, err := work.Get(id); err == nil {
+		t.Fatal("capture created a work-store copy")
 	}
 }
