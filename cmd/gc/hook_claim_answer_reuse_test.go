@@ -252,3 +252,33 @@ func TestClaimHookWorkReportsProgressPastThreshold(t *testing.T) {
 		}
 	})
 }
+
+// AC-5: plain `gc hook` reselects past a best-ranked store whose rows are all
+// left to another session, and ranks the later store from the answer it
+// already read rather than querying it again.
+func TestHookDiscoveryRunnerReselectReadsEachStoreOnce(t *testing.T) {
+	urgent := 0
+	bound := managedWorktreeCandidate("r1-a", "/wt/r1/r1-a")
+	bound.Priority = &urgent
+	stores := twoStoreFanOut()
+	rows := affinityStoreRunner(t, map[string][]beads.Bead{"city": {bound}, "riga": {unboundRoutedCandidate("r1-u")}})
+	reads := map[string]int{}
+	run := func(command, dir string, env []string) (string, error) {
+		reads[dir]++
+		return rows(command, dir, env)
+	}
+	visibility := affinitySeatVisibility(hookPoolSeat{WorkDir: "/rigs/r1/.gc/slots/dev-3"}, false)
+
+	var stdout, stderr bytes.Buffer
+	code := doHook("query", "/rigs/r1", false, hookDiscoveryRunner(stores, run, visibility, func(string, error) {}, &stderr), &stdout, &stderr, visibility)
+
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if got := listedHookIDs(t, stdout.String()); got != "r1-u" {
+		t.Fatalf("listed %q, want the later store's r1-u", got)
+	}
+	if reads["city"] != 1 || reads["riga"] != 1 {
+		t.Fatalf("reads = %v, want each store read once", reads)
+	}
+}

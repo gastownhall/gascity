@@ -1756,10 +1756,13 @@ func hookDiscoveryRunner(stores []hookStore, run hookStoreRunner, visibility hoo
 	report := newHookStoreFailureReport("gc hook", stderr, emitFailure)
 	return func(command, _ string) (string, error) {
 		// The primary is the agent's own store, matched by identity, so a later
-		// store never inherits its semantics once it is dropped.
+		// store never inherits its semantics once it is dropped. Each call reads
+		// every store at most once: a reselection ranks the answers this call
+		// already holds (hookStoreAnswers).
+		answers := newHookStoreAnswers(run)
 		remaining := stores
 		for {
-			out, selected, err := bestStoreWithWork(command, remaining, stores[0], run, report.note)
+			out, selected, err := bestStoreWithWork(command, remaining, stores[0], answers.read, report.note)
 			report.failed(command, err)
 			if err != nil || isZeroHookStore(selected) || len(remaining) == 1 || workQueryHasReadyWork(hookListing(out, time.Now(), visibility)) {
 				return out, err
