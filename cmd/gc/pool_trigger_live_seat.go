@@ -276,6 +276,16 @@ func (bp *agentBuildParams) retirePoolSeat(id string) {
 	bp.retiredPoolSeats[id] = true
 }
 
+// recordUnverifiedLiveSeat records that legacy realization bound the live
+// pool seat id this build without verifying its own work's worktree
+// (poolTriggerBindWorkDir).
+func (bp *agentBuildParams) recordUnverifiedLiveSeat(id string) {
+	if bp.unverifiedLiveSeats == nil {
+		bp.unverifiedLiveSeats = map[string]bool{}
+	}
+	bp.unverifiedLiveSeats[id] = true
+}
+
 // poolTriggerBindWorkDir is the work dir bindPoolSessionTriggerBead binds the
 // pool seat info to for request: the request's verified work dir
 // (verifiedPoolTriggerWorkDir), except for a live seat it would re-point at
@@ -284,11 +294,27 @@ func (bp *agentBuildParams) retirePoolSeat(id string) {
 // when no fresh session can start (selectOrPlanPoolSessionBeadAvoiding), so
 // the seat's claim decides whether it runs that work there: it leaves it from
 // inside a managed worktree. The request's evidence is still verified first,
-// so unusable evidence skips the item as before. A live seat whose name was
-// refused (SessionRequest.NameRefused) gets no work dir and is bound unnamed
-// where it runs; one that is not alive moves to the pool's own directory
-// (poolSeatBindingPatch).
+// so unusable evidence fails the bind as before: realization skips the item,
+// or keeps a seat resuming its own work unbound (poolSeatKeptForRefusedWork).
+// A live seat whose name was refused (SessionRequest.NameRefused) gets no
+// work dir and is bound unnamed where it runs; one that is not alive moves to
+// the pool's own directory (poolSeatBindingPatch). A live seat resuming the
+// trigger its row records (poolSeatResumesOwnTrigger) for work with a
+// managed-worktree spec gets no work dir, and its worktree is not verified:
+// the binding would keep the recorded dir anyway, and the process runs where
+// it runs, as v2 binds no live row (decidePass.selectPoolRow). The build
+// records the skip (agentBuildParams.unverifiedLiveSeats), so a seat whose
+// runtime dies before the reconciler reads it is not started unverified
+// (TemplateParams.WorktreeUnverified): the next build verifies it first.
+// Evidence the request already refuses (SessionRequest.WorktreeError) fails
+// the bind for a live seat too, at no probe's cost. Work without evidence
+// verifies nothing, so its seat is not probed.
 func poolTriggerBindWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, info session.Info, request SessionRequest) (string, error) {
+	if request.WorktreeSpec != nil && strings.TrimSpace(request.WorktreeError) == "" &&
+		poolSeatResumesOwnTrigger(info, request) && poolSeatAlive(bp, cfgAgent, info) {
+		bp.recordUnverifiedLiveSeat(info.ID)
+		return "", nil
+	}
 	workDir, err := verifiedPoolTriggerWorkDir(bp, cfgAgent, qualifiedName, request)
 	if err != nil || workDir == "" {
 		return workDir, err
@@ -306,6 +332,17 @@ func poolTriggerBindWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualif
 	return at.SeatDir, nil
 }
 
+// poolSeatResumesOwnTrigger reports whether request is the resume tier's
+// request for the pool seat info's own work (SessionBeadID names the seat)
+// and names the trigger the seat's row already records, in a work dir the row
+// records too: computePoolTriggerBindingPatch keeps that dir, so a verified
+// work dir would go unused.
+func poolSeatResumesOwnTrigger(info session.Info, request SessionRequest) bool {
+	workID := strings.TrimSpace(request.WorkBeadID)
+	return request.Tier == "resume" && request.SessionBeadID != "" && request.SessionBeadID == info.ID &&
+		workID != "" && workID == strings.TrimSpace(info.TriggerBeadID) && preparedStartSessionWorkDir(info) != ""
+}
+
 // sameTriggerWorkDirStale reports whether binding the pool seat info to
 // request must move its row off the work dir it records: the request is for
 // the trigger the row already records (computePoolTriggerBindingPatch keeps
@@ -313,9 +350,9 @@ func poolTriggerBindWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualif
 // (request.WorktreeSpec), and the recorded dir, resolved against cityPath, is
 // not workDir, that worktree. The work gained or changed its evidence after
 // the seat was bound, or a live seat re-pointed at it kept the dir it ran in.
-// The comparison is lexical, as the v2 decision is pure: legacy passes the
-// path its verify reported, v2 the spec's path (its plan-only work dir is
-// empty), which is the path the PreWake's verify reports.
+// The comparison is lexical, against the path legacy's verify reported. v2
+// does not ask: it binds every start candidate whose work carries a spec
+// (startCandidateBinding), and its PreWake stamps the verified path.
 // A seat started in the recorded dir would leave its own trigger to a session
 // in the trigger's worktree and drain. Callers ask this only for a seat that
 // can start: a running seat keeps the dir its process runs in.

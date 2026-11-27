@@ -99,6 +99,11 @@ const (
 	reasonAssignedWork  = "assigned-work"
 	drainOrphaned       = "orphaned"
 	drainSuspended      = "suspended"
+	// reasonWorktreeRefused keeps a start candidate selected for its own
+	// assigned work whose worktree evidence is unusable, while its awake
+	// decision wakes it: Keep, never started, so it keeps its claim
+	// (selectionEntry.WorktreeRefused).
+	reasonWorktreeRefused = "worktree-refused"
 )
 
 // partialState is the snapshot's partial causes (CONTRACT §2.1).
@@ -151,6 +156,14 @@ type selectionEntry struct {
 	// Binding is the work a row that is not alive is bound to at start
 	// (AM2); live rows never carry one.
 	Binding *bindingTarget
+	// WorktreeRefused marks a row selected for its own assigned work whose
+	// worktree evidence is unusable (selection.worktreeRefused): it carries
+	// no binding and no arm starts it, a heartbeat respawn included. It is
+	// Keep (reasonWorktreeRefused) only while it would wake: its awake
+	// decision wakes it, or A17 would respawn it (heartbeatRespawnDue).
+	// Otherwise it sleeps as any selected row does, so A21 parks, closes or
+	// repairs it.
+	WorktreeRefused bool
 	// Normalize marks a canonical singleton whose phantom identity must
 	// collapse before start (POOL-046, applied by the session key).
 	Normalize            bool
@@ -314,7 +327,9 @@ type planReservation struct {
 // request the pass refuses because it found the request's worktree evidence
 // unusable also names its work item (WorkBeadID) and why (Detail): no create
 // effect ever sees that request, so the planner alerts on the record
-// (observeWorktreeRefusals).
+// (observeWorktreeRefusals). So does a start candidate kept for its own
+// work's unusable evidence (decidePass.keepRefusedSeat), which starts no
+// effect while it is held.
 type allocTraceRecord struct {
 	Template   string
 	Instance   string

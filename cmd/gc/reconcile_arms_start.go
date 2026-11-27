@@ -166,13 +166,25 @@ func (r *rowFacts) configuredNamed() bool {
 // whose runtime is gone or dead and which still has assigned work, is
 // restarted through its hold; its PreWake exempts that hold for this intent
 // alone. The start gates still apply. The disposition tells the heartbeat
-// hold apart (heartbeatHeld: Disposition.HeartbeatHeld).
+// hold apart (heartbeatHeld: Disposition.HeartbeatHeld). A row selected for
+// its own work's refused worktree evidence (selectionEntry.WorktreeRefused)
+// is never started, through a hold or otherwise, whether it is Keep or
+// sleeps.
 func armHeartbeatRespawn(r *rowFacts) (intent, bool) {
 	e := r.entry
-	if e == nil || e.Desired == desireWake || e.Desired == desireDrain || e.AssignedWork == nil || !e.Liveness.startCandidate() || !heartbeatHeld(r.row.Info, r.w.Now) {
+	if e == nil || e.Desired == desireWake || e.Desired == desireDrain || e.WorktreeRefused || !heartbeatRespawnDue(e, r.row.Info, r.w.Now) {
 		return intent{}, false
 	}
 	return r.startIntent(decideHeartbeatRespawn)
+}
+
+// heartbeatRespawnDue reports the row info, entry e, that A17 restarts
+// through an agent heartbeat's hold, whatever its desire: its runtime is gone
+// or dead, it still has assigned work, and a heartbeat holds it
+// (heartbeatHeld). That is legacy's heartbeat crash recovery (#3994), which
+// wakes such a seat though its awake decision does not.
+func heartbeatRespawnDue(e *selectionEntry, info session.Info, now time.Time) bool {
+	return e.AssignedWork != nil && e.Liveness.startCandidate() && heartbeatHeld(info, now)
 }
 
 // armStart is A18: a row the allocation wants awake whose runtime is gone or

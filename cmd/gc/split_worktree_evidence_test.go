@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -42,21 +43,34 @@ func seedEvidenceStep(t *testing.T, store beads.Store, target, ownerRef string) 
 	if err != nil {
 		t.Fatalf("worktree.Ensure: %v", err)
 	}
-	if err := store.SetMetadataBatch(step.ID, map[string]string{
-		beadmeta.WorkDirMetadataKey:            path,
-		beadmeta.WorktreeRepoMetadataKey:       repo,
-		beadmeta.WorktreeRootMetadataKey:       root,
+	spec.BaseSHA = report.Provenance.BaseSHA
+	if err := store.SetMetadataBatch(step.ID, worktreeEvidenceMetadata(spec)); err != nil {
+		t.Fatalf("stamp evidence: %v", err)
+	}
+	return step, path
+}
+
+// worktreeEvidenceMetadata is the metadata a provisioner publishes on a work
+// bead for spec: gc.work_dir plus the nine ownership keys, and the bead's
+// gc.root_store_ref when spec names a store. worktreeSpecForBead rebuilds
+// spec from it.
+func worktreeEvidenceMetadata(spec worktree.Spec) map[string]string {
+	meta := map[string]string{
+		beadmeta.WorkDirMetadataKey:            spec.Path,
+		beadmeta.WorktreeRepoMetadataKey:       spec.RepoDir,
+		beadmeta.WorktreeRootMetadataKey:       spec.Root,
 		beadmeta.WorkBranchMetadataKey:         spec.Branch,
-		beadmeta.WorktreeBaseRefMetadataKey:    base,
-		beadmeta.WorktreeBaseSHAMetadataKey:    report.Provenance.BaseSHA,
+		beadmeta.WorktreeBaseRefMetadataKey:    spec.Base,
+		beadmeta.WorktreeBaseSHAMetadataKey:    spec.BaseSHA,
 		beadmeta.WorktreeCreatorMetadataKey:    spec.Creator,
 		beadmeta.WorktreeOwnerMetadataKey:      spec.Owner,
 		beadmeta.WorktreeGenerationMetadataKey: spec.Generation,
 		beadmeta.WorktreeLifecycleMetadataKey:  spec.Lifecycle,
-	}); err != nil {
-		t.Fatalf("stamp evidence: %v", err)
 	}
-	return step, path
+	if spec.StoreRef != "" {
+		meta[beadmeta.RootStoreRefMetadataKey] = spec.StoreRef
+	}
+	return meta
 }
 
 // bindStepFromDemand is what a cold pool does with one demanded step: the
@@ -190,5 +204,85 @@ func TestSplitCityCityRootedBindingStepWorktreeEvidenceBinds(t *testing.T) {
 	_, workDir, err := bindStepFromDemand(t, e, "worker", step.ID)
 	if err != nil || workDir != path {
 		t.Fatalf("city-rooted binding step: work dir %q err %v, want %q", workDir, err, path)
+	}
+}
+
+// bindStepFromAssignedWork is what a warm pool does with a step in store that
+// is in progress and assigned to its open session "sess-1": the assigned-work
+// census over every leg, the pool-demand filter, the resume request
+// computePoolDesiredStatesParkedAt builds for the step under the ref of the
+// leg it was read from, then the evidence guard and worktree.Verify
+// (verifiedPoolTriggerWorkDir) before the seat is bound.
+func bindStepFromAssignedWork(t *testing.T, e legAgreementEnv, store beads.Store, template, stepID string) (SessionRequest, string, error) {
+	t.Helper()
+	status, assignee := "in_progress", "sess-1"
+	if err := store.Update(stepID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatalf("assign step: %v", err)
+	}
+	sessions := sessionInfosFromBeads([]beads.Bead{sessionBead(assignee, "open")})
+	work, _, refs, _, partial := collectAssignedWorkBeadsWithStores(e.cityPath, e.cfg, e.leading(), e.rigs, nil, nil)
+	if partial {
+		t.Fatal("assigned-work census is partial")
+	}
+	work, refs = filterAssignedWorkBeadsForPoolDemand(e.cfg, e.cityPath, e.leading(), sessions, work, refs)
+	var req SessionRequest
+	found := false
+	for _, state := range computePoolDesiredStatesParkedAt(e.cfg, work, nil, refs, sessions, nil, nil, time.Now().UTC(), nil, nil) {
+		for _, r := range state.Requests {
+			if r.Template == template && r.WorkBeadID == stepID && r.Tier == "resume" {
+				req, found = r, true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no resume request for %s on %s; census refs %v", stepID, template, refs)
+	}
+	workDir, err := verifiedPoolTriggerWorkDir(nil, &e.cfg.Agents[0], template+"-1", req)
+	return req, workDir, err
+}
+
+// gastownhall/gascity#5753: the resume tier keeps the scale-demand tier's store
+// guard. A step read from rig bravo's own store whose evidence names rig:alpha
+// is refused rather than bound to the pool's own directory.
+func TestSplitCityResumeCrossRigWorktreeEvidenceStillRefused(t *testing.T) {
+	e := newLegAgreementEnv(t, true, "alpha", "bravo")
+	e.cfg.Agents = []config.Agent{{Name: "worker", Dir: "bravo", StartCommand: "true", MaxActiveSessions: intPtr(5)}}
+	step, _ := seedEvidenceStep(t, e.rigs["bravo"], "bravo/worker", "rig:alpha")
+
+	_, workDir, err := bindStepFromAssignedWork(t, e, e.rigs["bravo"], "bravo/worker", step.ID)
+	if err == nil || !strings.Contains(err.Error(), "does not match request store") {
+		t.Fatalf("cross-rig evidence: work dir %q err %v, want a store mismatch refusal", workDir, err)
+	}
+}
+
+// gastownhall/gascity#5753: a resumed step read from the split city's
+// scope-bound WORK LEDGER whose evidence names a rig is refused, as on the
+// scale-demand tier.
+func TestSplitCityResumeLedgerRowWithRigWorktreeEvidenceStillRefused(t *testing.T) {
+	e := newLegAgreementEnv(t, true, "alpha")
+	e.cfg.Agents = []config.Agent{{Name: "worker", Dir: "alpha", StartCommand: "true", MaxActiveSessions: intPtr(5)}}
+	step, _ := seedEvidenceStep(t, e.work, "alpha/worker", "rig:alpha")
+
+	req, workDir, err := bindStepFromAssignedWork(t, e, e.work, "alpha/worker", step.ID)
+	if req.WorkBindingResident {
+		t.Fatalf("work-ledger row %s marked binding-resident", step.ID)
+	}
+	if err == nil || !strings.Contains(err.Error(), "does not match request store") {
+		t.Fatalf("ledger row with rig evidence: work dir %q err %v, want a store mismatch refusal", workDir, err)
+	}
+}
+
+// gastownhall/gascity#5753: a resumed rig-rooted step read from the class
+// binding, which serves every scope, binds its verified worktree, as on the
+// scale-demand tier (ga-8tpvb).
+func TestSplitCityResumeBindingStepWorktreeEvidenceBindsRigPool(t *testing.T) {
+	e := newLegAgreementEnv(t, true, "alpha")
+	e.cfg.Agents = []config.Agent{{Name: "worker", Dir: "alpha", StartCommand: "true", MaxActiveSessions: intPtr(5)}}
+	step, path := seedEvidenceStep(t, e.binding, "alpha/worker", "rig:alpha")
+
+	req, workDir, err := bindStepFromAssignedWork(t, e, e.binding, "alpha/worker", step.ID)
+	if err != nil || workDir != path {
+		t.Fatalf("binding-resident step (request store %q, resident %v): work dir %q err %v, want %q",
+			req.WorkStoreRef, req.WorkBindingResident, workDir, err, path)
 	}
 }

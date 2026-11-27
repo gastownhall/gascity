@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -296,5 +297,52 @@ func TestWakeKnownIdentityRequestCarriesWorkBeadTitle(t *testing.T) {
 	}
 	if got, want := request.WorkBeadTitle, "Implement owned work"; got != want {
 		t.Errorf("wake-known-identity WorkBeadTitle = %q, want %q", got, want)
+	}
+}
+
+// TestWakeKnownCleanCreateStartsInVerifiedWorktree pins
+// gastownhall/gascity#5753 end to end for the wake-known-identity tier: the
+// clean session legacy realization creates for assigned work naming a
+// verified managed worktree records that worktree, not the pool's own
+// directory.
+func TestWakeKnownCleanCreateStartsInVerifiedWorktree(t *testing.T) {
+	for _, tc := range wakeKnownCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			spec, path := liveSeatManagedSpec(t, "gc-b")
+			request := assignedWorkRequest(t, tc.cfg, managedAssignedWork(spec, tc.assignee), tc.ready, []string{"r1"}, tc.sessions)
+			if request.Tier != "wake-known-identity" {
+				t.Fatalf("request = %+v, want wake-known-identity", request)
+			}
+			rows, _, stderr := realizeFreshRequest(t, request)
+			if len(rows) != 1 {
+				t.Fatalf("created %d sessions, want one clean create; stderr=%s", len(rows), stderr)
+			}
+			if got := preparedStartSessionWorkDir(rows[0]); got != path {
+				t.Fatalf("created session work dir = %q; want the verified worktree %q, not the pool directory; stderr=%s", got, path, stderr)
+			}
+		})
+	}
+}
+
+// TestWakeKnownIncompleteWorktreeEvidenceSkipsCleanCreate pins
+// gastownhall/gascity#5753 for unusable evidence on the wake-known-identity
+// tier: legacy realization refuses the clean create, reports it skipped, and
+// creates no session in the pool's own directory.
+func TestWakeKnownIncompleteWorktreeEvidenceSkipsCleanCreate(t *testing.T) {
+	for _, tc := range wakeKnownCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			spec, _ := liveSeatManagedSpec(t, "gc-b")
+			wb := managedAssignedWork(spec, tc.assignee)
+			delete(wb.Metadata, beadmeta.WorktreeLifecycleMetadataKey)
+			request := assignedWorkRequest(t, tc.cfg, wb, tc.ready, []string{"r1"}, tc.sessions)
+			rows, _, stderr := realizeFreshRequest(t, request)
+			if len(rows) != 0 {
+				t.Fatalf("created %d sessions (work dir %q), want none for unusable evidence; stderr=%s",
+					len(rows), preparedStartSessionWorkDir(rows[0]), stderr)
+			}
+			if !strings.Contains(stderr, "(skipping)") {
+				t.Fatalf("stderr = %q, want the item reported skipped", stderr)
+			}
+		})
 	}
 }

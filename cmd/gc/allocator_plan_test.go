@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"reflect"
 	"slices"
@@ -13,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worktree"
 )
@@ -1752,4 +1754,298 @@ func TestAllocator_RefusedNameMovesAReusedStartCandidateToThePoolDir(t *testing.
 			t.Fatalf("binding patch %v, want %v: only the trigger cleared", b.Patch, want)
 		}
 	})
+}
+
+// ownWorkResumeFixture is a pass over the pool seat gc-1, not running, whose
+// row records trigger w-1 in work dir seatDir and which holds w-1 in
+// progress, w-1 carrying worktree evidence meta. With sibling, the live seat
+// gc-2 holds its own work w-2, so the template is desired whatever becomes
+// of gc-1.
+func ownWorkResumeFixture(t *testing.T, seatDir string, meta map[string]string, sibling bool, rowMeta ...string) *allocFixture {
+	t.Helper()
+	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 2)}}
+	rows := []beads.Bead{poolRow("gc-1", "worker", 1, "asleep", append([]string{
+		beadmeta.TriggerBeadIDMetadataKey, "w-1", beadmeta.WorkDirMetadataKey, seatDir, beadmeta.LegacyWorkDirMetadataKey, seatDir,
+	}, rowMeta...)...)}
+	work := []beads.Bead{withMetadata(beads.Bead{ID: "w-1", Status: "in_progress", Assignee: "gc-1", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"}}, meta)}
+	if sibling {
+		rows = append(rows, poolRow("gc-2", "worker", 2, "active", beadmeta.TriggerBeadIDMetadataKey, "w-2"))
+		work = append(work, beads.Bead{ID: "w-2", Status: "in_progress", Assignee: "gc-2", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"}})
+	}
+	f := newAllocFixture(t, cfg).sessions(rows...)
+	if sibling {
+		f.alive("s-gc-2", InventoryAttrs{AttachedKnown: true})
+	}
+	f.in.Demand.AssignedWork = work
+	f.in.Demand.AssignedStoreRefs = make([]string, len(work))
+	return f
+}
+
+// cityManagedSpec is fakeManagedSpec for a bead of the city store.
+func cityManagedSpec(beadID string) worktree.Spec {
+	spec := fakeManagedSpec(beadID)
+	spec.StoreRef = "city"
+	return spec
+}
+
+// Kills a start candidate resuming its own assigned work dropped from desired
+// for unusable worktree evidence, which closes it as orphaned and releases a
+// claim no other seat can take (gastownhall/gascity#5753), and one bound or
+// woken into the dir its row records: whether the evidence is incomplete or a
+// failed verification's backoff is live, the seat is selected, unbound, and
+// Keep, alone or beside a desired sibling, and the keep is traced with its
+// work item, which the planner alerts on, and why.
+//
+// Also kills that Keep held where the seat's work gives it no wake, where
+// legacy holds only the wake of a seat kept for refused evidence
+// (TemplateParams.WorktreeRefusal): Keep held the seat and its claim
+// indefinitely, with no killed seat's release, no parked bound and no
+// stranded repair. A seat whose only work is a pin that is not ready, killed,
+// parked inside its bound or past it, stays selected, unbound and refused,
+// and sleeps as it does with usable evidence, so A21 closes or parks it as
+// it does that seat.
+//
+// And kills a seat that would wake only through A17 freed: its runtime gone
+// under an agent heartbeat's hold, holding its work, as legacy's heartbeat
+// crash recovery wakes it (TestLegacyTickHoldsAHeartbeatHeldOwnWorkSeatWithRefusedWorktree).
+// Usable evidence sleeps under the hold, bound, for A17 to respawn. Refused
+// evidence is Keep, refused and unbound: A6 only heals the dead row, and A21
+// does not close the healed one, so the seat keeps its slot and its claim.
+func TestAllocator_OwnWorkResumeWithRefusedWorktreeKeepsSeat(t *testing.T) {
+	spec := cityManagedSpec("w-1")
+	incomplete := worktreeEvidenceMetadata(spec)
+	delete(incomplete, beadmeta.WorktreeLifecycleMetadataKey)
+	for _, sibling := range []bool{false, true} {
+		for _, tc := range []struct {
+			name    string
+			meta    map[string]string
+			backoff bool
+			detail  string // what the keep's trace detail names
+		}{
+			{"incomplete evidence", incomplete, false, beadmeta.WorktreeLifecycleMetadataKey},
+			{"a failed verification's live backoff", worktreeEvidenceMetadata(spec), true, "worktree verification failed; seat worker-1 is not started"},
+		} {
+			t.Run(fmt.Sprintf("%s/sibling=%v", tc.name, sibling), func(t *testing.T) {
+				f := ownWorkResumeFixture(t, spec.Path, tc.meta, sibling)
+				if tc.backoff {
+					f.in.Backoff = workRefusal(spec)
+				}
+				d := f.decide()
+				e := entryOf(t, d, "gc-1")
+				if !e.InDesired || e.Desired != desireKeep || e.Reason != reasonWorktreeRefused || !e.WorktreeRefused || e.Binding != nil {
+					t.Fatalf("gc-1 = in-desired=%v %s/%s refused=%v binding %+v, want selected, Keep %s, refused and unbound; entries %v trace %v",
+						e.InDesired, e.Desired, e.Reason, e.WorktreeRefused, e.Binding, reasonWorktreeRefused, entryIDs(d), d.Trace)
+				}
+				kept := false
+				for _, r := range d.Trace {
+					kept = kept || r.Reason == "ineligible:"+gateWorktreeRefusedKeep && r.WorkBeadID == "w-1" && strings.Contains(r.Detail, tc.detail)
+				}
+				if !kept {
+					t.Fatalf("trace %+v, want the kept seat traced with its work item w-1 and a detail naming %q", d.Trace, tc.detail)
+				}
+				if len(d.Plans) != 0 {
+					t.Fatalf("plans %v for work %v: the kept seat holds its work", planSlots(d, "worker"), planWork(d))
+				}
+				if sibling {
+					if e := entryOf(t, d, "gc-2"); e.Desired != desireWake {
+						t.Fatalf("sibling gc-2 = %s/%s, want its assigned-work wake", e.Desired, e.Reason)
+					}
+				}
+			})
+		}
+	}
+	for _, tc := range []struct {
+		name   string
+		asleep []string // how the seat fell asleep
+		want   string   // A21's decision on the seat
+		killed bool
+	}{
+		{"killed", []string{"sleep_reason", string(session.SleepReasonKilled), "slept_at", ago(time.Hour)}, decideClosePoolSlot, true},
+		{"parked inside its bound", []string{"sleep_reason", "idle", "slept_at", ago(time.Hour)}, decideParkedHold, false},
+		{"past its bound", []string{"sleep_reason", "idle", "slept_at", ago(parkedWorkMaxHold + time.Minute)}, decideClosePoolSlot, false},
+	} {
+		t.Run("no wake/"+tc.name, func(t *testing.T) {
+			// entry decides gc-1 holding w-1 open and not ready, w-1 carrying
+			// meta, and returns gc-1's entry with A21's decision over it.
+			entry := func(meta map[string]string) (*selectionEntry, intent) {
+				t.Helper()
+				f := ownWorkResumeFixture(t, spec.Path, meta, false, tc.asleep...)
+				f.in.Demand.AssignedWork[0].Status = "open"
+				f.in.Demand.ReadyAssigned = map[storeScopedBeadKey]bool{}
+				e := entryOf(t, f.decide(), "gc-1")
+				c := newCloseCase(t, e.Liveness, e.Desired, append([]string{"state", "asleep"}, tc.asleep...)...)
+				ce := c.entry()
+				ce.Reason, ce.Park, ce.AssignedWork, ce.WorktreeRefused = e.Reason, e.Park, e.AssignedWork, e.WorktreeRefused
+				return e, c.decide()
+			}
+			usable, usableA21 := entry(worktreeEvidenceMetadata(spec))
+			refused, refusedA21 := entry(incomplete)
+			if usable.Desired != desireSleep || usable.WorktreeRefused {
+				t.Fatalf("usable evidence: gc-1 = %s/%s refused=%v, want Sleep", usable.Desired, usable.Reason, usable.WorktreeRefused)
+			}
+			if !refused.InDesired || !refused.WorktreeRefused || refused.Binding != nil ||
+				refused.Desired != usable.Desired || refused.Reason != usable.Reason || refused.Park != usable.Park {
+				t.Fatalf("refused evidence: gc-1 = in-desired=%v %s/%s park %+v refused=%v binding %+v; want selected, refused and unbound, asleep as with usable evidence (%s/%s park %+v)",
+					refused.InDesired, refused.Desired, refused.Reason, refused.Park, refused.WorktreeRefused, refused.Binding, usable.Desired, usable.Reason, usable.Park)
+			}
+			for _, got := range []struct {
+				evidence string
+				it       intent
+			}{{"usable", usableA21}, {"refused", refusedA21}} {
+				if got.it.Reason != tc.want || (tc.want == decideClosePoolSlot) != (got.it.Kind == intentClose) || got.it.Closing.Killed != tc.killed {
+					t.Fatalf("%s evidence: A21 = (%q, %q) closing %+v, want %q (killed %v)", got.evidence, got.it.Kind, got.it.Reason, got.it.Closing, tc.want, tc.killed)
+				}
+			}
+		})
+	}
+	t.Run("heartbeat hold", func(t *testing.T) {
+		held := func(now time.Time) string { return now.Add(time.Hour).Format(time.RFC3339) }
+		// decided returns gc-1's entry, w-1 carrying meta, with decideRow's
+		// verdicts on the row: dead while active, and as A6 heals it.
+		decided := func(meta map[string]string) (e *selectionEntry, dead, healed intent) {
+			t.Helper()
+			e = entryOf(t, ownWorkResumeFixture(t, spec.Path, meta, false, "held_until", held(allocNow)).decide(), "gc-1")
+			row := []string{"state", "active", "session_key", "k-1", "started_config_hash", "h", "held_until", held(gatherNow)}
+			h := newHealCase(t, e.Liveness, e.Desired, row...)
+			he := h.a.Snapshot.Entries[h.k]
+			he.Reason, he.AssignedWork, he.WorktreeRefused = e.Reason, e.AssignedWork, e.WorktreeRefused
+			dead = h.decide()
+			for k, v := range dead.folded() {
+				row = append(row, k, v)
+			}
+			c := newCloseCase(t, e.Liveness, e.Desired, row...)
+			ce := c.entry()
+			ce.Reason, ce.Park, ce.AssignedWork, ce.WorktreeRefused = e.Reason, e.Park, e.AssignedWork, e.WorktreeRefused
+			return e, dead, c.decide()
+		}
+		usable, usableDead, _ := decided(worktreeEvidenceMetadata(spec))
+		if usable.Desired != desireSleep || usable.WorktreeRefused || usable.Binding == nil || !usable.Liveness.startCandidate() {
+			t.Fatalf("usable evidence: gc-1 = %s/%s refused=%v binding %+v liveness %v, want asleep under its hold, bound", usable.Desired, usable.Reason, usable.WorktreeRefused, usable.Binding, usable.Liveness)
+		}
+		if usableDead.Kind != intentStart || usableDead.Reason != decideHeartbeatRespawn {
+			t.Fatalf("usable evidence: decideRow = (%q, %q), want A17's respawn through the hold", usableDead.Kind, usableDead.Reason)
+		}
+		refused, refusedDead, refusedHealed := decided(incomplete)
+		if !refused.InDesired || refused.Desired != desireKeep || refused.Reason != reasonWorktreeRefused || !refused.WorktreeRefused || refused.Binding != nil {
+			t.Fatalf("refused evidence: gc-1 = in-desired=%v %s/%s refused=%v binding %+v, want selected, Keep %s, refused and unbound",
+				refused.InDesired, refused.Desired, refused.Reason, refused.WorktreeRefused, refused.Binding, reasonWorktreeRefused)
+		}
+		if refusedDead.Reason != decideDeadRuntimeHeal || refusedDead.Kind == intentStart {
+			t.Fatalf("refused evidence: decideRow on the dead row = (%q, %q), want A6's heal alone", refusedDead.Kind, refusedDead.Reason)
+		}
+		if refusedHealed.Kind == intentClose || refusedHealed.Kind == intentStart {
+			t.Fatalf("refused evidence: decideRow on the healed row = (%q, %q), want neither a close nor a start: the seat keeps its slot and claim", refusedHealed.Kind, refusedHealed.Reason)
+		}
+	})
+}
+
+// Kills the resume tier's evidence lost on its way to the binding of a
+// same-trigger seat recording another dir (gastownhall/gascity#5753): the
+// start candidate gc-1, its row's trigger stamped with its store, records the
+// pool's own directory, so its binding has an empty patch, and is bound
+// anyway, carrying the work's spec, for the PreWake to verify the worktree
+// and stamp its path. Usable evidence wakes the seat.
+func TestAllocator_SameTriggerStaleResumeSeatBindsItsWorktree(t *testing.T) {
+	spec := cityManagedSpec("w-1")
+	d := ownWorkResumeFixture(t, "/city/pool", worktreeEvidenceMetadata(spec), false,
+		beadmeta.TriggerBeadStoreRefMetadataKey, "city").decide()
+	e := entryOf(t, d, "gc-1")
+	if !e.InDesired || e.Desired != desireWake || e.Binding == nil {
+		t.Fatalf("gc-1 = in-desired=%v %s/%s binding %+v, want a bound wake; trace %v", e.InDesired, e.Desired, e.Reason, e.Binding, d.Trace)
+	}
+	if b := e.Binding; b.WorkBeadID != "w-1" || b.WorktreeSpec == nil || *b.WorktreeSpec != spec || len(b.Patch) != 0 || b.KeptWorkDir != "" {
+		t.Fatalf("binding = %+v (spec %+v), want w-1 carrying its spec with an empty patch, nothing kept", b, b.WorktreeSpec)
+	}
+}
+
+// Kills a seat that resumes its own work in the managed worktree its row
+// records started there unverified (gastownhall/gascity#5753), where legacy's
+// bind verifies that worktree on every build and holds the seat while it
+// fails. The row's trigger is stamped with its store and its work dir is the
+// worktree, so the binding's patch is empty, and the start candidate is bound
+// anyway, carrying the work's spec. A worktree that verifies starts the seat
+// in it. One that does not (a detached HEAD) refuses the start before the
+// PreWake writes, the planner backs the work item off from that verdict, and
+// the next pass keeps the seat, Keep and unbound, traced with its work item,
+// on which the planner alerts. Once the backoff lapses the seat is bound
+// again, for the PreWake to verify the worktree again; a second failure keeps
+// it again without a second alert.
+func TestAllocator_ResumeSeatInItsWorktreeIsVerifiedBeforeItStarts(t *testing.T) {
+	spec := cityManagedSpec("w-1")
+	f := ownWorkResumeFixture(t, spec.Path, worktreeEvidenceMetadata(spec), false,
+		beadmeta.TriggerBeadStoreRefMetadataKey, "city")
+	rec := events.NewFake()
+	p := newPlanner(newFakePlannerClock(plannerT0), func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, io.Discard)
+	p.rec = rec
+	// pass is one allocation over the planner's backoff, observed as the
+	// planner observes it; it returns gc-1's entry.
+	pass := func() *selectionEntry {
+		t.Helper()
+		f.in.Backoff = p.backoff.Snapshot()
+		d := f.decide()
+		p.observeWorktreeRefusals(d.Trace)
+		return entryOf(t, d, "gc-1")
+	}
+	// start runs the PreWake of gc-1's start over binding, the worktree's
+	// verification returning verifyErr.
+	start := func(binding *bindingTarget, verifyErr error) (settlement, *startHookLeaf) {
+		t.Helper()
+		k, leaf := launchKit(t, "asleep", beadmeta.TriggerBeadIDMetadataKey, "w-1", beadmeta.TriggerBeadStoreRefMetadataKey, "city",
+			beadmeta.WorkDirMetadataKey, spec.Path, beadmeta.LegacyWorkDirMetadataKey, spec.Path)
+		k.p.Alloc.Snapshot.Entries[k.it.Key] = &selectionEntry{Binding: binding}
+		old := verifyWorktree
+		verifyWorktree = func(s worktree.Spec) (worktree.Report, error) { return worktree.Report{Path: s.Path}, verifyErr }
+		defer func() { verifyWorktree = old }()
+		return k.runKind(), leaf
+	}
+	alerts := func() int {
+		n := 0
+		for _, ev := range rec.Events {
+			if ev.Type == events.ReconcilerAlert && ev.Subject == "w-1" {
+				n++
+			}
+		}
+		return n
+	}
+	bound := func(e *selectionEntry, when string) *bindingTarget {
+		t.Helper()
+		if !e.InDesired || e.Desired != desireWake || e.Binding == nil {
+			t.Fatalf("%s: gc-1 = in-desired=%v %s/%s binding %+v, want a bound wake", when, e.InDesired, e.Desired, e.Reason, e.Binding)
+		}
+		if b := e.Binding; b.WorkBeadID != "w-1" || b.WorktreeSpec == nil || *b.WorktreeSpec != spec || len(b.Patch) != 0 || b.KeptWorkDir != "" {
+			t.Fatalf("%s: binding = %+v (spec %+v), want w-1 carrying its spec with an empty patch, nothing kept", when, b, b.WorktreeSpec)
+		}
+		return e.Binding
+	}
+	held := func(e *selectionEntry, when string) {
+		t.Helper()
+		if !e.InDesired || e.Desired != desireKeep || e.Reason != reasonWorktreeRefused || e.Binding != nil {
+			t.Fatalf("%s: gc-1 = in-desired=%v %s/%s binding %+v, want selected, Keep %s, unbound", when, e.InDesired, e.Desired, e.Reason, e.Binding, reasonWorktreeRefused)
+		}
+	}
+
+	binding := bound(pass(), "first pass")
+	if s, leaf := start(binding, nil); s.Outcome != settledLanded || len(leaf.cfgs) != 1 || leaf.cfgs[0].WorkDir != spec.Path {
+		t.Fatalf("a worktree that verifies: settlement %+v, launches %+v; want one launch in %s", s, leaf.cfgs, spec.Path)
+	}
+	detached := fmt.Errorf("verifying worktree %q: HEAD is detached", spec.Path)
+	s, leaf := start(binding, detached)
+	want := workVerdict{BeadID: "w-1", Fingerprint: specFingerprint(spec), Refused: true}
+	if s.Outcome != settledRefused || s.Cause != causeWorktree || s.Facts.Work == nil || *s.Facts.Work != want || len(leaf.cfgs) != 0 {
+		t.Fatalf("a detached HEAD: settlement %+v (work %+v), launches %d; want the start refused with verdict %+v, nothing launched", s, s.Facts.Work, len(leaf.cfgs), want)
+	}
+	p.applyFacts(s.Facts, f.in.Now)
+	held(pass(), "the backoff live")
+	if got := alerts(); got != 1 {
+		t.Fatalf("alerts on w-1 = %d, want one for the held seat", got)
+	}
+
+	f.in.Now = f.in.Now.Add(vetoBackoff(1) + time.Second)
+	binding = bound(pass(), "the backoff lapsed")
+	s, _ = start(binding, detached)
+	p.applyFacts(s.Facts, f.in.Now)
+	held(pass(), "the second backoff live")
+	if got := alerts(); got != 1 {
+		t.Fatalf("alerts on w-1 = %d, want still one: the seat is held for the same failure", got)
+	}
 }

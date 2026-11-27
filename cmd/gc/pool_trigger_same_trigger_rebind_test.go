@@ -52,7 +52,7 @@ func TestLegacySameTriggerBindKeepsARunningSeatsDir(t *testing.T) {
 	}
 }
 
-// sameTriggerWorkDirStale is the pure predicate both realizations ask before
+// sameTriggerWorkDirStale is the pure predicate legacy's bind asks before
 // binding a seat that can start: only a same-trigger bind of work with a
 // verified worktree spec, recording another dir, is stale.
 func TestSameTriggerWorkDirStale(t *testing.T) {

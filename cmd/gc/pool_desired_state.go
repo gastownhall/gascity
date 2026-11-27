@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/worktree"
 )
 
@@ -114,12 +115,27 @@ var legacyWorkDirNoticeSeen sync.Map // work bead ID -> struct{}
 // worktreeSpecForBead reconstructs the exact single-owner verification input
 // from metadata published after gc worktree ensure succeeds. A work_dir with
 // incomplete or conflicting evidence is an error, never permission to launch
-// a session into an unverified directory.
+// a session into an unverified directory. It logs, once per bead, the notice
+// worktreeSpecFromMetadata returns for a work_dir it treats as unmanaged.
 func worktreeSpecForBead(bead beads.Bead, storeRef string) (*worktree.Spec, error) {
+	spec, unmanaged, err := worktreeSpecFromMetadata(bead, storeRef)
+	if unmanaged != "" {
+		if _, dup := legacyWorkDirNoticeSeen.LoadOrStore(bead.ID, struct{}{}); !dup {
+			log.Printf("worktreeSpecForBead: %s", unmanaged)
+		}
+	}
+	return spec, err
+}
+
+// worktreeSpecFromMetadata is worktreeSpecForBead without the notice's log
+// line: it reads bead's metadata only, so the pure pool compute can call it.
+// A work_dir it treats as unmanaged returns a nil spec, no error and the
+// notice describing why.
+func worktreeSpecFromMetadata(bead beads.Bead, storeRef string) (*worktree.Spec, string, error) {
 	canonicalPath := strings.TrimSpace(bead.Metadata[beadmeta.WorkDirMetadataKey])
 	legacyPath := strings.TrimSpace(bead.Metadata[beadmeta.LegacyWorkDirMetadataKey])
 	if canonicalPath != "" && legacyPath != "" && canonicalPath != legacyPath {
-		return nil, fmt.Errorf("work bead %s has conflicting %s=%q and %s=%q",
+		return nil, "", fmt.Errorf("work bead %s has conflicting %s=%q and %s=%q",
 			bead.ID, beadmeta.WorkDirMetadataKey, canonicalPath, beadmeta.LegacyWorkDirMetadataKey, legacyPath)
 	}
 	path := canonicalPath
@@ -129,7 +145,7 @@ func worktreeSpecForBead(bead beads.Bead, storeRef string) (*worktree.Spec, erro
 		pathKey = beadmeta.LegacyWorkDirMetadataKey
 	}
 	if path == "" {
-		return nil, nil
+		return nil, "", nil
 	}
 	values := []struct {
 		key   string
@@ -162,11 +178,8 @@ func worktreeSpecForBead(bead beads.Bead, storeRef string) (*worktree.Spec, erro
 		// of the nine ownership keys), so treat it as an unmanaged workspace
 		// and let the seat spawn as it always did, instead of erroring it into
 		// permanent starvation.
-		if _, dup := legacyWorkDirNoticeSeen.LoadOrStore(bead.ID, struct{}{}); !dup {
-			log.Printf("worktreeSpecForBead: work bead %s has %s=%q with no worktree ownership metadata; treating as unmanaged",
-				bead.ID, pathKey, path)
-		}
-		return nil, nil
+		return nil, fmt.Sprintf("work bead %s has %s=%q with no worktree ownership metadata; treating as unmanaged",
+			bead.ID, pathKey, path), nil
 	}
 	if len(present) == 1 && present[0] == beadmeta.WorkBranchMetadataKey {
 		// gc.work_branch alone is not incomplete evidence either -- it is the
@@ -176,14 +189,11 @@ func worktreeSpecForBead(bead beads.Bead, storeRef string) (*worktree.Spec, erro
 		// ever published worktree ownership evidence). Treat it the same as
 		// the zero-key case above instead of hard-erroring the seat into
 		// permanent starvation the first time a hook claim touches it.
-		if _, dup := legacyWorkDirNoticeSeen.LoadOrStore(bead.ID, struct{}{}); !dup {
-			log.Printf("worktreeSpecForBead: work bead %s has %s=%q with only %s published; treating as unmanaged",
-				bead.ID, pathKey, path, beadmeta.WorkBranchMetadataKey)
-		}
-		return nil, nil
+		return nil, fmt.Sprintf("work bead %s has %s=%q with only %s published; treating as unmanaged",
+			bead.ID, pathKey, path, beadmeta.WorkBranchMetadataKey), nil
 	}
 	if len(missing) > 0 {
-		return nil, fmt.Errorf("work bead %s has %s=%q but is missing %s",
+		return nil, "", fmt.Errorf("work bead %s has %s=%q but is missing %s",
 			bead.ID, beadmeta.WorkDirMetadataKey, path, missing[0])
 	}
 	// The bead's own gc.root_store_ref is the canonical spelling
@@ -198,7 +208,7 @@ func worktreeSpecForBead(bead beads.Bead, storeRef string) (*worktree.Spec, erro
 		resolvedStoreRef = strings.TrimSpace(storeRef)
 	}
 	if resolvedStoreRef == "" {
-		return nil, fmt.Errorf("work bead %s has %s=%q but no store reference", bead.ID, beadmeta.WorkDirMetadataKey, path)
+		return nil, "", fmt.Errorf("work bead %s has %s=%q but no store reference", bead.ID, beadmeta.WorkDirMetadataKey, path)
 	}
 	return &worktree.Spec{
 		RepoDir:    strings.TrimSpace(bead.Metadata[beadmeta.WorktreeRepoMetadataKey]),
@@ -213,7 +223,7 @@ func worktreeSpecForBead(bead beads.Bead, storeRef string) (*worktree.Spec, erro
 		Owner:      strings.TrimSpace(bead.Metadata[beadmeta.WorktreeOwnerMetadataKey]),
 		Generation: strings.TrimSpace(bead.Metadata[beadmeta.WorktreeGenerationMetadataKey]),
 		Lifecycle:  strings.TrimSpace(bead.Metadata[beadmeta.WorktreeLifecycleMetadataKey]),
-	}, nil
+	}, "", nil
 }
 
 // PoolDesiredState holds the desired state for a single agent template.
@@ -332,7 +342,7 @@ func computePoolDesiredStatesAt(
 	decisionTime time.Time,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStatesParkedAt(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, scaleCheckDemand, decisionTime, nil, trace)
+	return computePoolDesiredStatesParkedAt(cfg, assignedWorkBeads, nil, nil, sessionInfos, scaleCheckCounts, scaleCheckDemand, decisionTime, nil, trace)
 }
 
 // computePoolDesiredStatesParkedAt is computePoolDesiredStatesAt with the
@@ -346,10 +356,18 @@ func computePoolDesiredStatesAt(
 // already supplied actionable work. A non-nil slice is authoritative: an open
 // bead whose flag is false or missing is not proven ready, so it cannot plan a
 // clean session for a wake_mode="fresh" agent's asleep assignee.
+//
+// storeRefs is the census store ref each of assignedWorkBeads was read under,
+// index-aligned like ready: the second result of
+// filterAssignedWorkBeadsForPoolDemand[At], never the pre-filter
+// assignedWorkStoreRefs. A nil or short slice leaves a row's leg unknown. The
+// resume and wake-known-identity tiers derive their requests' worktree
+// evidence and store guard from it (requestWithAssignedWorkProvenance).
 func computePoolDesiredStatesParkedAt(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
 	ready []bool,
+	storeRefs []string,
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 	scaleCheckDemand map[string]scaleCheckDemand,
@@ -483,7 +501,7 @@ func computePoolDesiredStatesParkedAt(
 						continue
 					}
 					wakeRequestedTemplates[template] = struct{}{}
-					resumeRequests = append(resumeRequests, SessionRequest{
+					resumeRequests = append(resumeRequests, requestWithAssignedWorkProvenance(SessionRequest{
 						Template:     template,
 						BeadPriority: beadPriorityRank(beadPriority(wb)),
 						Tier:         "wake-known-identity",
@@ -495,7 +513,7 @@ func computePoolDesiredStatesParkedAt(
 						WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
 						WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
 						BrainParentSID: strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
-					})
+					}, wb, storeRefs, w))
 					if trace != nil {
 						trace.RecordDecision(TraceSitePoolWakeKnownIdentity, TraceReasonAssignedWork, TraceOutcomeScheduled, template, "", traceRecordPayload{
 							"tier":                   "wake-known-identity",
@@ -505,7 +523,7 @@ func computePoolDesiredStatesParkedAt(
 					}
 					continue
 				}
-				resumeRequests = append(resumeRequests, SessionRequest{
+				resumeRequests = append(resumeRequests, requestWithAssignedWorkProvenance(SessionRequest{
 					Template:           template,
 					BeadPriority:       beadPriorityRank(beadPriority(wb)),
 					Tier:               "resume",
@@ -517,7 +535,7 @@ func computePoolDesiredStatesParkedAt(
 					BrainParentSID:     strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
 					Parked:             parked.parked(sessionBeadID) && !unparkable[sessionBeadID],
 					ParkedContinuation: parked.continues(sessionBeadID) && !unparkable[sessionBeadID],
-				})
+				}, wb, storeRefs, w))
 				continue
 			}
 			if isConfiguredNamedSessionIdentity(cfg, assignee) {
@@ -542,7 +560,7 @@ func computePoolDesiredStatesParkedAt(
 				continue
 			}
 			wakeRequestedTemplates[template] = struct{}{}
-			resumeRequests = append(resumeRequests, SessionRequest{
+			resumeRequests = append(resumeRequests, requestWithAssignedWorkProvenance(SessionRequest{
 				Template:       template,
 				BeadPriority:   beadPriorityRank(beadPriority(wb)),
 				Tier:           "wake-known-identity",
@@ -551,7 +569,7 @@ func computePoolDesiredStatesParkedAt(
 				WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
 				WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
 				BrainParentSID: strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
-			})
+			}, wb, storeRefs, w))
 			if trace != nil {
 				trace.RecordDecision(TraceSitePoolWakeKnownIdentity, TraceReasonAssignedWork, TraceOutcomeScheduled, template, "", traceRecordPayload{
 					"tier":      "wake-known-identity",
@@ -805,6 +823,36 @@ func requestWithScaleDemandProvenance(request SessionRequest, demand scaleCheckD
 		request.WorktreeError = strings.TrimSpace(demand.WorktreeErrors[workBeadID])
 	}
 	request.NameOnly = demand.NameOnly
+	return request
+}
+
+// requestWithAssignedWorkProvenance is request carrying the worktree evidence
+// and store guard of assigned work wb, the same fields scale demand attaches
+// (requestWithScaleDemandProvenance), so verifiedPoolTriggerWorkDir verifies a
+// resume or wake-known-identity request's managed worktree instead of binding
+// the pool's own directory. storeRefs[index] is the census ref wb was read
+// under (censusRefBare): it becomes the request's WorkStoreRef in the
+// scale-demand vocabulary, and a class binding leg marks the row
+// binding-resident under the city key. A missing ref leaves the leg unknown.
+// The spec prefers wb's own gc.root_store_ref (worktreeSpecFromMetadata, which
+// keeps the pure compute free of worktreeSpecForBead's unmanaged-workspace
+// log line); incomplete or conflicting evidence is carried as WorktreeError
+// for realization to refuse, never dropped here, so pool counts do not depend
+// on evidence.
+func requestWithAssignedWorkProvenance(request SessionRequest, wb beads.Bead, storeRefs []string, index int) SessionRequest {
+	request.WorkStoreRef, request.WorkBindingResident = "", false
+	request.WorktreeSpec, request.WorktreeError = nil, ""
+	if index >= 0 && index < len(storeRefs) {
+		ref := strings.TrimSpace(storeRefs[index])
+		request.WorkStoreRef = normalizeIdleClaimStoreRef(ref)
+		request.WorkBindingResident = storeref.IsClassRef(ref)
+	}
+	spec, _, err := worktreeSpecFromMetadata(wb, request.WorkStoreRef)
+	if err != nil {
+		request.WorktreeError = err.Error()
+		return request
+	}
+	request.WorktreeSpec = spec
 	return request
 }
 

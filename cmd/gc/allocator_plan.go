@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"slices"
@@ -43,6 +44,11 @@ const (
 	gateNameHeld        = "name-held:"
 	gatePoolSlotShaped  = "named-identity-pool-slot-shaped"
 )
+
+// gateWorktreeRefusedKeep is the cause traced for a start candidate kept,
+// unbound and not started, because the worktree evidence of its own assigned
+// work is unusable (decidePass.keepRefusedSeat).
+const gateWorktreeRefusedKeep = "worktree-refused-keep"
 
 // Template causes of a custom scale_check: the template's own check failed;
 // the scale_check source has no fresh run of it (none yet, failed, timed out
@@ -281,7 +287,7 @@ func (p *decidePass) computePoolDesired() {
 		poolCfg = &clone
 	}
 	p.parked = p.parkSeats(standIns)
-	p.poolStates = computePoolDesiredStatesParkedAt(poolCfg, p.poolWork, poolWorkReady, rows, p.merged.ScaleCheckCounts, p.merged.ScaleCheckDemand, p.in.Now, p.parked, nil)
+	p.poolStates = computePoolDesiredStatesParkedAt(poolCfg, p.poolWork, poolWorkReady, poolWorkRefs, rows, p.merged.ScaleCheckCounts, p.merged.ScaleCheckDemand, p.in.Now, p.parked, nil)
 	p.poolDesired = retainScaleCheckPartialPoolDesired(p.cfg, PoolDesiredCounts(p.poolStates),
 		p.decidableSnapshot(), p.merged.PoolPartialRetention)
 	if p.poolDesired == nil {
@@ -563,39 +569,44 @@ func (p *decidePass) selectPoolRow(cfgAgent *config.Agent, info session.Info, sl
 	sel := &selection{ref: ref, normalize: needsNormalize(cfgAgent, info)}
 	// Only a start candidate is bound (AM2): the binding is computed as
 	// legacy's bind computes it, from the plan-only work dir (worktree.Verify
-	// moves to the session key that applies it). Unusable evidence leaves a
-	// start candidate out of desired, as legacy skips the item; refused
-	// evidence (#34) is unusable while its verdict stands. A live row, or one
-	// whose liveness is unknown, keeps its selection and gets no binding. A
-	// parked seat's resume keeps its recorded work dir (KeptWorkDir), which
-	// the PreWake verifies as it verifies a worktree. A refused name's
-	// unnamed request (SessionRequest.NameRefused) moves the start candidate
-	// to the pool's own directory, as legacy moves a seat that is not alive
-	// (poolSeatBindingPatch).
+	// moves to the session key that applies it). Work with worktree evidence
+	// is always bound (startCandidateBinding), so the PreWake verifies the
+	// worktree before the seat starts, as legacy's bind verifies it on every
+	// build. Unusable evidence leaves a start candidate out of desired, as
+	// legacy skips the item; refused evidence (#34) is unusable while its
+	// verdict stands. A live row, or one whose liveness is unknown, keeps its
+	// selection and gets no binding. A parked seat's resume keeps its
+	// recorded work dir (KeptWorkDir), which the PreWake verifies as it
+	// verifies a worktree. A refused name's unnamed request
+	// (SessionRequest.NameRefused) moves the start candidate to the pool's
+	// own directory, as legacy moves a seat that is not alive
+	// (poolSeatBindingPatch). A start candidate resuming its own assigned
+	// work whose evidence is unusable keeps its selection, unbound, and is
+	// never started (selection.worktreeRefused), as legacy keeps the seat
+	// (poolSeatKeptForRefusedWork): left out of desired, it would close as
+	// orphaned and release a claim no other seat can take. It is Keep while
+	// it would wake, A17's heartbeat respawn included, where legacy holds its
+	// start (decidePass.classify); one its work gives no wake sleeps, so A21
+	// parks, closes or repairs it, as legacy frees an asleep seat. A worktree
+	// that fails the PreWake's verify (a detached HEAD, another branch, a
+	// removed path) refuses that start and backs its work item off, so such a
+	// seat is not started until the backoff lapses and the next PreWake
+	// verifies it again, as legacy holds it while its bind's verify fails.
 	if p.snap.Entries[k].Liveness.startCandidate() {
 		workDir, err := verifiedPoolTriggerWorkDir(p.bp, cfgAgent, ref.QualifiedInstance, request)
+		refused := err != nil || p.worktreeRefused(request)
 		switch {
+		case refused && poolRequestResumesAssignedWorkInfo(request, p.bp.assignedWorkBeads, info):
+			p.keepRefusedSeat(cfgAgent.QualifiedName(), ref.QualifiedInstance, k, request, err)
+			sel.worktreeRefused = true
 		case err != nil:
 			p.refuseWork(cfgAgent.QualifiedName(), ref.QualifiedInstance, k, request, err)
 			return
-		case p.worktreeRefused(request):
+		case refused:
 			p.refuse(cfgAgent.QualifiedName(), ref.QualifiedInstance, k, gateWorktreeRefused)
 			return
-		}
-		patch := poolSeatBindingPatch(info, request, workDir)
-		kept := parkedWorkDirKept(info, request, workDir)
-		// The plan-only work dir is "" for work with worktree evidence, so a
-		// same-trigger row recording another dir compares against the spec's
-		// path, which the PreWake's verify reports. Stale, it is bound even
-		// with an empty patch: the PreWake verifies the worktree and stamps
-		// its path as the row's work dir.
-		stale := request.WorktreeSpec != nil && sameTriggerWorkDirStale(p.in.CityPath, info, request, strings.TrimSpace(request.WorktreeSpec.Path))
-		if stale {
-			kept = ""
-		}
-		if len(patch) > 0 || kept != "" || stale {
-			sel.binding = bindingOf(request, workDir)
-			sel.binding.Patch, sel.binding.KeptWorkDir = patch, kept
+		default:
+			sel.binding = startCandidateBinding(info, request, workDir)
 		}
 	}
 	p.selected[k] = sel
@@ -604,6 +615,28 @@ func (p *decidePass) selectPoolRow(cfgAgent *config.Agent, info session.Info, sl
 		InstanceName: ref.InstanceName,
 		Alias:        ref.Alias,
 	}
+}
+
+// startCandidateBinding is the binding candidate of the start candidate info
+// selected for request over workDir, the plan-only work dir, computed as
+// legacy's bind computes it; nil when the row needs no binding. Work with
+// worktree evidence (request.WorktreeSpec) is bound even with an empty
+// patch: the PreWake verifies the worktree before the seat starts and stamps
+// its path as the row's work dir, as legacy's bind verifies it for every
+// seat that can start (poolTriggerBindWorkDir). Its plan-only work dir is
+// "", so its binding keeps no recorded dir (parkedWorkDirKept). So a
+// same-trigger row recording another dir (sameTriggerWorkDirStale) moves to
+// the worktree, and one recording the worktree itself starts there only
+// once it verifies.
+func startCandidateBinding(info session.Info, request SessionRequest, workDir string) *bindingTarget {
+	patch := poolSeatBindingPatch(info, request, workDir)
+	kept := parkedWorkDirKept(info, request, workDir)
+	if len(patch) == 0 && kept == "" && request.WorktreeSpec == nil {
+		return nil
+	}
+	binding := bindingOf(request, workDir)
+	binding.Patch, binding.KeptWorkDir = patch, kept
+	return binding
 }
 
 // admitPoolPlan runs the plan-time gates on a fresh pool plan and records it,
@@ -871,12 +904,14 @@ func needsNormalize(cfgAgent *config.Agent, info session.Info) bool {
 }
 
 // bindings is step 14 (C6 as amended by AM2 and S2-5): a selected start
-// candidate whose trigger differs from its target is bound to it; a live row,
-// or one whose liveness is unknown, never is. Bindings are recomputed every
-// pass (C6.1). Within a pass a work item is bound at most once, and work a
-// selected row that is alive or holds a start lease carries as its trigger is
-// consumed (C6.3), by the first such row in key order. The lease is v5's
-// (P4, S3): a pending-create claim or the creating state.
+// candidate whose trigger differs from its target is bound to it, as is one
+// whose work carries worktree evidence, for its PreWake to verify
+// (startCandidateBinding); a live row, or one whose liveness is unknown,
+// never is. Bindings are recomputed every pass (C6.1). Within a pass a work
+// item is bound at most once, and work a selected row that is alive or holds
+// a start lease carries as its trigger is consumed (C6.3), by the first such
+// row in key order. The lease is v5's (P4, S3): a pending-create claim or the
+// creating state.
 func (p *decidePass) bindings() {
 	keys := slices.Collect(maps.Keys(p.selected))
 	sortRowKeys(keys)
@@ -920,6 +955,24 @@ func (p *decidePass) refuseWork(template, instance string, k rowKey, request Ses
 	p.refuse(template, instance, k, gateWorktreeRefused)
 	r := &p.trace[len(p.trace)-1]
 	r.WorkBeadID, r.Detail = strings.TrimSpace(request.WorkBeadID), err.Error()
+}
+
+// keepRefusedSeat traces a start candidate kept, unbound and not started,
+// because the request resuming its own assigned work has unusable worktree
+// evidence. The record names its work item, as refuseWork's does, so the
+// planner alerts on the kept seat (observeWorktreeRefusals): a kept seat
+// starts no effect that would report it. Its detail is err, the evidence the
+// pass refused, or, when err is nil, the failed verification whose backoff
+// is live (decidePass.worktreeRefused), worded the same every pass, so the
+// alert does not repeat while the seat stays kept.
+func (p *decidePass) keepRefusedSeat(template, instance string, k rowKey, request SessionRequest, err error) {
+	p.refuse(template, instance, k, gateWorktreeRefusedKeep)
+	detail := fmt.Sprintf("worktree verification failed; seat %s is not started until the worktree verifies", instance)
+	if err != nil {
+		detail = err.Error()
+	}
+	r := &p.trace[len(p.trace)-1]
+	r.WorkBeadID, r.Detail = strings.TrimSpace(request.WorkBeadID), detail
 }
 
 // createRefused returns the cause of a create backoff live at Now for the
