@@ -798,3 +798,28 @@ func TestClaimFailureExitsCarryOneReadTrace(t *testing.T) {
 		})
 	}
 }
+
+// A single-leg claim whose one read answers inside the budget is unchanged:
+// one read, the same result line, the same exit code.
+func TestSingleLegClaimReadUnchanged(t *testing.T) {
+	withProductionClaimRetryPacing(t)
+	b := newBudgetClaimHarness()
+	stores := budgetLegs()
+	b.leg("/city", 140*time.Second, hookRunnerAnswer{out: routedRowJSON("work-1")})
+
+	code, stdout, stderr := b.claim(stores, b.ops())
+
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr)
+	}
+	if len(b.reads) != 1 {
+		t.Fatalf("reads = %v, want exactly one", b.reads)
+	}
+	result := decodeTurnBoundResult(t, stdout)
+	if result.Action != "work" || result.BeadID != "work-1" || !result.OK {
+		t.Fatalf("result = %+v, want ok action=work bead_id=work-1", result)
+	}
+	if lines := readTraceLines(stderr); len(lines) != 0 {
+		t.Fatalf("a claim wrote a read trace: %q", lines)
+	}
+}
