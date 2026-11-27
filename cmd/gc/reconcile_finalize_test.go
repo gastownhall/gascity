@@ -1,12 +1,14 @@
 package main
 
 import (
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -129,8 +131,9 @@ func TestFinalizeDrainAckStoppedSession_PrunesWorkerDir(t *testing.T) {
 		t.Fatalf("write .git marker: %v", err)
 	}
 	env.setSessionMetadata(&b, map[string]string{
-		"session_key": "k-1",
-		"worker_dir":  workerDir,
+		"session_key":          "k-1",
+		"worker_dir":           workerDir,
+		poolManagedMetadataKey: boolMetadata(true),
 	})
 
 	probe := &fakeGitProbe{isRepo: true}
@@ -205,5 +208,266 @@ func TestLegacyFinalizeUsesExtractedBuilder(t *testing.T) {
 	}
 	if calls["finalizePatch"] == 0 || calls["AcknowledgeDrainPatch"] != 0 || calls["CompleteDrainPatch"] != 0 {
 		t.Fatalf("finalizeDrainAckStoppedSession calls %v; want finalizePatch and no drain patch built itself", calls)
+	}
+}
+
+// drainAckPruneSeat is a stop-pending session row whose worker_dir is a prune
+// fixture's clean, pushed, unmanaged checkout, plus the rig-root probe that
+// records every removal the prune helper requests.
+type drainAckPruneSeat struct {
+	env     *reconcilerTestEnv
+	fx      *pruneTestFixture
+	rig     *fakeGitProbe
+	removes []string
+	id      string
+}
+
+// newDrainAckPruneSeat builds the seat as an unnamed pool session of template
+// demo/worker; meta is written over its metadata last.
+func newDrainAckPruneSeat(t *testing.T, meta map[string]string) *drainAckPruneSeat {
+	t.Helper()
+	fx := newPruneFixture(t)
+	env := newReconcilerTestEnv(t)
+	fx.cfg.Agents = []config.Agent{{Name: "worker", Dir: "demo"}}
+	env.cfg = fx.cfg
+	s := &drainAckPruneSeat{env: env, fx: fx}
+	s.rig = &fakeGitProbe{isRepo: true, worktreeRemove: func(path string, _ bool) error {
+		s.removes = append(s.removes, path)
+		return nil
+	}}
+	fx.setProbe(fx.rigRoot, s.rig)
+
+	b := env.createSessionBead("demo/worker-1", "demo/worker")
+	patch := session.DrainAckStopPendingPatch(env.clk.Now().UTC())
+	patch[poolManagedMetadataKey] = boolMetadata(true)
+	patch["worker_dir"] = fx.workerDir
+	for k, v := range meta {
+		patch[k] = v
+	}
+	if err := env.store.SetMetadataBatch(b.ID, patch); err != nil {
+		t.Fatalf("SetMetadataBatch(stop-pending): %v", err)
+	}
+	s.id = b.ID
+	return s
+}
+
+// finalize runs the drain-ack finalizer over info, the seat's snapshot.
+func (s *drainAckPruneSeat) finalize(info session.Info, closeIfUnassigned bool) drainAckFinalizeResult {
+	sw := testSeatWork(s.fx.cityPath, s.env.cfg, s.env.store, nil)
+	return finalizeDrainAckStoppedSession(s.fx.cityPath, s.env.cfg, s.env.store, sw, info, "", closeIfUnassigned,
+		newFakeDrainOps(), s.env.dt, s.env.clk, events.Discard, &s.env.stderr)
+}
+
+// status is the seat's persisted status and lifecycle state.
+func (s *drainAckPruneSeat) status(t *testing.T) (string, string) {
+	t.Helper()
+	got, err := s.env.store.Get(s.id)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", s.id, err)
+	}
+	return got.Status, got.Metadata["state"]
+}
+
+// TestFinalizeDrainAckStoppedSessionPruneRefusalKeepsTheClose (gascity#8093).
+// The worker_dir prune follows a drain-ack close the store already holds: a
+// prune the helper refuses or cannot finish leaves the seat closed as
+// drained, and the helper keeps its own refusal, marker and error report.
+func TestFinalizeDrainAckStoppedSessionPruneRefusalKeepsTheClose(t *testing.T) {
+	cases := []struct {
+		name        string
+		setup       func(s *drainAckPruneSeat)
+		wantRemoves int
+		wantMarker  string
+		wantLog     string
+	}{
+		{
+			name: "auto-prune disabled",
+			setup: func(s *drainAckPruneSeat) {
+				off := false
+				s.fx.cfg.Daemon.AutoPruneWorkerDir = &off
+			},
+		},
+		{
+			name: "uncommitted changes",
+			setup: func(s *drainAckPruneSeat) {
+				s.fx.setProbe(s.fx.workerDir, &fakeGitProbe{isRepo: true, currentBranch: "work/w1", hasUncommitted: true})
+			},
+			wantMarker: "uncommitted-work",
+			wantLog:    "has uncommitted changes",
+		},
+		{
+			name: "unpushed commits",
+			setup: func(s *drainAckPruneSeat) {
+				s.fx.setProbe(s.fx.workerDir, &fakeGitProbe{isRepo: true, currentBranch: "work/w1", hasUnpushed: true})
+			},
+			wantMarker: "unpushed-commits",
+			wantLog:    "has unpushed commits",
+		},
+		{
+			name: "removal fails",
+			setup: func(s *drainAckPruneSeat) {
+				s.rig.worktreeRemove = func(path string, _ bool) error {
+					s.removes = append(s.removes, path)
+					return errors.New("worktree locked")
+				}
+			},
+			wantRemoves: 1,
+			wantLog:     "worktree locked",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := newDrainAckPruneSeat(t, nil)
+			c.setup(s)
+
+			res := s.finalize(s.env.sessionInfo(s.id), true)
+
+			if !res.closed {
+				t.Fatalf("finalize result %+v, want the close reported", res)
+			}
+			if status, state := s.status(t); status != "closed" || state != "drained" {
+				t.Fatalf("status/state = %q/%q, want closed/drained despite the prune outcome", status, state)
+			}
+			if len(s.removes) != c.wantRemoves {
+				t.Fatalf("rig-root removals = %q, want %d", s.removes, c.wantRemoves)
+			}
+			if c.wantMarker != "" {
+				assertWorktreeStaleMarker(t, s.fx.workerDir, "work/w1", c.wantMarker)
+			} else {
+				assertNoWorktreeStaleMarker(t, s.fx.workerDir)
+			}
+			log := s.env.stderr.String()
+			if strings.Contains(log, "pruned worker_dir") {
+				t.Fatalf("stderr reports a prune: %s", log)
+			}
+			if c.wantLog == "" && strings.Contains(log, "worker_dir") {
+				t.Fatalf("stderr = %q, want no worker_dir report", log)
+			}
+			if !strings.Contains(log, c.wantLog) || (c.wantLog != "" && !strings.Contains(log, s.fx.workerDir)) {
+				t.Fatalf("stderr = %q, want a report naming %s: %q", log, s.fx.workerDir, c.wantLog)
+			}
+		})
+	}
+}
+
+// TestFinalizeDrainAckStoppedSessionPrunesOnlyItsOwnClose (gascity#8093). A
+// drain-ack finalize that does not itself close the seat (assigned work, an
+// operator's suspend, a keep-open finalize, or witnessing another observer's
+// close) requests no worker_dir removal and keeps its lifecycle result: the
+// assigned seat sleeps idle, the suspended and keep-open seats drain open.
+func TestFinalizeDrainAckStoppedSessionPrunesOnlyItsOwnClose(t *testing.T) {
+	cases := []struct {
+		name              string
+		setup             func(t *testing.T, s *drainAckPruneSeat)
+		closeIfUnassigned bool
+		wantStatus        string
+		wantState         string
+		wantSleepReason   string
+		wantWitness       bool
+	}{
+		{
+			name:              "assigned work",
+			setup:             func(t *testing.T, s *drainAckPruneSeat) { assignWork(t, s.env.store, s.id) },
+			closeIfUnassigned: true,
+			wantStatus:        "open",
+			wantState:         "asleep",
+			wantSleepReason:   "idle",
+		},
+		{
+			name: "operator suspended",
+			setup: func(t *testing.T, s *drainAckPruneSeat) {
+				if _, err := sessionFrontDoor(s.env.store).OperatorSuspend(s.id, s.env.clk.Now()); err != nil {
+					t.Fatalf("OperatorSuspend: %v", err)
+				}
+			},
+			closeIfUnassigned: true,
+			wantStatus:        "open",
+			wantState:         "drained",
+		},
+		{
+			name:       "keep-open finalize",
+			setup:      func(*testing.T, *drainAckPruneSeat) {},
+			wantStatus: "open",
+			wantState:  "drained",
+		},
+		{
+			name: "witness of another observer's close",
+			setup: func(t *testing.T, s *drainAckPruneSeat) {
+				if err := s.env.store.Close(s.id); err != nil {
+					t.Fatalf("Close(%s): %v", s.id, err)
+				}
+			},
+			closeIfUnassigned: true,
+			wantStatus:        "closed",
+			wantWitness:       true,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := newDrainAckPruneSeat(t, nil)
+			before := s.env.sessionInfo(s.id)
+			c.setup(t, s)
+			info := s.env.sessionInfo(s.id)
+			if c.wantWitness {
+				// The witnessing observer's snapshot predates the other close.
+				info = before
+			}
+
+			res := s.finalize(info, c.closeIfUnassigned)
+
+			if res.closed {
+				t.Fatalf("finalize result %+v, want no close of its own", res)
+			}
+			if (res.witnessInfo != nil) != c.wantWitness {
+				t.Fatalf("witness result %v, want %v", res.witnessInfo != nil, c.wantWitness)
+			}
+			got, err := s.env.store.Get(s.id)
+			if err != nil {
+				t.Fatalf("Get(%s): %v", s.id, err)
+			}
+			if got.Status != c.wantStatus {
+				t.Fatalf("status = %q, want %q", got.Status, c.wantStatus)
+			}
+			if c.wantState != "" && got.Metadata["state"] != c.wantState {
+				t.Fatalf("state = %q, want %q", got.Metadata["state"], c.wantState)
+			}
+			if c.wantSleepReason != "" && got.Metadata["sleep_reason"] != c.wantSleepReason {
+				t.Fatalf("sleep_reason = %q, want %q", got.Metadata["sleep_reason"], c.wantSleepReason)
+			}
+			if len(s.removes) != 0 || s.rig.removeInvoked {
+				t.Fatalf("rig-root removals = %q, want none; stderr=%s", s.removes, s.env.stderr.String())
+			}
+		})
+	}
+}
+
+// TestFinalizeDrainAckStoppedSessionKeepsNonPoolWorkerDir (gascity#8093). The
+// drain-ack close reclaims only unnamed pool seats' checkouts, the population
+// the pool-freeable close prunes: a named or non-pool session's worker_dir is
+// a persistent agent home that every git safety gate would otherwise pass.
+func TestFinalizeDrainAckStoppedSessionKeepsNonPoolWorkerDir(t *testing.T) {
+	cases := []struct {
+		name string
+		meta map[string]string
+	}{
+		{name: "named pool session", meta: map[string]string{session.NamedSessionMetadataKey: "true"}},
+		{name: "manual session", meta: map[string]string{poolManagedMetadataKey: "", "session_origin": "manual"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := newDrainAckPruneSeat(t, c.meta)
+
+			res := s.finalize(s.env.sessionInfo(s.id), true)
+
+			if !res.closed {
+				t.Fatalf("finalize result %+v, want the close reported", res)
+			}
+			if status, state := s.status(t); status != "closed" || state != "drained" {
+				t.Fatalf("status/state = %q/%q, want closed/drained", status, state)
+			}
+			if len(s.removes) != 0 || s.rig.removeInvoked {
+				t.Fatalf("rig-root removals = %q, want none for a non-pool home; stderr=%s", s.removes, s.env.stderr.String())
+			}
+		})
 	}
 }

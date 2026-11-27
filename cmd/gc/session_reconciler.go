@@ -1000,10 +1000,14 @@ func finalizeDrainAckStoppedSession(
 			recordStopped(true)
 			// Pool worktrees are transient by design — reclaim disk when the
 			// session bead is retired, same as the stranded-repair and
-			// pool-freeable close paths below. Skipped under safety gates
+			// pool-freeable close paths below. Only unnamed pool seats: a named
+			// or non-pool session's worker_dir is a persistent agent home the
+			// git safety gates alone would not keep. Skipped under safety gates
 			// (uncommitted, unpushed) and overridable via
 			// cfg.Daemon.AutoPruneWorkerDir (gascity#8093).
-			pruneAgentHomeWorktreeIfSafeInfo(info, cityPath, cfg, stderr)
+			if isPoolManagedSessionInfo(info) && !isNamedSessionInfo(info) {
+				pruneAgentHomeWorktreeIfSafeInfo(info, cityPath, cfg, stderr)
+			}
 			// write-returns-Info (Step 6d): the caller's snapshot fold is ApplyPatch(the
 			// ClosePatch) + MarkClosed (closed:true). The raw session.Status="closed"
 			// mirror is deleted — the caller's MarkClosed fold is the sole same-tick
