@@ -1185,13 +1185,14 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 		return 1
 	}
 	store, err := openNudgeBeadStoreErr(target.cityPath)
-	if err != nil || store.Store == nil {
+	nudgeStore := store.Store
+	if err != nil || nudgeStore == nil {
 		fmt.Fprintf(stderr, "gc nudge poll: opening the nudge store for %q: %v\n", target.agentKey(), err) //nolint:errcheck
 		return 1
 	}
 	// Session-class store for the observe read (nudgeObserveTarget); the raw
 	// nudges store keeps flowing to the queue-delivery path. Identity today.
-	sessStore := cliSessionStore(store.Store, target.cfg, target.cityPath)
+	sessStore := cliSessionStore(nudgeStore, target.cfg, target.cityPath)
 	var missingSince time.Time
 	var lastFreeOS time.Time
 	var idleTicksSinceObserve int
@@ -1270,7 +1271,10 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 		if !obs.Running {
 			now := time.Now()
 			if !dormantWakeSettled {
-				dormantWakeSettled = pollDormantQueuedNudgeWake(target, sessionFrontDoor(sessStore), now, stderr)
+				// A provider per attempt, so the mail gate reads the
+				// messages as they are now rather than through an old cache.
+				mp := newMailProviderWithSessionStore(cliMailStore(nudgeStore, target.cfg, target.cityPath).Store, sessStore)
+				dormantWakeSettled = pollDormantQueuedNudgeWake(target, sessionFrontDoor(sessStore), mp, now, stderr)
 			}
 			if shouldKeepNudgePollerAlive(target, missingSince, now) {
 				if missingSince.IsZero() {
@@ -1902,17 +1906,26 @@ func requestManagedNudgeWake(target nudgeTarget, sessFront *session.Store) (sess
 // target's runtime not running. It reads the queue lock-free and writes
 // nothing to it. wanted reports whether a pending, unexpired item with a wake
 // intent remains for target; an item fenced to another session does not
-// count. When none does, or the managed wake's preconditions are not met
-// (managedNudgeWakeSkipReason), it records nothing and reports zero. The wake
+// count, and neither does a mail notice whose message mp reports read or gone
+// (blockedQueuedMailNudgeReason). When none does, or the managed wake's
+// preconditions are not met (managedNudgeWakeSkipReason), it records nothing
+// and reports zero. The wake
 // itself is RequestWakeUnlessHeld's: recorded only on an asleep or drained
 // row nothing holds, and coalesced onto one already pending.
-func requestDormantQueuedNudgeWake(target nudgeTarget, sessFront *session.Store, now time.Time) (outcome session.WakeRequestOutcome, wanted bool, err error) {
+func requestDormantQueuedNudgeWake(target nudgeTarget, sessFront *session.Store, mp mail.Provider, now time.Time) (outcome session.WakeRequestOutcome, wanted bool, err error) {
 	pending, _, _, err := listQueuedNudgesForTargetSnapshot(target.cityPath, target, now)
 	if err != nil {
 		return 0, false, fmt.Errorf("reading queued nudges for %s: %w", target.agentKey(), err)
 	}
 	for _, item := range pending {
 		if !item.WakeIfNeeded || (item.SessionID != "" && item.SessionID != target.sessionID) {
+			continue
+		}
+		_, blocked, mailErr := blockedQueuedMailNudgeReason(mp, item)
+		if mailErr != nil {
+			return 0, false, fmt.Errorf("checking the mail behind queued nudge %s for %s: %w", item.ID, target.agentKey(), mailErr)
+		}
+		if blocked {
 			continue
 		}
 		wanted = true
@@ -1936,8 +1949,8 @@ func requestDormantQueuedNudgeWake(target nudgeTarget, sessFront *session.Store,
 // no item that wants one settles it, while a row that is not dormant yet (a
 // session still stopping) or an error is asked again on a later tick. A
 // failed poke is reported on stderr; the recorded wake still stands.
-func pollDormantQueuedNudgeWake(target nudgeTarget, sessFront *session.Store, now time.Time, stderr io.Writer) bool {
-	outcome, wanted, err := requestDormantQueuedNudgeWake(target, sessFront, now)
+func pollDormantQueuedNudgeWake(target nudgeTarget, sessFront *session.Store, mp mail.Provider, now time.Time, stderr io.Writer) bool {
+	outcome, wanted, err := requestDormantQueuedNudgeWake(target, sessFront, mp, now)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc nudge poll: %v\n", err) //nolint:errcheck
 		return false

@@ -227,7 +227,8 @@ func dispatchQueuedNudges(queue nudgeQueueHandle, cityPath string, cfg *config.C
 			// controller, whose next reconcile reads the recorded wake, so
 			// nothing is poked.
 			detail := ""
-			outcome, wanted, wakeErr := requestDormantQueuedNudgeWake(target, sessionFrontDoor(sessStore), now)
+			mp := newMailProviderWithSessionStore(resolveMailMessagesStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil), sessStore)
+			outcome, wanted, wakeErr := requestDormantQueuedNudgeWake(target, sessionFrontDoor(sessStore), mp, now)
 			switch {
 			case wakeErr != nil:
 				if firstErr == nil {

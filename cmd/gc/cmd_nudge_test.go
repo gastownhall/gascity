@@ -9708,12 +9708,34 @@ func TestRequestDormantQueuedNudgeWake(t *testing.T) {
 			wantOutcome: session.WakeHeld,
 			wantWanted:  true,
 		},
+		{
+			name: "notice whose mail was read wants no wake",
+			prepare: func(t *testing.T, c *queuedNoticeCity) {
+				sleepUnheld(t, c.store, c.id)
+				if err := c.mp.MarkRead(c.msgID); err != nil {
+					t.Fatalf("MarkRead: %v", err)
+				}
+			},
+		},
+		{
+			name: "notice whose mail was deleted wants no wake",
+			prepare: func(t *testing.T, c *queuedNoticeCity) {
+				sleepUnheld(t, c.store, c.id)
+				if err := c.store.Close(c.msgID); err != nil {
+					t.Fatalf("Close(message): %v", err)
+				}
+				if err := c.store.Delete(c.msgID); err != nil {
+					t.Fatalf("Delete(message): %v", err)
+				}
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newQueuedNoticeCity(t)
 			c.stop(t)
 			tc.prepare(t, c)
-			outcome, wanted, err := requestDormantQueuedNudgeWake(c.target, cliSessionFrontDoor(c.store, c.target.cfg, c.dir), time.Now())
+			mp := newMailProviderWithSessionStore(cliMailStore(c.store, c.target.cfg, c.dir).Store, cliSessionStore(c.store, c.target.cfg, c.dir))
+			outcome, wanted, err := requestDormantQueuedNudgeWake(c.target, cliSessionFrontDoor(c.store, c.target.cfg, c.dir), mp, time.Now())
 			if err != nil {
 				t.Fatalf("requestDormantQueuedNudgeWake: %v", err)
 			}
