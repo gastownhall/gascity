@@ -2299,6 +2299,7 @@ go_test(
         "session_beads_named_close_race_test.go",
         "session_beads_provider_chat_test.go",
         "session_beads_retire_rows_canonical_test.go",
+        "session_beads_retired_cleanup_test.go",
         "session_beads_test.go",
         "session_circuit_breaker_test.go",
         "session_circuit_reset_socket_test.go",

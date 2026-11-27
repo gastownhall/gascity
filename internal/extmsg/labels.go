@@ -18,6 +18,7 @@ const (
 	labelGroupParticipantSessionNamePrefix = "extmsg:group:participant:session-name:v1:"
 	labelMembershipBase                    = "gc:extmsg-membership"
 	labelTranscriptStateBase               = "gc:extmsg-transcript-state"
+	labelSessionTeardownBase               = "gc:extmsg-session-teardown"
 
 	labelBindingConversationPrefix = "extmsg:binding:conv:v1:"
 	labelBindingSessionPrefix      = "extmsg:binding:session:v1:"
@@ -35,7 +36,14 @@ const (
 	labelMembershipSessionPrefix   = "extmsg:membership:session:v1:"
 	labelMembershipExactPrefix     = "extmsg:membership:exact:v1:"
 	labelTranscriptStatePrefix     = "extmsg:transcript:state:v1:"
+	labelSessionTeardownSession    = "extmsg:session-teardown:session:v1:"
 )
+
+// sessionTeardownSessionLabel labels the pending-teardown record of one
+// retired session (RecordPendingSessionTeardown).
+func sessionTeardownSessionLabel(sessionID string) string {
+	return labelSessionTeardownSession + strings.TrimSpace(sessionID)
+}
 
 func bindingConversationLabel(ref ConversationRef) string {
 	ref = normalizeConversationRef(ref)

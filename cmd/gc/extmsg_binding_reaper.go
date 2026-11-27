@@ -71,6 +71,45 @@ func reapStaleExtmsgParticipants(ctx context.Context, messaging beads.MailStore,
 	}
 }
 
+// resumePendingExtmsgSessionTeardowns finishes, on each reconciler tick, the
+// external-message teardowns retired-session cleanup recorded as unfinished
+// (cancelStateAssignedToRetiredSessionBead). A teardown cut off by its budget,
+// or failed, leaves the retired session's bindings, participants and
+// memberships open, and no other sweep closes a participant or membership of
+// a session that is gone, so group routing would keep targeting it. The pass
+// runs under its own retiredSessionCleanupLegBudget and stops between
+// teardown items once that ends, leaving the rest to the next tick. Errors
+// are logged and swallowed so a store hiccup never stalls the reconciler loop.
+//
+// It reads and writes the teardown records and the extmsg state through the
+// sessions store as the messaging store (extmsgStoreOverSessions), where the
+// retirement teardown it finishes reads and writes them.
+func resumePendingExtmsgSessionTeardowns(ctx context.Context, sessions beads.SessionStore, now time.Time, stderr io.Writer) {
+	if sessions == (beads.SessionStore{}) {
+		return
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	var stats extmsg.SessionTeardownStats
+	cutOff, err := runRetiredSessionCleanupLeg(ctx, func(ctx context.Context) error {
+		var err error
+		stats, err = extmsg.ResumePendingSessionTeardowns(ctx, extmsgStoreOverSessions(sessions), sessions, now)
+		return err
+	})
+	if stats.Finished > 0 || stats.Dropped > 0 {
+		fmt.Fprintf(stderr, "session reconciler: extmsg session teardowns resumed (finished=%d dropped=%d pending=%d)\n", //nolint:errcheck
+			stats.Finished, stats.Dropped, stats.Pending)
+	}
+	switch {
+	case err == nil:
+	case cutOff:
+		fmt.Fprintf(stderr, "session reconciler: resuming extmsg session teardowns ran out of its %s budget; the next tick goes on: %v\n", retiredSessionCleanupLegBudget, err) //nolint:errcheck
+	default:
+		fmt.Fprintf(stderr, "session reconciler: resuming extmsg session teardowns: %v\n", err) //nolint:errcheck
+	}
+}
+
 // extmsgStoreOverSessions is the sessions store as the messaging store, for
 // the session-retirement paths that still read and write extmsg's
 // (messaging-class) bindings and participants through the sessions store they

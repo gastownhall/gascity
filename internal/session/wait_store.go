@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -452,11 +453,20 @@ func (s *Store) RetryClosedWait(id, nextAttempt string, now time.Time) (WaitInfo
 // CancelWaits marks all non-terminal waits for the session canceled (closing the
 // terminal ones idempotently) and returns every queued wait-nudge ID discovered
 // across capped lookup pages, plus whether any lookup page was capped.
-func (s *Store) CancelWaits(sessionID string, now time.Time) (nudgeIDs []string, capped bool, err error) {
-	return s.cancelWaitsAndCollectNudgeIDs(sessionID, now)
+//
+// Each lookup page closes its non-terminal waits in one CloseAll and its
+// terminal waits in another, whatever ctx is, so a cancellable ctx costs no
+// store call a context that is never canceled does not. ctx is checked before
+// each lookup and before each of those CloseAll calls. Once cancellation is
+// observed CancelWaits returns the nudge IDs and cap it has accumulated with
+// an error wrapping ctx.Err(); waits it did not reach stay open. A store call
+// already in flight is not interrupted, so cancellation can take effect one
+// CloseAll of up to a full lookup page late.
+func (s *Store) CancelWaits(ctx context.Context, sessionID string, now time.Time) (nudgeIDs []string, capped bool, err error) {
+	return s.cancelWaitsAndCollectNudgeIDs(ctx, sessionID, now)
 }
 
-func (s *Store) cancelWaitsAndCollectNudgeIDs(sessionID string, now time.Time) ([]string, bool, error) {
+func (s *Store) cancelWaitsAndCollectNudgeIDs(ctx context.Context, sessionID string, now time.Time) ([]string, bool, error) {
 	ids := []string(nil)
 	seen := map[string]bool{}
 	capped := false
@@ -465,6 +475,9 @@ func (s *Store) cancelWaitsAndCollectNudgeIDs(sessionID string, now time.Time) (
 		"canceled_at": now.UTC().Format(time.RFC3339),
 	}
 	for {
+		if err := waitCancelCheckpoint(ctx, sessionID); err != nil {
+			return ids, capped, err
+		}
 		waits, err := s.WaitsForSession(sessionID)
 		if err != nil && !beads.IsLookupLimitError(err) {
 			return ids, capped, err
@@ -484,15 +497,11 @@ func (s *Store) cancelWaitsAndCollectNudgeIDs(sessionID string, now time.Time) (
 			}
 			cancelIDs = append(cancelIDs, wait.ID)
 		}
-		if len(cancelIDs) > 0 {
-			if _, err := s.store.CloseAll(cancelIDs, canceledMetadata); err != nil {
-				return ids, capped, err
-			}
+		if err := s.closeWaitClass(ctx, sessionID, cancelIDs, canceledMetadata); err != nil {
+			return ids, capped, err
 		}
-		if len(terminalIDs) > 0 {
-			if _, err := s.store.CloseAll(terminalIDs, nil); err != nil {
-				return ids, capped, err
-			}
+		if err := s.closeWaitClass(ctx, sessionID, terminalIDs, nil); err != nil {
+			return ids, capped, err
 		}
 		canceled := len(cancelIDs) + len(terminalIDs)
 		if !lookupCapped {
@@ -502,6 +511,30 @@ func (s *Store) cancelWaitsAndCollectNudgeIDs(sessionID string, now time.Time) (
 			return ids, capped, err
 		}
 	}
+}
+
+// closeWaitClass closes one ID class of a lookup page in a single CloseAll,
+// checking ctx first; an empty class makes no call. Any splitting of the
+// close is the store's: it sizes its own requests, and a smaller batch here
+// would add a store call per batch.
+func (s *Store) closeWaitClass(ctx context.Context, sessionID string, ids []string, metadata map[string]string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	if err := waitCancelCheckpoint(ctx, sessionID); err != nil {
+		return err
+	}
+	_, err := s.store.CloseAll(ids, metadata)
+	return err
+}
+
+// waitCancelCheckpoint reports ctx's cancellation as a wait-cancellation stop
+// for sessionID.
+func waitCancelCheckpoint(ctx context.Context, sessionID string) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("canceling waits for session %s stopped: %w", sessionID, err)
+	}
+	return nil
 }
 
 // ReassignWaits moves open non-terminal waits from one session bead ID to another
@@ -613,7 +646,7 @@ func (s *Store) wakeSessionFromBead(sessionBead beads.Bead, now time.Time) ([]st
 	if state, conflict := lifecycleWakeConflictState(view); conflict {
 		return nil, &WakeConflictError{SessionID: sessionBead.ID, State: state}
 	}
-	nudgeIDs, capped, err := s.cancelWaitsAndCollectNudgeIDs(sessionBead.ID, now)
+	nudgeIDs, capped, err := s.cancelWaitsAndCollectNudgeIDs(context.Background(), sessionBead.ID, now)
 	if err != nil {
 		return nil, err
 	}

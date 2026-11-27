@@ -362,7 +362,7 @@ func TestCancelWaitsAndCollectNudgeIDsReturnsAllNudgesAfterLookupLimit(t *testin
 		}
 	}
 
-	nudgeIDs, capped, err := waitStoreOver(store).CancelWaits(sessionID, now)
+	nudgeIDs, capped, err := waitStoreOver(store).CancelWaits(context.Background(), sessionID, now)
 	if err != nil {
 		t.Fatalf("CancelWaitsAndCollectNudgeIDs: %v", err)
 	}
@@ -412,7 +412,7 @@ func TestCancelWaitsAndCollectNudgeIDsReturnsObservedNudgesOnCancelError(t *test
 	}
 	store := cancelWaitMetadataFailStore{MemStore: mem, failID: wait.ID}
 
-	nudgeIDs, capped, err := waitStoreOver(store).CancelWaits("gc-session", time.Now().UTC())
+	nudgeIDs, capped, err := waitStoreOver(store).CancelWaits(context.Background(), "gc-session", time.Now().UTC())
 	if err == nil || !strings.Contains(err.Error(), "cancel wait metadata failed") {
 		t.Fatalf("CancelWaitsAndCollectNudgeIDs error = %v, want cancel wait metadata failed", err)
 	}
@@ -547,7 +547,7 @@ func TestCancelWaits_CancelsLegacyWaitBeadsWithoutLegacyTypeQuery(t *testing.T) 
 		t.Fatalf("create legacy wait: %v", err)
 	}
 
-	if _, _, err := waitStoreOver(store).CancelWaits("gc-session", time.Now().UTC()); err != nil {
+	if _, _, err := waitStoreOver(store).CancelWaits(context.Background(), "gc-session", time.Now().UTC()); err != nil {
 		t.Fatalf("CancelWaits: %v", err)
 	}
 	updated, err := store.Get(wait.ID)
@@ -889,4 +889,315 @@ func TestHeldForPendingResetAfterAManagerStartConsumedTheReset(t *testing.T) {
 	if w := (WaitInfo{RegisteredEpoch: "3", RegisteredResetPending: true}); w.HeldForPendingReset(info) {
 		t.Fatal("a wait registered after the stale-key recovery is held, though no restart is in flight to consume the reset")
 	}
+}
+
+// contextCancelWaiter is the context-first CancelWaits contract. Tests reach it
+// through a runtime assertion so they compile against a context-free method
+// and report the missing parameter as a failure instead of a build error.
+type contextCancelWaiter interface {
+	CancelWaits(ctx context.Context, sessionID string, now time.Time) ([]string, bool, error)
+}
+
+func contextFirstCancelWaits(t *testing.T, s *Store) contextCancelWaiter {
+	t.Helper()
+	cw, ok := any(s).(contextCancelWaiter)
+	if !ok {
+		t.Fatal("(*Store).CancelWaits does not take a context.Context as its first parameter")
+	}
+	return cw
+}
+
+// cancelWaitsProbeStore counts wait lookups and records every CloseAll batch,
+// and runs an optional hook after each successful call so a test can cancel
+// a context at a chosen store-call boundary.
+type cancelWaitsProbeStore struct {
+	*beads.MemStore
+	lists    int
+	batches  [][]string
+	metadata []map[string]string
+	failAt   int // 1-based CloseAll call that fails; 0 never fails
+	after    func(kind string, n int)
+}
+
+func (s *cancelWaitsProbeStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.lists++
+	items, err := s.MemStore.List(query)
+	if s.after != nil {
+		s.after("list", s.lists)
+	}
+	return items, err
+}
+
+func (s *cancelWaitsProbeStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	s.batches = append(s.batches, append([]string(nil), ids...))
+	s.metadata = append(s.metadata, metadata)
+	if s.failAt == len(s.batches) {
+		return 0, errors.New("close batch failed")
+	}
+	n, err := s.MemStore.CloseAll(ids, metadata)
+	if s.after != nil {
+		s.after("closeall", len(s.batches))
+	}
+	return n, err
+}
+
+func (s *cancelWaitsProbeStore) batchSizes() []int {
+	sizes := make([]int, 0, len(s.batches))
+	for _, b := range s.batches {
+		sizes = append(sizes, len(b))
+	}
+	return sizes
+}
+
+// seedCancelWaits creates pending waits followed by terminal (canceled) open
+// waits for sessionID; nudge IDs repeat every nudgeEvery waits.
+func seedCancelWaits(t *testing.T, store beads.Store, sessionID string, pending, terminal, nudgeEvery int) {
+	t.Helper()
+	for i := 0; i < pending+terminal; i++ {
+		state := "pending"
+		if i >= pending {
+			state = waitStateCanceled
+		}
+		if _, err := store.Create(beads.Bead{
+			Title:  fmt.Sprintf("wait-%d", i),
+			Type:   WaitBeadType,
+			Labels: []string{WaitBeadLabel, "session:" + sessionID},
+			Metadata: map[string]string{
+				"session_id": sessionID,
+				"state":      state,
+				"nudge_id":   fmt.Sprintf("nudge-%d", i%nudgeEvery),
+			},
+		}); err != nil {
+			t.Fatalf("create wait %d: %v", i, err)
+		}
+	}
+}
+
+func openWaitCount(t *testing.T, store beads.Store, sessionID string) int {
+	t.Helper()
+	open, err := store.List(beads.ListQuery{Status: "open", Label: "session:" + sessionID})
+	if err != nil {
+		t.Fatalf("list open waits: %v", err)
+	}
+	return len(open)
+}
+
+// TestCancelWaitsBackgroundBulkCompatibility: a context that can never be
+// canceled keeps one CloseAll per nonempty ID class per lookup page, for
+// CancelWaits and for wake's shared cancellation helper.
+func TestCancelWaitsBackgroundBulkCompatibility(t *testing.T) {
+	const sessionID = "gc-session"
+	// Created newest-last; lookups sort newest first, so page one is the
+	// 1000 newest: all 30 terminal waits plus 970 pending. Page two holds the
+	// remaining 41 pending waits.
+	const pending, terminal = SessionWaitLookupLimit + 11, 30
+
+	t.Run("CancelWaits", func(t *testing.T) {
+		probe := &cancelWaitsProbeStore{MemStore: beads.NewMemStore()}
+		seedCancelWaits(t, probe, sessionID, pending, terminal, 7)
+		probe.lists = 0
+
+		nudgeIDs, capped, err := contextFirstCancelWaits(t, waitStoreOver(probe)).CancelWaits(context.Background(), sessionID, time.Now().UTC())
+		if err != nil {
+			t.Fatalf("CancelWaits: %v", err)
+		}
+		if !capped {
+			t.Fatal("capped = false, want true")
+		}
+		if got, want := probe.batchSizes(), []int{970, 30, 41}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("CloseAll batch sizes = %v, want %v (one per nonempty class per page)", got, want)
+		}
+		if probe.lists != 2 {
+			t.Fatalf("wait lookups = %d, want 2", probe.lists)
+		}
+		if len(nudgeIDs) != 7 {
+			t.Fatalf("nudge IDs = %v, want 7 unique", nudgeIDs)
+		}
+		if got := openWaitCount(t, probe, sessionID); got != 0 {
+			t.Fatalf("open waits = %d, want 0", got)
+		}
+	})
+
+	t.Run("WakeHelper", func(t *testing.T) {
+		probe := &cancelWaitsProbeStore{MemStore: beads.NewMemStore()}
+		sessionBead, err := probe.Create(beads.Bead{
+			Type:     BeadType,
+			Labels:   []string{LabelSession},
+			Metadata: map[string]string{"state": string(StateSuspended), "sleep_reason": "deps"},
+		})
+		if err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		seedCancelWaits(t, probe, sessionBead.ID, pending, terminal, 7)
+		contextFirstCancelWaits(t, waitStoreOver(probe))
+
+		if _, err := waitStoreOver(probe).wakeSessionFromBead(sessionBead, time.Now().UTC()); err != nil {
+			t.Fatalf("wakeSessionFromBead: %v", err)
+		}
+		if got, want := probe.batchSizes(), []int{970, 30, 41}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("CloseAll batch sizes = %v, want %v (one per nonempty class per page)", got, want)
+		}
+		if got := openWaitCount(t, probe, sessionBead.ID); got != 0 {
+			t.Fatalf("open waits = %d, want 0", got)
+		}
+	})
+}
+
+// TestCancelWaitsContextCheckpoints: under a cancellable context CancelWaits
+// makes the same store calls as under a context that is never canceled (one
+// CloseAll per nonempty ID class per lookup page), checks the context before
+// each lookup and each of those CloseAll calls, and once cancellation is
+// observed returns the nudge IDs and cap it accumulated with an error
+// matching ctx.Err().
+func TestCancelWaitsContextCheckpoints(t *testing.T) {
+	const sessionID = "gc-session"
+	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	type run struct {
+		probe    *cancelWaitsProbeStore
+		nudgeIDs []string
+		capped   bool
+		err      error
+	}
+	// cancelAt runs CancelWaits under a cancellable context that is canceled
+	// right after the given store call succeeds ("" never cancels; n == 0
+	// cancels before the first call).
+	cancelAt := func(t *testing.T, pending, terminal int, kind string, n int, failAt int) run {
+		t.Helper()
+		probe := &cancelWaitsProbeStore{MemStore: beads.NewMemStore(), failAt: failAt}
+		seedCancelWaits(t, probe, sessionID, pending, terminal, 1<<30)
+		probe.lists = 0
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		if kind != "" && n == 0 {
+			cancel()
+		}
+		probe.after = func(k string, i int) {
+			if k == kind && i == n {
+				cancel()
+			}
+		}
+		nudgeIDs, capped, err := contextFirstCancelWaits(t, waitStoreOver(probe)).CancelWaits(ctx, sessionID, now)
+		return run{probe: probe, nudgeIDs: nudgeIDs, capped: capped, err: err}
+	}
+	wantCanceled := func(t *testing.T, err error) {
+		t.Helper()
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("CancelWaits error = %v, want one matching context.Canceled", err)
+		}
+	}
+
+	t.Run("SameCallsAsBackground", func(t *testing.T) {
+		// The seed of TestCancelWaitsBackgroundBulkCompatibility: page one is
+		// 970 pending plus all 30 terminal waits, page two the other 41
+		// pending.
+		r := cancelAt(t, SessionWaitLookupLimit+11, 30, "", 0, 0)
+		if r.err != nil {
+			t.Fatalf("CancelWaits: %v", r.err)
+		}
+		if got, want := r.probe.batchSizes(), []int{970, 30, 41}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("CloseAll batch sizes = %v, want %v (one per nonempty class per page)", got, want)
+		}
+		if r.probe.lists != 2 {
+			t.Fatalf("wait lookups = %d, want 2", r.probe.lists)
+		}
+		for i, md := range r.probe.metadata {
+			if pendingBatch := i != 1; pendingBatch != (md["state"] == waitStateCanceled) {
+				t.Fatalf("batch %d metadata = %v, want canceled metadata only on pending batches", i, md)
+			}
+		}
+		if len(r.nudgeIDs) != SessionWaitLookupLimit+41 || !r.capped {
+			t.Fatalf("nudgeIDs/capped = %d/%v, want %d/true", len(r.nudgeIDs), r.capped, SessionWaitLookupLimit+41)
+		}
+		if got := openWaitCount(t, r.probe, sessionID); got != 0 {
+			t.Fatalf("open waits = %d, want 0", got)
+		}
+	})
+
+	t.Run("AlreadyCanceled", func(t *testing.T) {
+		r := cancelAt(t, 5, 0, "list", 0, 0)
+		wantCanceled(t, r.err)
+		if r.probe.lists != 0 || len(r.probe.batches) != 0 {
+			t.Fatalf("lookups/CloseAlls = %d/%d, want 0/0", r.probe.lists, len(r.probe.batches))
+		}
+		if got := openWaitCount(t, r.probe, sessionID); got != 5 {
+			t.Fatalf("open waits = %d, want 5", got)
+		}
+	})
+
+	t.Run("CanceledDuringLookup", func(t *testing.T) {
+		r := cancelAt(t, 5, 0, "list", 1, 0)
+		wantCanceled(t, r.err)
+		if len(r.probe.batches) != 0 {
+			t.Fatalf("CloseAll calls = %d, want 0 after cancellation", len(r.probe.batches))
+		}
+		if len(r.nudgeIDs) != 5 {
+			t.Fatalf("nudgeIDs = %v, want the 5 the lookup observed", r.nudgeIDs)
+		}
+	})
+
+	t.Run("CanceledBetweenClasses", func(t *testing.T) {
+		r := cancelAt(t, 10, 4, "closeall", 1, 0)
+		wantCanceled(t, r.err)
+		if got, want := r.probe.batchSizes(), []int{10}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("CloseAll batch sizes = %v, want %v (no terminal batch)", got, want)
+		}
+		if got := openWaitCount(t, r.probe, sessionID); got != 4 {
+			t.Fatalf("open waits = %d, want the 4 terminal waits left open", got)
+		}
+	})
+
+	t.Run("CanceledBetweenPages", func(t *testing.T) {
+		r := cancelAt(t, SessionWaitLookupLimit+3, 0, "closeall", 1, 0)
+		wantCanceled(t, r.err)
+		if r.probe.lists != 1 {
+			t.Fatalf("wait lookups = %d, want 1 (no second page after cancellation)", r.probe.lists)
+		}
+		if got, want := r.probe.batchSizes(), []int{SessionWaitLookupLimit}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("CloseAll batch sizes = %v, want %v", got, want)
+		}
+		if !r.capped {
+			t.Fatal("capped = false, want the first page's cap")
+		}
+		if len(r.nudgeIDs) != SessionWaitLookupLimit {
+			t.Fatalf("nudgeIDs = %d, want %d", len(r.nudgeIDs), SessionWaitLookupLimit)
+		}
+		if got := openWaitCount(t, r.probe, sessionID); got != 3 {
+			t.Fatalf("open waits = %d, want 3", got)
+		}
+		closed, err := r.probe.List(beads.ListQuery{Status: "closed", Label: "session:" + sessionID})
+		if err != nil {
+			t.Fatalf("list closed waits: %v", err)
+		}
+		if len(closed) != SessionWaitLookupLimit {
+			t.Fatalf("closed waits = %d, want %d", len(closed), SessionWaitLookupLimit)
+		}
+		for _, w := range closed {
+			if w.Metadata["state"] != waitStateCanceled || w.Metadata["canceled_at"] != now.Format(time.RFC3339) {
+				t.Fatalf("closed wait %s metadata = %v, want canceled at %s", w.ID, w.Metadata, now.Format(time.RFC3339))
+			}
+		}
+	})
+
+	t.Run("CanceledDuringFinalCloseAllIsSuccess", func(t *testing.T) {
+		r := cancelAt(t, 15, 0, "closeall", 1, 0)
+		if r.err != nil {
+			t.Fatalf("CancelWaits error = %v, want nil: completed work is not turned into an error", r.err)
+		}
+		if got := openWaitCount(t, r.probe, sessionID); got != 0 {
+			t.Fatalf("open waits = %d, want 0", got)
+		}
+	})
+
+	t.Run("OrdinaryStoreError", func(t *testing.T) {
+		r := cancelAt(t, 20, 10, "", 0, 2)
+		if r.err == nil || !strings.Contains(r.err.Error(), "close batch failed") || errors.Is(r.err, context.Canceled) {
+			t.Fatalf("CancelWaits error = %v, want the store's close batch failure", r.err)
+		}
+		if got, want := r.probe.batchSizes(), []int{20, 10}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("CloseAll batch sizes = %v, want %v (stop at the failing terminal CloseAll)", got, want)
+		}
+		if got := openWaitCount(t, r.probe, sessionID); got != 10 {
+			t.Fatalf("open waits = %d, want the 10 terminal waits left open", got)
+		}
+	})
 }
