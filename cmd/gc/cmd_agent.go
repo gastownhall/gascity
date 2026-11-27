@@ -707,6 +707,12 @@ func doAgentAdd(fs fsys.FS, cityPath, name, promptTemplate, dir string, suspende
 		return 1
 	}
 
+	release, ok := lockCityConfigForCommand(fs, cityPath, "gc agent add", stderr)
+	if !ok {
+		return 1
+	}
+	defer release()
+
 	cfg, err := loadCityConfigFS(fs, tomlPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc agent add: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -980,6 +986,12 @@ func doAgentSuspendOrResume(fs fsys.FS, cityPath, name string, suspended bool, s
 		verb, past = "resume", "Resumed"
 	}
 	tomlPath := filepath.Join(cityPath, "city.toml")
+
+	release, ok := lockCityConfigForCommand(fs, cityPath, "gc agent "+verb, stderr)
+	if !ok {
+		return 1
+	}
+	defer release()
 
 	// Phase 1: load raw config (no expansion) for safe write-back.
 	cfg, err := loadCityConfigForEditFS(fs, tomlPath)

@@ -499,6 +499,11 @@ func (c *builtinImportDoctorCheck) uninspectableWithRetiredTree(scan legacySyste
 func (c *builtinImportDoctorCheck) CanFix() bool { return true }
 
 func (c *builtinImportDoctorCheck) Fix(_ *doctor.CheckContext) error {
+	release, err := lockCityConfigForDoctorFix(c.cityPath)
+	if err != nil {
+		return err
+	}
+	defer release()
 	manifest, err := loadCityImportManifestFS(fsys.OSFS{}, c.cityPath)
 	if err != nil {
 		return fmt.Errorf("reading city.toml manifest: %w", err)

@@ -1979,6 +1979,11 @@ func reverseRigClearedNotes(cityPath string) ([]string, error) {
 // recorded in the journal first, so --abort-reverse can put it back.
 func (r *reverseRun) retireSplit() error {
 	cityPath := r.request.CityPath
+	release, err := lockCityConfig(fsys.OSFS{}, cityPath, r.logPrefix, r.stderr)
+	if err != nil {
+		return err
+	}
+	defer release()
 	tomlPath, err := reverseCityTOMLPath(cityPath)
 	if err != nil {
 		return err
@@ -2320,7 +2325,7 @@ func doStorageAbortReverse(ctx context.Context, request storageOperatorRequest, 
 	if err := infraEngineCrashPoint("abort-reverse rows"); err != nil {
 		return fail(err)
 	}
-	if err := undoReverseRetirement(request.CityPath, journal); err != nil {
+	if err := undoReverseRetirement(request.CityPath, journal, stderr); err != nil {
 		return fail(err)
 	}
 	for _, name := range []string{infraRevertingRecordName, infraReversedManifestName} {
@@ -2435,17 +2440,25 @@ func reverseRigRowsLeftBinding(target infraBindingTarget, journal storageReverse
 
 // undoReverseRetirement puts back what R4 changed: city.toml, unless the
 // operator changed it since (reverseCityTOMLToUndo), the renamed records and
-// the version floor.
-func undoReverseRetirement(cityPath string, journal storageReverseJournal) error {
+// the version floor. It holds the city config lock from its read of
+// city.toml through the restore, writing any wait notice to stderr.
+func undoReverseRetirement(cityPath string, journal storageReverseJournal, stderr io.Writer) error {
+	release, err := lockCityConfig(fsys.OSFS{}, cityPath, "gc storage migrate --abort-reverse", stderr)
+	if err != nil {
+		return err
+	}
 	tomlPath, undo, err := reverseCityTOMLToUndo(cityPath, journal)
 	if err != nil {
+		release()
 		return err
 	}
 	if undo {
 		if err := writeCityTOMLAtomic(tomlPath, []byte(*journal.CityTOMLBefore)); err != nil {
+			release()
 			return err
 		}
 	}
+	release()
 	for _, rn := range journal.Renamed {
 		if fileExists(rn.To) && !fileExists(rn.From) {
 			if err := os.Rename(rn.To, rn.From); err != nil {

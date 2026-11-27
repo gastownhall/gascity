@@ -3,7 +3,9 @@
 // It extracts the load → mutate → validate → write-back pattern used
 // throughout the CLI (cmd/gc) into a reusable package that the API layer
 // can share. All mutations go through [Editor], which serializes access
-// with a mutex and writes atomically via temp file + rename.
+// within one process with a mutex and writes atomically via temp file +
+// rename. Edits from different processes are serialized by [LockCity], which
+// the owner of each edit transaction holds around it.
 package configedit
 
 import (
@@ -69,7 +71,9 @@ const (
 )
 
 // Editor provides serialized, atomic mutations of a city.toml file.
-// It is safe for concurrent use from multiple goroutines.
+// It is safe for concurrent use from multiple goroutines, but it serializes
+// within one process only: a caller that shares the city with other processes
+// holds [LockCity] around each edit, and Editor methods never take it.
 type Editor struct {
 	mu       sync.Mutex
 	tomlPath string

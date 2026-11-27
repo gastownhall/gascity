@@ -27,6 +27,9 @@ import (
 //
 // The body reads as the provisioning pipeline; each numbered step delegates to a
 // helper below so this function stays a readable orchestration.
+//
+// The caller serializes with other config writers through configedit.LockCity
+// (the controller in withConfigTransaction, the CLI in its command).
 func Provision(deps Deps, req ProvisionRequest) (config.Rig, ProvisionResult, error) {
 	if err := validateDeps(deps); err != nil {
 		return config.Rig{}, ProvisionResult{}, err

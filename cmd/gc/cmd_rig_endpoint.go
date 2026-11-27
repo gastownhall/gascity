@@ -168,6 +168,11 @@ func doRigSetEndpoint(fs fsys.FS, cityPath, rigName string, opts rigEndpointOpti
 	}
 
 	tomlPath := filepath.Join(cityPath, "city.toml")
+	release, ok := lockCityConfigForCommand(fs, cityPath, "gc rig set-endpoint", stderr)
+	if !ok {
+		return 1
+	}
+	defer release()
 	cfg, err := loadCityConfigForEditFS(fs, tomlPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig set-endpoint: loading config: %v\n", err) //nolint:errcheck // best-effort stderr

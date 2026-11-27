@@ -141,6 +141,11 @@ func doBeadsCityEndpoint(fs fsys.FS, cityPath string, opts cityEndpointOptions, 
 		return 1
 	}
 
+	release, ok := lockCityConfigForCommand(fs, cityPath, name, stderr)
+	if !ok {
+		return 1
+	}
+	defer release()
 	rawCfg, err := loadCityConfigForEditFS(fs, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: loading config: %v\n", name, err) //nolint:errcheck
