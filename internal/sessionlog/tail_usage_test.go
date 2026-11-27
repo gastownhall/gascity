@@ -607,3 +607,224 @@ func TestExtractTailUsageSinceSpansOversizedTranscriptLine(t *testing.T) {
 		t.Errorf("got %d invocations, want all %d spanning the oversized line", len(got), 2*half)
 	}
 }
+
+func TestExtractTailUsageProvesSpanFromNearestUser(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+	writeTailJSONL(t, path, []map[string]any{
+		{
+			"type": "user", "uuid": "req", "timestamp": "2026-08-31T12:00:00.000Z",
+			"message": map[string]any{"role": "user", "content": "do the thing"},
+		},
+		{
+			"type": "assistant", "uuid": "a1", "parentUuid": "req",
+			"timestamp": "2026-08-31T12:00:05.000Z",
+			"message": map[string]any{
+				"id": "msg_span", "role": "assistant", "model": "claude-opus-4-7",
+				"usage": map[string]any{"input_tokens": 10, "output_tokens": 4},
+			},
+		},
+		// A tool-result user entry is the nearest request for the next block.
+		{
+			"type": "user", "uuid": "tool", "parentUuid": "a1",
+			"timestamp": "2026-08-31T12:00:06.000Z",
+			"message":   map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result"}}},
+		},
+		{
+			"type": "assistant", "uuid": "a2", "parentUuid": "tool",
+			"timestamp": "2026-08-31T12:00:08.000Z",
+			"message": map[string]any{
+				"id": "msg_span", "role": "assistant", "model": "claude-opus-4-7",
+				"usage": map[string]any{"input_tokens": 10, "output_tokens": 4},
+			},
+		},
+	})
+
+	usages, err := ExtractTailUsage(path)
+	if err != nil {
+		t.Fatalf("ExtractTailUsage: %v", err)
+	}
+	if len(usages) != 1 {
+		t.Fatalf("got %d usages, want the collapsed response: %+v", len(usages), usages)
+	}
+	got := usages[0]
+	if got.EntryUUID != "a2" || got.MessageID != "msg_span" {
+		t.Fatalf("identity = %q/%q, want a2/msg_span", got.EntryUUID, got.MessageID)
+	}
+	wantStart := time.Date(2026, 8, 31, 12, 0, 6, 0, time.UTC)
+	wantEnd := time.Date(2026, 8, 31, 12, 0, 8, 0, time.UTC)
+	if !got.StartedAt.Equal(wantStart) || !got.Timestamp.Equal(wantEnd) {
+		t.Fatalf("span = %s .. %s, want tool-result %s .. %s", got.StartedAt, got.Timestamp, wantStart, wantEnd)
+	}
+}
+
+func TestExtractTailUsageLeavesSpanStartUnknown(t *testing.T) {
+	usage := map[string]any{"input_tokens": 3, "output_tokens": 1}
+	cases := []struct {
+		name  string
+		lines []map[string]any
+	}{
+		{
+			name: "no parent",
+			lines: []map[string]any{{
+				"type": "assistant", "uuid": "a", "timestamp": "2026-08-31T12:00:05.000Z",
+				"message": map[string]any{"id": "msg", "role": "assistant", "model": "m", "usage": usage},
+			}},
+		},
+		{
+			name: "parent outside the window",
+			lines: []map[string]any{{
+				"type": "assistant", "uuid": "a", "parentUuid": "missing",
+				"timestamp": "2026-08-31T12:00:05.000Z",
+				"message":   map[string]any{"id": "msg", "role": "assistant", "model": "m", "usage": usage},
+			}},
+		},
+		{
+			name: "user present without a timestamp",
+			lines: []map[string]any{
+				{
+					"type": "user", "uuid": "older", "timestamp": "2026-08-31T11:00:00.000Z",
+					"message": map[string]any{"role": "user", "content": "earlier"},
+				},
+				{
+					"type": "user", "uuid": "blank", "parentUuid": "older",
+					"message": map[string]any{"role": "user", "content": "no clock"},
+				},
+				{
+					"type": "assistant", "uuid": "a", "parentUuid": "blank",
+					"timestamp": "2026-08-31T12:00:05.000Z",
+					"message":   map[string]any{"id": "msg", "role": "assistant", "model": "m", "usage": usage},
+				},
+			},
+		},
+		{
+			name: "cycle",
+			lines: []map[string]any{
+				{
+					"type": "assistant", "uuid": "b", "parentUuid": "a",
+					"message": map[string]any{"role": "assistant"},
+				},
+				{
+					"type": "assistant", "uuid": "a", "parentUuid": "b",
+					"timestamp": "2026-08-31T12:00:05.000Z",
+					"message":   map[string]any{"id": "msg", "role": "assistant", "model": "m", "usage": usage},
+				},
+			},
+		},
+		{
+			name: "logical parent is not a request",
+			lines: []map[string]any{
+				{
+					"type": "user", "uuid": "real-user", "timestamp": "2026-08-31T12:00:00.000Z",
+					"message": map[string]any{"role": "user", "content": "hi"},
+				},
+				{
+					"type": "assistant", "uuid": "a", "logicalParentUuid": "real-user",
+					"timestamp": "2026-08-31T12:00:05.000Z",
+					"message":   map[string]any{"id": "msg", "role": "assistant", "model": "m", "usage": usage},
+				},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "session.jsonl")
+			writeTailJSONL(t, path, tc.lines)
+			usages, err := ExtractTailUsage(path)
+			if err != nil {
+				t.Fatalf("ExtractTailUsage: %v", err)
+			}
+			if len(usages) != 1 {
+				t.Fatalf("got %d usages, want 1: %+v", len(usages), usages)
+			}
+			if !usages[0].StartedAt.IsZero() {
+				t.Fatalf("StartedAt = %s, want unknown", usages[0].StartedAt)
+			}
+			wantEnd := time.Date(2026, 8, 31, 12, 0, 5, 0, time.UTC)
+			if !usages[0].Timestamp.Equal(wantEnd) {
+				t.Fatalf("Timestamp = %s, want %s", usages[0].Timestamp, wantEnd)
+			}
+		})
+	}
+}
+
+func TestExtractTailUsageCollapseKeepsProvenSpanBounds(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+	usage := map[string]any{"input_tokens": 8, "output_tokens": 2}
+	writeTailJSONL(t, path, []map[string]any{
+		{
+			"type": "user", "uuid": "req", "timestamp": "2026-08-31T12:00:00.000Z",
+			"message": map[string]any{"role": "user", "content": "go"},
+		},
+		{
+			"type": "assistant", "uuid": "a1", "parentUuid": "req",
+			"timestamp": "2026-08-31T12:00:04.000Z",
+			"message":   map[string]any{"id": "msg_keep", "role": "assistant", "model": "m", "usage": usage},
+		},
+		// The last block proves neither bound. The earlier block's span stays.
+		{
+			"type": "assistant", "uuid": "a2", "parentUuid": "missing",
+			"message": map[string]any{"id": "msg_keep", "role": "assistant", "model": "m", "usage": usage},
+		},
+	})
+
+	usages, err := ExtractTailUsage(path)
+	if err != nil {
+		t.Fatalf("ExtractTailUsage: %v", err)
+	}
+	if len(usages) != 1 {
+		t.Fatalf("got %d usages, want 1: %+v", len(usages), usages)
+	}
+	got := usages[0]
+	if got.EntryUUID != "a2" {
+		t.Fatalf("EntryUUID = %q, want the last block a2", got.EntryUUID)
+	}
+	wantStart := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	wantEnd := time.Date(2026, 8, 31, 12, 0, 4, 0, time.UTC)
+	if !got.StartedAt.Equal(wantStart) || !got.Timestamp.Equal(wantEnd) {
+		t.Fatalf("span = %s .. %s, want %s .. %s", got.StartedAt, got.Timestamp, wantStart, wantEnd)
+	}
+}
+
+func TestExtractTailUsageKeepsReasoningChannel(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+	writeTailJSONL(t, path, []map[string]any{
+		{
+			"type": "assistant", "uuid": "reasoned",
+			"message": map[string]any{
+				"id": "msg_r", "role": "assistant", "model": "m",
+				"usage": map[string]any{"input_tokens": 4, "output_tokens": 2, "reasoning_tokens": 9},
+			},
+		},
+		{
+			"type": "assistant", "uuid": "reason-only",
+			"message": map[string]any{
+				"id": "msg_only", "role": "assistant", "model": "m",
+				"usage": map[string]any{"reasoning_tokens": 12},
+			},
+		},
+		{
+			"type": "assistant", "uuid": "empty",
+			"message": map[string]any{
+				"id": "msg_empty", "role": "assistant", "model": "m",
+				"usage": map[string]any{"input_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0},
+			},
+		},
+	})
+
+	usages, err := ExtractTailUsage(path)
+	if err != nil {
+		t.Fatalf("ExtractTailUsage: %v", err)
+	}
+	if len(usages) != 2 {
+		t.Fatalf("got %d usages, want reasoned plus reasoning-only: %+v", len(usages), usages)
+	}
+	if usages[0].MessageID != "msg_r" || usages[0].ReasoningTokens != 9 || usages[0].OutputTokens != 2 {
+		t.Fatalf("reasoned = %+v", usages[0])
+	}
+	if usages[1].MessageID != "msg_only" || usages[1].ReasoningTokens != 12 || usages[1].InputTokens != 0 || usages[1].OutputTokens != 0 {
+		t.Fatalf("reasoning-only = %+v", usages[1])
+	}
+}

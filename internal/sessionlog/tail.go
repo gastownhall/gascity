@@ -190,11 +190,12 @@ func splitLines(data []byte) ([][]byte, error) {
 
 // tailEntry is the minimal structure we decode from each JSONL line.
 type tailEntry struct {
-	Type      string          `json:"type"`
-	Subtype   string          `json:"subtype,omitempty"`
-	UUID      string          `json:"uuid"`
-	Message   json.RawMessage `json:"message"`
-	Timestamp tailTime        `json:"timestamp"`
+	Type       string          `json:"type"`
+	Subtype    string          `json:"subtype,omitempty"`
+	UUID       string          `json:"uuid"`
+	ParentUUID string          `json:"parentUuid"`
+	Message    json.RawMessage `json:"message"`
+	Timestamp  tailTime        `json:"timestamp"`
 }
 
 // tailTime decodes a transcript entry timestamp without letting an
@@ -348,6 +349,7 @@ type assistantMessage struct {
 	Usage *struct {
 		InputTokens              int `json:"input_tokens"`
 		OutputTokens             int `json:"output_tokens"`
+		ReasoningTokens          int `json:"reasoning_tokens"`
 		CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 		CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 	} `json:"usage"`

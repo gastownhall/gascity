@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Structured history needs every Codex invocation's usage, not only those in
@@ -36,8 +37,30 @@ func TestReadCodexFileDetachedUsageCoversWholeRollout(t *testing.T) {
 	if got.Model != "gpt-5.5" || got.EntryUUID != "2026-09-06T00:00:03Z" || got.InputTokens != 100 || got.CacheReadTokens != 10 || got.OutputTokens != 40 {
 		t.Fatalf("first invocation = %+v", got)
 	}
+	wantStart, err := time.Parse(time.RFC3339, "2026-09-06T00:00:01Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEnd, err := time.Parse(time.RFC3339, "2026-09-06T00:00:03Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.StartedAt.Equal(wantStart) || !got.Timestamp.Equal(wantEnd) {
+		t.Fatalf("first span = %s .. %s, want %s .. %s (the later duplicate must not move it)", got.StartedAt, got.Timestamp, wantStart, wantEnd)
+	}
 	got = sess.DetachedUsage[1]
 	if got.Model != "gpt-new" || got.InputTokens != 200 || got.OutputTokens != 50 || got.ReasoningTokens != 5 {
 		t.Fatalf("second invocation = %+v", got)
+	}
+	wantStart, err = time.Parse(time.RFC3339, "2026-09-06T00:00:05Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEnd, err = time.Parse(time.RFC3339, "2026-09-06T00:00:07Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.StartedAt.Equal(wantStart) || !got.Timestamp.Equal(wantEnd) {
+		t.Fatalf("second span = %s .. %s, want %s .. %s", got.StartedAt, got.Timestamp, wantStart, wantEnd)
 	}
 }
