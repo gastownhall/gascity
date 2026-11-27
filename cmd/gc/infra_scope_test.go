@@ -36,10 +36,16 @@ const fakeCgroupEnv = "FAKE_CGROUP_SCOPE"
 // fakeInfraScopeName is the fake scope the fake systemd-run moves commands to.
 const fakeInfraScopeName = "fake-infra-scope"
 
+// testSessionIdentityEnv is the session identity gc gives every agent
+// session. The infrastructure scope rule does not read it; the fake host sets
+// it to show that.
+const testSessionIdentityEnv = "GC_SESSION_ID"
+
 // infraScopeHost describes the host facts the infrastructure scope rule
-// reads.
+// reads, and whether the gc process carries a session identity, which does
+// not affect the verdict.
 type infraScopeHost struct {
-	session bool   // the gc process carries GC_SESSION_ID
+	session bool   // the gc process carries GC_SESSION_ID; no effect on the verdict
 	linger  bool   // /var/lib/systemd/linger/<user> exists
 	cgroup  string // the gc process's cgroup v2 path; empty means loginSessionCgroup
 }
@@ -94,9 +100,9 @@ func installInfraScopeHost(t *testing.T, h infraScopeHost) string {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv(infraSliceEnv, "")
 	if h.session {
-		t.Setenv(infraSessionIdentityEnv, "gc-test-session")
+		t.Setenv(testSessionIdentityEnv, "gc-test-session")
 	} else {
-		t.Setenv(infraSessionIdentityEnv, "")
+		t.Setenv(testSessionIdentityEnv, "")
 	}
 
 	lingerDir := filepath.Join(dir, "linger")
@@ -959,31 +965,6 @@ func TestInfraCommandWrapsResolvableExecutable(t *testing.T) {
 	cmd, unit := infraCommand(infraTestDescription, "sh", "-c", "true")
 	if want := infraTestScopeArgv(unit, []string{"sh", "-c", "true"}); !slices.Equal(cmd.Args, want) {
 		t.Fatalf("infraCommand args = %q, want %q", cmd.Args, want)
-	}
-}
-
-// TestProviderLifecycleEnvCarriesSessionIdentity: an agent's gc autostarts
-// the store through the provider script (gc-beads-bd.sh start → gc
-// dolt-state start-managed). That inner gc scopes the Dolt server only if
-// the provider env passes GC_SESSION_ID through, and must not invent one.
-func TestProviderLifecycleEnvCarriesSessionIdentity(t *testing.T) {
-	for _, session := range []bool{true, false} {
-		t.Run(fmt.Sprintf("session=%t", session), func(t *testing.T) {
-			cityPath := t.TempDir()
-			if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[beads]\nprovider = \"bd\"\n"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			want := ""
-			if session {
-				want = "gc-test-session"
-			}
-			// An empty value is no session identity to infraArgv.
-			t.Setenv(infraSessionIdentityEnv, want)
-			env := runtimeEnvEntriesToMap(mustProviderLifecycleProcessEnv(t, cityPath, "exec:"+gcBeadsBdScriptPath(cityPath)))
-			if got := env[infraSessionIdentityEnv]; got != want {
-				t.Fatalf("provider env %s = %q, want %q", infraSessionIdentityEnv, got, want)
-			}
-		})
 	}
 }
 
