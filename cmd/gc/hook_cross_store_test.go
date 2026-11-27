@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"strings"
 	"sync"
 	"testing"
@@ -689,5 +690,219 @@ func TestBestStoreWithWorkOverlapsStoreLegs(t *testing.T) {
 	}
 	if strings.TrimSpace(out) != "[]" || !isZeroHookStore(selected) {
 		t.Fatalf("out = %q, store = %+v; want the no-work answer []", out, selected)
+	}
+}
+
+// hookLegAnswer is one store leg's fixed read result in
+// TestBestStoreWithWorkSelectionIndependentOfCompletionOrder.
+type hookLegAnswer struct {
+	out string
+	err error
+}
+
+// hookSelection is what bestStoreWithWork decided, reduced to what a caller
+// acts on: the output, the store it came from, the class of error and the
+// failed stores passed to noted, in the order they were noted.
+type hookSelection struct {
+	out   string
+	store string
+	err   string
+	noted []string
+}
+
+func hookSelectionErrClass(err error) string {
+	if err == nil {
+		return "nil"
+	}
+	var secondary *hookSecondaryStoreFailure
+	if errors.As(err, &secondary) {
+		dirs := make([]string, 0, len(secondary.failures))
+		for _, f := range secondary.failures {
+			dirs = append(dirs, f.dir)
+		}
+		return "secondary:" + strings.Join(dirs, ",")
+	}
+	return "own:" + err.Error()
+}
+
+// TestBestStoreWithWorkSelectionIndependentOfCompletionOrder pins #5533's
+// selection invariant: reading the store legs concurrently must not change what
+// bestStoreWithWork answers. For each set of fixed per-store results, the
+// answer read one store at a time is the reference, and the same results
+// arriving in store order, reversed, and in a seeded shuffle must give the same
+// output, store, error class and noted stores. Where a store answers early (own
+// in-progress work), the legs still running must be canceled.
+func TestBestStoreWithWorkSelectionIndependentOfCompletionOrder(t *testing.T) {
+	const (
+		inProgress = `[{"id":"ci-1","priority":3,"status":"in_progress","assignee":"me"}]`
+		rigResume  = `[{"id":"va-9","priority":3,"status":"in_progress","assignee":"me"}]`
+		p0         = `[{"id":"va-1","priority":0}]`
+		p1         = `[{"id":"va-2","priority":1}]`
+		p1b        = `[{"id":"vb-2","priority":1}]`
+		p1c        = `[{"id":"ci-2","priority":1}]`
+		p2         = `[{"id":"ci-3","priority":2}]`
+		empty      = `[]`
+		plain      = "va-5 some plain-text row"
+	)
+	errOwn := errors.New("own store read failed")
+	errRig := errors.New("rig store read failed")
+	errDown := fmt.Errorf("%w: %w", errHookRigRuntimeUnavailable, errTestStoreTimeout)
+	plainStores := []hookStore{{dir: "city"}, {dir: "riga", rig: "riga"}, {dir: "rigb", rig: "rigb"}, {dir: "rigc", rig: "rigc"}}
+	// The federated reader pinned to the primary: the extras run their own
+	// single-store command (hookFederationPinnedToPrimary).
+	pinnedStores := []hookStore{{dir: "city"}, {dir: "riga", rig: "riga", command: "single"}, {dir: "rigb", rig: "rigb", command: "single"}, {dir: "rigc", rig: "rigc", command: "single"}}
+
+	// Each row's want* fields are today's one-store-at-a-time answer, so the
+	// serial oracle the schedules are compared against is itself pinned.
+	rows := []struct {
+		name         string
+		stores       []hookStore
+		answers      map[string]hookLegAnswer
+		shortCircuit bool
+		want         hookSelection
+	}{
+		{name: "primary in-progress short-circuit", stores: plainStores, shortCircuit: true, answers: map[string]hookLegAnswer{
+			"city": {out: inProgress}, "riga": {out: p0}, "rigb": {out: empty}, "rigc": {err: errRig},
+		}, want: hookSelection{out: inProgress, store: "city", err: "nil"}},
+		{name: "rank winner", stores: plainStores, answers: map[string]hookLegAnswer{
+			"city": {out: p2}, "riga": {out: p1}, "rigb": {out: p0}, "rigc": {out: empty},
+		}, want: hookSelection{out: p0, store: "rigb", err: "nil"}},
+		// Three stores tie at priority 1; the tie-break clock pinned at 1ns
+		// rotates to index 1 % 3.
+		{name: "pinned tie", stores: plainStores, answers: map[string]hookLegAnswer{
+			"city": {out: p1c}, "riga": {out: p1}, "rigb": {out: p1b}, "rigc": {out: empty},
+		}, want: hookSelection{out: p1, store: "riga", err: "nil"}},
+		{name: "unrankable first-hit", stores: plainStores, answers: map[string]hookLegAnswer{
+			"city": {out: empty}, "riga": {out: plain}, "rigb": {out: p0}, "rigc": {out: p1},
+		}, want: hookSelection{out: plain, store: "riga", err: "nil"}},
+		{name: "served with a failed secondary", stores: plainStores, answers: map[string]hookLegAnswer{
+			"city": {out: p1c}, "riga": {err: errRig}, "rigb": {out: empty}, "rigc": {err: errDown},
+		}, want: hookSelection{out: p1c, store: "city", err: "nil", noted: []string{"riga", "rigc"}}},
+		{name: "primary error with work in a rig", stores: plainStores, answers: map[string]hookLegAnswer{
+			"city": {err: errOwn}, "riga": {out: empty}, "rigb": {out: p1}, "rigc": {out: empty},
+		}, want: hookSelection{out: p1, store: "rigb", err: "nil"}},
+		{name: "primary error with no work anywhere", stores: plainStores, answers: map[string]hookLegAnswer{
+			"city": {err: errOwn}, "riga": {out: empty}, "rigb": {err: errRig}, "rigc": {out: empty},
+		}, want: hookSelection{err: "own:" + errOwn.Error()}},
+		{name: "secondary failures only", stores: plainStores, answers: map[string]hookLegAnswer{
+			"city": {out: empty}, "riga": {err: errRig}, "rigb": {out: empty}, "rigc": {err: errRig},
+		}, want: hookSelection{err: "secondary:riga,rigc"}},
+		{name: "down managed rig", stores: plainStores, answers: map[string]hookLegAnswer{
+			"city": {out: empty}, "riga": {err: errDown}, "rigb": {out: empty}, "rigc": {out: empty},
+		}, want: hookSelection{out: empty, err: "nil", noted: []string{"riga"}}},
+		{name: "federated-pinned primary failure", stores: pinnedStores, answers: map[string]hookLegAnswer{
+			"city": {err: errOwn}, "riga": {out: p0}, "rigb": {err: errRig}, "rigc": {out: empty},
+		}, want: hookSelection{err: "own:" + errOwn.Error()}},
+		{name: "federated-pinned primary failure with a resume answer", stores: pinnedStores, shortCircuit: true, answers: map[string]hookLegAnswer{
+			"city": {err: errOwn}, "riga": {out: empty}, "rigb": {out: rigResume}, "rigc": {out: p0},
+		}, want: hookSelection{out: rigResume, store: "rigb", err: "nil"}},
+	}
+
+	const step = 15 * time.Millisecond
+	type schedule struct {
+		name  string
+		delay func(i, n int) time.Duration
+	}
+	shuffled := rand.New(rand.NewSource(5533)).Perm(len(plainStores))
+	schedules := []schedule{
+		{name: "store order", delay: func(i, _ int) time.Duration { return time.Duration(i) * step }},
+		{name: "reversed", delay: func(i, n int) time.Duration { return time.Duration(n-1-i) * step }},
+		{name: "seeded shuffle", delay: func(i, _ int) time.Duration { return time.Duration(shuffled[i]) * step }},
+	}
+
+	selectWith := func(t *testing.T, stores []hookStore, answers map[string]hookLegAnswer, delay func(i, n int) time.Duration) hookSelection {
+		t.Helper()
+		index := make(map[string]int, len(stores))
+		for i, st := range stores {
+			index[st.dir] = i
+		}
+		run := func(ctx context.Context, _, dir string, _ []string) (string, error) {
+			select {
+			case <-time.After(delay(index[dir], len(stores))):
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+			a, ok := answers[dir]
+			if !ok {
+				t.Errorf("leg read unknown store %q", dir)
+			}
+			return a.out, a.err
+		}
+		var noted []string
+		out, st, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run, func(f *hookStoreReadError) {
+			noted = append(noted, f.dir)
+		})
+		return hookSelection{out: out, store: st.dir, err: hookSelectionErrClass(err), noted: noted}
+	}
+
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			withHookTieBreakClock(t, time.Unix(0, 1))
+			prev := hookStoreLegConcurrency
+			hookStoreLegConcurrency = 1
+			want := selectWith(t, row.stores, row.answers, func(int, int) time.Duration { return 0 })
+			hookStoreLegConcurrency = prev
+			if want.out != row.want.out || want.store != row.want.store || want.err != row.want.err || strings.Join(want.noted, ",") != strings.Join(row.want.noted, ",") {
+				t.Fatalf("one-store-at-a-time selection = %+v, want today's %+v", want, row.want)
+			}
+
+			for _, sched := range schedules {
+				got := selectWith(t, row.stores, row.answers, sched.delay)
+				if got.out != want.out || got.store != want.store || got.err != want.err || strings.Join(got.noted, ",") != strings.Join(want.noted, ",") {
+					t.Errorf("%s: selection = %+v, want the one-store-at-a-time %+v", sched.name, got, want)
+				}
+			}
+
+			if !row.shortCircuit {
+				return
+			}
+			// The answering store is fast and every later leg would take far
+			// longer: an early answer must cancel them, not wait them out.
+			const slow = 5 * time.Second
+			answering := 0
+			for i, st := range row.stores {
+				if st.dir == want.store {
+					answering = i
+				}
+			}
+			later := len(row.stores) - answering - 1
+			canceled := make(chan string, later)
+			run := func(ctx context.Context, _, dir string, _ []string) (string, error) {
+				i := 0
+				for j, st := range row.stores {
+					if st.dir == dir {
+						i = j
+					}
+				}
+				a := row.answers[dir]
+				if i <= answering {
+					return a.out, a.err
+				}
+				select {
+				case <-time.After(slow):
+					return a.out, a.err
+				case <-ctx.Done():
+					canceled <- dir
+					return "", ctx.Err()
+				}
+			}
+			start := time.Now()
+			_, st, err := bestStoreWithWork(context.Background(), "q", row.stores, row.stores[0], run)
+			if err != nil || st.dir != want.store {
+				t.Fatalf("early answer = (%q, %v), want %q", st.dir, err, want.store)
+			}
+			if elapsed := time.Since(start); elapsed >= slow {
+				t.Fatalf("early answer took %s: it waited for the later legs", elapsed)
+			}
+			// Cancellation reaches the later legs asynchronously.
+			timeout := time.After(slow)
+			for n := 0; n < later; n++ {
+				select {
+				case <-canceled:
+				case <-timeout:
+					t.Fatalf("%d of %d later legs observed ctx.Done() after the early answer", n, later)
+				}
+			}
+		})
 	}
 }
