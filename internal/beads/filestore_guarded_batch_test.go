@@ -127,3 +127,81 @@ func TestFileStoreGuardedBatchSeesAnotherProcessWrite(t *testing.T) {
 		t.Errorf("reopened %s metadata owner = %q, want %q; store A's batch overwrote store B's write", row.ID, got.Metadata["owner"], "b")
 	}
 }
+
+// TestHistoryStorageCommitSurvivesReopen proves that the fence, journal row and
+// explicit cursor are persisted together, rather than only observed in a cache.
+func TestHistoryStorageCommitSurvivesReopen(t *testing.T) {
+	for _, backend := range []string{"file", "sqlite"} {
+		t.Run(backend, func(t *testing.T) {
+			dir := t.TempDir()
+			open := func() beads.Store {
+				t.Helper()
+				if backend == "file" {
+					s, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(dir, "beads.json"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					return s
+				}
+				s, err := beads.OpenSQLiteStore(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					if err := s.(*beads.SQLiteStore).CloseStore(); err != nil {
+						t.Errorf("closing SQLite store: %v", err)
+					}
+				})
+				return s
+			}
+			closeStore := func(s beads.Store) {
+				t.Helper()
+				if sqlite, ok := s.(*beads.SQLiteStore); ok {
+					if err := sqlite.CloseStore(); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			s := open()
+			session, err := s.Create(beads.Bead{Title: "session", Metadata: map[string]string{"generation": "1"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cursor, err := s.Create(beads.Bead{Title: "cursor", Metadata: map[string]string{"sequence": "0"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			batcher, ok := beads.GuardedBatcherFor(s)
+			if !ok {
+				t.Fatalf("%T has no guarded batches", s)
+			}
+			recordID := "gc-historyproof"
+			_, err = batcher.ApplyGuarded(t.Context(), beads.GuardedBatch{Items: []beads.GuardedItem{
+				{Create: &beads.Bead{ID: recordID, Title: "retained journal", Metadata: map[string]string{"session_id": session.ID, "generation": "2", "sequence": "1"}}},
+				{Update: &beads.GuardedUpdate{ID: cursor.ID, ExpectedRevision: &cursor.Revision, Opts: beads.UpdateOpts{Metadata: map[string]string{"sequence": "1"}}}},
+				{Update: &beads.GuardedUpdate{ID: session.ID, ExpectedRevision: &session.Revision, Opts: beads.UpdateOpts{Metadata: map[string]string{"generation": "2"}}}},
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			closeStore(s)
+			reopened := open()
+			defer closeStore(reopened)
+			for _, check := range []struct{ id, key, want string }{
+				{session.ID, "generation", "2"},
+				{cursor.ID, "sequence", "1"},
+				{recordID, "session_id", session.ID},
+				{recordID, "generation", "2"},
+				{recordID, "sequence", "1"},
+			} {
+				row, err := reopened.Get(check.id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if row.Metadata[check.key] != check.want {
+					t.Errorf("reopened %s %s=%q, want %q", check.id, check.key, row.Metadata[check.key], check.want)
+				}
+			}
+		})
+	}
+}
