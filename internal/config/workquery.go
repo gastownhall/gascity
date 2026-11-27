@@ -1014,6 +1014,46 @@ func standardAssignedReadyWorkQueryScript(topo QueryTopology) string {
 		`done; `
 }
 
+// hasConfiguredPoolTemplate reports whether a is configured as a pool
+// template — the identity ready work can be assigned to before it is claimed
+// down to a specific instance. Gated on MinActiveSessions alone, not the
+// broader SupportsInstanceExpansion condition (session_capacity.go), which
+// also fires on a bare ScaleCheck override with no pool membership; that
+// wider condition would add this tier's script for agents that never
+// configure a template identity at all.
+func (a *Agent) hasConfiguredPoolTemplate() bool {
+	if a == nil {
+		return false
+	}
+	return a.MinActiveSessions != nil
+}
+
+// templateAssignedReadyTierScript adds a fallback read for ready work
+// assigned directly to a pool's shared template identity. A configured
+// pool member ($GC_TEMPLATE set, $GC_SESSION_ORIGIN "ephemeral" or unset,
+// mirroring the pool-demand gate) queries the template identity only after
+// every concrete identity above it has come up empty, so ready work assigned
+// to the template — not yet claimed down to any specific instance — stays
+// discoverable. Like the concrete-identity loop, it follows the ordinary
+// ready read with the ephemeral (wisp) probe on non-1.0.5 bd compatibility,
+// so template-assigned wisps are found there too. It runs after the
+// graph-anchor tiers, so an anchored session resumes its own workflow before
+// it looks at template work. Named/manual sessions and non-pool agents never
+// match the case guard, and a session from a different pool never matches
+// the exact-assignee read, so the tier is a no-op for them.
+func templateAssignedReadyTierScript(a *Agent, topo QueryTopology) string {
+	if !a.hasConfiguredPoolTemplate() {
+		return ""
+	}
+	return `if [ -n "$GC_TEMPLATE" ]; then case "$GC_SESSION_ORIGIN" in ` +
+		`ephemeral|"") ` +
+		assignedReadyTierCommand("GC_TEMPLATE", topo) +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		ephemeralAssignedReadyProbeScript("GC_TEMPLATE", topo) +
+		`;; ` +
+		`esac; fi; `
+}
+
 func legacyControlAssignedWorkQueryScript(topo QueryTopology) string {
 	return legacyControlAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo) +
 		legacyControlAssignedReadyWorkQueryScript(topo)
@@ -1372,6 +1412,7 @@ func buildWorkQuery(a *Agent, topo QueryTopology) string {
 			assignedGraphWorkflowAnchorReadyFunctionScript(topo) +
 			`probe_assigned_graph_anchor_ready "$1"; ` +
 			graphWorkflowAnchorFallbackBeforeFreshPoolScript() +
+			templateAssignedReadyTierScript(a, topo) +
 			`probe_pool_demand "$1"; ` +
 			`printf "[]"`
 		return shellquote.Join([]string{"sh", "-c", script, "--", target})
@@ -1432,7 +1473,7 @@ func buildAssignedReadyQuery(a *Agent, topo QueryTopology) string {
 	if legacyWorkflowControlQualifiedName(target) != "" {
 		return shellquote.Join([]string{"sh", "-c", legacyControlAssignedReadyWorkQueryScript(topo) + `printf "[]"`})
 	}
-	return shellquote.Join([]string{"sh", "-c", standardAssignedReadyWorkQueryScript(topo) + `printf "[]"`})
+	return shellquote.Join([]string{"sh", "-c", standardAssignedReadyWorkQueryScript(topo) + templateAssignedReadyTierScript(a, topo) + `printf "[]"`})
 }
 
 // EffectiveRoutedPoolQuery returns the routed-pool-only command for prompt
