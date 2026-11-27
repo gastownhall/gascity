@@ -565,12 +565,19 @@ func startManagedDoltSQLServerWithTestWatchdog(cityPath, configFile, logFilePath
 		_ = os.Remove(disarmFile)
 		return managedDoltStartedProcess{}, fmt.Errorf("start dolt test watchdog: %w", err)
 	}
+	// Snapshot the watchdog's start identity while it is definitely alive, before
+	// the handshake read: if the read fails, the cleanup below re-verifies the
+	// PID against this snapshot so a reused PID is never signaled.
+	watchdogPID := cmd.Process.Pid
+	watchdogTicks, watchdogIdentity := snapshotManagedDoltStartIdentity(watchdogPID)
 	if parentPipeRead != nil {
 		_ = parentPipeRead.Close()
 	}
-	pid, err := readManagedDoltTestWatchdogPID(stdout, cmd.Process.Pid)
+	pid, err := readManagedDoltTestWatchdogPID(stdout, watchdogPID)
 	if err != nil {
-		_ = terminateManagedDoltPID(cityPath, cmd.Process.Pid)
+		_ = terminateManagedDoltPIDGuarded(cityPath, watchdogPID, func() bool {
+			return managedDoltPIDStartIdentityMatches(watchdogPID, watchdogTicks, watchdogIdentity)
+		})
 		_ = cmd.Wait()
 		if parentPipeWrite != nil {
 			_ = parentPipeWrite.Close()
@@ -1112,8 +1119,9 @@ func terminateManagedDoltPID(cityPath string, pid int) error {
 // pidAlive then reports the reused process as alive, the grace runs to its
 // deadline, and a bare-PID SIGKILL would land on the stranger. Re-verifying just
 // before the kill closes that window. A nil guard keeps the legacy unconditional
-// behavior for callers that never snapshotted an identity (test watchdog,
-// recovery cleanup, pre-handshake scope watchdog).
+// behavior for callers that never snapshotted an identity (recovery cleanup,
+// terminateManagedDoltTestPID, and runManagedDoltTestWatchdog's teardown of its
+// own dolt child).
 func terminateManagedDoltPIDGuarded(cityPath string, pid int, identityMatches func() bool) error {
 	if pid <= 0 {
 		return nil
