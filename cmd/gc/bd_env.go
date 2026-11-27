@@ -1440,6 +1440,10 @@ func resolvedRuntimeCityDoltTarget(cityPath string, allowRecovery bool) (contrac
 }
 
 func resolvedRuntimeCityDoltTargetContext(ctx context.Context, cityPath string, allowRecovery bool) (contract.DoltConnectionTarget, bool, error) {
+	return resolveRuntimeCityDoltTarget(ctx, cityPath, allowRecovery, nil)
+}
+
+func resolveRuntimeCityDoltTarget(ctx context.Context, cityPath string, allowRecovery bool, persistedRemote func(string) (contract.DoltConnectionTarget, bool)) (contract.DoltConnectionTarget, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return contract.DoltConnectionTarget{}, false, err
 	}
@@ -1488,6 +1492,11 @@ func resolvedRuntimeCityDoltTargetContext(ctx context.Context, cityPath string, 
 	if port := recoveredManagedDoltPort(); port != "" {
 		return contract.DoltConnectionTarget{Host: defaultManagedDoltHost, Port: port}, true, nil
 	}
+	if managedRuntimeErr == nil && persistedRemote != nil {
+		if target, ok := persistedRemote(cityPath); ok {
+			return target, true, nil
+		}
+	}
 	if allowRecovery && !cityDoltReadinessBelongsToBd(cityPath) {
 		if err := healthBeadsProviderContext(ctx, cityPath, false); err == nil {
 			resetRecoveryCache()
@@ -1518,6 +1527,37 @@ func resolvedRuntimeCityDoltTargetContext(ctx context.Context, cityPath string, 
 		return contract.DoltConnectionTarget{}, false, managedRuntimeErr
 	}
 	return contract.DoltConnectionTarget{}, false, nil
+}
+
+// A ready provider-owned direct remote city can have only bd's persisted TCP
+// binding, with no GC-authoritative config or managed runtime to recover.
+// Use it only for an exact city command, never as an inherited rig target.
+func readyProviderRemoteCityDoltTarget(cityPath string) (contract.DoltConnectionTarget, bool) {
+	empty := contract.DoltConnectionTarget{}
+	if !cityUsesBdStoreContract(cityPath) || scopeStoreLivesInTheCitysManagedDolt(cityPath, cityPath) {
+		return empty, false
+	}
+	entry, owned, err := providerScopeOwnership(cityPath, cityPath)
+	if err != nil || !owned || entry.State != providerScopeReady {
+		return empty, false
+	}
+	fs := fsys.OSFS{}
+	path := scopeMetadataJSONPath(cityPath)
+	meta, exists, err := contract.LoadMetadataState(fs, path)
+	if err != nil || !exists || meta.Backend != "dolt" || meta.DoltMode != "server" {
+		return empty, false
+	}
+	binding, bound, err := contract.ReadPersistedServerBinding(fs, path)
+	if err != nil || !bound || binding.DoltSocket != "" || managedLocalDoltHost(binding.DoltHost) {
+		return empty, false
+	}
+	// Respect the contract's local-sidecar and managed-runtime precedence.
+	// A missing or ambiguous answer stays on the existing recovery path.
+	target, err := contract.ResolveDoltConnectionTarget(fs, cityPath, cityPath)
+	if err != nil || !target.External || target.Socket != "" || target.Host != binding.DoltHost || target.Port != binding.DoltPort {
+		return empty, false
+	}
+	return target, true
 }
 
 func managedLocalDoltEnv(env map[string]string) bool {
@@ -1769,7 +1809,13 @@ func applyResolvedCityDoltEnv(env map[string]string, cityPath string, allowRecov
 }
 
 func applyResolvedCityDoltEnvContext(ctx context.Context, env map[string]string, cityPath string, allowRecovery bool) error {
-	target, ok, err := resolvedRuntimeCityDoltTargetContext(ctx, cityPath, allowRecovery)
+	return applyResolvedCityDoltEnvUsing(ctx, env, cityPath, allowRecovery, resolvedRuntimeCityDoltTargetContext)
+}
+
+type cityDoltTargetResolver func(context.Context, string, bool) (contract.DoltConnectionTarget, bool, error)
+
+func applyResolvedCityDoltEnvUsing(ctx context.Context, env map[string]string, cityPath string, allowRecovery bool, resolve cityDoltTargetResolver) error {
+	target, ok, err := resolve(ctx, cityPath, allowRecovery)
 	if err != nil {
 		return err
 	}
@@ -2103,6 +2149,16 @@ func bdRuntimeEnvWithErrorRecovery(cityPath string, allowRecovery bool) (map[str
 }
 
 func bdRuntimeEnvWithErrorRecoveryContext(ctx context.Context, cityPath string, allowRecovery bool) (map[string]string, error) {
+	return bdRuntimeEnvWithResolver(ctx, cityPath, allowRecovery, resolvedRuntimeCityDoltTargetContext)
+}
+
+func bdRuntimeEnvForCityCommand(cityPath string) (map[string]string, error) {
+	return bdRuntimeEnvWithResolver(context.Background(), cityPath, true, func(ctx context.Context, path string, allowRecovery bool) (contract.DoltConnectionTarget, bool, error) {
+		return resolveRuntimeCityDoltTarget(ctx, path, allowRecovery, readyProviderRemoteCityDoltTarget)
+	})
+}
+
+func bdRuntimeEnvWithResolver(ctx context.Context, cityPath string, allowRecovery bool, resolve cityDoltTargetResolver) (map[string]string, error) {
 	cached, stamp, ok := cachedProxiedScopeRuntimeEnv(cityPath, cityPath)
 	if ok {
 		return cached, nil
@@ -2195,7 +2251,7 @@ func bdRuntimeEnvWithErrorRecoveryContext(ctx context.Context, cityPath string, 
 	} else if bound {
 		return env, nil
 	}
-	if err := applyResolvedCityDoltEnvContext(ctx, env, cityPath, allowRecovery); err != nil {
+	if err := applyResolvedCityDoltEnvUsing(ctx, env, cityPath, allowRecovery, resolve); err != nil {
 		clearProjectedDoltEnv(env)
 		mirrorBeadsDoltEnv(env)
 		if isRecoverableManagedDoltEnvError(err) {
