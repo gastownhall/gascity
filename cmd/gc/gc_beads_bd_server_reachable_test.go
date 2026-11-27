@@ -63,10 +63,10 @@ func TestServerReachableReflectsDoltExit(t *testing.T) {
 				"DOLT_USER=root",
 				"DOLT_PASSWORD=",
 			)
-			runErr := cmd.Run()
+			output, runErr := cmd.CombinedOutput()
 			gotOK := runErr == nil
 			if gotOK != tc.wantOK {
-				t.Fatalf("server_reachable ok=%v, want %v (fake dolt exit %d)", gotOK, tc.wantOK, tc.doltExit)
+				t.Fatalf("server_reachable ok=%v, want %v (fake dolt exit %d); command error: %v; output:\n%s", gotOK, tc.wantOK, tc.doltExit, runErr, output)
 			}
 		})
 	}
