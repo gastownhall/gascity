@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/inputadmission"
 )
 
@@ -262,5 +263,102 @@ func TestHookClaimInputAdmissionReadErrorFailsLoud(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), "no_work") {
 		t.Fatalf("stdout = %q, laundered an admission failure into a no_work drain", stdout.String())
+	}
+}
+
+// TestClassRoutedHookWithholdsUnreadyInput pins the split-city seam: the
+// override judges across the two legs a relocated workflow spans — the root
+// and step in the binding, the held input in the work store — so the gate
+// withholds the binding-resident step and writes nothing in either leg, and
+// a clean input keeps the step served.
+func TestClassRoutedHookWithholdsUnreadyInput(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		hold     bool
+		wantKept int
+	}{
+		{name: "held work-side input withholds the binding step", hold: true},
+		{name: "clean input keeps the step served", wantKept: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newDoneWorkflowSplitFixture(t, false)
+			if tc.hold {
+				if err := f.work.Update(f.source.ID, beads.UpdateOpts{Labels: []string{"hold:external"}}); err != nil {
+					t.Fatalf("holding input: %v", err)
+				}
+			}
+			base := f.baseOps(t)
+			base.InputAdmission = func(context.Context, string, []string, []beads.Bead) (map[string]inputadmission.Withhold, error) {
+				t.Fatal("the split override judges across both legs, never through the base seam")
+				return nil, nil
+			}
+			ops := classRoutedHookClaimOps(base, f.route)
+			var stderr bytes.Buffer
+			kept, withheld, err := withholdInputGatedCandidates([]beads.Bead{f.step}, hookClaimOptions{
+				Assignee:     "worker-1",
+				RouteTargets: []string{"worker"},
+			}, ops, "/work", &stderr)
+			if err != nil {
+				t.Fatalf("withholdInputGatedCandidates: %v", err)
+			}
+			if len(kept) != tc.wantKept || withheld != tc.hold {
+				t.Fatalf("kept %d candidates, withheld=%v (stderr=%q), want %d, %v", len(kept), withheld, stderr.String(), tc.wantKept, tc.hold)
+			}
+			if tc.hold {
+				for _, want := range []string{"withheld " + f.step.ID, "input " + f.source.ID, "convoy " + f.convoyID, "workflow root " + f.root.ID} {
+					if !strings.Contains(stderr.String(), want) {
+						t.Fatalf("stderr = %q, want it to name %q", stderr.String(), want)
+					}
+				}
+			}
+			f.assertOpen(t, f.root.ID, f.step.ID) // the gate writes nothing
+		})
+	}
+}
+
+// TestDivergenceTreatsWithheldInputAsBenign pins the classifier's read of the
+// claim path's own seam: a controller-counted row the hook could not claim
+// because its input is not ready is correct pull, the bucket a held row lands
+// in, and a judgment that fails is a failed read of the trigger, never either
+// verdict.
+func TestDivergenceTreatsWithheldInputAsBenign(t *testing.T) {
+	routed := map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"}
+	bead := beads.Bead{ID: "wb-1", Status: "open", Type: "task", Metadata: routed}
+	for _, tt := range []struct {
+		name      string
+		withheld  map[string]inputadmission.Withhold
+		err       error
+		wantClass string
+		wantStat  string
+	}{
+		{
+			name:      "withheld is benign",
+			withheld:  map[string]inputadmission.Withhold{"wb-1": {Reason: inputadmission.ReasonHeld, RootID: "r", ConvoyID: "c", InputID: "i"}},
+			wantClass: events.DemandClaimBenign,
+			wantStat:  "open",
+		},
+		{
+			name:      "judgment failure is unknown",
+			err:       errors.New("convoy read failed"),
+			wantClass: events.DemandClaimUnknown,
+			wantStat:  demandTriggerUnreadable,
+		},
+		{
+			name:      "admissible is divergence",
+			withheld:  map[string]inputadmission.Withhold{},
+			wantClass: events.DemandClaimDivergence,
+			wantStat:  "open",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := demandDivergenceOpsForBlockedBead(bead, nil, false, nil)
+			ops.InputAdmission = func(context.Context, string, []string, []beads.Bead) (map[string]inputadmission.Withhold, error) {
+				return tt.withheld, tt.err
+			}
+			status, class := classifyDemandTrigger(bead.ID, "/rig", divergenceOptions(), ops)
+			if class != tt.wantClass || status != tt.wantStat {
+				t.Fatalf("classification = (%q, %q), want (%q, %q)", status, class, tt.wantStat, tt.wantClass)
+			}
+		})
 	}
 }
