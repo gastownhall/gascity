@@ -1904,26 +1904,27 @@ func requestManagedNudgeWake(target nudgeTarget, sessFront *session.Store) (sess
 // requestDormantQueuedNudgeWake records the managed wake that target's queued
 // nudges declared (queuedNudge.WakeIfNeeded), for an observer that found
 // target's runtime not running. It reads the queue lock-free and writes
-// nothing to it. wanted reports whether a pending, unexpired item with a wake
-// intent remains for target; an item fenced to another session does not
-// count, and neither does a mail notice whose message mp reports read or gone
-// (blockedQueuedMailNudgeReason). When none does, or the managed wake's
-// preconditions are not met (managedNudgeWakeSkipReason), it records nothing
-// and reports zero. The wake
-// itself is RequestWakeUnlessHeld's: recorded only on an asleep or drained
-// row nothing holds, and coalesced onto one already pending.
-func requestDormantQueuedNudgeWake(target nudgeTarget, sessFront *session.Store, mp mail.Provider, now time.Time) (outcome session.WakeRequestOutcome, wanted bool, err error) {
+// nothing to it. It asks for the wake only while a pending, unexpired item
+// with a wake intent remains for target; an item fenced to another session
+// does not count, and neither does a mail notice whose message mp reports
+// read or gone (blockedQueuedMailNudgeReason). When none does, or the managed
+// wake's preconditions are not met (managedNudgeWakeSkipReason), it records
+// nothing and reports zero. The wake itself is RequestWakeUnlessHeld's:
+// recorded only on an asleep or drained row nothing holds, and coalesced onto
+// one already pending.
+func requestDormantQueuedNudgeWake(target nudgeTarget, sessFront *session.Store, mp mail.Provider, now time.Time) (session.WakeRequestOutcome, error) {
 	pending, _, _, err := listQueuedNudgesForTargetSnapshot(target.cityPath, target, now)
 	if err != nil {
-		return 0, false, fmt.Errorf("reading queued nudges for %s: %w", target.agentKey(), err)
+		return 0, fmt.Errorf("reading queued nudges for %s: %w", target.agentKey(), err)
 	}
+	wanted := false
 	for _, item := range pending {
 		if !item.WakeIfNeeded || (item.SessionID != "" && item.SessionID != target.sessionID) {
 			continue
 		}
 		_, blocked, mailErr := blockedQueuedMailNudgeReason(mp, item)
 		if mailErr != nil {
-			return 0, false, fmt.Errorf("checking the mail behind queued nudge %s for %s: %w", item.ID, target.agentKey(), mailErr)
+			return 0, fmt.Errorf("checking the mail behind queued nudge %s for %s: %w", item.ID, target.agentKey(), mailErr)
 		}
 		if blocked {
 			continue
@@ -1932,41 +1933,45 @@ func requestDormantQueuedNudgeWake(target nudgeTarget, sessFront *session.Store,
 		break
 	}
 	if !wanted || managedNudgeWakeSkipReason(target, sessFront.Backed()) != "" {
-		return 0, false, nil
+		return 0, nil
 	}
-	outcome, err = requestManagedNudgeWake(target, sessFront)
+	outcome, err := requestManagedNudgeWake(target, sessFront)
 	if err != nil {
-		return 0, true, fmt.Errorf("requesting managed wake for %s: %w", target.agentKey(), err)
+		return 0, fmt.Errorf("requesting managed wake for %s: %w", target.agentKey(), err)
 	}
-	return outcome, true, nil
+	return outcome, nil
 }
 
 // pollDormantQueuedNudgeWake is the poll loop's dormant-session arm: it
 // records the wake target's queued nudges declared
 // (requestDormantQueuedNudgeWake) and pokes the controller when one is
 // recorded. It reports whether this dormant spell is settled, so the loop
-// does not ask again until the session has run: a recorded wake, a hold, or
-// no item that wants one settles it, while a row that is not dormant yet (a
-// session still stopping) or an error is asked again on a later tick. A
-// failed poke is reported on stderr; the recorded wake still stands.
+// does not ask again until the session has run. Only a recorded wake, which
+// the controller serves, or a hold, which keeps the notice queued until it
+// is released (CONTRACT v5.9 D8), settles it. Every other answer is asked
+// again on a later tick, because the queue and the row still move while the
+// session sleeps: no item that wants a wake yet (a notice leased to a
+// claimer that died with the session's run reads as pending again once the
+// lease lapses), a row that is not dormant yet (a session still stopping), a
+// managed-wake precondition that is not met, or an error. A failed poke is
+// reported on stderr; the recorded wake still stands.
 func pollDormantQueuedNudgeWake(target nudgeTarget, sessFront *session.Store, mp mail.Provider, now time.Time, stderr io.Writer) bool {
-	outcome, wanted, err := requestDormantQueuedNudgeWake(target, sessFront, mp, now)
+	outcome, err := requestDormantQueuedNudgeWake(target, sessFront, mp, now)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc nudge poll: %v\n", err) //nolint:errcheck
 		return false
 	}
-	if !wanted {
-		return true
-	}
 	switch outcome {
-	case session.WakeNotDormant:
-		return false
 	case session.WakeRecorded:
 		if err := nudgePokeController(target.cityPath, reconcilekey.Session(target.sessionID)); err != nil {
 			fmt.Fprintf(stderr, "gc nudge poll: warning: poke failed after managed wake for %s: %v\n", target.agentKey(), err) //nolint:errcheck
 		}
+		return true
+	case session.WakeHeld:
+		return true
+	default:
+		return false
 	}
-	return true
 }
 
 // managedNudgeWakeSkipReason names the first missing precondition of the

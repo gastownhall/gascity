@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"sort"
 	"time"
 
@@ -371,6 +372,42 @@ func RunNudgeFrontDoorTests(r Runner, suite NudgesSuite) {
 		if len(state.InFlight) != 2 {
 			r.Errorf("Snapshot in-flight = %v, want both claimed nudges", nudgeIDs(state.InFlight))
 		}
+	})
+
+	// An observer that finds a session dormant reads the wake intent off the
+	// queue's lock-free Snapshot, where an in-flight item whose lease lapsed
+	// reads as pending again, so the intent has to survive every read and a
+	// claim.
+	r.Run("WakeIfNeededRoundTrips", func(r Runner) {
+		queue := mustQueue(r, suite)
+		now := time.Now().UTC()
+		notice := nudgeItem("n-wakes", "", now)
+		notice.WakeIfNeeded = true
+		for _, item := range []nudgequeue.Item{notice, nudgeItem("n-waits", "", now)} {
+			if err := queue.Enqueue(item); err != nil {
+				r.Fatalf("Enqueue(%s): %v", item.ID, err)
+			}
+		}
+		want := map[string]bool{"n-wakes": true, "n-waits": false}
+		pending, _, _, err := queue.ListForAgent(ConformanceNudgeAgent, now)
+		if err != nil {
+			r.Fatalf("ListForAgent: %v", err)
+		}
+		assertWakeIntents(r, "ListForAgent pending", pending, want)
+		state, err := queue.Snapshot()
+		if err != nil {
+			r.Fatalf("Snapshot: %v", err)
+		}
+		assertWakeIntents(r, "Snapshot pending", state.Pending, want)
+		claimed, err := queue.ClaimDue(storebinding.ClaimTarget{QueueKeys: []string{ConformanceNudgeAgent}}, now)
+		if err != nil {
+			r.Fatalf("ClaimDue: %v", err)
+		}
+		assertWakeIntents(r, "ClaimDue", claimed, want)
+		if state, err = queue.Snapshot(); err != nil {
+			r.Fatalf("Snapshot after the claim: %v", err)
+		}
+		assertWakeIntents(r, "Snapshot in-flight", state.InFlight, want)
 	})
 
 	// Maintain is the whole-queue recovery pass the delivery verbs no longer
@@ -762,6 +799,19 @@ func nudgeItem(id, sessionID string, now time.Time) nudgequeue.Item {
 		CreatedAt:    now,
 		DeliverAfter: now,
 		ExpiresAt:    now.Add(24 * time.Hour),
+	}
+}
+
+// assertWakeIntents fails r unless items, as read, are exactly the ids of want,
+// each carrying the wake intent want gives it.
+func assertWakeIntents(r Runner, read string, items []nudgequeue.Item, want map[string]bool) {
+	r.Helper()
+	got := make(map[string]bool, len(items))
+	for _, item := range items {
+		got[item.ID] = item.WakeIfNeeded
+	}
+	if !maps.Equal(got, want) {
+		r.Fatalf("%s wake intents by id = %v, want %v", read, got, want)
 	}
 }
 

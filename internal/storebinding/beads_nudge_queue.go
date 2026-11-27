@@ -189,6 +189,10 @@ const (
 	// batch's membership read is indexed on it. It is written by the batch
 	// claim's guarded write and cleared by a definitive rejection.
 	nudgeMetaDeliveryBatch = "delivery_batch"
+	// nudgeMetaWakeIfNeeded is the producer's declared wake intent
+	// (Item.WakeIfNeeded). It is written only when set, so a record without
+	// it is an item that waits for its session's next run.
+	nudgeMetaWakeIfNeeded = "wake_if_needed"
 )
 
 // ErrBeadsNudgeQueueCorrupt reports a queue bead that cannot be projected back
@@ -1459,6 +1463,13 @@ func decodeNudgeQueueBead(record beads.Bead, now time.Time) (nudgeQueueEntry, er
 		}
 		item.Attempts = attempts
 	}
+	if raw := record.Metadata[nudgeMetaWakeIfNeeded]; raw != "" {
+		wake, err := strconv.ParseBool(raw)
+		if err != nil {
+			return nudgeQueueEntry{}, fmt.Errorf("%w: bead %q field %s: %w", ErrBeadsNudgeQueueCorrupt, record.ID, nudgeMetaWakeIfNeeded, err)
+		}
+		item.WakeIfNeeded = wake
+	}
 
 	state := record.Metadata[nudgeMetaQueueState]
 	if state == "" {
@@ -1502,6 +1513,9 @@ func encodeNudgeItem(item nudgequeue.Item, state string, extra map[string]string
 	}
 	if item.Attempts != 0 {
 		optional[nudgeMetaAttempts] = strconv.Itoa(item.Attempts)
+	}
+	if item.WakeIfNeeded {
+		optional[nudgeMetaWakeIfNeeded] = strconv.FormatBool(true)
 	}
 	if item.Reference != nil {
 		optional[nudgeMetaRefKind] = item.Reference.Kind

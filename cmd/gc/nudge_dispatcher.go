@@ -228,14 +228,14 @@ func dispatchQueuedNudges(queue nudgeQueueHandle, cityPath string, cfg *config.C
 			// nothing is poked.
 			detail := ""
 			mp := newMailProviderWithSessionStore(resolveMailMessagesStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil), sessStore)
-			outcome, wanted, wakeErr := requestDormantQueuedNudgeWake(target, sessionFrontDoor(sessStore), mp, now)
+			outcome, wakeErr := requestDormantQueuedNudgeWake(target, sessionFrontDoor(sessStore), mp, now)
 			switch {
 			case wakeErr != nil:
 				if firstErr == nil {
 					firstErr = wakeErr
 				}
 				detail = wakeErr.Error()
-			case wanted && outcome == sessionpkg.WakeRecorded:
+			case outcome == sessionpkg.WakeRecorded:
 				detail = "wake requested"
 			}
 			skipCounts["not-running"]++
