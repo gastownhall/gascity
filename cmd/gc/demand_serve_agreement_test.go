@@ -3,10 +3,13 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"maps"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -804,5 +807,248 @@ func TestBdStatusBlockedRowClassifiesAsStatusBlocked(t *testing.T) {
 	}
 	if cause := classifyDemandRowClaimability(got, time.Now()); cause != demandRowStatusBlocked {
 		t.Fatalf("classifyDemandRowClaimability(bd blocked row) = %q, want %q", cause, demandRowStatusBlocked)
+	}
+}
+
+// claimViewProbeStore is a claim view that reads by id as a bd or native Dolt
+// store does: a batch of ids in one round trip (beads.ExactBatchGetter). It
+// counts its reads by id and the ids each one asks, holds every read for
+// latency, and fails every read that asks an id a test names, as a failed
+// round trip fails its whole batch.
+type claimViewProbeStore struct {
+	beads.Store
+	// latency holds each read by id, a Get or a batch, for that long: a
+	// round trip to the ledger. Set it before the store is read.
+	latency time.Duration
+	mu      sync.Mutex
+	reads   int
+	// widest is the most ids one read by id asked about.
+	widest int
+	gets   map[string]int
+	fail   map[string]error
+}
+
+var _ beads.ExactBatchGetter = (*claimViewProbeStore)(nil)
+
+func newClaimViewProbeStore(inner beads.Store) *claimViewProbeStore {
+	return &claimViewProbeStore{Store: inner, gets: map[string]int{}, fail: map[string]error{}}
+}
+
+// ask counts one read by id of ids and, after the store's latency, returns
+// the error a test named for any of them.
+func (s *claimViewProbeStore) ask(ids ...string) error {
+	s.mu.Lock()
+	s.reads++
+	s.widest = max(s.widest, len(ids))
+	var err error
+	for _, id := range ids {
+		s.gets[id]++
+		if err == nil {
+			err = s.fail[id]
+		}
+	}
+	s.mu.Unlock()
+	if s.latency > 0 {
+		<-time.After(s.latency)
+	}
+	return err
+}
+
+func (s *claimViewProbeStore) Get(id string) (beads.Bead, error) {
+	if err := s.ask(id); err != nil {
+		return beads.Bead{}, err
+	}
+	return s.Store.Get(id)
+}
+
+// GetExactBatch reads ids in one round trip: the rows the store holds, and
+// every other id unresolved.
+func (s *claimViewProbeStore) GetExactBatch(ids []string) (map[string]beads.Bead, []string, error) {
+	if err := s.ask(ids...); err != nil {
+		return nil, nil, err
+	}
+	found := make(map[string]beads.Bead, len(ids))
+	var unresolved []string
+	for _, id := range ids {
+		b, err := s.Store.Get(id)
+		switch {
+		case err == nil:
+			found[id] = b
+		case errors.Is(err, beads.ErrNotFound):
+			unresolved = append(unresolved, id)
+		default:
+			return nil, nil, err
+		}
+	}
+	return found, unresolved, nil
+}
+
+// probes is how many reads by id asked about id.
+func (s *claimViewProbeStore) probes(id string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.gets[id]
+}
+
+// readsByID is how many reads by id the store served; a batch is one.
+func (s *claimViewProbeStore) readsByID() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reads
+}
+
+// widestRead is the most ids one read by id asked about.
+func (s *claimViewProbeStore) widestRead() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.widest
+}
+
+// mustCreateRow creates b in store with its explicit id, then moves it to
+// status (a MemStore creates every row open).
+func mustCreateRow(t *testing.T, store *beads.MemStore, b beads.Bead, status string) {
+	t.Helper()
+	if _, err := store.Create(b); err != nil {
+		t.Fatalf("create %s: %v", b.ID, err)
+	}
+	switch status {
+	case "", "open":
+	case "closed":
+		if err := store.Close(b.ID); err != nil {
+			t.Fatalf("close %s: %v", b.ID, err)
+		}
+	default:
+		if err := store.Update(b.ID, beads.UpdateOpts{Status: &status}); err != nil {
+			t.Fatalf("set %s status %s: %v", b.ID, status, err)
+		}
+	}
+}
+
+// TestDefaultScaleDemandCountsOnlyRowsTheClaimCanWin is the cross-store form of
+// T-A (#5857). A rig pool's city leg counts a routed row only when the seat's
+// claim, which resolves the id in the rig store first, can win it: a city row
+// whose rig copy is closed, assigned or in progress is a seat that is refused,
+// drains and is spawned again every pass.
+func TestDefaultScaleDemandCountsOnlyRowsTheClaimCanWin(t *testing.T) {
+	cfg := agreementConfig()
+	routed := map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate}
+	row := func(id string) beads.Bead {
+		return beads.Bead{ID: id, Title: id, Type: "task", Metadata: maps.Clone(routed)}
+	}
+	rigMem := beads.NewMemStore()
+	rigMem.HonorExplicitIDs = true
+	cityMem := beads.NewMemStore()
+	cityMem.HonorExplicitIDs = true
+
+	// X: the stale replica. Closed and assigned in its owning rig store, still
+	// open, unassigned and ready in the city store.
+	x := row("canary-x")
+	x.Assignee = "other-session"
+	mustCreateRow(t, rigMem, x, "closed")
+	mustCreateRow(t, cityMem, row("canary-x"), "open")
+	// Z: ready in both stores; the rig leg wins it, so it needs no probe.
+	mustCreateRow(t, rigMem, row("canary-z"), "open")
+	mustCreateRow(t, cityMem, row("canary-z"), "open")
+	// W: the rig copy is open but already held.
+	w := row("canary-w")
+	w.Assignee = "other-session"
+	mustCreateRow(t, rigMem, w, "open")
+	mustCreateRow(t, cityMem, row("canary-w"), "open")
+	// V: the rig copy is in progress.
+	mustCreateRow(t, rigMem, row("canary-v"), "in_progress")
+	mustCreateRow(t, cityMem, row("canary-v"), "open")
+
+	rig := newClaimViewProbeStore(rigMem)
+	own := defaultScaleCheckTarget{template: agreementTemplate, store: rig, storeKey: "rig:rig"}
+	city := defaultScaleCheckTarget{template: agreementTemplate, store: cityMem, storeKey: "city"}
+	targets := append([]defaultScaleCheckTarget{own}, crossStoreDemandLegs([]defaultScaleCheckTarget{city}, own)...)
+
+	counts, demand, partial, errs := defaultScaleCheckCountsAndDemand(cfg, targets)
+	if len(errs) != 0 || partial[agreementTemplate] {
+		t.Fatalf("errs = %v partial = %v, want a complete pass", errs, partial)
+	}
+	if got := counts[agreementTemplate]; got != 1 {
+		t.Fatalf("counts[%s] = %d (named %v), want 1: only canary-z is work the rig seat's claim can win", agreementTemplate, got, demand[agreementTemplate].WorkBeadIDs)
+	}
+	entry := demand[agreementTemplate]
+	if want := []string{"canary-z"}; !slices.Equal(entry.WorkBeadIDs, want) {
+		t.Fatalf("WorkBeadIDs = %v, want %v", entry.WorkBeadIDs, want)
+	}
+	for _, id := range []string{"canary-x", "canary-w", "canary-v"} {
+		if ref, ok := entry.StoreRefs[id]; ok {
+			t.Fatalf("StoreRefs[%s] = %q: a row the claim cannot win must leave no store ref", id, ref)
+		}
+		if _, ok := entry.Titles[id]; ok {
+			t.Fatalf("Titles names %s, a row the claim cannot win", id)
+		}
+		if got := rig.probes(id); got != 1 {
+			t.Fatalf("claim view probed %s %d times, want 1", id, got)
+		}
+	}
+	if ref := entry.StoreRefs["canary-z"]; ref != "rig:rig" {
+		t.Fatalf("StoreRefs[canary-z] = %q, want the rig leg that won it", ref)
+	}
+	if got := rig.probes("canary-z"); got != 0 {
+		t.Fatalf("claim view probed canary-z %d times; a row the own leg already counts needs no probe", got)
+	}
+	if got := rig.readsByID(); got != 1 {
+		t.Fatalf("claim view read %d times by id, want 1: a pass asks a view about all of its rows in one read", got)
+	}
+}
+
+// TestDemandClaimViewsAskEachRowOnce: one pass asks a claim view about an id
+// once, however many templates' cross-store legs reach it.
+func TestDemandClaimViewsAskEachRowOnce(t *testing.T) {
+	rigMem := beads.NewMemStore()
+	rigMem.HonorExplicitIDs = true
+	mustCreateRow(t, rigMem, beads.Bead{ID: "canary-x", Title: "x", Type: "task", Assignee: "other-session"}, "closed")
+	rig := newClaimViewProbeStore(rigMem)
+	view := demandClaimView{reader: rig, key: "rig:rig"}
+	question := demandClaimViewQuestion{view: view, id: "canary-x"}
+	views := askDemandClaimViews(legacyDemandReads{}, []demandClaimViewQuestion{question, question})
+	for i := 0; i < 2; i++ {
+		if ok, err := views.claimable(view, "canary-x"); ok || err != nil {
+			t.Fatalf("claimable(canary-x) = %v, %v; want shadowed without error", ok, err)
+		}
+	}
+	if got := rig.probes("canary-x"); got != 1 {
+		t.Fatalf("claim view probed canary-x %d times in one pass, want 1", got)
+	}
+}
+
+// TestDefaultScaleDemandKeepsShadowedRowsInTheClaimWindowRank: a shadowed row
+// is still served to the seat by its reader, so it keeps its rank in the claim
+// window. A row bound to a managed worktree ranked past the window behind it
+// stays uncounted, as the seat's window would not reach it.
+func TestDefaultScaleDemandKeepsShadowedRowsInTheClaimWindowRank(t *testing.T) {
+	cfg := agreementConfig()
+	rigMem := beads.NewMemStore()
+	rigMem.HonorExplicitIDs = true
+	cityMem := beads.NewMemStore()
+	cityMem.HonorExplicitIDs = true
+	stale := beads.Bead{ID: "canary-x", Title: "x", Type: "task", Priority: intPtr(0), Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate}}
+	mustCreateRow(t, cityMem, stale, "open")
+	stale.Assignee = "other-session"
+	mustCreateRow(t, rigMem, stale, "closed")
+	var bound []string
+	for n := 1; n <= config.RoutedReadyClaimWindow; n++ {
+		b := seedBoundRoutedWork(t, cityMem, agreementTemplate, n)
+		bound = append(bound, b.ID)
+	}
+	own := defaultScaleCheckTarget{template: agreementTemplate, store: rigMem, storeKey: "rig:rig"}
+	targets := append([]defaultScaleCheckTarget{own}, crossStoreDemandLegs([]defaultScaleCheckTarget{{template: agreementTemplate, store: cityMem, storeKey: "city"}}, own)...)
+
+	counts, demand, _, errs := defaultScaleCheckCountsAndDemand(cfg, targets)
+	if len(errs) != 0 {
+		t.Fatalf("errs = %v", errs)
+	}
+	if got, want := counts[agreementTemplate], config.RoutedReadyClaimWindow-1; got != want {
+		t.Fatalf("counts[%s] = %d, want %d: the shadowed row holds rank 0, so the last bound row sits at rank %d, outside the window", agreementTemplate, got, want, config.RoutedReadyClaimWindow)
+	}
+	last := bound[len(bound)-1]
+	for _, id := range demand[agreementTemplate].WorkBeadIDs {
+		if id == last || id == "canary-x" {
+			t.Fatalf("WorkBeadIDs names %s; want neither the shadowed row nor the bound row behind the window", id)
+		}
 	}
 }

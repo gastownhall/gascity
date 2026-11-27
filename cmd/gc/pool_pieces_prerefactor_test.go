@@ -8,7 +8,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -414,153 +413,10 @@ func countMinActiveCoveredPreRefactor(beads []AwakeSessionBead, desired map[stri
 	return n
 }
 
-// The copies below are of code P3-1 moved verbatim (buildDemandTargets,
-// computeNamedSessionDemand, classifyOverlaySession). They pin the move, not
-// the behavior: when main changes the moved code, delete these copies and
-// their differential tests. Don't update them.
-
-func buildDemandTargetsPreRefactor(
-	cityName, cityPath string,
-	cfg *config.City,
-	store beads.Store,
-	rigStores map[string]beads.Store,
-	suspendedRigPaths map[string]bool,
-	allOpenSessionInfos []session.Info,
-	stderr io.Writer,
-) demandTargets {
-	var pendingPools []poolEvalWork
-	var defaultScaleTargets []defaultScaleCheckTarget
-	var defaultNamedScaleTargets []defaultScaleCheckTarget
-	coldWakeTemplates := map[string]bool{}
-	namedOnDemandTemplates := map[string]bool{}
-	nameOnlyTemplates := map[string]bool{}
-	type activeStore struct {
-		store beads.Store
-		ref   string
-	}
-	activeStores := []activeStore{{store: store, ref: "city"}}
-	for _, rig := range cfg.Rigs {
-		if suspendedRigPaths[filepath.Clean(rig.Path)] {
-			continue
-		}
-		if s, ok := rigStores[rig.Name]; ok {
-			activeStores = append(activeStores, activeStore{store: s, ref: rig.Name})
-		}
-	}
-	controlBinding := convergedRoutedWorkBinding(cityPath, cfg, store, rigStores, suspendedRigPaths)
-
-	for i := range cfg.Agents {
-		if cfg.Agents[i].Suspended {
-			continue
-		}
-		namedSessionMode := ""
-		for j := range cfg.NamedSessions {
-			if cfg.NamedSessions[j].TemplateQualifiedName() == cfg.Agents[i].QualifiedName() {
-				namedSessionMode = cfg.NamedSessions[j].ModeOrDefault()
-				break
-			}
-		}
-		backsNamedSession := namedSessionMode != ""
-
-		sp := scaleParamsForTopology(&cfg.Agents[i], config.QueryTopology{Beads: cfg.Beads})
-		sp.Check = expandAgentCommandTemplate(cityPath, cityName, &cfg.Agents[i], cfg.Rigs, "scale_check", sp.Check, stderr)
-
-		if !cfg.Agents[i].SupportsGenericEphemeralSessions() {
-			continue
-		}
-
-		hasCustomScaleCheck := strings.TrimSpace(cfg.Agents[i].ScaleCheck) != ""
-		template := cfg.Agents[i].QualifiedName()
-		storeScopedControlDispatcher := cfg.Agents[i].Name == config.ControlDispatcherAgentName
-		runningSessions := 0
-		for _, si := range allOpenSessionInfos {
-			if isPoolManagedSessionInfo(si) && poolSessionIsLiveInfo(si) {
-				if agentTemplateIdentitiesEquivalent(cfg, si.Template, template) {
-					runningSessions++
-				}
-			}
-		}
-
-		isCold := runningSessions == 0 && cfg.Agents[i].EffectiveMinActiveSessions() == 0
-
-		if backsNamedSession {
-			rigName := configuredRigName(cityPath, &cfg.Agents[i], cfg.Rigs)
-			if rigName != "" && suspendedRigPaths[filepath.Clean(rigRootForName(rigName, cfg.Rigs))] {
-				continue
-			}
-			poolDir := agentCommandDir(cityPath, &cfg.Agents[i], cfg.Rigs)
-			if store != nil && !hasCustomScaleCheck {
-				ownTarget := ownScaleCheckTarget(cityPath, cfg, &cfg.Agents[i], store, rigStores, controlBinding, storeScopedControlDispatcher)
-				if namedSessionMode != "always" {
-					defaultScaleTargets = append(defaultScaleTargets, ownTarget)
-					namedOnDemandTemplates[template] = true
-				}
-				defaultNamedScaleTargets = append(defaultNamedScaleTargets, ownTarget)
-				if !storeScopedControlDispatcher && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
-					cityTarget := defaultScaleCheckTarget{template: template, store: store, storeKey: "city"}
-					if namedSessionMode != "always" {
-						defaultScaleTargets = append(defaultScaleTargets, cityTarget)
-					}
-					defaultNamedScaleTargets = append(defaultNamedScaleTargets, cityTarget)
-				}
-				continue
-			}
-			if store != nil && isCold && !storeScopedControlDispatcher {
-				for _, source := range activeStores {
-					target := defaultScaleCheckTarget{template: template, store: source.store, storeKey: source.ref}
-					if namedSessionMode != "always" {
-						defaultScaleTargets = append(defaultScaleTargets, target)
-					}
-					defaultNamedScaleTargets = append(defaultNamedScaleTargets, target)
-				}
-				if namedSessionMode != "always" {
-					coldWakeTemplates[template] = true
-				}
-			}
-			pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir, newDemand: store != nil})
-			continue
-		}
-
-		rigName := configuredRigName(cityPath, &cfg.Agents[i], cfg.Rigs)
-		if rigName != "" && suspendedRigPaths[filepath.Clean(rigRootForName(rigName, cfg.Rigs))] {
-			continue
-		}
-		poolDir := agentCommandDir(cityPath, &cfg.Agents[i], cfg.Rigs)
-		if store != nil && !hasCustomScaleCheck {
-			ownTarget := ownScaleCheckTarget(cityPath, cfg, &cfg.Agents[i], store, rigStores, controlBinding, storeScopedControlDispatcher)
-			defaultScaleTargets = append(defaultScaleTargets, ownTarget)
-			if !storeScopedControlDispatcher && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
-				defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTarget{template: template, store: store, storeKey: "city"})
-			}
-			continue
-		}
-		claimsGeneratedQuery := cfg.Agents[i].WorkQuery == ""
-		if store != nil && !storeScopedControlDispatcher && (isCold || claimsGeneratedQuery) {
-			for _, source := range activeStores {
-				defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTarget{template: template, store: source.store, storeKey: source.ref})
-			}
-			if isCold {
-				coldWakeTemplates[template] = true
-			} else {
-				nameOnlyTemplates[template] = true
-			}
-		}
-		env, err := controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[i])
-		if err != nil {
-			fmt.Fprintf(stderr, "scaleCheck: building env for %s: %v\n", cfg.Agents[i].QualifiedName(), err) //nolint:errcheck
-			continue
-		}
-		pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir, env: env, newDemand: store != nil})
-	}
-	return demandTargets{
-		pendingPools:             pendingPools,
-		defaultScaleTargets:      defaultScaleTargets,
-		defaultNamedScaleTargets: defaultNamedScaleTargets,
-		coldWakeTemplates:        coldWakeTemplates,
-		namedOnDemandTemplates:   namedOnDemandTemplates,
-		nameOnlyTemplates:        nameOnlyTemplates,
-	}
-}
+// The copies below are of code P3-1 moved verbatim (computeNamedSessionDemand,
+// classifyOverlaySession). They pin the move, not the behavior: when main
+// changes the moved code, delete these copies and their differential tests.
+// Don't update them.
 
 func computeNamedSessionDemandPreRefactor(
 	cityName, cityPath string,
