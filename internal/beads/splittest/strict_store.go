@@ -681,6 +681,42 @@ func (s *StrictStore) ConditionalWriterHandle() (beads.ConditionalWriter, bool) 
 	return beads.ConditionalWriterFor(s.Store)
 }
 
+// PinnedIDCreatorHandle forwards the leaf's pinned create behind Create's
+// checks: the explicit id is fenced like any other (guardExplicitID), and the
+// created row must carry that id (checkCreatedID) and is class-checked
+// (checkCreatedClass). Like ConditionalWriterHandle, the wrapper does not
+// claim beads.PinnedIDCreator for a leaf that lacks it. beads.PinnedIDCreatorFor
+// asks this handle before it follows the wrapper's resolution target, so a
+// pinned create through the wrapper never reaches the leaf unchecked.
+func (s *StrictStore) PinnedIDCreatorHandle() (beads.PinnedIDCreator, bool) {
+	creator, ok := beads.PinnedIDCreatorFor(s.Store)
+	if !ok {
+		return nil, false
+	}
+	return strictPinnedCreator{s: s, creator: creator}, true
+}
+
+// strictPinnedCreator is StrictStore.Create for a pinned create.
+type strictPinnedCreator struct {
+	s       *StrictStore
+	creator beads.PinnedIDCreator
+}
+
+func (c strictPinnedCreator) CreatePinned(b beads.Bead) (beads.Bead, error) {
+	if err := c.s.guardExplicitID(b.ID); err != nil {
+		return beads.Bead{}, err
+	}
+	created, err := c.creator.CreatePinned(b)
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	if err := c.s.checkCreatedID(b.ID, created); err != nil {
+		return beads.Bead{}, err
+	}
+	c.s.checkCreatedClass(b, created)
+	return created, nil
+}
+
 // ConditionalWritesResolveTarget declares the wrapped leaf as the
 // conditional-writes resolution target, exactly as the typed class wrappers do.
 // Without it a resolve through this wrapper collapses to unset→legacy silently,

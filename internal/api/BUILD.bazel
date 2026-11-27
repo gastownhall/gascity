@@ -381,6 +381,7 @@ go_test(
         "handler_extmsg_agent_binding_test.go",
         "handler_extmsg_default_route_test.go",
         "handler_extmsg_test.go",
+        "handler_extmsg_transcript_recovery_test.go",
         "handler_formula_write_test.go",
         "handler_formulas_test.go",
         "handler_index_snapshot_test.go",

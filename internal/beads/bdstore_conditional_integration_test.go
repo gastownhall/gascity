@@ -112,6 +112,16 @@ func TestBdStoreConditionalWriterConformance(t *testing.T) {
 		})
 	})
 
+	t.Run("pinned_create", func(t *testing.T) {
+		// MUST stay below the capability skip above: BdStore.CreatePinned
+		// admits only a bd that passes the conditional-write probe, and that
+		// bd must refuse a duplicate pinned id without touching the row.
+		beadstest.RunPinnedCreateConformance(t, func(t *testing.T) beads.Store {
+			store, _ := newConditionalIntegrationBdStore(t)
+			return store
+		}, nil)
+	})
+
 	t.Run("capable_usage_echo_must_not_classify_unsupported", func(t *testing.T) {
 		// MUST stay below the capability skip above: a pre-#4682 bd rejects
 		// --if-revision ITSELF ("unknown flag: --if-revision"), which is a

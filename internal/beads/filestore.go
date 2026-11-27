@@ -364,6 +364,35 @@ func (fs *FileStore) Create(b Bead) (Bead, error) {
 	return result, nil
 }
 
+// CreatePinned is MemStore.CreatePinned under the file lock: it reloads the
+// file first, so a row another handle saved under the same id is seen and
+// refused, and rolls the in-memory insert back when the save fails. It
+// satisfies PinnedIDCreator.
+func (fs *FileStore) CreatePinned(b Bead) (Bead, error) {
+	if err := checkPinnedCreateID("file pinned create", b.ID); err != nil {
+		return Bead{}, err
+	}
+	fs.fmu.Lock()
+	defer fs.fmu.Unlock()
+	if err := fs.locker.Lock(); err != nil {
+		return Bead{}, err
+	}
+	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
+	if err := fs.reloadFromDisk(); err != nil {
+		return Bead{}, err
+	}
+	snap := fs.snapshotLocked()
+	result, err := fs.MemStore.CreatePinned(b)
+	if err != nil {
+		return Bead{}, err
+	}
+	if err := fs.save(); err != nil {
+		fs.restoreFrom(snap.seq, snap.beads, snap.deps)
+		return Bead{}, err
+	}
+	return result, nil
+}
+
 // Update delegates to MemStore.Update and flushes to disk.
 // If the disk flush fails, the in-memory mutation is rolled back.
 func (fs *FileStore) Update(id string, opts UpdateOpts) error {

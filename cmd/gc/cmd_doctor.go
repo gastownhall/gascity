@@ -337,6 +337,10 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		registerCityStoreCheck(newOpsRecordingDoctorCheck(cityPath, cfg, opts.RolloutFlags, opts.RolloutResolveErr, storeGate.Skipped))
 		lanesCheck := newConversationLanesDoctorCheck(cityPath, cfg)
 		registerCityStoreCheck(lanesCheck)
+		// Runs the messaging store's read-only conditional-write probe, and
+		// reads one transcript state only when the store cannot allocate
+		// transcript sequences atomically.
+		registerCityStoreCheck(newExtmsgTranscriptDoctorCheck(cityPath, cfg))
 		// legacy-delivery reports the queue and pollers even when the city
 		// store is skipped, so it probes the sessions store through the gate
 		// rather than being replaced by the gate's stand-in.

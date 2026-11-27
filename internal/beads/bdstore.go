@@ -518,6 +518,13 @@ type BdStore struct {
 	condReleaseMu                 sync.Mutex
 	condReleaseLatchedUnsupported bool
 
+	// pinnedCreateMu/Checked/Err memoize the `bd version` gate that decides
+	// whether `bd create --id` is insert-only for this store's bd
+	// (bdstore_pinned_create.go). The probe runs once per store instance.
+	pinnedCreateMu      sync.Mutex
+	pinnedCreateChecked bool
+	pinnedCreateErr     error
+
 	// Conditional-write (ConditionalWriter) capability state, populated lazily on
 	// the first conditional write (bdstore_conditional.go). condWriteProbed/
 	// condWriteCapable memoize the four-verb --if-revision probe; condWriteLatched

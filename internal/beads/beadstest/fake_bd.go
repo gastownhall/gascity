@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/deps"
 )
 
 // FakeBd is a minimal, stateful stand-in for the bd CLI, backed by a MemStore,
@@ -23,11 +24,39 @@ import (
 type FakeBd struct {
 	mu    sync.Mutex
 	store *beads.MemStore
+	// version is what `bd version` reports. It decides how `bd create --id`
+	// answers a duplicate, mirroring bd: v1.3.0 made --id creates insert-only;
+	// earlier releases upserted over the stored row.
+	version string
+	// conditionalWrites makes `bd <verb> --help` advertise --if-revision, so
+	// BdStore's conditional-write probe passes. Off by default, as on every
+	// released bd: the fake does not implement fenced writes.
+	conditionalWrites bool
 }
 
-// NewFakeBd returns an empty fake bd.
+// NewFakeBd returns an empty fake bd reporting v1.3.4, the installable
+// default bd (deps.env BD_VERSION).
 func NewFakeBd() *FakeBd {
-	return &FakeBd{store: beads.NewMemStore()}
+	store := beads.NewMemStore()
+	store.HonorExplicitIDs = true
+	return &FakeBd{store: store, version: "1.3.4"}
+}
+
+// SetVersion changes the release the fake reports, for gate legs that model a
+// bd predating the pinned-create or conditional-write floors.
+func (f *FakeBd) SetVersion(version string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.version = version
+}
+
+// AdvertiseConditionalWrites makes the fake answer BdStore's conditional-write
+// capability probe as a bd that supports --if-revision, for gate legs that
+// need the probe to pass. The fake still does not run fenced writes.
+func (f *FakeBd) AdvertiseConditionalWrites() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.conditionalWrites = true
 }
 
 // NewBdStore returns a BdStore whose bd commands run against f.
@@ -102,7 +131,19 @@ func (f *FakeBd) Run(_, name string, args ...string) ([]byte, error) {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if len(args) == 2 && args[1] == "--help" {
+		// A released bd lists no --if-revision; AdvertiseConditionalWrites
+		// models one that does.
+		usage := "Usage:\n  bd " + args[0] + " [flags]\n\nFlags:\n"
+		if f.conditionalWrites {
+			usage += "  --if-revision int   apply only at this revision\n"
+		}
+		return []byte(usage + "  --json              emit JSON\n"), nil
+	}
 	switch args[0] {
+	case "version":
+		// Run already holds f.mu here.
+		return []byte("bd version " + f.version + " (fake)\n"), nil
 	case "create":
 		flags, positional := parseFakeBdArgs(args[1:])
 		return f.create(flags, positional)
@@ -176,6 +217,9 @@ func lastFlag(flags map[string][]string, names ...string) (string, bool) {
 
 func (f *FakeBd) create(flags map[string][]string, positional []string) ([]byte, error) {
 	b := beads.Bead{Status: "open"}
+	if v, ok := lastFlag(flags, "--id"); ok && v != "" {
+		b.ID = v
+	}
 	if len(positional) > 0 {
 		b.Title = positional[0]
 	}
@@ -208,10 +252,39 @@ func (f *FakeBd) create(flags map[string][]string, positional []string) ([]byte,
 		b.Ephemeral = true
 	}
 	created, err := f.store.Create(b)
-	if err != nil {
+	if err == nil {
+		return json.Marshal(toFakeBdIssue(created))
+	}
+	// A refused duplicate id models bd v1.3.0+ (insert-only --id). bd before
+	// v1.3.0 upserted instead: the stored row was silently reset from the new
+	// create and reported as a fresh one, which is the overwrite the
+	// pinned-create gate exists to keep from ever running.
+	if b.ID == "" || !f.upsertsPinnedIDs() {
 		return nil, err
 	}
-	return json.Marshal(toFakeBdIssue(created))
+	if _, getErr := f.store.Get(b.ID); getErr != nil {
+		return nil, err // not a duplicate after all
+	}
+	status := "open"
+	if err := f.store.Update(b.ID, beads.UpdateOpts{
+		Title:       &b.Title,
+		Status:      &status,
+		Type:        &b.Type,
+		Assignee:    &b.Assignee,
+		Description: &b.Description,
+		Metadata:    b.Metadata,
+	}); err != nil {
+		return nil, err
+	}
+	upserted, _ := f.store.Get(b.ID)
+	return json.Marshal(toFakeBdIssue(upserted))
+}
+
+// upsertsPinnedIDs reports whether this fake models a bd release whose
+// `bd create --id` upserts a duplicate instead of refusing it (every release
+// below v1.3.0).
+func (f *FakeBd) upsertsPinnedIDs() bool {
+	return deps.CompareVersions(f.version, "1.3.0") < 0
 }
 
 func (f *FakeBd) show(ids []string) ([]byte, error) {

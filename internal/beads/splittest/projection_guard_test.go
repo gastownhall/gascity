@@ -350,3 +350,42 @@ func TestProjectionGuardsTheRemainingWrites(t *testing.T) {
 		t.Fatalf("flags = %d, want 9", got)
 	}
 }
+
+// TestProjectionPinnedCreateIsChecked: a pinned create resolved through a view
+// lands on the view's create checks, as Create does. A row of the other side's
+// class lands, is flagged and is visible only to the view that wrote it; an
+// edge to the other side's row is refused before anything is written.
+func TestProjectionPinnedCreateIsChecked(t *testing.T) {
+	p, leaf, sink, _, session := guardFixture(t)
+	creator, ok := beads.PinnedIDCreatorFor(p.WorkView())
+	if !ok {
+		t.Fatal("no pinned create through the work view over a MemStore")
+	}
+
+	if _, err := creator.CreatePinned(beads.Bead{ID: "gc-pinned-task", Title: "pinned task"}); err != nil {
+		t.Fatalf("pinned create of the view's own class: %v", err)
+	}
+	if got := sink.testOnlyCount(); got != 0 {
+		t.Fatalf("a pinned create of the view's own class flagged %d times", got)
+	}
+
+	misrouted := sessionBead("pinned session")
+	misrouted.ID = "gcg-pinned-session"
+	created, err := creator.CreatePinned(misrouted)
+	if err != nil || created.ID != misrouted.ID {
+		t.Fatalf("pinned create of a session through the work view = %+v, %v; want the row at its pinned id", created, err)
+	}
+	if got := sink.testOnlyCount(); got != 1 {
+		t.Fatalf("a session pinned through the work view flagged %d times, want 1", got)
+	}
+	if _, err := p.ClassView().Get(created.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("the class view sees a session the work view pinned: %v", err)
+	}
+
+	child := beads.Bead{ID: "gc-pinned-child", Title: "child", ParentID: session.ID}
+	_, err = creator.CreatePinned(child)
+	wantNotHere(t, "pinned create under a session parent through the work view", err)
+	if _, err := leaf.Get(child.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("the refused pinned create wrote its row: %v", err)
+	}
+}

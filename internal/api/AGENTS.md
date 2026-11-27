@@ -100,6 +100,33 @@ through that rig. A lookup scoped to a suspended rig reads only that shared
 store, or nothing, and never falls back to the other rigs' stores
 (`activeBeadSearchScope`).
 
+## External-messaging transcripts
+
+`internal/extmsg/transcript_sequence.go` allocates transcript sequences. Each
+entry is created at its slot's pinned ID, `<state ID>-<sequence>-entry`,
+through `beads.PinnedIDCreator`, so the store refuses a second entry at one
+sequence whichever process writes it; the state's `next_sequence` head
+advances by metadata compare-and-set, one occupied slot at a time, and an
+entry is readable only once the head passes it. A messaging store that lacks
+either capability, or fails its conditional-write probe
+(`beads.ProbeConditionalWrites`: a bd without `--if-revision`, the DoltLite
+read store, an exec store), appends unguarded instead: at the head's
+sequence, under a minted ID, with an unconditional head write, which can give
+two entries one sequence. The service logs that once, and `gc doctor`'s
+`extmsg-transcript-sequencing` check reports it. A pinned create the store
+refuses before writing anything sends that append unguarded too
+(`pinnedCreateRefused`): a bd whose version cannot be read
+(`beads.ErrPinnedCreateUnsupported`), and a namespace-fenced class binding
+refusing a slot ID outside its namespaces (`beads.ErrPinnedIDOutsideNamespace`),
+as it refuses every slot of a transcript state that `gc storage migrate`
+carried in under its work-store ID. The doctor's read-only probe cannot see
+either, so its OK answer reports the capability only. Never refuse an append
+for a missing capability: no released bd has `--if-revision`, so a refusal
+would stop every transcript on a stock bd-served city. A store wrapper that
+intercepts creates forwards `CreatePinned` (or `PinnedIDCreatorHandle`) with
+its own create checks: `beads.PinnedIDCreatorFor` asks each layer before it
+follows the layer's conditional-writes resolution target.
+
 ## Deferred creation baseline
 
 Before scheduling an agent session, persist the command the controller resolves

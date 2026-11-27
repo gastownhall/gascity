@@ -150,12 +150,32 @@ func cloneBead(b Bead) Bead {
 func (m *MemStore) Create(b Bead) (Bead, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.createLocked(b, m.HonorExplicitIDs && strings.TrimSpace(b.ID) != "")
+}
+
+// CreatePinned persists b at exactly b.ID, refusing an id that already names a
+// row (open or closed) and leaving that row untouched. It honors the id
+// whatever HonorExplicitIDs says, without changing that shared setting, and
+// satisfies PinnedIDCreator.
+func (m *MemStore) CreatePinned(b Bead) (Bead, error) {
+	if err := checkPinnedCreateID("mem pinned create", b.ID); err != nil {
+		return Bead{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.createLocked(b, true)
+}
+
+// createLocked is the shared create body; honorExplicit keeps the caller's
+// trimmed id under the hard duplicate-id contract instead of minting one.
+// The caller holds m.mu.
+func (m *MemStore) createLocked(b Bead, honorExplicit bool) (Bead, error) {
 	if !m.storageOnly {
 		noteSessionCreate(b)
 	}
 
 	explicit := strings.TrimSpace(b.ID)
-	if m.HonorExplicitIDs && explicit != "" {
+	if honorExplicit {
 		if m.beadExistsLocked(explicit) {
 			return Bead{}, fmt.Errorf("creating bead %q: duplicate id", explicit)
 		}

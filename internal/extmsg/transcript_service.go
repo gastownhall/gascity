@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
@@ -20,10 +22,23 @@ const (
 type transcriptService struct {
 	store beads.MailStore
 	locks *bindingLockPool
+	// warnf logs what an append recovered from or works around; log.Printf
+	// outside tests.
+	warnf func(format string, args ...any)
+	// unguardedWarning logs the first unguarded append only.
+	unguardedWarning sync.Once
 }
 
 func newTranscriptService(store beads.MailStore, locks *bindingLockPool) *transcriptService {
-	return &transcriptService{store: store, locks: locks}
+	return &transcriptService{store: store, locks: locks, warnf: log.Printf}
+}
+
+// warnUnguarded logs, once per service, that cause sends its appends to
+// unguarded allocation (appendUnguardedLocked).
+func (s *transcriptService) warnUnguarded(cause error) {
+	s.unguardedWarning.Do(func() {
+		s.warnf("extmsg: transcript sequences are allocated without a store-level guard: %v; an ambiguous create, a failed head write or a writer in another process can give two transcript entries one sequence (gc doctor: extmsg-transcript-sequencing)", cause)
+	})
 }
 
 func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptInput) (ConversationTranscriptRecord, error) {
@@ -54,6 +69,11 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 	createdAt := zeroNow(input.CreatedAt)
 	providerMessageID := strings.TrimSpace(input.ProviderMessageID)
 	text := strings.TrimSpace(input.Text)
+	creator, cas, unguarded := transcriptAppendCapabilities(s.store)
+	token, err := newTranscriptAppendToken()
+	if err != nil {
+		return ConversationTranscriptRecord{}, err
+	}
 	var out ConversationTranscriptRecord
 	err = withBindingLock(s.locks, ref, func() error {
 		state, err := s.ensureStateLocked(ref)
@@ -67,16 +87,6 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 		} else if state.HydrationStatus == HydrationPending {
 			return ErrHydrationPending
 		}
-		if providerMessageID != "" {
-			existing, err := s.findTranscriptByProviderMessageLocked(ref, providerMessageID)
-			if err != nil {
-				return err
-			}
-			if existing != nil {
-				out = *existing
-				return nil
-			}
-		}
 		actorJSON, err := marshalOptionalJSON(input.Actor)
 		if err != nil {
 			return err
@@ -85,55 +95,75 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 		if err != nil {
 			return err
 		}
-		sequence := state.NextSequence
-		fields := encodeMetadataFields(input.Metadata, map[string]string{
-			"schema_version":         strconv.Itoa(schemaVersion),
-			"scope_id":               ref.ScopeID,
-			"provider":               ref.Provider,
-			"account_id":             ref.AccountID,
-			"conversation_id":        ref.ConversationID,
-			"parent_conversation_id": ref.ParentConversationID,
-			"conversation_kind":      string(ref.Kind),
-			"sequence":               strconv.FormatInt(sequence, 10),
-			"kind":                   string(kind),
-			"provenance":             string(provenance),
-			"provider_message_id":    providerMessageID,
-			"explicit_target":        normalizeHandle(input.ExplicitTarget),
-			"reply_to_message_id":    strings.TrimSpace(input.ReplyToMessageID),
-			"source_session_id":      strings.TrimSpace(input.SourceSessionID),
-			"created_at":             formatTime(createdAt),
-			"actor_json":             actorJSON,
-			"attachments_json":       attachmentsJSON,
-		})
-		labels := []string{
-			labelTranscriptBase,
-			transcriptConversationLabel(ref),
-			transcriptBucketLabel(ref, transcriptBucket(sequence)),
+		entryAt := func(sequence int64) beads.Bead {
+			fields := encodeMetadataFields(input.Metadata, map[string]string{
+				"schema_version":         strconv.Itoa(schemaVersion),
+				"scope_id":               ref.ScopeID,
+				"provider":               ref.Provider,
+				"account_id":             ref.AccountID,
+				"conversation_id":        ref.ConversationID,
+				"parent_conversation_id": ref.ParentConversationID,
+				"conversation_kind":      string(ref.Kind),
+				"sequence":               strconv.FormatInt(sequence, 10),
+				"kind":                   string(kind),
+				"provenance":             string(provenance),
+				"provider_message_id":    providerMessageID,
+				"explicit_target":        normalizeHandle(input.ExplicitTarget),
+				"reply_to_message_id":    strings.TrimSpace(input.ReplyToMessageID),
+				"source_session_id":      strings.TrimSpace(input.SourceSessionID),
+				"created_at":             formatTime(createdAt),
+				"actor_json":             actorJSON,
+				"attachments_json":       attachmentsJSON,
+				transcriptAppendTokenKey: token,
+			})
+			labels := []string{
+				"gc:extmsg-transcript",
+				labelTranscriptBase,
+				transcriptConversationLabel(ref),
+				transcriptBucketLabel(ref, transcriptBucket(sequence)),
+			}
+			if providerMessageID != "" {
+				labels = append(labels, transcriptProviderMessageLabel(ref, providerMessageID))
+			}
+			return beads.Bead{
+				Title:       fmt.Sprintf("%s#%d", conversationTitle(ref), sequence),
+				Type:        "task",
+				Description: text,
+				Labels:      labels,
+				Metadata:    fields,
+			}
 		}
-		if providerMessageID != "" {
-			labels = append(labels, transcriptProviderMessageLabel(ref, providerMessageID))
+		if unguarded != nil {
+			s.warnUnguarded(unguarded)
+			out, err = s.appendUnguardedLocked(ref, state, providerMessageID, entryAt)
+			return err
 		}
-		created, err := s.store.Create(beads.Bead{
-			Title:       fmt.Sprintf("%s#%d", conversationTitle(ref), sequence),
-			Type:        "task",
-			Description: text,
-			Labels:      append([]string{"gc:extmsg-transcript"}, labels...),
-			Metadata:    fields,
-		})
+		alloc := &transcriptAllocator{
+			svc:        s,
+			creator:    creator,
+			cas:        cas,
+			ref:        ref,
+			stateID:    state.ID,
+			providerID: providerMessageID,
+			token:      token,
+			entryAt:    entryAt,
+		}
+		out, err = alloc.append(ctx)
+		if !pinnedCreateRefused(err) {
+			return err
+		}
+		// The store refused the pinned create before writing anything, as
+		// the capability promises (a bd whose version could not be read, a
+		// wrapper over an engine without the capability, or a fenced class
+		// binding refusing the slot ID of a state migrated in under its
+		// work-store ID), so nothing of this append is stored. The allocator
+		// may have moved the head meanwhile.
+		s.warnUnguarded(err)
+		_, state, err = s.readTranscriptStateLive(state.ID)
 		if err != nil {
-			return fmt.Errorf("create transcript entry: %w", err)
+			return err
 		}
-		next := sequence + 1
-		updates := map[string]string{
-			"next_sequence": strconv.FormatInt(next, 10),
-		}
-		if state.EarliestAvailableSequence <= 0 {
-			updates["earliest_available_sequence"] = "1"
-		}
-		if err := s.store.SetMetadataBatch(state.ID, updates); err != nil {
-			return fmt.Errorf("update transcript state: %w", err)
-		}
-		out, err = decodeTranscriptBead(created)
+		out, err = s.appendUnguardedLocked(ref, state, providerMessageID, entryAt)
 		return err
 	})
 	return out, err
@@ -768,8 +798,10 @@ func (s *transcriptService) ensureStateLockedWriter(w membershipWriter, ref Conv
 	return decodeTranscriptStateBead(created)
 }
 
+// findStateLocked reads the conversation's transcript state past any cache:
+// its next_sequence is the published head every append and read decides from.
 func (s *transcriptService) findStateLocked(ref ConversationRef) (*ConversationTranscriptStateRecord, error) {
-	items, err := s.store.List(beads.ListQuery{Label: transcriptStateLabel(ref)})
+	items, err := beads.LiveFor(s.store).List(beads.ListQuery{Label: transcriptStateLabel(ref)})
 	if err != nil {
 		return nil, fmt.Errorf("list transcript state: %w", err)
 	}
@@ -794,8 +826,10 @@ func (s *transcriptService) findStateLocked(ref ConversationRef) (*ConversationT
 	return out, nil
 }
 
-func (s *transcriptService) findTranscriptByProviderMessageLocked(ref ConversationRef, providerMessageID string) (*ConversationTranscriptRecord, error) {
-	items, err := s.store.List(beads.ListQuery{Label: transcriptProviderMessageLabel(ref, providerMessageID)})
+// findTranscriptByProviderMessage returns the open entry of ref carrying
+// providerMessageID, read through r, or nil when there is none.
+func findTranscriptByProviderMessage(r beadLister, ref ConversationRef, providerMessageID string) (*ConversationTranscriptRecord, error) {
+	items, err := r.List(beads.ListQuery{Label: transcriptProviderMessageLabel(ref, providerMessageID)})
 	if err != nil {
 		return nil, fmt.Errorf("list transcript by provider message label: %w", err)
 	}
@@ -867,7 +901,10 @@ func (s *transcriptService) listTranscriptLocked(ref ConversationRef, after int6
 	descending := order == TranscriptOrderDesc
 	records := make([]ConversationTranscriptRecord, 0, limit)
 	appendBucket := func(bucket int64) error {
-		items, err := s.store.List(beads.ListQuery{Label: transcriptBucketLabel(ref, bucket)})
+		// Buckets are read live: an entry another writer created through
+		// another cache is published once the head passes it, and a cached
+		// read could miss it below the head.
+		items, err := beads.LiveFor(s.store).List(beads.ListQuery{Label: transcriptBucketLabel(ref, bucket)})
 		if err != nil {
 			return fmt.Errorf("list transcript bucket %d: %w", bucket, err)
 		}
@@ -880,7 +917,7 @@ func (s *transcriptService) listTranscriptLocked(ref ConversationRef, after int6
 			if err != nil {
 				return err
 			}
-			if !sameConversationRef(record.Conversation, ref) || record.Sequence <= after {
+			if !sameConversationRef(record.Conversation, ref) || record.Sequence < startSeq || record.Sequence > endSeq {
 				continue
 			}
 			bucketRecords = append(bucketRecords, record)

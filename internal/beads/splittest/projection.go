@@ -1129,6 +1129,16 @@ func (v *view) MetadataCASWriterHandle() (beads.MetadataCASWriter, bool) {
 	return checkedCAS{v: v, writer: writer}, true
 }
 
+// PinnedIDCreatorHandle returns the front's pinned create behind the view's
+// create checks.
+func (v *view) PinnedIDCreatorHandle() (beads.PinnedIDCreator, bool) {
+	creator, ok := beads.PinnedIDCreatorFor(v.Store)
+	if !ok {
+		return nil, false
+	}
+	return checkedPinnedCreator{v: v, creator: creator}, true
+}
+
 // AtomicConditionalCloserHandle returns the front's atomic terminal write
 // behind the view's checks.
 func (v *view) AtomicConditionalCloserHandle() (beads.AtomicConditionalCloser, bool) {
@@ -1304,6 +1314,26 @@ func (c checkedCAS) CompareAndSetMetadataKey(id, key, expected, next string) (bo
 		return false, err
 	}
 	return c.writer.CompareAndSetMetadataKey(id, key, expected, next)
+}
+
+// checkedPinnedCreator is the view's Create for a pinned create: it refuses a
+// create whose parent or dependency is the other side's row, and flags and
+// pins a created row of the other side's class to this view.
+type checkedPinnedCreator struct {
+	v       *view
+	creator beads.PinnedIDCreator
+}
+
+func (c checkedPinnedCreator) CreatePinned(b beads.Bead) (beads.Bead, error) {
+	if err := c.v.guardCreateEdges(b); err != nil {
+		return beads.Bead{}, err
+	}
+	created, err := c.creator.CreatePinned(b)
+	if err != nil {
+		return created, err
+	}
+	c.v.afterCreate(b, created)
+	return created, nil
 }
 
 // checkedCloser refuses atomic terminal writes to wrong-class rows.
