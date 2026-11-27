@@ -294,7 +294,7 @@ var wakeSources = []wakeSource{
 		after:  func(w *controllerWake, _ wakeInput) { w.WakeMaintenance() },
 	},
 	{
-		site:   "cmd_supervisor.go:runSupervisor",
+		site:   "cmd_supervisor.go:pokeStartedCitiesOnReload",
 		call:   "Enqueue(wakeReasonSupervisor, reconcilekey.Allocator())",
 		before: func(p, d chan<- struct{}, _ wakeInput) { legacyEnqueue(p, d, allocatorKey...) }, // was v.cs.Enqueue(reconcilekey.Allocator())
 		after:  func(w *controllerWake, _ wakeInput) { w.Enqueue(wakeReasonSupervisor, reconcilekey.Allocator()) },

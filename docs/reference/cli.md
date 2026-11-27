@@ -6128,7 +6128,10 @@ bead caches, which GET /beads and the dashboard serve, so a bead
 written outside gc (for example closed with bd close) shows without
 waiting for the cache's next periodic re-scan. The re-scan runs in the
 background and finishes after the reload replies; a suspended city or
-rig is not re-scanned until it resumes.
+rig is not re-scanned until it resumes. Every supervisor reload
+requests this re-scan, including the reloads gc sends on its own when
+it registers, starts, stops or unregisters a city, or when a city's
+controller does not answer.
 
 The reload also re-reads write_auth_verify_key from supervisor.toml and
 swaps the write-auth verifying keys in place, so a key can be enrolled,

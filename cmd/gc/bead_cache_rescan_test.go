@@ -277,8 +277,9 @@ func TestSupervisorReloadDoesNotWaitForAScan(t *testing.T) {
 }
 
 // TestSupervisorReloadHelpMentionsBeadCacheRescan: the reload help says it
-// also re-scans the bead caches GET /beads serves, and that the re-scan
-// finishes after the reply.
+// also re-scans the bead caches GET /beads serves, that the re-scan
+// finishes after the reply, and that every supervisor reload, the ones gc
+// sends on its own included, requests it.
 func TestSupervisorReloadHelpMentionsBeadCacheRescan(t *testing.T) {
 	var out bytes.Buffer
 	cmd := newSupervisorReloadCmd(io.Discard, io.Discard)
@@ -291,6 +292,7 @@ func TestSupervisorReloadHelpMentionsBeadCacheRescan(t *testing.T) {
 		"requests an immediate re-scan of every running city's bead caches",
 		"GET /beads",
 		"after the reload replies",
+		"Every supervisor reload requests this re-scan, including the reloads gc sends on its own",
 	} {
 		if !strings.Contains(help, want) {
 			t.Errorf("gc supervisor reload --help does not say %q:\n%s", want, out.String())

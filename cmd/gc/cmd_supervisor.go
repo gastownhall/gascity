@@ -1253,7 +1253,10 @@ func printSupervisorSupervisionWarning(stderr io.Writer, warning string) {
 // reconciles its agents at once (e.g. after a child process was killed), and
 // asks each of its bead caches, which GET /beads serves, for a re-scan, so a
 // write made outside gc (an out-of-process bd close) shows without waiting
-// for the cache's cadence. It waits on no reconcile and no scan.
+// for the cache's cadence. Every supervisor reload runs it: the operator's
+// (gc supervisor reload, the reload signal) and the bare reload verb that
+// city lifecycle commands and controller pokes send. It waits on no
+// reconcile and no scan.
 func pokeStartedCitiesOnReload(snap *citySnapshot, stderr io.Writer) {
 	for _, v := range snap.all {
 		if !v.Started || v.cs == nil {
@@ -1285,7 +1288,10 @@ bead caches, which GET /beads and the dashboard serve, so a bead
 written outside gc (for example closed with bd close) shows without
 waiting for the cache's next periodic re-scan. The re-scan runs in the
 background and finishes after the reload replies; a suspended city or
-rig is not re-scanned until it resumes.
+rig is not re-scanned until it resumes. Every supervisor reload
+requests this re-scan, including the reloads gc sends on its own when
+it registers, starts, stops or unregisters a city, or when a city's
+controller does not answer.
 
 The reload also re-reads write_auth_verify_key from supervisor.toml and
 swaps the write-auth verifying keys in place, so a key can be enrolled,
