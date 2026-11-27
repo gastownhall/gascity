@@ -1037,37 +1037,6 @@ func hookRankCandidate(row map[string]any) hookCandidateRank {
 // bestStoreWithWork's rules: work in a store that answers is taken, and with no
 // work anywhere that store's failed read is the answer.
 //
-// # One leg means nothing to fall back TO, so there is nothing to re-validate
-//
-// The whole reason to re-read is the LATER store: draining as "no work" when a
-// federated peer still has ready routed work is the strand this exists to
-// prevent. A single-leg fan-out — every federated city after S3, where the
-// primary's reader answers for the whole plan — has no later store, so the
-// second read can only pay another full city-wide query for a row the claim
-// itself re-checks anyway (`bd update --claim` skips rows it cannot take). On
-// mc's topology that read is the more expensive half of the claim.
-//
-// discovered is the output selection already read from this store, moments ago.
-//
-// noted is forwarded to bestStoreWithWork for its failed-secondary reports.
-func claimStoreWithFallback(command string, stores []hookStore, selected, primary hookStore, discovered string, run hookStoreRunner, noted ...hookStoreFailureNote) (string, hookStore, error) {
-	if len(stores) == 1 {
-		return discovered, selected, nil
-	}
-	selectedOut, err := run(hookStoreCommand(selected, command), selected.dir, selected.env)
-	if err != nil {
-		if sameHookStore(selected, primary) {
-			return "", hookStore{}, err
-		}
-		return bestStoreWithWork(command, stores, primary, run, noted...)
-	}
-	ready := filterUnreadyHookCandidates(normalizeWorkQueryOutput(strings.TrimSpace(selectedOut)), time.Now())
-	if workQueryHasReadyWork(ready) {
-		return selectedOut, selected, nil
-	}
-	return bestStoreWithWork(command, stores, primary, run, noted...)
-}
-
 // hookClaimReadsPerTick counts the work-query runs one claim attempt performs
 // over a given leg set: one to select, and one to re-validate unless there is
 // nothing to fall back to. It exists so the cost this slice removes is asserted

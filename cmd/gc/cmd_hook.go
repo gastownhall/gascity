@@ -973,10 +973,11 @@ func routedHookClaimOps(base hookClaimOps, opened *hookClaimClassRoute, err erro
 
 // claimHookWorkWithRunner is claimHookWork with the work-query runner and claim
 // ops injected for tests. It selects the best-ranked store reporting ready work
-// (see bestStoreWithWork), re-validates it for claim-time freshness and falls
-// back to a later store if it emptied since discovery (claimStoreWithFallback),
-// then attempts the claim against that store's captured rows, against that
-// store's dir/env.
+// (see bestStoreWithWork), then attempts the claim directly against that
+// store's captured discovery rows, against that store's dir/env. There is no
+// claim-time re-read of the selected store: the CAS re-checks the row it takes
+// (bd update --claim skips rows it cannot take), and the second read spent the
+// claim window the reads need (issue #5693).
 //
 // When a selected store still reports ready work but every claimable row is lost
 // to another claimant before the mutation, the single-store claim drains without
@@ -1032,18 +1033,15 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		if isZeroHookStore(selected) {
 			break // no remaining store has ready work
 		}
-		// On a multi-leg city this re-reads the selected store before the
-		// mutation, and a primary-leg failure there is surfaced exactly like a
-		// discovery failure: it is the same read of the same store, moments
-		// later, so it gets the same classification.
-		claimOutput, claimStore, err := claimStoreWithFallback(workQuery, remaining, selected, primary, discovered, run, noteStoreFailure)
-		if err != nil {
-			report.failed(workQuery, err)
-			return reportClaimWorkQueryFailure(err, stderr)
-		}
-		if isZeroHookStore(claimStore) {
-			break // selected store emptied and no later store has ready work
-		}
+		// The claim acts on the discovery output directly. The CAS re-checks
+		// the row it takes, so a second read of the selected store bought
+		// freshness the mutation already enforces — and on a slow fan-out it
+		// spent the claim window the reads need (#5693: two 70s legs, then a
+		// third 70s re-read, refused every CAS with "the claim window is
+		// spent"). A row lost between discovery and the CAS is a lost race in
+		// tryHookClaim: non-terminal, the store is dropped below, and
+		// reselection claims a later leg's work.
+		claimOutput, claimStore := discovered, selected
 		storeOpts := claimOpts
 		storeOpts.Env = queryEnv
 		if len(claimStore.env) > 0 {
@@ -1078,10 +1076,10 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 
 // reportClaimWorkQueryFailure reports a failed claim-path work query on stderr
 // and returns the exit code for it. Every claim read whose failure is surfaced
-// funnels through here: discovery, the claim-time re-validation on a multi-leg
-// city, and tryHookClaim's own read. So a timed-out or transport-class failure
-// on any of them carries the token and exit 2, scoped as
-// hookStoreUnavailableToken's doc states (the agent's own store only).
+// funnels through here: discovery (including a reselection after a lost race)
+// and tryHookClaim's own read. So a timed-out or transport-class failure on any
+// of them carries the token and exit 2, scoped as hookStoreUnavailableToken's
+// doc states (the agent's own store only).
 //
 // This is the same store-unavailable classification the read path applies.
 // --claim is the form agents actually run in the dispatch loop, so without the

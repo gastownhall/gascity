@@ -363,6 +363,59 @@ func TestHealthyPrimaryStillAcceptsExtraLegWork(t *testing.T) {
 	}
 }
 
+// TestFederatedClaimCASFailureDrainsClaimsErrored pins the accepted behavior of
+// a claim that acts on the discovery output directly (#5693): a store that
+// served a row at discovery but whose CAS transport fails at mutation time is a
+// CLAIM failure, not a read failure. The invocation drains claims_errored
+// (exit 0, drain-ack consumed, bead.claim_failed event) rather than exiting 2
+// with the store-unavailable token — the row was served, so "the store could
+// not be read" would be the wrong fact — and the later reselection sees the
+// peer leg empty, so nothing is stranded behind the failed CAS.
+func TestFederatedClaimCASFailureDrainsClaimsErrored(t *testing.T) {
+	withFastClaimRetries(t)
+	h := newFailureHookHarness()
+	h.script("/rig", hookRunnerAnswer{out: "[]"})
+	h.script("/city", hookRunnerAnswer{out: routedRowJSON("cas-1")})
+	stores := []hookStore{
+		{dir: "/rig", env: []string{"BEADS_DIR=/rig"}},
+		{dir: "/city", env: []string{"BEADS_DIR=/city"}},
+	}
+	casErr := errors.New("bd update --claim cas-1: Error: dial tcp 127.0.0.1:3307: connect: connection refused")
+	var claimFailed []string
+	var stdout, stderr bytes.Buffer
+	ops := h.ops()
+	ops.Claim = func(_ context.Context, _ string, _ []string, _, _ string) (beads.Bead, bool, error) {
+		return beads.Bead{}, false, casErr
+	}
+	ops.EmitClaimFailed = func(beadID string, _ hookClaimOptions, _ error) {
+		claimFailed = append(claimFailed, beadID)
+	}
+	code := claimHookWorkWithRunner("work-query", stores[0].dir, stores[0].env, stores, failureClaimOptions(), ops,
+		h.run, h.emitFailure, &stdout, &stderr)
+	var result hookClaimJSONResult
+	if trimmed := strings.TrimSpace(stdout.String()); trimmed != "" {
+		if err := json.Unmarshal([]byte(trimmed), &result); err != nil {
+			t.Fatalf("decoding claim result %q: %v", trimmed, err)
+		}
+	}
+
+	if code != 0 || result.Action != "drain" || result.Reason != hookClaimReasonClaimsErrored {
+		t.Fatalf("exit=%d result=%+v, want a claims_errored drain at exit 0; stderr=%s", code, result, stderr.String())
+	}
+	if !h.drained {
+		t.Fatal("a claims_errored drain must still acknowledge drain")
+	}
+	if len(claimFailed) != 1 || claimFailed[0] != "cas-1" {
+		t.Fatalf("bead.claim_failed events = %v, want exactly [cas-1]", claimFailed)
+	}
+	if strings.Contains(stderr.String(), hookStoreUnavailableToken) {
+		t.Fatalf("a failed CAS is not a failed read; the token must not appear:\nstderr=%q", stderr.String())
+	}
+	if len(h.events) != 0 {
+		t.Fatalf("work-query failure events = %v, want none: every read succeeded", h.events)
+	}
+}
+
 // TestWorkQueryFailureEventsCoverOrdinaryErrors pins the widening itself: kills
 // and timeouts kept their reasons, and an ordinary non-zero exit — previously
 // classified un-recordable and therefore invisible — is now a lifecycle fact.

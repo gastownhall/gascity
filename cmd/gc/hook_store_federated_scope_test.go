@@ -117,7 +117,10 @@ const bdListInProgressForTest = "bd list --status in_progress"
 // the binding). Before S3 a six-leg city cost six runs to select plus one to
 // re-validate. The plan says the primary's reader answers for every one of those
 // legs, so the relevant leg count is one — and with one leg there is no later
-// store to fall back to, so the re-validation has nothing to do either.
+// store to fall back to. The claim-time re-validation read itself is gone
+// (#5693): the claim acts on the discovery output, and the read count a
+// multi-leg tick performs is pinned end to end in
+// TestFederatedClaimRunsNoReadBetweenSelectionAndCAS.
 func TestFederatedClaimTickIssuesOneWorkQueryRun(t *testing.T) {
 	a := &config.Agent{Name: "worker"}
 	topo := federatedHookTopology()
@@ -133,37 +136,6 @@ func TestFederatedClaimTickIssuesOneWorkQueryRun(t *testing.T) {
 	}
 	if got := hookClaimReadsPerTick(before); got <= hookClaimReadsPerTick(after) {
 		t.Fatalf("the un-collapsed fan-out costs %d runs and the collapsed one %d; the measurement is not measuring anything", got, hookClaimReadsPerTick(after))
-	}
-
-	// And the claim really does act on the discovery output rather than paying
-	// for a second read of it.
-	one := after
-	calls := 0
-	run := func(string, string, []string) (string, error) {
-		calls++
-		return `[{"id":"gcg-1","status":"open"}]`, nil
-	}
-	out, store, err := claimStoreWithFallback(federated, one, one[0], one[0], `[{"id":"gcg-1","status":"open"}]`, run)
-	if err != nil {
-		t.Fatalf("claimStoreWithFallback: %v", err)
-	}
-	if calls != 0 {
-		t.Fatalf("claim-time re-validation ran %d extra work queries on a single-leg city; there is no later store it could fall back to", calls)
-	}
-	if out != `[{"id":"gcg-1","status":"open"}]` || !sameHookStore(store, one[0]) {
-		t.Fatalf("claimStoreWithFallback = (%q, %q), want the discovery output on the one leg", out, store.dir)
-	}
-
-	// The control: with a real second leg the re-validation still happens, so
-	// the skip above is about having nowhere to fall back to and not about
-	// having removed the freshness read.
-	twoLegs := []hookStore{{dir: "city"}, {dir: "riga"}}
-	calls = 0
-	if _, _, err := claimStoreWithFallback("q", twoLegs, twoLegs[0], twoLegs[0], "stale", run); err != nil {
-		t.Fatalf("claimStoreWithFallback (two legs): %v", err)
-	}
-	if calls != 1 {
-		t.Fatalf("a two-leg claim performed %d re-validation reads, want 1", calls)
 	}
 }
 
@@ -228,30 +200,6 @@ func TestBestStoreWithWorkRunsEachStoresOwnCommand(t *testing.T) {
 	}
 	if ran["riga"] != "single-store query" {
 		t.Fatalf("federated extra ran %q, want its own single-store query", ran["riga"])
-	}
-}
-
-// TestClaimStoreWithFallbackRunsTheSelectedStoresOwnCommand covers the claim
-// half of the same seam: claim-time re-validation must re-ask the selected store
-// its OWN question, or the scoped extras would be re-probed city-wide.
-func TestClaimStoreWithFallbackRunsTheSelectedStoresOwnCommand(t *testing.T) {
-	stores := []hookStore{
-		{dir: "city", env: []string{"GC_STORE=city"}},
-		{dir: "riga", env: []string{"GC_STORE=riga"}, command: "single-store query"},
-	}
-	var revalidated string
-	run := func(command, dir string, _ []string) (string, error) {
-		if dir == "riga" {
-			revalidated = command
-			return `[{"id":"hw-riga","status":"open"}]`, nil
-		}
-		return `[]`, nil
-	}
-	if _, store, err := claimStoreWithFallback("federated query", stores, stores[1], stores[0], "", run); err != nil || store.dir != "riga" {
-		t.Fatalf("claimStoreWithFallback = (%q, %v), want riga", store.dir, err)
-	}
-	if revalidated != "single-store query" {
-		t.Fatalf("claim-time re-validation ran %q, want the selected store's own single-store query", revalidated)
 	}
 }
 

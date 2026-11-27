@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -179,6 +180,126 @@ func TestClaimReadRetryWithoutAnInvocationWindowKeepsFullBudget(t *testing.T) {
 	}
 	if want := 1 + hookClaimQueryRetryAttempts; len(clock.readStarts) != want {
 		t.Fatalf("reads = %d, want %d with no invocation window", len(clock.readStarts), want)
+	}
+}
+
+// claimFanoutClock is a fake invocation clock for whole-claim fan-out tests.
+// Where retryWindowClock paces the retry loop's reads directly, this one layers
+// over a failureHookHarness runner and advances once per work-query read, so a
+// test states where every leg's read lands against the invocation's claim
+// window without scripting the loop's internals.
+type claimFanoutClock struct {
+	now       time.Time
+	invokedAt time.Time
+	readCost  time.Duration
+	// readCosts, when set, is consumed one entry per read in place of the
+	// uniform readCost, so a test can price reads differently.
+	readCosts []time.Duration
+	sleeps    []time.Duration
+}
+
+func newClaimFanoutClock(readCost time.Duration) *claimFanoutClock {
+	start := time.Date(2026, 11, 27, 7, 0, 0, 0, time.UTC)
+	return &claimFanoutClock{now: start, invokedAt: start, readCost: readCost}
+}
+
+func (c *claimFanoutClock) Now() time.Time { return c.now }
+
+func (c *claimFanoutClock) Sleep(d time.Duration) {
+	c.sleeps = append(c.sleeps, d)
+	c.now = c.now.Add(d)
+}
+
+// nextReadCost is the cost of the next work-query read: the queued per-read
+// cost when one is set, else the uniform readCost.
+func (c *claimFanoutClock) nextReadCost() time.Duration {
+	if len(c.readCosts) > 0 {
+		cost := c.readCosts[0]
+		c.readCosts = c.readCosts[1:]
+		return cost
+	}
+	return c.readCost
+}
+
+// claimFanoutRecorder captures what one claimHookWorkWithRunner invocation did:
+// every claim mutation it attempted, the claim-window expiries it emitted, the
+// claim mutations that errored, and how many work-query reads ran.
+type claimFanoutRecorder struct {
+	claims        []string
+	windowExpired []hookClaimWindowExpiry
+	claimFailed   []string
+	reads         int
+}
+
+// runClaimFanout drives claimHookWorkWithRunner over a failureHookHarness on
+// the fake clock: every work-query read advances the clock by its cost, and the
+// ops record the claims, window expiries and claim failures the assertions
+// read. tune, when given, adjusts the ops after the harness seeds them (and
+// before the recorders wrap the seams) — e.g. to make a CAS lose its race. It
+// returns the exit code, the decoded JSON result (zero value when nothing was
+// written), stderr, and the recorder.
+func runClaimFanout(t *testing.T, clock *claimFanoutClock, h *failureHookHarness, stores []hookStore, tune ...func(*hookClaimOps)) (int, hookClaimJSONResult, string, *claimFanoutRecorder) {
+	t.Helper()
+	rec := &claimFanoutRecorder{}
+	ops := h.ops()
+	for _, f := range tune {
+		f(&ops)
+	}
+	baseClaim := ops.Claim
+	ops.Claim = func(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
+		rec.claims = append(rec.claims, beadID)
+		return baseClaim(ctx, dir, env, beadID, assignee)
+	}
+	ops.EmitClaimWindowExpired = func(e hookClaimWindowExpiry) { rec.windowExpired = append(rec.windowExpired, e) }
+	ops.EmitClaimFailed = func(beadID string, _ hookClaimOptions, _ error) { rec.claimFailed = append(rec.claimFailed, beadID) }
+	ops.Now, ops.Sleep = clock.Now, clock.Sleep
+	ops.InvokedAt, ops.ClaimWindow = clock.invokedAt, retryWindowTestWindow
+	run := func(command, dir string, env []string) (string, error) {
+		rec.reads++
+		out, err := h.run(command, dir, env)
+		clock.now = clock.now.Add(clock.nextReadCost())
+		return out, err
+	}
+	var stdout, stderr bytes.Buffer
+	code := claimHookWorkWithRunner("work-query", stores[0].dir, stores[0].env, stores, failureClaimOptions(), ops,
+		run, h.emitFailure, &stdout, &stderr)
+	var result hookClaimJSONResult
+	if trimmed := strings.TrimSpace(stdout.String()); trimmed != "" {
+		if err := json.Unmarshal([]byte(trimmed), &result); err != nil {
+			t.Fatalf("decoding claim result %q: %v", trimmed, err)
+		}
+	}
+	return code, result, stderr.String(), rec
+}
+
+// TestFederatedClaimClaimsRoutedWorkFoundBySlowLegs is issue #5693's reported
+// defect: on a two-leg city where every work-query read costs 70s — the loaded
+// worst case the incident measured — discovery ends at 140s, inside the 160s
+// default claim window, so the claim must take the routed bead the fan-out
+// found. At base the claim re-read the selected leg before the CAS, spent the
+// window on that second read, and the CAS was then refused with "the claim
+// window is spent" on every patrol: routed unassigned beads starved for hours
+// while a manual bd update --claim took the same rows instantly.
+func TestFederatedClaimClaimsRoutedWorkFoundBySlowLegs(t *testing.T) {
+	h := newFailureHookHarness()
+	h.script("/own", hookRunnerAnswer{out: "[]"})
+	h.script("/rig", hookRunnerAnswer{out: routedRowJSON("work-1")})
+	stores := []hookStore{
+		{dir: "/own", env: []string{"BEADS_DIR=/own"}},
+		{dir: "/rig", env: []string{"BEADS_DIR=/rig"}, rig: "alpha"},
+	}
+	clock := newClaimFanoutClock(70 * time.Second)
+
+	code, result, stderr, rec := runClaimFanout(t, clock, h, stores)
+
+	if code != 0 || result.Action != "work" || result.BeadID != "work-1" {
+		t.Fatalf("exit=%d result=%+v, want exit 0 claiming work-1 (discovery ended at 140s, inside the 160s window); stderr=%s", code, result, stderr)
+	}
+	if len(rec.claims) != 1 || rec.claims[0] != "work-1" {
+		t.Fatalf("claims = %v, want exactly [work-1]", rec.claims)
+	}
+	if len(rec.windowExpired) != 0 {
+		t.Fatalf("execution.claim_window_expired fired %d times; the reads fit the window, only the removed re-read did not", len(rec.windowExpired))
 	}
 }
 
