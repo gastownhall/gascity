@@ -710,7 +710,7 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 		// configured canonical identity, so the canonical session the awake/scale
 		// accounting wakes for it can actually surface and claim it (the
 		// agent-side work_query/claim path matches identities by raw string).
-		canonicalizeLegacyBoundAssignedWork(cfg, assignedWorkBeads, assignedWorkStores, sessionBeads, stderr)
+		canonicalizeLegacyBoundAssignedWork(cfg, assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, sessionBeads, stderr).log(stderr, "canonicalizeLegacyBoundAssignedWork")
 		// The demand pass's own writes over the assigned snapshot, between the
 		// collect_assigned_work and collect_unassigned_routed records.
 		recordDemandSubPhase(trace, "demand_snapshot.assigned_repairs", repairsStart, map[string]any{
@@ -6617,15 +6617,26 @@ func stampRunRootFromStep(cfg *config.City, store beads.Store, step beads.Bead, 
 // what is already on the bead, so steady-state reconciles perform no writes. A
 // write failure is logged and skipped — recovery is best-effort and must never
 // block reconciliation.
-func canonicalizeLegacyBoundAssignedWork(cfg *config.City, workBeads []beads.Bead, workStores []beads.Store, sessionBeads *sessionBeadSnapshot, stderr io.Writer) {
-	if cfg == nil || len(workBeads) != len(workStores) {
-		return
+//
+// Shared-leg rule: workRefs names the store leg each row was collected under
+// (index-aligned with workBeads/workStores, as the routed arm's rule). On a leg
+// other cities also read (legacyRehomeLegIsOwn) each changed field's rewrite is
+// allowed only when it strips a binding segment this city mints on that leg's
+// rig (legacyRehomeAllowed); a refused field skips the whole row, so in-flight
+// work is never half-migrated, and the refusal is reported. The caller logs the
+// returned report. This is what stops two cities sharing one rig store from
+// pulling each other's canonical in-flight work out from under its owner
+// (#5846).
+func canonicalizeLegacyBoundAssignedWork(cfg *config.City, workBeads []beads.Bead, workStores []beads.Store, workRefs []string, sessionBeads *sessionBeadSnapshot, stderr io.Writer) legacyRehomeReport {
+	var report legacyRehomeReport
+	if cfg == nil || len(workBeads) != len(workStores) || len(workRefs) != len(workBeads) {
+		return report
 	}
 	// A nil or load-errored snapshot is incomplete: the live-session guard below
 	// cannot prove a legacy owner is gone, so re-homing could strand a live
 	// session's in-flight work. Skip and let a later complete tick converge it.
 	if sessionBeads == nil || sessionBeads.LoadError() != nil {
-		return
+		return report
 	}
 	sessionByAssignee := buildSessionAssigneeIndex(sessionBeads)
 	for i, wb := range workBeads {
@@ -6656,6 +6667,24 @@ func canonicalizeLegacyBoundAssignedWork(cfg *config.City, workBeads []beads.Bea
 		if _, served := sessionByAssignee[assignee]; served {
 			continue
 		}
+		// Shared-leg rule (see canonicalizeLegacyBoundUnassignedRoutedWork): each
+		// changed field is guarded on the leg the row was collected under, and a
+		// refused field skips the whole row — a half-migrated row (canonical
+		// assignee on a foreign route, or the reverse) would neither claim nor
+		// serve, so the row moves only when both its fields may.
+		own := legacyRehomeLegIsOwn(workRefs[i])
+		if assigneeChanged {
+			if agent := findAgentByTemplate(cfg, assignee); !legacyRehomeAllowed(cfg, own, assignee, agent) {
+				report.refuse(legacyRehomeEntry{ID: wb.ID, Leg: workRefs[i], Field: "assignee", From: assignee, To: canonicalAssignee})
+				continue
+			}
+		}
+		if routedChanged {
+			if agent := findAgentByTemplate(cfg, routedTo); !legacyRehomeAllowed(cfg, own, routedTo, agent) {
+				report.refuse(legacyRehomeEntry{ID: wb.ID, Leg: workRefs[i], Field: beadmeta.RoutedToMetadataKey, From: routedTo, To: canonicalRouted})
+				continue
+			}
+		}
 		opts := beads.UpdateOpts{}
 		if assigneeChanged {
 			opts.Assignee = &canonicalAssignee
@@ -6663,10 +6692,20 @@ func canonicalizeLegacyBoundAssignedWork(cfg *config.City, workBeads []beads.Bea
 		if routedChanged {
 			opts.Metadata = map[string]string{beadmeta.RoutedToMetadataKey: canonicalRouted}
 		}
-		if err := store.Update(wb.ID, opts); err != nil && stderr != nil {
-			fmt.Fprintf(stderr, "canonicalizeLegacyBoundAssignedWork: %s: %v\n", wb.ID, err) //nolint:errcheck
+		if err := store.Update(wb.ID, opts); err != nil {
+			if stderr != nil {
+				fmt.Fprintf(stderr, "canonicalizeLegacyBoundAssignedWork: %s: %v\n", wb.ID, err) //nolint:errcheck
+			}
+			continue
+		}
+		if assigneeChanged {
+			report.rehomed(legacyRehomeEntry{ID: wb.ID, Leg: workRefs[i], Field: "assignee", From: assignee, To: canonicalAssignee})
+		}
+		if routedChanged {
+			report.rehomed(legacyRehomeEntry{ID: wb.ID, Leg: workRefs[i], Field: beadmeta.RoutedToMetadataKey, From: routedTo, To: canonicalRouted})
 		}
 	}
+	return report
 }
 
 // canonicalizeLegacyBoundUnassignedRoutedWork rewrites the gc.routed_to of open,

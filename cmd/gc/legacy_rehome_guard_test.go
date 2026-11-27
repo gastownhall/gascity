@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"slices"
@@ -276,5 +277,134 @@ func TestCanonicalizeLegacyRoutedWorkRefusesAddDirectionOnSharedRigLeg(t *testin
 	want := legacyRehomeEntry{ID: "wb-add", Leg: "rig:qcore", Field: "gc.routed_to", From: "qcore/omp", To: "qcore/pool.omp"}
 	if report.Refused[0] != want {
 		t.Errorf("refusal = %+v, want %+v", report.Refused[0], want)
+	}
+}
+
+// TestCanonicalizeLegacyAssignedWorkLeavesForeignInFlightOnSharedRigLeg is
+// AC-3 of the #5846 design: the assigned arm gets the same leg-scoped guard as
+// the routed arm. In-flight foreign work — another city's canonical in_progress
+// row on a shared rig store — resolves through the permissive fallbacks to this
+// city's unbound agent, and re-homing it would pull live work out from under
+// the city that owns it. Each changed field is guarded; a refused field skips
+// the whole row (never half-migrate it), and the refusal is reported.
+func TestCanonicalizeLegacyAssignedWorkLeavesForeignInFlightOnSharedRigLeg(t *testing.T) {
+	t.Run("both fields refused", func(t *testing.T) {
+		cfg := &config.City{Agents: []config.Agent{poolAgent("omp", "fixture", intPtr(3), 0)}}
+
+		wb := workBead("fx-asg", "fixture/pool.omp", "fixture/pool.omp", "in_progress", 5)
+		mem := beads.NewMemStoreFrom(0, []beads.Bead{wb}, nil)
+		store := &updateCountingStore{Store: mem}
+
+		report := canonicalizeLegacyBoundAssignedWork(cfg, []beads.Bead{wb}, []beads.Store{store}, []string{"fixture"}, newSessionBeadSnapshot(nil), io.Discard)
+
+		if store.updates != 0 {
+			t.Errorf("refused rewrite still issued %d Update call(s), want 0", store.updates)
+		}
+		got, err := mem.Get("fx-asg")
+		if err != nil {
+			t.Fatalf("Get(fx-asg): %v", err)
+		}
+		if got.Assignee != "fixture/pool.omp" {
+			t.Errorf("assignee = %q, want the foreign canonical identity left alone", got.Assignee)
+		}
+		if routed := got.Metadata["gc.routed_to"]; routed != "fixture/pool.omp" {
+			t.Errorf("gc.routed_to = %q, want the foreign canonical route left alone", routed)
+		}
+		if len(report.Rehomed) != 0 {
+			t.Errorf("report rehomed %+v, want none", report.Rehomed)
+		}
+		if len(report.Refused) != 1 {
+			t.Fatalf("report refused %+v, want exactly the assignee refusal (the row is skipped whole)", report.Refused)
+		}
+		want := legacyRehomeEntry{ID: "fx-asg", Leg: "fixture", Field: "assignee", From: "fixture/pool.omp", To: "fixture/omp"}
+		if report.Refused[0] != want {
+			t.Errorf("refusal = %+v, want %+v", report.Refused[0], want)
+		}
+	})
+
+	t.Run("mixed row is never half-migrated", func(t *testing.T) {
+		// The city mints "gc" city-wide but not "pool": stripping the gc binding
+		// off the assignee is provably this city's own legacy spelling, stripping
+		// the pool binding off the route is not. The guard refuses the route, so
+		// the assignee stays too — a row half-migrated to a canonical assignee on
+		// a foreign route would neither claim nor serve.
+		cfg := &config.City{
+			Imports: map[string]config.Import{"gc": {Source: "./packs/gc"}},
+			Agents:  []config.Agent{poolAgent("omp", "fixture", intPtr(3), 0)},
+		}
+
+		wb := workBead("fx-mix", "fixture/pool.omp", "fixture/gc.omp", "in_progress", 5)
+		mem := beads.NewMemStoreFrom(0, []beads.Bead{wb}, nil)
+		store := &updateCountingStore{Store: mem}
+
+		report := canonicalizeLegacyBoundAssignedWork(cfg, []beads.Bead{wb}, []beads.Store{store}, []string{"fixture"}, newSessionBeadSnapshot(nil), io.Discard)
+
+		if store.updates != 0 {
+			t.Errorf("mixed row written %d time(s), want 0 (never half-migrate)", store.updates)
+		}
+		got, err := mem.Get("fx-mix")
+		if err != nil {
+			t.Fatalf("Get(fx-mix): %v", err)
+		}
+		if got.Assignee != "fixture/gc.omp" || got.Metadata["gc.routed_to"] != "fixture/pool.omp" {
+			t.Errorf("row = (assignee %q, route %q), want both fields untouched", got.Assignee, got.Metadata["gc.routed_to"])
+		}
+		if len(report.Rehomed) != 0 {
+			t.Errorf("report rehomed %+v, want none", report.Rehomed)
+		}
+		if len(report.Refused) != 1 {
+			t.Fatalf("report refused %+v, want exactly the route refusal", report.Refused)
+		}
+		want := legacyRehomeEntry{ID: "fx-mix", Leg: "fixture", Field: "gc.routed_to", From: "fixture/pool.omp", To: "fixture/omp"}
+		if report.Refused[0] != want {
+			t.Errorf("refusal = %+v, want %+v", report.Refused[0], want)
+		}
+	})
+}
+
+// TestCanonicalizeLegacyAssignedRehomeMismatchedRefsWritesNothing pins the refs
+// contract for the assigned arm, mirroring the routed arm's rule: workRefs must
+// be index-aligned with workBeads/workStores, and a length mismatch writes
+// nothing and reports nothing.
+func TestCanonicalizeLegacyAssignedRehomeMismatchedRefsWritesNothing(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{poolAgent("planner", "rig-A", intPtr(5), 0)}}
+	const legacy = "rig-A/gc.planner"
+
+	wb := workBead("wb-asg", legacy, legacy, "in_progress", 5)
+	mem := beads.NewMemStoreFrom(0, []beads.Bead{wb}, nil)
+	store := &updateCountingStore{Store: mem}
+	report := canonicalizeLegacyBoundAssignedWork(cfg, []beads.Bead{wb}, []beads.Store{store}, nil, newSessionBeadSnapshot(nil), io.Discard)
+	if store.updates != 0 {
+		t.Errorf("assigned arm wrote %d time(s) with mismatched refs", store.updates)
+	}
+	if len(report.Rehomed) != 0 || len(report.Refused) != 0 {
+		t.Errorf("mismatched refs reported %+v, want an empty report", report)
+	}
+}
+
+// TestCanonicalizeLegacyAssignedRehomeDegradedSnapshotWritesNothing pins the
+// degraded-snapshot rule through the report: a nil or load-errored snapshot
+// cannot prove a legacy owner is gone, so the pass skips whole and returns an
+// empty report — no rehomes, no refusals, no writes.
+func TestCanonicalizeLegacyAssignedRehomeDegradedSnapshotWritesNothing(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{poolAgent("planner", "rig-A", intPtr(5), 0)}}
+	const legacy = "rig-A/gc.planner"
+
+	for name, snap := range map[string]*sessionBeadSnapshot{
+		"nil snapshot":          nil,
+		"load-errored snapshot": newSessionBeadSnapshotWithError(errors.New("dolt down")),
+	} {
+		t.Run(name, func(t *testing.T) {
+			wb := workBead("wb-asg", legacy, legacy, "in_progress", 5)
+			mem := beads.NewMemStoreFrom(0, []beads.Bead{wb}, nil)
+			store := &updateCountingStore{Store: mem}
+			report := canonicalizeLegacyBoundAssignedWork(cfg, []beads.Bead{wb}, []beads.Store{store}, []string{""}, snap, io.Discard)
+			if store.updates != 0 {
+				t.Errorf("degraded snapshot wrote %d time(s)", store.updates)
+			}
+			if len(report.Rehomed) != 0 || len(report.Refused) != 0 {
+				t.Errorf("degraded snapshot reported %+v, want empty", report)
+			}
+		})
 	}
 }

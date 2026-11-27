@@ -162,7 +162,10 @@ func (c *v2DemandMigrationsCheck) sweep(fix bool, stderr io.Writer) demandMigrat
 		s.problems = append(s.problems, "assigned collection partial")
 	}
 	repairPoolSlotWorkDirClobber(c.cfg, assigned, writes(demandMigrationRepairs[0], assignedStores, assignedRefs), stderr)
-	canonicalizeLegacyBoundAssignedWork(c.cfg, assigned, writes(demandMigrationRepairs[1], assignedStores, assignedRefs), sessions, stderr)
+	assignedRehome := canonicalizeLegacyBoundAssignedWork(c.cfg, assigned, writes(demandMigrationRepairs[1], assignedStores, assignedRefs), assignedRefs, sessions, stderr)
+	if fix {
+		assignedRehome.log(stderr, demandMigrationRepairs[1])
+	}
 
 	routed, routedStores, routedRefs, routedPartial := collectOpenUnassignedRoutedWork(c.cityPath, c.cfg, city, rigs, suspended, stderr, nil, nil)
 	if routedPartial {
