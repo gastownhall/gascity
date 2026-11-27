@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
@@ -370,6 +371,215 @@ func TestHasRecordAnsweringTo_ListingErrors(t *testing.T) {
 			}
 			if len(store.queries) != tc.wantLookups {
 				t.Fatalf("lookups = %d, want %d", len(store.queries), tc.wantLookups)
+			}
+		})
+	}
+}
+
+// TestTemplateTenureIn pins which session records count toward a template's
+// tenure: a session bead, open or closed, recorded under exactly that
+// template, found by one Live, closed-inclusive lookup on the template key that
+// writes nothing. Each record dates the tenure by its creation.
+func TestTemplateTenureIn(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		beadType string
+		labeled  bool
+		open     bool
+		metadata map[string]string
+		counts   bool
+	}{
+		{"closed record of the template", BeadType, true, false, map[string]string{"template": "rig-A/gc.planner"}, true},
+		{"open record of the template", BeadType, true, true, map[string]string{"template": "rig-A/gc.planner"}, true},
+		{"label-only record with an empty type", "", true, false, map[string]string{"template": "rig-A/gc.planner"}, true},
+		{"work bead carrying the template", "task", false, true, map[string]string{"template": "rig-A/gc.planner"}, false},
+		{"record of another template", BeadType, true, false, map[string]string{"template": "rig-A/planner"}, false},
+		{"record answering to the identity only by alias", BeadType, true, false, map[string]string{"alias": "rig-A/gc.planner", "template": "rig-A/planner"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := beads.NewMemStore()
+			record := seedRecord(t, mem, tc.beadType, tc.labeled, tc.open, tc.metadata)
+			before, err := mem.Get(record.ID)
+			if err != nil {
+				t.Fatalf("Get record: %v", err)
+			}
+			store := &recordLookupStore{Store: mem}
+
+			got, err := TemplateTenureIn(store, " rig-A/gc.planner ")
+			if err != nil {
+				t.Fatalf("TemplateTenureIn: %v", err)
+			}
+			var want TemplateTenure
+			if tc.counts {
+				want.Until = before.CreatedAt
+			}
+			if !got.Until.Equal(want.Until) {
+				t.Fatalf("TemplateTenureIn(rig-A/gc.planner) = %+v, want %+v", got, want)
+			}
+			wantQuery := beads.ListQuery{Metadata: map[string]string{"template": "rig-A/gc.planner"}, IncludeClosed: true, Live: true}
+			if len(store.queries) != 1 || !reflect.DeepEqual(store.queries[0], wantQuery) {
+				t.Fatalf("listings = %+v, want exactly %+v", store.queries, wantQuery)
+			}
+			after, err := mem.Get(record.ID)
+			if err != nil {
+				t.Fatalf("Get record: %v", err)
+			}
+			if after.Type != tc.beadType || !after.UpdatedAt.Equal(before.UpdatedAt) {
+				t.Fatalf("stored type/updated_at = %q/%v, want %q/%v: the lookup must not repair or write", after.Type, after.UpdatedAt, tc.beadType, before.UpdatedAt)
+			}
+		})
+	}
+
+	t.Run("a looser metadata filter is confirmed per row", func(t *testing.T) {
+		mem := beads.NewMemStore()
+		seedRecord(t, mem, BeadType, true, false, map[string]string{"template": "Rig-A/GC.planner"})
+		got, err := TemplateTenureIn(foldedMetadataStore{mem}, "rig-A/gc.planner")
+		if err != nil || got != (TemplateTenure{}) {
+			t.Fatalf("TemplateTenureIn = %+v, %v; want a record of Rig-A/GC.planner not to count for rig-A/gc.planner", got, err)
+		}
+	})
+
+	t.Run("nil store or blank template looks nothing up", func(t *testing.T) {
+		if got, err := TemplateTenureIn(nil, "rig-A/gc.planner"); got != (TemplateTenure{}) || err != nil {
+			t.Fatalf("TemplateTenureIn(nil) = %+v, %v; want the zero tenure, nil", got, err)
+		}
+		store := &recordLookupStore{Store: beads.NewMemStore()}
+		if got, err := TemplateTenureIn(store, "  "); got != (TemplateTenure{}) || err != nil || len(store.queries) != 0 {
+			t.Fatalf("TemplateTenureIn(blank) = %+v, %v after %d listings; want the zero tenure, nil, none", got, err, len(store.queries))
+		}
+	})
+}
+
+// TestTemplateTenureIn_EveryRecordCounts: the tenure is taken over every
+// record of the template, not the first one found. Its Until is the latest
+// record's creation, open or closed. A record's later writes, its close
+// included, do not extend it: a pre-migration session bead a city keeps as a
+// seat of the renamed agent is written on every wake and sleep while it runs
+// the new identity, and closed while it runs it too. A record with no creation
+// time dates nothing, however it was last written.
+func TestTemplateTenureIn_EveryRecordCounts(t *testing.T) {
+	base := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	record := func(id, status string, created, updated time.Time) beads.Bead {
+		return beads.Bead{
+			ID: id, Title: "record", Type: BeadType, Status: status, CreatedAt: created, UpdatedAt: updated,
+			Metadata: map[string]string{"template": "rig-A/gc.planner"},
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		records []beads.Bead
+		want    TemplateTenure
+	}{
+		{"the latest creation among closed records", []beads.Bead{
+			record("s-1", "closed", base.Add(3*time.Hour), base.Add(4*time.Hour)),
+			record("s-2", "closed", base.Add(5*time.Hour), base.Add(6*time.Hour)),
+			record("s-3", "closed", base.Add(time.Hour), base.Add(9*time.Hour)),
+		}, TemplateTenure{Until: base.Add(5 * time.Hour)}},
+		{"a closed record by its creation, not its close", []beads.Bead{
+			record("s-1", "closed", base.Add(2*time.Hour), base.Add(98*time.Hour)),
+		}, TemplateTenure{Until: base.Add(2 * time.Hour)}},
+		{"a closed record the store reports no update for", []beads.Bead{
+			record("s-1", "closed", base.Add(2*time.Hour), time.Time{}),
+		}, TemplateTenure{Until: base.Add(2 * time.Hour)}},
+		{"an open record by its creation, not its last write", []beads.Bead{
+			record("s-1", "open", base.Add(2*time.Hour), base.Add(98*time.Hour)),
+		}, TemplateTenure{Until: base.Add(2 * time.Hour)}},
+		{"an open record among closed ones", []beads.Bead{
+			record("s-1", "closed", base, base.Add(time.Hour)),
+			record("s-2", "open", base.Add(2*time.Hour), base.Add(98*time.Hour)),
+			record("s-3", "closed", base.Add(time.Hour), base.Add(4*time.Hour)),
+		}, TemplateTenure{Until: base.Add(2 * time.Hour)}},
+		{"an open record created before a closed one", []beads.Bead{
+			record("s-1", "open", base, base.Add(98*time.Hour)),
+			record("s-2", "closed", base.Add(3*time.Hour), base.Add(4*time.Hour)),
+		}, TemplateTenure{Until: base.Add(3 * time.Hour)}},
+		{"a closed record with no time", []beads.Bead{
+			record("s-1", "closed", time.Time{}, time.Time{}),
+		}, TemplateTenure{}},
+		{"a closed record with no creation time", []beads.Bead{
+			record("s-1", "closed", time.Time{}, base.Add(98*time.Hour)),
+		}, TemplateTenure{}},
+		{"an open record with no creation time", []beads.Bead{
+			record("s-1", "open", time.Time{}, base.Add(98*time.Hour)),
+		}, TemplateTenure{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := TemplateTenureIn(beads.NewMemStoreFrom(0, tc.records, nil), "rig-A/gc.planner")
+			if err != nil {
+				t.Fatalf("TemplateTenureIn: %v", err)
+			}
+			if !got.Until.Equal(tc.want.Until) {
+				t.Fatalf("TemplateTenureIn = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTemplateTenureCovers pins how a row is dated against a tenure: it is
+// covered when it was created no later than Until, the latest creation of a
+// record of the template. A row with no creation time is never covered, and
+// nothing is covered when no record dates the tenure.
+func TestTemplateTenureCovers(t *testing.T) {
+	until := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name    string
+		tenure  TemplateTenure
+		created time.Time
+		want    bool
+	}{
+		{"no record", TemplateTenure{}, until, false},
+		{"no record, undated row", TemplateTenure{}, time.Time{}, false},
+		{"row created before the latest record", TemplateTenure{Until: until}, until.Add(-time.Hour), true},
+		{"row created as the latest record", TemplateTenure{Until: until}, until, true},
+		{"row created after the latest record", TemplateTenure{Until: until}, until.Add(time.Second), false},
+		{"undated row", TemplateTenure{Until: until}, time.Time{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.tenure.Covers(tc.created); got != tc.want {
+				t.Fatalf("%+v.Covers(%v) = %v, want %v", tc.tenure, tc.created, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTemplateTenureIn_ListingErrors keeps a failed lookup from reading as
+// "no record": a hard failure returns the error with the zero tenure, and a
+// partial result still counts the rows it returned.
+func TestTemplateTenureIn_ListingErrors(t *testing.T) {
+	unreachable := errors.New("session store unreachable")
+	partial := &beads.PartialResultError{Op: "bd list", Err: errors.New("one row failed to parse")}
+	for _, tc := range []struct {
+		name     string
+		err      error
+		template string
+		counts   bool
+	}{
+		{"hard failure", unreachable, "rig-A/gc.planner", false},
+		{"partial result with the record", partial, "rig-A/gc.planner", true},
+		{"partial result without one", partial, "rig-A/gc.worker", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := beads.NewMemStore()
+			record := seedRecord(t, mem, BeadType, true, false, map[string]string{"template": "rig-A/gc.planner"})
+			stored, err := mem.Get(record.ID)
+			if err != nil {
+				t.Fatalf("Get record: %v", err)
+			}
+			store := &recordLookupStore{Store: mem, err: tc.err}
+
+			got, err := TemplateTenureIn(store, tc.template)
+			if !errors.Is(err, tc.err) {
+				t.Fatalf("err = %v, want it to wrap %v", err, tc.err)
+			}
+			var want TemplateTenure
+			if tc.counts {
+				want.Until = stored.CreatedAt
+			}
+			if !got.Until.Equal(want.Until) {
+				t.Fatalf("TemplateTenureIn(%s) = %+v, want %+v", tc.template, got, want)
+			}
+			if len(store.queries) != 1 {
+				t.Fatalf("lookups = %d, want 1", len(store.queries))
 			}
 		})
 	}
