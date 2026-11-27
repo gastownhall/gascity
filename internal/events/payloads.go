@@ -115,6 +115,19 @@ type BeadClaimFailedPayload struct {
 // IsEventPayload marks BeadClaimFailedPayload as an events.Payload variant.
 func (BeadClaimFailedPayload) IsEventPayload() {}
 
+// BeadClaimRefusedPayload is the typed payload for bead.claim_refused events.
+// Store is the database whose claim-authority boundary refused Assignee's
+// claim of BeadID; Reason is the store's refusal text.
+type BeadClaimRefusedPayload struct {
+	BeadID   string `json:"bead_id"`
+	Assignee string `json:"assignee"`
+	Store    string `json:"store"`
+	Reason   string `json:"reason"`
+}
+
+// IsEventPayload marks BeadClaimRefusedPayload as an events.Payload variant.
+func (BeadClaimRefusedPayload) IsEventPayload() {}
+
 // BeadClaimLoopHeldPayload is the typed payload for bead.claim_loop_held
 // events. The envelope's Subject is the held bead. Failures is how many
 // distinct seats of Template have failed to claim it in this streak; Error (a
@@ -150,6 +163,7 @@ func init() {
 	RegisterPayload(BeadClaimRejected, BeadClaimRejectedPayload{})
 	RegisterPayload(BeadClaimReleased, BeadClaimReleasedPayload{})
 	RegisterPayload(BeadClaimFailed, BeadClaimFailedPayload{})
+	RegisterPayload(BeadClaimRefused, BeadClaimRefusedPayload{})
 	RegisterPayload(BeadClaimLoopHeld, BeadClaimLoopHeldPayload{})
 	RegisterPayload(HookClaimReclaimedStale, HookClaimReclaimedStalePayload{})
 	RegisterPayload(BeadsBlockedRecomputed, BlockedRecomputedPayload{})

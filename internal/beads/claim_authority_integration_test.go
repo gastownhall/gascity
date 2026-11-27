@@ -547,3 +547,38 @@ func TestClaimAuthorityOffAndIncapableStoresStayUnarmedAndOnlyDisarmRemoves(t *t
 		t.Fatalf("claim on the disarmed store: %v", err)
 	}
 }
+
+// AC-8: an armed store's refusal reaches the caller of a store claim as the
+// typed ErrClaimNotAuthorized, not as a lost race, and names the bead, the
+// assignee and the store; the bead stays open and unassigned, and the same
+// claim succeeds once the identity is published.
+func TestClaimAuthorityRefusalIsTypedAndNamesBeadAssigneeAndStore(t *testing.T) {
+	f := newClaimAuthorityFixture(t)
+	f.arm(t)
+	for _, ephemeral := range []bool{false, true} {
+		t.Run(f.tableOf(ephemeral), func(t *testing.T) {
+			// Each table refuses its own outsider: publishing one for the
+			// retry must not authorize the next table's refused claim.
+			outsider := absentClaimant + "-" + f.tableOf(ephemeral)
+			bead := f.createRouted(t, ephemeral)
+			_, ok, err := f.store.Claim(bead.ID, outsider)
+			if ok || !errors.Is(err, ErrClaimNotAuthorized) {
+				t.Fatalf("Claim = ok %v err %v, want a typed ErrClaimNotAuthorized refusal", ok, err)
+			}
+			var refusal *ClaimNotAuthorizedError
+			if !errors.As(err, &refusal) {
+				t.Fatalf("Claim error %v carries no *ClaimNotAuthorizedError", err)
+			}
+			if refusal.BeadID != bead.ID || refusal.Assignee != outsider || refusal.Store != "beads" {
+				t.Fatalf("refusal = bead %q assignee %q store %q, want %q %q %q", refusal.BeadID, refusal.Assignee, refusal.Store, bead.ID, outsider, "beads")
+			}
+			assertBeadOpenUnassigned(t, f.store, bead.ID)
+
+			f.reconcile(t, testClaimAuthorityPublisher("alpha", ClaimAuthorityModeAuto), false, outsider)
+			if _, ok, err := f.store.Claim(bead.ID, outsider); err != nil || !ok {
+				t.Fatalf("retry after publish = ok %v err %v, want the claim", ok, err)
+			}
+			assertClaimed(t, f.store, bead.ID, outsider)
+		})
+	}
+}

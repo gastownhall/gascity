@@ -276,6 +276,9 @@ type hookClaimOps struct {
 	// candidate is skipped because its claim write failed: the controller's
 	// claim-loop guard counts these (claim_loop_guard.go). Best-effort.
 	EmitClaimFailed func(beadID string, opts hookClaimOptions, err error)
+	// EmitClaimRefused publishes a bead.claim_refused event when a store's
+	// claim-authority boundary refuses a claim. Best-effort.
+	EmitClaimRefused func(hookClaimRefusal)
 	// ResolveWorkBranch returns the git branch of the worker's worktree, stamped
 	// onto the bead as gc.work_branch at claim time. It is handed a tree that
 	// already carries the repository it resolved to, so the branch comes from the
@@ -701,6 +704,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	if ops.EmitClaimFailed == nil {
 		ops.EmitClaimFailed = hookEmitClaimFailed
 	}
+	if ops.EmitClaimRefused == nil {
+		ops.EmitClaimRefused = hookEmitClaimRefused
+	}
 	if ops.ResolveWorkBranch == nil {
 		ops.ResolveWorkBranch = hookResolveWorkBranch
 	}
@@ -984,6 +990,10 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		// re-stamp and the workflow re-check below spend any more store time.
 		landedAt := ops.nowOrWallClock()
 		if err != nil {
+			if skipHookClaimRefusedByAuthority(candidate.ID, claimActor, dir, err, ops, stderr) {
+				claimsErrored = true
+				continue
+			}
 			if !ok && (hookClaimBeadIsElsewhere(err) || hookClaimBindingRefusedTheClaim(err) || hookClaimBeadIsAWisp(err)) {
 				// The read federated and the write did not: the assigned tier
 				// reads city-wide, so a graph step in a relocated class store
@@ -1189,6 +1199,10 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		// workflow re-check below spends any more store time.
 		landedAt := ops.nowOrWallClock()
 		if err != nil {
+			if skipHookClaimRefusedByAuthority(candidate.ID, opts.Assignee, dir, err, ops, stderr) {
+				claimsErrored = true
+				continue
+			}
 			if ok {
 				// The atomic mutation committed, but its canonical readback failed.
 				// Stop immediately: trying another candidate or draining would strand
@@ -2583,7 +2597,7 @@ func hookClaimReclaimWithBdStore(ctx context.Context, dir string, env []string, 
 func hookClaimThroughStore(beadID, assignee string, claim func() (beads.Bead, bool, error), get func(string) (beads.Bead, error)) (beads.Bead, bool, error) {
 	claimed, ok, err := claim()
 	if err != nil {
-		return beads.Bead{}, false, err
+		return beads.Bead{}, false, beads.ClassifyClaimAuthorityError(err)
 	}
 	if !ok {
 		// Claim conflict: re-read the bead so the caller can surface who won
@@ -4036,6 +4050,76 @@ func emitClaimReleased(rec events.Recorder, release hookClaimReleaseRecord) {
 // city event log so a lost-claim race is observable for eval/audit (ADR-0009).
 func hookEmitClaimRejected(beadID, existingClaimant, attemptedClaimant string) {
 	emitClaimRejected(openCityRecorder(io.Discard), beadID, existingClaimant, attemptedClaimant)
+}
+
+// hookClaimRefusal is one claim a store's claim-authority boundary refused.
+type hookClaimRefusal struct {
+	BeadID   string
+	Assignee string
+	// Store is the database that refused, or the claim's work directory when
+	// the refusal did not name one.
+	Store string
+	Err   error
+}
+
+// skipHookClaimRefusedByAuthority reports whether err is a claim-authority
+// refusal and, if so, records it: a bead.claim_refused event and a stderr
+// line. The store wrote nothing, so the bead is left exactly as it was for a
+// later claim to retry once this identity is published; the caller moves on
+// to its other candidates.
+func skipHookClaimRefusedByAuthority(beadID, assignee, dir string, err error, ops hookClaimOps, stderr io.Writer) bool {
+	if !errors.Is(err, beads.ErrClaimNotAuthorized) {
+		return false
+	}
+	refusal := hookClaimRefusal{BeadID: beadID, Assignee: assignee, Store: dir, Err: err}
+	var detail *beads.ClaimNotAuthorizedError
+	if errors.As(err, &detail) {
+		if detail.Assignee != "" {
+			refusal.Assignee = detail.Assignee
+		}
+		if detail.Store != "" {
+			refusal.Store = detail.Store
+		}
+	}
+	fmt.Fprintf(stderr, "gc hook --claim: skipping %s: claim by %s not authorized by store %s: %v\n", beadID, refusal.Assignee, refusal.Store, err) //nolint:errcheck
+	if ops.EmitClaimRefused != nil {
+		ops.EmitClaimRefused(refusal)
+	}
+	return true
+}
+
+// hookEmitClaimRefused publishes a best-effort bead.claim_refused event. A `gc
+// hook` invocation records to its own city instead (hookCity.claimOps).
+func hookEmitClaimRefused(refusal hookClaimRefusal) {
+	emitClaimRefused(openCityRecorder(io.Discard), refusal)
+}
+
+// emitClaimRefused records refusal as a bead.claim_refused event to rec,
+// closing rec when it is a closer.
+func emitClaimRefused(rec events.Recorder, refusal hookClaimRefusal) {
+	if closer, ok := rec.(io.Closer); ok {
+		defer closer.Close() //nolint:errcheck // lifecycle events are best-effort
+	}
+	reason := ""
+	if refusal.Err != nil {
+		reason = refusal.Err.Error()
+	}
+	payload, err := json.Marshal(events.BeadClaimRefusedPayload{
+		BeadID:   refusal.BeadID,
+		Assignee: refusal.Assignee,
+		Store:    refusal.Store,
+		Reason:   reason,
+	})
+	if err != nil {
+		return
+	}
+	rec.Record(events.Event{
+		Type:    events.BeadClaimRefused,
+		Actor:   refusal.Assignee,
+		Subject: refusal.BeadID,
+		Message: reason,
+		Payload: payload,
+	})
 }
 
 // hookEmitClaimFailed publishes a best-effort bead.claim_failed event for a

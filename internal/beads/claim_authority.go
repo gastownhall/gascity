@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -62,11 +63,17 @@ var claimAuthorityBeadTables = []string{"issues", "wisps"}
 // a retry after the next publish can succeed.
 var ErrClaimNotAuthorized = errors.New("claim not authorized by the store's claim authority")
 
-// ClaimNotAuthorizedError carries the server's refusal text. It matches
+// ClaimNotAuthorizedError carries the server's refusal. It matches
 // ErrClaimNotAuthorized under errors.Is and unwraps to the original error.
 type ClaimNotAuthorizedError struct {
 	// Message is the refusal text, starting at ClaimAuthorityMarker.
 	Message string
+	// BeadID, Assignee and Store are the refused bead, the identity the write
+	// named and the database that refused it, read from Message; empty when
+	// Message is not in the trigger's form.
+	BeadID   string
+	Assignee string
+	Store    string
 	// Err is the error the refusal was classified from.
 	Err error
 }
@@ -93,12 +100,31 @@ func ClassifyClaimAuthorityError(err error) error {
 	}
 	var myErr *mysql.MySQLError
 	if errors.As(err, &myErr) && myErr.Number == mysqlErrSignal && strings.Contains(myErr.Message, ClaimAuthorityMarker) {
-		return &ClaimNotAuthorizedError{Message: refusalText(myErr.Message), Err: err}
+		return newClaimNotAuthorizedError(myErr.Message, err)
 	}
 	if text := err.Error(); strings.Contains(text, ClaimAuthorityMarker) {
-		return &ClaimNotAuthorizedError{Message: refusalText(text), Err: err}
+		return newClaimNotAuthorizedError(text, err)
 	}
 	return err
+}
+
+// The trigger's refusal reads
+// "<marker> <assignee> is not an authorized claimant for routed bead <id> in store <database>".
+// The DDL renderer and the parser share these phrases so the two cannot drift.
+const (
+	claimAuthorityRefusalClaimant = " is not an authorized claimant for routed bead "
+	claimAuthorityRefusalStore    = " in store "
+)
+
+var claimAuthorityRefusalPattern = regexp.MustCompile("^" + regexp.QuoteMeta(ClaimAuthorityMarker) +
+	` ([^\s"]+)` + regexp.QuoteMeta(claimAuthorityRefusalClaimant) + `([^\s"]+)` + regexp.QuoteMeta(claimAuthorityRefusalStore) + `([^\s"]+)`)
+
+func newClaimNotAuthorizedError(text string, err error) *ClaimNotAuthorizedError {
+	refusal := &ClaimNotAuthorizedError{Message: refusalText(text), Err: err}
+	if m := claimAuthorityRefusalPattern.FindStringSubmatch(refusal.Message); m != nil {
+		refusal.Assignee, refusal.BeadID, refusal.Store = m[1], m[2], m[3]
+	}
+	return refusal
 }
 
 // refusalText trims text to the refusal itself: from the marker to the end of
@@ -220,10 +246,10 @@ func ClaimAuthorityTriggerDDL(table string, insert bool) string {
 		"     AND %s\n"+
 		"     AND %s\n"+
 		"  THEN\n"+
-		"    SET gc_msg = CONCAT('%s ', NEW.assignee, ' is not an authorized claimant for routed bead ', NEW.id);\n"+
+		"    SET gc_msg = CONCAT('%s ', NEW.assignee, '%s', NEW.id, '%s', DATABASE());\n"+
 		"    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = gc_msg;\n"+
 		"  END IF;\n"+
-		"END", name, when, table, cond, claimAuthorityUnauthorizedSQL(), ClaimAuthorityMarker)
+		"END", name, when, table, cond, claimAuthorityUnauthorizedSQL(), ClaimAuthorityMarker, claimAuthorityRefusalClaimant, claimAuthorityRefusalStore)
 }
 
 // claimAuthorityDesiredTriggers returns trigger name → DDL for the current
