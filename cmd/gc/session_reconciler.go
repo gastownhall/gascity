@@ -30,6 +30,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/readywork"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -5817,6 +5818,11 @@ func firstOpenClaimableAssignedWorkBeadForReachableStore(sw *SeatWork, info sess
 //     only the cache-enriched reads that carry the column.
 //   - claimable — bd's projection says explicitly unblocked and nothing else
 //     bead-local excludes the row; it fires.
+//   - input_withheld — input admission withholds the row (#8832): its
+//     workflow's input is held, blocked, deferred or waiting on an
+//     unsatisfied prerequisite, judged live from this store. The hook refuses
+//     the row on every path, so this is proof like a hold: draining past it
+//     was correct pull.
 //
 // Fails CLOSED on a dep-read error: the error is returned rather than read as "no
 // blocker", so the caller surfaces it instead of manufacturing the alarm from an
@@ -5837,8 +5843,8 @@ func firstOpenClaimableAssignedWorkBeadForReachableStore(sw *SeatWork, info sess
 // polarity is pinned by
 // TestReconcileSessionBeads_DrainAckDepConfirmReadErrorNoFireAndLogsError.
 func openAssignedRowProvablyNonClaimable(store beads.Store, item beads.Bead, now time.Time) (bool, error) {
-	switch classifyDemandRowClaimability(item, now) {
-	case demandRowDeferred, demandRowHeld, demandRowStatusBlocked:
+	switch classifyDemandRowClaimability(item, now, readywork.InputWithheld(readywork.Leg{Store: store}, []beads.Bead{item})[item.ID]) {
+	case demandRowDeferred, demandRowHeld, demandRowStatusBlocked, demandRowInputWithheld:
 		return true, nil
 	case demandRowBlockednessUnproven:
 		return beadHasUnmetPlainBlocksDep(store, item.ID)
@@ -6416,12 +6422,15 @@ func sessionHasReadyAssignedWorkForTier(store beads.Store, assignee string, tier
 	if err != nil {
 		return false, err
 	}
-	// Ready is hold-transparent; the hook is not. Held open work cannot be
-	// served to this session, so it does not keep it awake (assignedOpenWorkHeld,
-	// the same gate desired-state wake demand applies in markReadyAssigned).
+	// Ready is hold- and admission-transparent; the hook is not. Held open
+	// work, and open work input admission withholds (#8832), cannot be served
+	// to this session, so it does not keep it awake
+	// (assignedOpenWorkWithheld, the same gate desired-state wake demand
+	// applies in markReadyAssigned).
+	inputWithheld := readywork.InputWithheld(readywork.Leg{Store: store}, items)
 	unheld := items[:0:0]
 	for _, item := range items {
-		if !assignedOpenWorkHeld(item) {
+		if !assignedOpenWorkWithheld(item, inputWithheld) {
 			unheld = append(unheld, item)
 		}
 	}

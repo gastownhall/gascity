@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/fanout"
+	"github.com/gastownhall/gascity/internal/inputadmission"
 )
 
 // Cross-store blockers: one rule on a split city, bd's answer everywhere else.
@@ -673,6 +674,17 @@ func (g *LegGate) Gate(ctx context.Context, own int, rows []beads.Bead) ([]beads
 		items = g.cs.mergeStranded(own, listed.rows, items, owners)
 	}
 	return g.rows.gate(ctx, owners, items, 0)
+}
+
+// Withheld returns the rows input admission has withheld in this gate's
+// judgments so far, keyed by row id: the recording a demand pass keeps beside
+// its gated reads, so its wake and keep-awake counting refuse the same rows
+// the reader did.
+func (g *LegGate) Withheld() map[string]inputadmission.Withhold {
+	if g == nil {
+		return nil
+	}
+	return g.rows.withheldRows()
 }
 
 // listing reads legs[own]'s absent-blocker listing, once for the gate's life.

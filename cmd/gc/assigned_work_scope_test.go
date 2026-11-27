@@ -451,7 +451,7 @@ func TestFilterAssignedWorkBeadsForPoolDemandDropsElapsedBdDeferredRoutedBead(t 
 	if got := demandRequests([]beads.Bead{parked}); len(got) != 0 {
 		t.Fatalf("parked row requests = %#v, want none: no worker can claim a row bd ready hides", got)
 	}
-	if got := classifyDemandRowClaimability(parked, time.Now()); got != demandRowDeferred {
+	if got := classifyDemandRowClaimability(parked, time.Now(), false); got != demandRowDeferred {
 		t.Fatalf("classifyDemandRowClaimability = %q, want %q", got, demandRowDeferred)
 	}
 }

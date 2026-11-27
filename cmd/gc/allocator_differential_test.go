@@ -346,25 +346,28 @@ func v2Allocation(t *testing.T, c diffCity) allocOutcome {
 	return out
 }
 
-// diffRecording is K1's recording for c: the scale_check source holds the
-// lane's run of every custom scale_check (runCustomScaleChecks) with the
-// production runner, shellScaleCheck, which legacy's build runs too, or
-// c's read error, ended c.scaleCheckAge ago. Nil without custom checks, as
-// before the lane's first publish.
+// diffRecording is K1's recording for c: the demand legs as the lane read
+// and gated them at diffNow (#8832 — the v2 pass serves a gate leg's Ready
+// only from a gated recording), and the scale_check source holding the lane's
+// run of every custom scale_check (runCustomScaleChecks) with the production
+// runner, shellScaleCheck, which legacy's build runs too, or c's read error,
+// ended c.scaleCheckAge ago. The lane read may have run the checks itself;
+// the fixture's own result replaces it, and freshness is the fixture's
+// diffScaleCheckFreshFor, so c.scaleCheckAge keeps its meaning.
 func diffRecording(t *testing.T, c diffCity, cityPath string, store beads.Store) *externalReadsRecording {
 	t.Helper()
+	rec := recordGatedDemandReads(diffNow, cityPath, c.cfg, store, nil)
+	rec.FreshFor = diffScaleCheckFreshFor
 	if !c.scaleCheck {
-		return nil
+		return rec
 	}
 	res := sourceResult{StartedAt: diffNow.Add(-c.scaleCheckAge), EndedAt: diffNow.Add(-c.scaleCheckAge), Err: c.scaleCheckErr}
 	if c.scaleCheckErr == nil {
 		res.ScaleCheck = runCustomScaleChecks(externalReadsEnv{CityPath: cityPath, CityName: c.cfg.Workspace.Name, Cfg: c.cfg, CityStore: store},
 			shellScaleCheck, controllerQueryRuntimeEnv, io.Discard)
 	}
-	return &externalReadsRecording{
-		Seq: 1, FreshFor: diffScaleCheckFreshFor,
-		Sources: map[sourceKey]sourceResult{{kind: sourceScaleCheck, cfg: c.cfg}: res},
-	}
+	rec.Sources[sourceKey{kind: sourceScaleCheck, cfg: c.cfg}] = res
+	return rec
 }
 
 // diffScaleCheckFreshFor is the recording's freshness: 3 × a nominal 20s

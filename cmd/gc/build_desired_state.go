@@ -1978,12 +1978,16 @@ func collectAssignedWorkBeadsWithStores(
 			start = pass.now()
 			openDemand, err := reads.RawOpen(source.store)
 			pass.read(read("list_open", demandReadTierLive), start, len(openDemand), err)
+			// The open rows input admission withholds (#8832): the hook will
+			// not serve them, so an assigned root among them is no wake demand
+			// while its input is not admissible.
+			openWithheld := inputWithheldFor(reads, readywork.Leg{Store: source.store}, openDemand)
 			if err == nil {
-				appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, readyIDs, openDemand, seen, source.store, source.ref)
+				appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, readyIDs, openWithheld, openDemand, seen, source.store, source.ref)
 			} else {
 				errs = append(errs, fmt.Errorf("List(open, live demand): %w", err))
 				if beads.IsPartialResult(err) && len(openDemand) > 0 {
-					appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, readyIDs, openDemand, seen, source.store, source.ref)
+					appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, readyIDs, openWithheld, openDemand, seen, source.store, source.ref)
 				}
 			}
 			// Open pool-routed beads that still carry an assignee. These are
@@ -2099,7 +2103,10 @@ func collectAssignedWorkBeadsWithStores(
 			var readyStoreRefs []string
 			readyIDs := make(map[string]bool)
 			seen := make(map[string]struct{})
-			appendAssignedUnique(&readyBeads, &readyStores, &readyStoreRefs, readyIDs, ready, seen, source.store, source.ref)
+			// Ready is hold- and admission-transparent; the hook is not. The
+			// withheld assigned rows (#8832) carry no wake readiness.
+			readyWithheld := inputWithheldFor(reads, readywork.Leg{Store: source.store}, ready)
+			appendAssignedUnique(&readyBeads, &readyStores, &readyStoreRefs, readyIDs, readyWithheld, ready, seen, source.store, source.ref)
 			readyResults[idx] = storeAssignedWorkResult{ref: source.ref, beads: readyBeads, stores: readyStores, storeRefs: readyStoreRefs, readyIDs: readyIDs, errs: errs}
 		}()
 	}
@@ -3297,9 +3304,10 @@ func (c *readyDemandCache) withSessionsStore(sessions beads.SessionStore) *ready
 	return c
 }
 
-// withCrossStoreGate arms the cache with the city's ready legs when the city
-// is split (crossStoreGateLegs), and returns it. A city that relocates nothing
-// (or one whose topology cannot be planned, which its readers report
+// withCrossStoreGate arms the cache with the city's ready legs
+// (crossStoreGateLegs), and returns it: every city's snapshots are gated for
+// input admission, and a split city's also for cross-store blockers (#8832).
+// A city whose topology cannot be planned (which its readers report
 // themselves) is left ungated. Only a pass that may read remotely arms it:
 // the v2 gather serves snapshots the external-reads lane already gated
 // (gatherDemand).
@@ -3576,18 +3584,18 @@ func appendInProgressWorkUnique(cfg *config.City, dst *[]beads.Bead, stores *[]b
 			continue
 		}
 		if appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef) {
-			markReadyAssigned(readyIDs, b)
+			markReadyAssigned(readyIDs, nil, b)
 		}
 	}
 }
 
-func appendAssignedUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, readyIDs map[string]bool, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) {
+func appendAssignedUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, readyIDs map[string]bool, inputWithheld map[string]bool, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) {
 	for _, b := range beadList {
 		if strings.TrimSpace(b.Assignee) == "" {
 			continue
 		}
 		if appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef) {
-			markReadyAssigned(readyIDs, b)
+			markReadyAssigned(readyIDs, inputWithheld, b)
 		}
 	}
 }
@@ -3598,7 +3606,7 @@ func appendAssignedUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[
 // for on-demand named sessions such as the Gas Town refinery patrol — so these
 // beads contribute to readyIDs (their assigned turn is genuinely actionable),
 // unlike the open-routed orphan-release pass.
-func appendOpenAssignedMoleculeWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, readyIDs map[string]bool, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) {
+func appendOpenAssignedMoleculeWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, readyIDs map[string]bool, inputWithheld map[string]bool, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) {
 	now := time.Now()
 	for _, b := range beadList {
 		if !isOpenAssignedMoleculeWork(b) {
@@ -3614,9 +3622,35 @@ func appendOpenAssignedMoleculeWorkUnique(dst *[]beads.Bead, stores *[]beads.Sto
 			continue
 		}
 		if appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef) {
-			markReadyAssigned(readyIDs, b)
+			markReadyAssigned(readyIDs, inputWithheld, b)
 		}
 	}
+}
+
+// inputWithheldFor composes the pass's input-admission verdicts for one
+// leg's rows (#8832): the gated read's own verdicts — the external-reads
+// lane's one gate, which judged every leg at once (demandReads
+// .InputWithheldFor) — over the rows it judged, and a fresh single-leg judge
+// over the rest, so a row the gate did not see (a snapshot it read before the
+// row appeared) is still judged from this leg's store. Either half withholds
+// nothing on its own failure: the never-under-count rule keeps the ungated
+// answer, and a leg whose gated read is missing is partial in its reads
+// anyway.
+func inputWithheldFor(reads demandReads, leg readywork.Leg, rows []beads.Bead) map[string]bool {
+	if leg.Store == nil || len(rows) == 0 {
+		return nil
+	}
+	withheld := make(map[string]bool, len(rows))
+	for id := range reads.InputWithheldFor(leg) {
+		withheld[id] = true
+	}
+	for id := range readywork.InputWithheld(leg, rows) {
+		withheld[id] = true
+	}
+	if len(withheld) == 0 {
+		return nil
+	}
+	return withheld
 }
 
 // markReadyAssigned records a bead ID as wake-demand-ready. It is called only
@@ -3627,15 +3661,19 @@ func appendOpenAssignedMoleculeWorkUnique(dst *[]beads.Bead, stores *[]beads.Sto
 // OPEN work parked on a dispatch hold is never marked: bd's Ready() is
 // hold-transparent, but the session's own hook refuses to serve a held row
 // (isHeldHookCandidate), so counting it as wake demand woke an on-demand named
-// session that drain-acked no_work and was re-woken every tick. The bead stays
+// session that drain-acked no_work and was re-woken every tick. A row input
+// admission withholds (#8832) is never marked for the same reason: the hook
+// refuses it too, so waking for it loops exactly as a hold did. The bead stays
 // in the assigned-work snapshot — orphan release, pool accounting and crash
 // recovery still see the assignment (ga-5736js) — it just carries no wake
-// readiness. assignedOpenWorkHeld is the shared predicate.
-func markReadyAssigned(readyIDs map[string]bool, b beads.Bead) {
+// readiness. assignedOpenWorkWithheld is the shared predicate; inputWithheld
+// is the row ids the pass's input admission withheld (inputWithheldFor over
+// this leg's rows), nil when none.
+func markReadyAssigned(readyIDs map[string]bool, inputWithheld map[string]bool, b beads.Bead) {
 	if readyIDs == nil {
 		return
 	}
-	if assignedOpenWorkHeld(b) {
+	if assignedOpenWorkWithheld(b, inputWithheld) {
 		return
 	}
 	readyIDs[b.ID] = true

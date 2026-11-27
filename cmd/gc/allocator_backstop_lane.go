@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/inputadmission"
 	"github.com/gastownhall/gascity/internal/readywork"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -175,24 +176,59 @@ type legRecording struct {
 	RawOpenErr  error
 	ReadyAll    []beads.Bead
 	ReadyAllErr error
-	// ReadyGated says ReadyAll went through the split city's cross-store gate
-	// when it was read (gateReady). The v2 pass serves a gate leg's Ready only
+	// ReadyGated says ReadyAll went through the city's ready gate when it was
+	// read (gateReady): the cross-store rule when the city is split, input
+	// admission always (#8832). The v2 pass serves a gate leg's Ready only
 	// from such a recording. ReadyGateErr is the gate's own failure, which
 	// keeps ReadyAll ungated and partial; it is not a failed read of the leg.
 	ReadyGated   bool
 	ReadyGateErr error
+	// InputWithheld is the input-admission half of the same gate's verdict:
+	// the rows it withheld from this leg's ReadyAll, keyed by row id, with the
+	// verdict's reason (#8832). The pass's consumers read this record instead
+	// of re-judging, so wake and keep-awake refuse exactly the rows the
+	// gated read refused.
+	InputWithheld map[string]inputadmission.Withhold
+	// Claimed is the leg's live in_progress rows, read by the same source as
+	// its gated ReadyAll (#8832). A claim written straight to the backing —
+	// another host's hook — is invisible to the cache until its next
+	// convergence, yet the pass serves this leg's Ready from this recording,
+	// so without these rows a just-claimed bead drops out of assigned work
+	// and the seat holding it reads as idle. The pass widens its cached
+	// in_progress view with them (v2DemandReads.Cached). ClaimedErr is that
+	// read's own failure, which leaves the cache to serve alone.
+	Claimed    []beads.Bead
+	ClaimedErr error
 }
 
-// gateReady passes ReadyAll through the split city's cross-store gate when
-// the leg is one of its legs (own >= 0), and marks the recording gated. It
-// runs in the lane, off the pass: judging a row reads the other stores that
-// may hold its blockers (demand_cross_store_gate.go).
+// gateReady passes ReadyAll through the city's ready gate when the leg is one
+// of its legs (own >= 0), and marks the recording gated. It runs in the lane,
+// off the pass: judging a row reads the stores that may hold its blockers and
+// its workflow's input (demand_cross_store_gate.go).
 func (r *legRecording) gateReady(gate *readywork.LegGate, own int) {
 	if gate == nil || own < 0 {
 		return
 	}
+	passed := r.ReadyAll
 	r.ReadyAll, r.ReadyGateErr = gateReadyRows(gate, own, r.ReadyAll, r.ReadyAllErr, crossStoreGateDeadline)
 	r.ReadyGated = true
+	r.InputWithheld = inputWithheldAmong(gate.Withheld(), passed)
+}
+
+// inputWithheldAmong narrows the gate's withheld record to the rows the gate
+// judged in this leg's ReadyAll snapshot, so a recording reports only its own
+// leg's verdicts.
+func inputWithheldAmong(withheld map[string]inputadmission.Withhold, rows []beads.Bead) map[string]inputadmission.Withhold {
+	if len(withheld) == 0 || len(rows) == 0 {
+		return nil
+	}
+	out := make(map[string]inputadmission.Withhold, len(rows))
+	for _, row := range rows {
+		if w, ok := withheld[row.ID]; ok {
+			out[row.ID] = w
+		}
+	}
+	return out
 }
 
 // gatedReady is the Ready a gate leg's recording serves: its rows, and its
@@ -729,11 +765,14 @@ func (l *externalReadsLane) scaleCheckOf(key sourceKey, res sourceResult, ok boo
 // suspended: legacy's demand pass returns before them, and the decide reads
 // none while it is (POOL-001).
 //
-// On a split city every gate leg's ReadyAll is recorded gated: the lane-fed
-// legs' as they are read, and each exact leg's from a Ready-only source of its
+// On every city each gate leg's ReadyAll is recorded gated (#8832): the
+// lane-fed legs' as they are read, and each exact leg's from a source of its
 // own, since the pass reads an exact leg's other demand from its cache but
-// cannot judge its rows without reading other stores. One gate serves the
-// pass, so a blocker is read once however many legs it holds back.
+// cannot judge its rows without reading other stores. That source also
+// records the leg's live in_progress rows, the claims the cache may not have
+// converged yet (legRecording.Claimed). One gate serves the pass, so a
+// blocker or an input's facts are read once however many legs hold them
+// back.
 func (l *externalReadsLane) sources(env externalReadsEnv) []externalSource {
 	var out []externalSource
 	add := func(key sourceKey, read func() (sourcePayload, error)) {
@@ -767,6 +806,11 @@ func (l *externalReadsLane) sources(env externalReadsEnv) []externalSource {
 		add(key, func() (sourcePayload, error) {
 			var r legRecording
 			r.ReadyAll, r.ReadyAllErr = guardedRead(func() ([]beads.Bead, error) { return reads.ReadyAll(leg.Store) })
+			// The live handle reads the backing directly: the cached one
+			// would miss the very claims this records (#8832).
+			r.Claimed, r.ClaimedErr = guardedRead(func() ([]beads.Bead, error) {
+				return beads.HandlesFor(leg.Store).Live.List(beads.ListQuery{Status: "in_progress"})
+			})
 			r.gateReady(gate, own)
 			return sourcePayload{Leg: r}, nil
 		})

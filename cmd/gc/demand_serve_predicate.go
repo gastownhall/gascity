@@ -179,6 +179,13 @@ const (
 	// held assigned work drained correctly; reporting it as a strand is what
 	// accompanied the hold-label wake/drain loop.
 	demandRowHeld demandRowClaimability = "held"
+	// demandRowInputWithheld: input admission withholds the row (#8832) — its
+	// workflow's input is held, blocked, deferred or waiting on an unsatisfied
+	// prerequisite. The verdict is not bead-local, so the caller judges it from
+	// the stores it reads (readywork.InputWithheld, the hook's claim seam) and
+	// passes it in as inputWithheld. The hook refuses the row on every path,
+	// like a hold, so this is PROOF of non-claimability.
+	demandRowInputWithheld demandRowClaimability = "input_withheld"
 	// demandRowStatusBlocked: bd itself parked the row with status "blocked". A bd
 	// read folds that status to "open" and keeps the raw value in
 	// Bead.SourceStatus, which is how the row is told apart. The status is a
@@ -233,12 +240,15 @@ const (
 // b.SourceStatus, which is what the status-blocked check reads. An empty
 // SourceStatus means the store reported no raw status (memstore, sqlite, exec,
 // or a row patched after a status change) and is not read as blocked.
-func classifyDemandRowClaimability(b beads.Bead, now time.Time) demandRowClaimability {
+func classifyDemandRowClaimability(b beads.Bead, now time.Time, inputWithheld bool) demandRowClaimability {
 	if beads.IsDeferred(b, now) {
 		return demandRowDeferred
 	}
 	if beadmeta.HasDispatchHold(b.Labels) {
 		return demandRowHeld
+	}
+	if inputWithheld {
+		return demandRowInputWithheld
 	}
 	// Ahead of the is_blocked clause: the status is bead-local and fresh, so an
 	// explicit is_blocked=false (or an absent projection) cannot mask it.

@@ -48,6 +48,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
+	"github.com/gastownhall/gascity/internal/readywork"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -459,8 +460,11 @@ func liveParkedWork(work []strandedAssignedWork, readErr error, seat releaseSeat
 			if err != nil {
 				return false, fmt.Errorf("reading %s's ready work: %w", p.assignee, err)
 			}
+			// Ready is hold- and admission-transparent; the hook is not. A
+			// withheld row does not keep the seat out of park (#8832).
+			inputWithheld := readywork.InputWithheld(readywork.Leg{Store: p.store}, ready)
 			for _, r := range ready {
-				if assignedOpenWorkHeld(r) || !parkCountsAsWork(r) {
+				if assignedOpenWorkWithheld(r, inputWithheld) || !parkCountsAsWork(r) {
 					continue
 				}
 				if slices.ContainsFunc(work, func(item strandedAssignedWork) bool { return item.store == p.store && item.bead.ID == r.ID }) {

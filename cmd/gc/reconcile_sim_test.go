@@ -536,11 +536,16 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 	s.envNow = &reconcileEnv{Gen: 1, Cfg: s.cfg, SP: s.leaf}
 	s.env = gatherEnv{
 		CityPath: t.TempDir(), CityName: "test-city",
-		Env:          func() *reconcileEnv { return s.envNow }, // a config drift swaps it (reconcile_sim_drift_test.go)
-		Sessions:     func() beads.Store { return s.legs[0].cache },
-		WorkStore:    func() beads.Store { return s.legs[0].cache }, // the city's work and sessions share a store
-		RigStores:    func() map[string]beads.Store { return map[string]beads.Store{simRigLeg: s.legs[1].cache} },
-		Recording:    func() *externalReadsRecording { return nil },
+		Env:       func() *reconcileEnv { return s.envNow }, // a config drift swaps it (reconcile_sim_drift_test.go)
+		Sessions:  func() beads.Store { return s.legs[0].cache },
+		WorkStore: func() beads.Store { return s.legs[0].cache }, // the city's work and sessions share a store
+		RigStores: func() map[string]beads.Store { return map[string]beads.Store{simRigLeg: s.legs[1].cache} },
+		Recording: func() *externalReadsRecording {
+			// The lane's read as it runs before a pass in production: every
+			// city's demand legs are gate legs (#8832), and the v2 pass
+			// serves a gate leg's Ready only from a gated recording.
+			return recordGatedDemandReads(s.clk.Now(), s.env.CityPath, s.cfg, s.legs[0].cache, map[string]beads.Store{simRigLeg: s.legs[1].cache})
+		},
 		Observations: func() *ObservationCache { return s.lane.cache },
 		Episodes: func() (map[string]session.StartupHealthEpisode, error) {
 			return readStartupHealthEpisodes(s.legs[0].cache)

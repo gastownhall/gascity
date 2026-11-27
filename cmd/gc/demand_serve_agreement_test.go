@@ -779,7 +779,7 @@ func TestClassifyDemandRowClaimabilityStatusBlocked(t *testing.T) {
 		{"deferred", beads.Bead{Status: "open", DeferUntil: &future}, demandRowDeferred},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := classifyDemandRowClaimability(tt.bead, now); got != tt.want {
+			if got := classifyDemandRowClaimability(tt.bead, now, false); got != tt.want {
 				t.Errorf("classifyDemandRowClaimability = %q, want %q", got, tt.want)
 			}
 		})
@@ -802,7 +802,7 @@ func TestBdStatusBlockedRowClassifiesAsStatusBlocked(t *testing.T) {
 	if got.Status != "open" || got.IsBlocked != nil {
 		t.Fatalf("decoded row = status %q, IsBlocked %v; want the folded production shape (open, no projection)", got.Status, got.IsBlocked)
 	}
-	if cause := classifyDemandRowClaimability(got, time.Now()); cause != demandRowStatusBlocked {
+	if cause := classifyDemandRowClaimability(got, time.Now(), false); cause != demandRowStatusBlocked {
 		t.Fatalf("classifyDemandRowClaimability(bd blocked row) = %q, want %q", cause, demandRowStatusBlocked)
 	}
 }

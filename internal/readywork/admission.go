@@ -2,6 +2,8 @@ package readywork
 
 import (
 	"context"
+	"maps"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -16,11 +18,30 @@ type rowGate struct {
 	legs  []Leg
 	cs    *crossStore
 	judge *inputadmission.Judge
+
+	// withheld records every row input admission withheld over the gate's
+	// life, with its verdict, for the demand pass that reports them
+	// (LegGate.Withheld).
+	mu       sync.Mutex
+	withheld map[string]inputadmission.Withhold
 }
 
 // newRowGate returns the gate for one read over legs, judging deferral at now.
 func newRowGate(legs []Leg, cs *crossStore, now time.Time) *rowGate {
-	return &rowGate{legs: legs, cs: cs, judge: inputadmission.New(admissionSources(legs), now)}
+	return &rowGate{
+		legs:     legs,
+		cs:       cs,
+		judge:    inputadmission.New(admissionSources(legs), now),
+		withheld: make(map[string]inputadmission.Withhold),
+	}
+}
+
+// withheldRows returns a copy of every row input admission has withheld over
+// the gate's life, keyed by row id.
+func (g *rowGate) withheldRows() map[string]inputadmission.Withhold {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return maps.Clone(g.withheld)
 }
 
 // legIndex returns the index of the leg serving store, or -1.
@@ -58,9 +79,12 @@ func (g *rowGate) heldRows(ctx context.Context, own int, rows []beads.Bead) (map
 	if err != nil {
 		return nil, err
 	}
-	for id := range withheld {
+	g.mu.Lock()
+	for id, w := range withheld {
 		held[id] = true
+		g.withheld[id] = w
 	}
+	g.mu.Unlock()
 	return held, nil
 }
 
@@ -112,4 +136,35 @@ func (g *rowGate) gate(ctx context.Context, owners map[string]int, items []beads
 		kept = kept[:limit]
 	}
 	return kept, nil
+}
+
+// InputWithheld judges rows, one leg's assigned rows read live by a controller
+// probe, for input admission over that leg's store alone, and returns the
+// withheld row ids (#8832). The hook's claim path refuses a withheld row, so a
+// wake, keep-awake, park or ladder probe that counts it as work holds a session
+// for work it cannot claim. The verdict is the rule the ready reader applies,
+// read live.
+//
+// A leg with a nil store, no rows, or a judgment that fails withholds nothing:
+// the probe keeps its ungated answer rather than failing a seat decision from a
+// read hiccup, the never-under-count rule the demand pass's gate applies
+// (PartialResultError there, a conservative answer here).
+func InputWithheld(leg Leg, rows []beads.Bead) map[string]bool {
+	if leg.Store == nil || len(rows) == 0 {
+		return nil
+	}
+	label := leg.Label
+	if label == "" {
+		label = "assigned"
+	}
+	judge := inputadmission.New([]inputadmission.Source{{Label: label, Reader: leg.Store}}, time.Now())
+	verdicts, err := judge.Judge(context.Background(), 0, rows)
+	if err != nil || len(verdicts) == 0 {
+		return nil
+	}
+	withheld := make(map[string]bool, len(verdicts))
+	for id := range verdicts {
+		withheld[id] = true
+	}
+	return withheld
 }

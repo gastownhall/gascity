@@ -259,13 +259,17 @@ func replayPass(t *testing.T, x replayExport, rows []beads.Bead, at time.Time) *
 	obs := NewObservationCache(clk, time.Minute, "replay")
 	obs.PublishInventory(obsPass(clk, 1, 1, completeBackend("", names...)), attrs)
 	env := &reconcileEnv{Gen: 1, Cfg: replayCity(x.City, rows), SP: &sleepCountingProvider{}}
+	cityPath := t.TempDir()
 	p := newPlanner(realPlannerClock{}, func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, io.Discard)
 	p.tracePass(gatherEnv{
-		CityPath: t.TempDir(), CityName: x.City,
-		Env:          func() *reconcileEnv { return env },
-		Sessions:     func() beads.Store { return cache },
-		RigStores:    func() map[string]beads.Store { return nil },
-		Recording:    func() *externalReadsRecording { return nil },
+		CityPath: cityPath, CityName: x.City,
+		Env:       func() *reconcileEnv { return env },
+		Sessions:  func() beads.Store { return cache },
+		RigStores: func() map[string]beads.Store { return nil },
+		// The lane's gated read as it runs before a pass in production
+		// (#8832): the v2 pass serves a gate leg's Ready only from a gated
+		// recording, and every city's demand legs are gate legs now.
+		Recording:    func() *externalReadsRecording { return recordGatedDemandReads(at, cityPath, env.Cfg, cache, nil) },
 		Observations: func() *ObservationCache { return obs },
 		Episodes:     func() (map[string]session.StartupHealthEpisode, error) { return readStartupHealthEpisodes(cache) },
 		Templates: func(*reconcileEnv, time.Time) templateResolver {

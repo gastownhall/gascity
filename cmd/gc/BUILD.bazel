@@ -1940,6 +1940,7 @@ go_test(
         "named_session_materialization_test.go",
         "native_dolt_env_cfg_reuse_test.go",
         "native_dolt_rebind_integration_test.go",
+        "native_input_admission_demand_test.go",
         "native_reopen_wiring_test.go",
         "nudge_claim_census_test.go",
         "nudge_dispatcher_test.go",

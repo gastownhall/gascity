@@ -27,6 +27,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/readywork"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
@@ -98,6 +99,13 @@ func (cr *CityRuntime) workLegs() WorkLegs {
 // suspendedRigs names the open rigs this leg set leaves out because they are
 // suspended.
 func (l WorkLegs) suspendedRigs() []string { return l.suspended }
+
+// admissionLeg is the city work store as a ready leg: the single source a
+// controller probe judges one row's input admission over when it holds no leg
+// set of its own (#8832).
+func (l WorkLegs) admissionLeg() readywork.Leg {
+	return readywork.Leg{Label: "work", Store: l.work}
+}
 
 // storeForRef resolves a source store-ref ("city:<name>", "rig:<name>", a
 // class binding ref) to the leg it names: the city work store for a city or
