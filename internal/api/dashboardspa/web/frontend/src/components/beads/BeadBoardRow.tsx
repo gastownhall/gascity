@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import type { BeadNode } from '../../lib/beadGraph';
+import { routedAgent } from '../../supervisor/beadReads';
 import type { BadgeSeverity } from '../../attention/compose';
 import { attentionListItemProps } from '../../attention/routeHighlight';
 
@@ -7,7 +8,7 @@ import { attentionListItemProps } from '../../attention/routeHighlight';
 // no side-stripe. Selection is carried by weight + a leading "▸" + a warm
 // surface tint, never by a colored left edge (DESIGN.md §6). Clicking a row
 // opens the bead detail pop-out (gascity-dashboard-14s1); the row carries
-// only a compact `needs N · blocks M` annotation, with the full navigable
+// the routed agent and a compact `needs N · blocks M` annotation, with the full navigable
 // dependency tree living in the modal where it has room to read.
 
 interface BeadBoardRowProps {
@@ -41,6 +42,7 @@ export function BeadBoardRow({
   onSelect,
 }: BeadBoardRowProps) {
   const { bead, deps, blocks, hasUnresolvedDeps } = node;
+  const agent = routedAgent(bead);
   const rowRef = useRef<HTMLLIElement | null>(null);
   const depCount = deps.length;
   const blockCount = blocks.length;
@@ -105,6 +107,11 @@ export function BeadBoardRow({
             )}`}
           >
             {note}
+          </span>
+        )}
+        {agent && (
+          <span className="block pl-4 mt-0.5 break-words text-label text-fg-muted">
+            For agent: {agent}
           </span>
         )}
       </button>
