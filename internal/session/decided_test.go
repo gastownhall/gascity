@@ -122,6 +122,15 @@ func TestDecidedMatch(t *testing.T) {
 		{site: FactsLegacyResetEvict, move: map[string]string{"reset_committed_at": "2026-02-01T00:00:00Z"}},
 		{site: FactsLegacyResetEvict, move: map[string]string{"generation": "3"}, wantMatch: true},
 
+		// A startup crash stamps only the incarnation it read after the death,
+		// and never over another reason.
+		{site: FactsStartupCrash, wantMatch: true},
+		{site: FactsStartupCrash, closeRow: true},
+		{site: FactsStartupCrash, move: map[string]string{"generation": "3"}},
+		{site: FactsStartupCrash, move: map[string]string{"instance_token": "tok-2"}},
+		{site: FactsStartupCrash, move: map[string]string{"sleep_reason": "killed"}},
+		{site: FactsStartupCrash, move: map[string]string{"held_until": "2099-01-01T00:00:00Z", "wake_request": "1"}, wantMatch: true},
+
 		// mc-uhvqj: a wake failure or churn accrues only for the wake it read.
 		{site: FactsLegacyExitAccrual, decided: map[string]string{"last_woke_at": "2026-01-01T00:00:00Z"}, wantMatch: true},
 		{site: FactsLegacyExitAccrual, closeRow: true},

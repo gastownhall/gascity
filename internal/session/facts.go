@@ -92,6 +92,9 @@ const (
 	// FactsOpClose is an operator's close, read under its start lock and the
 	// runtime lease.
 	FactsOpClose FactsSite = "op.close"
+	// FactsStartupCrash is the Manager recording a terminal provider death
+	// during Start on the row it read after the death.
+	FactsStartupCrash FactsSite = "op.startup-crash"
 )
 
 // factsSite is how a site compares Facts: without Drop's keys, or only
@@ -179,6 +182,10 @@ var factsSites = map[FactsSite]factsSite{
 	FactsResumeConsume: {
 		Only:   []string{"held_until", "sleep_intent", "quarantined_until", "wait_hold", "suspended_at", "generation", "instance_token"},
 		Reason: "the facts the resume read before its start: a write to any since (a newer suspend, kill, wait or quarantine, or another start) refuses the consume; state is left out, as legacy's heal moves it under a dormant row",
+	},
+	FactsStartupCrash: {
+		Only:   []string{"generation", "instance_token", "sleep_reason"},
+		Reason: "the death is the incarnation's the Manager read after its Start died: a new start moves the incarnation, and an operator's kill or suspend records its own sleep_reason, either of which owns the row's reason instead of startup-crash",
 	},
 	FactsLegacyResetEvict: {
 		Only:   []string{"continuation_reset_pending", "reset_committed_at"},

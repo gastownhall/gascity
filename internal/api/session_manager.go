@@ -17,19 +17,21 @@ func (s *Server) actor(kind session.ActorKind) session.Actor {
 
 func (s *Server) sessionManager(sessions beads.SessionStore) *session.Manager {
 	cfg := s.state.Config()
-	if cfg == nil {
-		return session.NewManagerWithOptions(sessions, s.state.SessionProvider(), session.WithCityPath(s.state.CityPath()), session.WithDeferredSubmitQueue(s.state.NudgeQueue()))
-	}
-	return session.NewManagerWithOptions(
-		sessions,
-		s.state.SessionProvider(),
+	opts := []session.ManagerOption{
 		session.WithCityPath(s.state.CityPath()),
 		session.WithDeferredSubmitQueue(s.state.NudgeQueue()),
+		session.WithEventRecorder(s.state.EventProvider()),
+	}
+	if cfg == nil {
+		return session.NewManagerWithOptions(sessions, s.state.SessionProvider(), opts...)
+	}
+	opts = append(opts,
 		session.WithRuntimeLeaseTTL(session.RuntimeLeaseTTLFor(cfg)),
 		session.WithTransportPolicyResolver(func(template, provider string) (string, bool) {
 			return configuredSessionTransportResolution(cfg, template, provider)
 		}),
 	)
+	return session.NewManagerWithOptions(sessions, s.state.SessionProvider(), opts...)
 }
 
 func configuredSessionTransport(cfg *config.City, template, provider string) string {

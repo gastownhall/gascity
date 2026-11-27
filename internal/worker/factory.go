@@ -113,6 +113,9 @@ func NewFactory(cfg FactoryConfig) (*Factory, error) {
 	if cfg.DeferredSubmits != nil {
 		opts = append(opts, sessionpkg.WithDeferredSubmitQueue(cfg.DeferredSubmits))
 	}
+	if cfg.Recorder != nil {
+		opts = append(opts, sessionpkg.WithEventRecorder(cfg.Recorder))
+	}
 	manager := sessionpkg.NewManagerWithOptions(beads.SessionStore{Store: cfg.Store}, cfg.Provider, opts...)
 	return newFactory(manager, cfg)
 }
