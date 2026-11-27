@@ -1,6 +1,7 @@
 package readywork
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -88,6 +89,15 @@ func containsID(rows []ReadyBead, id string) bool {
 		}
 	}
 	return false
+}
+
+// idsOf lists rows' ids for failure messages.
+func idsOf(rows []beads.Bead) []string {
+	ids := make([]string, 0, len(rows))
+	for _, r := range rows {
+		ids = append(ids, r.ID)
+	}
+	return ids
 }
 
 // ptrTime returns a pointer to t.
@@ -262,6 +272,61 @@ func TestNativeInputAdmissionPrerequisiteWithholdsAndReleases(t *testing.T) {
 		}
 		admits(t, fx)
 	})
+}
+
+// TestNativeInputAdmissionBoundedReadRefillsPastWithheldRows covers AC-4: with
+// a limit pushed to the legs, more than limit+slack withheld rows ahead of an
+// admissible row must not end the read early — a withheld row is not a row in
+// hand, so the leg is asked again, widening its own cut, until one of its
+// rows can be served.
+func TestNativeInputAdmissionBoundedReadRefillsPastWithheldRows(t *testing.T) {
+	store := beads.NewMemStore()
+	withheld := boundedSlack + Query{Limit: 1}.Limit + 4
+	for i := 0; i < withheld; i++ {
+		fx := materializeInputWorkflow(t, store, nil)
+		if err := store.Update(fx.input.ID, beads.UpdateOpts{Labels: []string{"hold:external"}}); err != nil {
+			t.Fatalf("holding input %d: %v", i, err)
+		}
+	}
+	admissible := materializeInputWorkflow(t, store, nil)
+	rows, err := Read([]Leg{testLeg("city", store)}, Query{Limit: 1, MetadataFields: []string{"gc.routed_to=gascity/pool"}})
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != admissible.step.ID {
+		t.Fatalf("Read with limit 1 behind %d withheld rows = %d rows; want exactly the admissible step %s", withheld, len(rows), admissible.step.ID)
+	}
+}
+
+// TestNativeInputAdmissionLegGateWithholdsOnUnifiedCity covers AC-4's gate arm:
+// the controller's LegGate — the same gate demand and serve share — withholds
+// a held-input row on a unified city too, not only a split one, and keeps the
+// row once the hold is released.
+func TestNativeInputAdmissionLegGateWithholdsOnUnifiedCity(t *testing.T) {
+	store := beads.NewMemStore()
+	fx := materializeInputWorkflow(t, store, nil)
+	if err := store.Update(fx.input.ID, beads.UpdateOpts{Labels: []string{"hold:external"}}); err != nil {
+		t.Fatalf("holding input: %v", err)
+	}
+	gate := NewLegGate([]Leg{testLeg("city", store)}, beads.ReadyQuery{TierMode: beads.FederatedReadTier})
+	gated, err := gate.Gate(context.Background(), 0, []beads.Bead{fx.step})
+	if err != nil {
+		t.Fatalf("Gate: %v", err)
+	}
+	if len(gated) != 0 {
+		t.Fatalf("Gate kept held-input step %s on a unified city; want it withheld", fx.step.ID)
+	}
+	if err := store.Update(fx.input.ID, beads.UpdateOpts{RemoveLabels: []string{"hold:external"}}); err != nil {
+		t.Fatalf("releasing hold: %v", err)
+	}
+	gate = NewLegGate([]Leg{testLeg("city", store)}, beads.ReadyQuery{TierMode: beads.FederatedReadTier})
+	gated, err = gate.Gate(context.Background(), 0, []beads.Bead{fx.step})
+	if err != nil {
+		t.Fatalf("Gate after release: %v", err)
+	}
+	if len(gated) != 1 || gated[0].ID != fx.step.ID {
+		t.Fatalf("Gate after release = %v; want the step kept", idsOf(gated))
+	}
 }
 
 // TestNativeInputAdmissionOpenInputStaysEligible covers AC-2: an input that is
