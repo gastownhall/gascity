@@ -948,8 +948,11 @@ func claimHookWorkProvisioning(city *hookCity, workQuery, workDir string, queryE
 	// whatever is left on the way out (a release, a reclaim, a claim that
 	// stopped on an error).
 	defer ops.announceBeadEvents()
-	run := hookRigLegRunner(city.path, city.cfg, stores, shellWorkQueryWithEnv)
-	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, run, emitFailure, stdout, stderr)
+	// Each work-query subprocess runs under the parent context the claim loop's
+	// read guard gives its read (hookClaimReadGuard.readContext), so a read made
+	// once work is in hand is killed at the read deadline.
+	read := hookRigLegRunnerContext(city.path, city.cfg, stores, shellWorkQueryWithEnvContext)
+	return claimHookWorkWithReads(workQuery, workDir, queryEnv, stores, claimOpts, ops, read, emitFailure, stdout, stderr)
 }
 
 // routedHookClaimOps is the claim ops one class-route resolution (opened, err)
@@ -971,14 +974,21 @@ func routedHookClaimOps(base hookClaimOps, opened *hookClaimClassRoute, err erro
 	return ops, true
 }
 
-// claimHookWorkWithRunner is claimHookWork with the work-query runner and claim
-// ops injected for tests. It selects the best-ranked store reporting ready work
-// (see bestStoreWithWork), re-validates it for claim-time freshness and falls
-// back to a later store if it emptied since discovery (claimStoreWithFallback),
-// then attempts the claim against that store's captured rows, against that
-// store's dir/env.
+// claimHookWorkWithRunner is claimHookWorkWithReads over run, a runner with no
+// subprocess for the read guard to kill: the seam tests drive the claim loop
+// through.
+func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, ops hookClaimOps, run hookStoreRunner, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
+	return claimHookWorkWithReads(workQuery, workDir, queryEnv, stores, claimOpts, ops, hookClaimReadRunnerFor(run), emitFailure, stdout, stderr)
+}
+
+// claimHookWorkWithReads is claimHookWork with the work-query reads and claim
+// ops injected. It selects the best-ranked store reporting ready work
+// (see bestStoreWithWork), then attempts the claim against that store's
+// discovered rows, against that store's dir/env. There is no claim-time
+// re-read of the selected store: every read spends the one invocation claim
+// window, and the CAS already re-checks each row it takes.
 //
-// When a selected store still reports ready work but every claimable row is lost
+// When a selected store reports ready work but every claimable row is lost
 // to another claimant before the mutation, the single-store claim drains without
 // work. That would strand routed work waiting in a LATER federated store behind
 // the lost race, so this loop drops the exhausted store and reselects across the
@@ -994,9 +1004,23 @@ func routedHookClaimOps(base hookClaimOps, opened *hookClaimClassRoute, err erro
 // the whole fan-out so it can prove "no WORK store holds this bead" before it
 // writes ownership into the binding (claim_class_route.go). Nil on a city that
 // relocates nothing.
-func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, ops hookClaimOps, run hookStoreRunner, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
+func claimHookWorkWithReads(workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, ops hookClaimOps, read hookClaimReadRunner, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
 	ops.applyDefaults()
 	ops.ClassRoute.observeWorkLegs(stores)
+	// Every read below shares the invocation's read budget, so found work
+	// always leaves the CAS its reserve inside the claim window. The guard also
+	// records each read for the one trace line a failed invocation prints.
+	reads := newHookClaimReadGuard(&ops, read, stores)
+	run := reads.read
+	// A window refusal is the one terminal claim result the trace explains, so
+	// the expiry is noted on its way to the event bus.
+	var refusedAt time.Duration
+	windowRefused := false
+	emitWindowExpired := ops.EmitClaimWindowExpired
+	ops.EmitClaimWindowExpired = func(expiry hookClaimWindowExpiry) {
+		refusedAt, windowRefused = expiry.InvocationAge, true
+		emitWindowExpired(expiry)
+	}
 	// primary is the agent's own store (the first entry). It is captured once
 	// here, before the loop shrinks remaining: only the primary's error is
 	// surfaced as itself and emitted as this session's work-query failure. Once
@@ -1023,27 +1047,31 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 	// another directory. It is named once, on the shared drain, so a later
 	// store's claim keeps the invocation quiet about it.
 	var left []beads.Bead
+	// reselecting records that an earlier selection's claim took nothing, so
+	// the read trace of a failed selection says a claim came before it.
+	reselecting := false
+	// failRead ends the invocation on a read that failed or that the read
+	// budget cut: the failure on the event bus first, then the
+	// store-unavailable token and its exit code, then the read trace.
+	failRead := func(err error) int {
+		report.failed(workQuery, err)
+		code := reportClaimWorkQueryFailure(err, stderr)
+		reads.writeTrace(stderr, hookClaimSelectionFailedTail(reselecting, claimsErrored))
+		return code
+	}
 	for len(remaining) > 0 {
+		reads.beginSelection()
 		discovered, selected, err := selectStoreWithWorkRetrying(workQuery, remaining, primary, run, &ops, noteStoreFailure)
 		if err != nil {
-			report.failed(workQuery, err)
-			return reportClaimWorkQueryFailure(err, stderr)
+			return failRead(err)
 		}
 		if isZeroHookStore(selected) {
 			break // no remaining store has ready work
 		}
-		// On a multi-leg city this re-reads the selected store before the
-		// mutation, and a primary-leg failure there is surfaced exactly like a
-		// discovery failure: it is the same read of the same store, moments
-		// later, so it gets the same classification.
-		claimOutput, claimStore, err := claimStoreWithFallback(workQuery, remaining, selected, primary, discovered, run, noteStoreFailure)
-		if err != nil {
-			report.failed(workQuery, err)
-			return reportClaimWorkQueryFailure(err, stderr)
-		}
-		if isZeroHookStore(claimStore) {
-			break // selected store emptied and no later store has ready work
-		}
+		// The claim acts on the discovery answer itself, with no second read of
+		// the selected store: the CAS re-checks the row, and a row lost since
+		// discovery drops this store below and reselects across the rest.
+		claimOutput, claimStore := discovered, selected
 		storeOpts := claimOpts
 		storeOpts.Env = queryEnv
 		if len(claimStore.env) > 0 {
@@ -1056,13 +1084,25 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		}
 		storeOps := ops
 		storeOps.Runner = func(string, string) (string, error) { return claimOutput, nil }
+		// An answer that arrived past the read deadline is still acted on: what
+		// it holds may need no mutation. A mutation on it is refused as the read
+		// the budget cut.
+		if i, late := reads.lateAnswer(claimStore); late {
+			storeOps.RefuseLateAnswer = func() int {
+				return failRead(reads.refuseLateAnswer(i, claimStore, hookStoreCommand(claimStore, workQuery)))
+			}
+		}
 		res := tryHookClaim(workQuery, storeDir, &storeOpts, &storeOps, stdout, stderr)
 		if res.terminal {
+			if windowRefused {
+				reads.writeTrace(stderr, fmt.Sprintf("claim refused at +%s: window spent", hookClaimTraceDuration(refusedAt)))
+			}
 			return res.code
 		}
 		if res.claimsErrored {
 			claimsErrored = true
 		}
+		reselecting = true
 		left = append(left, res.left...)
 		// This store reported ready work but the claim acquired nothing — every
 		// claimable row was lost to another claimant, none matched this session, or
@@ -1073,13 +1113,17 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		remaining = removeHookStore(remaining, claimStore)
 	}
 	reportHookClaimLeftToAnotherSession(left, claimOpts.PoolSeat, stderr)
-	return writeHookClaimNoWork(claimOpts, ops, claimsErrored, workDir, stdout, stderr)
+	code := writeHookClaimNoWork(claimOpts, ops, claimsErrored, workDir, stdout, stderr)
+	if claimsErrored {
+		reads.writeTrace(stderr, "claims errored")
+	}
+	return code
 }
 
 // reportClaimWorkQueryFailure reports a failed claim-path work query on stderr
 // and returns the exit code for it. Every claim read whose failure is surfaced
-// funnels through here: discovery, the claim-time re-validation on a multi-leg
-// city, and tryHookClaim's own read. So a timed-out or transport-class failure
+// funnels through here: discovery, its paced retries, the reselection after a
+// lost race, and tryHookClaim's own read. So a timed-out or transport-class failure
 // on any of them carries the token and exit 2, scoped as
 // hookStoreUnavailableToken's doc states (the agent's own store only).
 //
@@ -1157,6 +1201,12 @@ var (
 // caller keeps its failed-read contract instead of treating a dead invocation
 // as an idle store: no drain, and reportClaimWorkQueryFailure classifies the
 // code (2 if the read failed transport-class or timed out, else 1).
+//
+// A retry that starts past the invocation's read deadline (claimReadDeadline)
+// still runs while the window is open. Its answer may need no claim mutation:
+// an empty one drains no_work, and this session's own in-progress work is
+// resumed. A mutation on work it answers is refused as the read the budget cut
+// (hookClaimOps.RefuseLateAnswer).
 //
 // A failed secondary store with no work anywhere is an error here too
 // (hookSecondaryStoreFailure), so it gets the same bounded retry. noted is
@@ -1353,8 +1403,16 @@ var hookWorkQueryTimeout = 150 * time.Second
 // a short bounded interval so startup hooks cannot strand sessions behind a
 // wedged data-plane command.
 func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
+	return shellWorkQueryWithEnvContext(context.Background(), command, dir, env)
+}
+
+// shellWorkQueryWithEnvContext is shellWorkQueryWithEnv under parent: the query
+// is bounded by hookWorkQueryTimeout and by any deadline parent carries (the
+// claim path's invocation read deadline, claimReadContext), whichever comes
+// first, and its timeout error names which of the two fired.
+func shellWorkQueryWithEnvContext(parent context.Context, command, dir string, env []string) (string, error) {
 	if generated := generatedProgram(command); generated != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), hookWorkQueryTimeout)
+		ctx, cancel := context.WithTimeout(parent, hookWorkQueryTimeout)
 		defer cancel()
 		var stderr bytes.Buffer
 		out, err := generated(ctx, dir, execenv.WithUsageMetricsDisabled(workQueryEnvForDir(env, dir)), &stderr)
@@ -1363,7 +1421,7 @@ func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
 	if reason := runtime.ShellCommandUnavailable(command); reason != "" {
 		return "", fmt.Errorf("work query refused: %s", reason)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), hookWorkQueryTimeout)
+	ctx, cancel := context.WithTimeout(parent, hookWorkQueryTimeout)
 	defer cancel()
 	cmd, err := runtime.ShellCommandContext(ctx, command)
 	if err != nil {
@@ -1384,8 +1442,13 @@ func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
 
 // workQueryResult turns a finished work query's output and error into
 // shellWorkQueryWithEnv's result. ctx is the query's own, bounded by
-// hookWorkQueryTimeout.
+// hookWorkQueryTimeout and by its parent's deadline.
 func workQueryResult(ctx context.Context, command string, out []byte, stderr *bytes.Buffer, err error) (string, error) {
+	if ctx.Err() == context.DeadlineExceeded && errors.Is(context.Cause(ctx), errHookClaimReadBudgetSpent) {
+		// The parent's read deadline fired before the query's own timeout:
+		// the invocation's claim read budget ran out mid-read.
+		return "", fmt.Errorf("running work query %q: timed out after the invocation's claim read deadline, before its own %s timeout: %w", command, hookWorkQueryTimeout, context.Cause(ctx))
+	}
 	if ctx.Err() == context.DeadlineExceeded {
 		// Wrap context.DeadlineExceeded so callers can classify the timeout as
 		// transient (dispatch.IsTransientControllerError / errors.Is). Without

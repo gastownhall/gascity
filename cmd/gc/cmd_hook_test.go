@@ -1060,19 +1060,18 @@ func TestDoHookClaimDrainAckOnNoWork(t *testing.T) {
 }
 
 // TestClaimHookWorkRetriesLaterStoreWhenSelectedStoreLosesClaimRace is the
-// post-merge regression for the federated claim race: when the discovery-
-// selected store still reports ready work at claim-time re-validation but every
-// claimable row is lost to another claimant before the mutation, the claim must
-// drop that store and reselect across the remaining federated stores instead of
-// draining as "no work" while a later store still has claimable routed work.
+// post-merge regression for the federated claim race: when every claimable row
+// of the discovery-selected store is lost to another claimant at its CAS, the
+// claim must drop that store and reselect across the remaining federated stores
+// instead of draining as "no work" while a later store still has claimable
+// routed work.
 func TestClaimHookWorkRetriesLaterStoreWhenSelectedStoreLosesClaimRace(t *testing.T) {
 	stores := []hookStore{
 		{dir: "city", env: []string{"GC_STORE=city"}},
 		{dir: "riga", env: []string{"GC_STORE=riga"}},
 	}
-	// Both stores report ready routed work on every query, so the selected
-	// store's claim-time re-validation succeeds; the only reason the city claim
-	// fails is the lost race below, not an emptied store.
+	// Both stores report ready routed work on every query, so the only reason
+	// the city claim fails is the lost race below, not an emptied store.
 	run := func(_, dir string, _ []string) (string, error) {
 		switch dir {
 		case "city":
@@ -1189,26 +1188,24 @@ func TestClaimHookWorkReportsFederatedStoreErrorAfterPrimaryLosesRace(t *testing
 }
 
 // TestClaimHookWorkUsesFallbackStoreDirEnvAndOutput covers the load-bearing
-// fallback-store handoff directly at the claim entrypoint: when the discovery-
-// selected store has emptied by claim-time re-validation, the claim mutation
-// must run against the LATER federated store's dir, env, and captured rows — not
-// the original selected store's coordinates.
+// store handoff directly at the claim entrypoint: when the discovery-selected
+// store's row is lost to another claimant at CAS time, the claim mutation must
+// run against the LATER federated store's dir, env, and captured rows — not
+// the exhausted store's coordinates. (Before #5693 the selected store was
+// re-read for claim-time freshness and reselected when it had emptied; the
+// claim now acts on the discovery output directly, and the claim loop's
+// lost-race fallthrough performs the same handoff.)
 func TestClaimHookWorkUsesFallbackStoreDirEnvAndOutput(t *testing.T) {
 	stores := []hookStore{
 		{dir: "city", env: []string{"GC_STORE=city"}},
 		{dir: "riga", env: []string{"GC_STORE=riga"}},
 	}
-	cityCalls := 0
 	run := func(_, dir string, _ []string) (string, error) {
 		switch dir {
 		case "city":
-			cityCalls++
-			if cityCalls == 1 {
-				// Discovery sees ready work in the city store...
-				return `[{"id":"hw-city","status":"open","metadata":{"gc.routed_to":"worker"}}]`, nil
-			}
-			// ...but it has emptied by claim-time re-validation (and stays empty).
-			return `[]`, nil
+			// Discovery's pick: priority 1 outranks riga's default 2, and the
+			// row loses its race at CAS time.
+			return `[{"id":"hw-city","status":"open","priority":1,"metadata":{"gc.routed_to":"worker"}}]`, nil
 		case "riga":
 			return `[{"id":"hw-riga","status":"open","metadata":{"gc.routed_to":"worker"}}]`, nil
 		default:
@@ -1221,6 +1218,9 @@ func TestClaimHookWorkUsesFallbackStoreDirEnvAndOutput(t *testing.T) {
 	ops := hookClaimOps{
 		Claim: func(_ context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
 			claimDir, claimEnv = dir, env
+			if beadID == "hw-city" {
+				return beads.Bead{}, false, nil // taken by another claimant between discovery and the CAS
+			}
 			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
 		},
 		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },

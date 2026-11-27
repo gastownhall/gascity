@@ -347,6 +347,16 @@ type hookClaimOps struct {
 	// fresh one each time the loop copies the ops.
 	InvokedAt   time.Time
 	ClaimWindow time.Duration
+	// RefuseLateAnswer, when set, means the work-query answer this claim acts
+	// on arrived at or after the invocation's read deadline (claimReadDeadline),
+	// too late for a claim mutation on it to be sure of starting inside the
+	// window. The claim still acts on that answer where it needs no mutation
+	// (adoption, workflow retirement, the seat and deferral skips), and each
+	// claim tier calls this in place of a mutation, ahead of the window fence:
+	// it reports the answer as the read the budget cut and returns the exit
+	// code. Only the federated claim loop sets it (claimHookWorkWithReads); nil
+	// refuses nothing.
+	RefuseLateAnswer func() int
 	// ClassRoute is the relocated coordination-class binding these seams
 	// escalate to, or nil on a city that relocates nothing. It is not a seam:
 	// it is here so claimHookWorkWithRunner — the only caller that knows the
@@ -964,6 +974,9 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		// is fenced like a fresh claim. Adoption of an ALREADY in_progress bead
 		// runs earlier, in hookClaimExistingAssignment, and is deliberately
 		// exempt: it mints no new obligation.
+		if ops.RefuseLateAnswer != nil {
+			return hookClaimResult{terminal: true, code: ops.RefuseLateAnswer()}
+		}
 		if ops.claimWindowSpent() {
 			return refuseExpiredHookClaimWindow(candidate.ID, ops, stderr)
 		}
@@ -1149,6 +1162,9 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			if !opts.AutoReclaimStaleClaims || !hookCandidateReclaimEligible(candidate, opts.RouteTargets, now) {
 				continue
 			}
+			if ops.RefuseLateAnswer != nil {
+				return hookClaimResult{terminal: true, code: ops.RefuseLateAnswer()}
+			}
 			if ops.claimWindowSpent() {
 				return refuseExpiredHookClaimWindow(candidate.ID, ops, stderr)
 			}
@@ -1166,6 +1182,9 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		}
 		// F-B. The fresh-claim CAS is the mutation that mints a new obligation,
 		// so it is the one the turn-binding window most directly guards.
+		if ops.RefuseLateAnswer != nil {
+			return hookClaimResult{terminal: true, code: ops.RefuseLateAnswer()}
+		}
 		if ops.claimWindowSpent() {
 			return refuseExpiredHookClaimWindow(candidate.ID, ops, stderr)
 		}
