@@ -82,6 +82,12 @@ func (c *countingOps) listCalls() []listCall {
 	return append([]listCall(nil), c.lists...)
 }
 
+func (c *countingOps) listCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.lists)
+}
+
 func (c *countingOps) execCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -102,6 +108,14 @@ func (c *countingOps) reset() {
 	c.lists = nil
 	c.execs = 0
 	c.execPods = nil
+}
+
+// withFake runs fn on the wrapped fake under the wrapper's lock, so a test can
+// mutate pods while other goroutines are reading through the wrapper.
+func (c *countingOps) withFake(fn func(*fakeK8sOps)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	fn(c.inner)
 }
 
 // testClock is a settable provider clock, safe for concurrent readers.
@@ -252,4 +266,38 @@ func TestPodSnapshotLookupSemantics(t *testing.T) {
 			t.Fatalf("exec count = %d; want 0 (no pgrep into a non-Running pod)", got)
 		}
 	})
+}
+
+// TestPodSnapshotRefreshesAfterTTL: observation reads share one pod listing
+// for a TTL measured from when its LIST started; the first read at or past it
+// lists again, once, and sees a pod created after the first listing.
+func TestPodSnapshotRefreshesAfterTTL(t *testing.T) {
+	ops := newCountingOps()
+	addRunningPod(ops.inner, "a", "a")
+	p, clock := newSnapshotProvider(ops)
+	populatedAt := clock.now()
+
+	if !p.IsRunning("a") {
+		t.Fatal("IsRunning(a) = false, want true")
+	}
+	ops.withFake(func(f *fakeK8sOps) { addRunningPod(f, "b", "b") })
+
+	clock.set(populatedAt.Add(testSnapshotTTL - time.Nanosecond))
+	if p.IsRunning("b") {
+		t.Fatal("IsRunning(b) inside the TTL = true, want false: the listing predates b")
+	}
+	if n := ops.listCount(); n != 1 {
+		t.Fatalf("LISTs inside the TTL = %d, want 1", n)
+	}
+
+	clock.set(populatedAt.Add(testSnapshotTTL))
+	if !p.IsRunning("b") {
+		t.Fatal("IsRunning(b) at the TTL = false, want true from a fresh listing")
+	}
+	if !p.IsRunning("a") || !p.IsRunning("b") {
+		t.Fatal("reads after the refresh lost a running session")
+	}
+	if lists := ops.listCalls(); len(lists) != 2 || lists[1] != (listCall{selector: "app=gc-agent"}) {
+		t.Fatalf("LISTs = %+v, want exactly one refresh {selector: app=gc-agent}", lists)
+	}
 }
