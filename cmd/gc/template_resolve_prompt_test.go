@@ -1460,25 +1460,22 @@ func TestResolveTemplatePromptTemplateStillRendersProbedDefaultBranch(t *testing
 	}
 }
 
-// installBlockingGitForTemplate puts a fake git first on PATH that logs every
-// invocation and then execs sleep, standing in for a git that never answers
-// (a wedged filesystem or an unresponsive remote helper).
-func installBlockingGitForTemplate(t *testing.T) string {
+// installBlockingGitForTemplate puts a fake git first on PATH that execs
+// sleep, standing in for a git that never answers (a wedged filesystem or an
+// unresponsive remote helper). It keeps no call log: the probe deadline kills
+// it, possibly before a first write, so a test counts spawns with
+// answerLaterProbes instead.
+func installBlockingGitForTemplate(t *testing.T) {
 	t.Helper()
 	if goruntime.GOOS == "windows" {
 		t.Skip("shell-script fake git is not portable to windows")
 	}
 	binDir := t.TempDir()
-	logPath := filepath.Join(t.TempDir(), "git-calls.log")
-	script := "#!/bin/sh\n" +
-		"printf '%s\\n' \"$*\" >> \"$GC_TEST_GIT_LOG\"\n" +
-		"exec sleep 60\n"
+	script := "#!/bin/sh\nexec sleep 60\n"
 	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755); err != nil {
 		t.Fatalf("write blocking fake git: %v", err)
 	}
-	t.Setenv("GC_TEST_GIT_LOG", logPath)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return logPath
 }
 
 // newProbeTestParams returns build params with a fresh probe latch, a tiny
@@ -1497,6 +1494,18 @@ func newProbeTestParams(t *testing.T) (*agentBuildParams, *bytes.Buffer) {
 
 func countLines(s string) int {
 	return strings.Count(s, "\n")
+}
+
+// answerLaterProbes swaps in a fake git that answers "develop" at once and
+// lifts bp's deadline to the default, returning the new fake's call log. A
+// test that tripped the latch with the blocking fake then proves whether a
+// later call spawns git from this log, which a slow process start cannot
+// empty.
+func answerLaterProbes(t *testing.T, bp *agentBuildParams) string {
+	t.Helper()
+	gitLog := installRecordingGitForTemplate(t, "develop")
+	bp.gitProbeDeadline = 0
+	return gitLog
 }
 
 func TestBuildParamsDefaultBranchRecordedRigValueSkipsGit(t *testing.T) {
@@ -1527,6 +1536,9 @@ func TestBuildParamsDefaultBranchEmptyDirIsMainWithoutGit(t *testing.T) {
 func TestBuildParamsDefaultBranchProbesGitWhenNothingRecorded(t *testing.T) {
 	installRecordingGitForTemplate(t, "develop")
 	bp, _ := newProbeTestParams(t)
+	// The fake answers at once; the default deadline keeps a slow process
+	// start from reading as a missed probe.
+	bp.gitProbeDeadline = 0
 
 	if got := bp.defaultBranch("", t.TempDir()); got != "develop" {
 		t.Fatalf("defaultBranch = %q, want the probed branch", got)
@@ -1537,17 +1549,21 @@ func TestBuildParamsDefaultBranchProbesGitWhenNothingRecorded(t *testing.T) {
 // "main", and the first miss latches the whole build: the second agent, in a
 // different directory, spawns no git and logs no second line.
 func TestBuildParamsDefaultBranchMissedDeadlineLatchesBuild(t *testing.T) {
-	gitLog := installBlockingGitForTemplate(t)
+	installBlockingGitForTemplate(t)
 	bp, stderr := newProbeTestParams(t)
 
 	if got := bp.defaultBranch("", t.TempDir()); got != "" {
 		t.Fatalf("first defaultBranch = %q, want empty on a missed deadline", got)
 	}
+	if !bp.gitLatch.tripped() {
+		t.Fatal("latch not tripped by a missed deadline")
+	}
+	gitLog := answerLaterProbes(t, bp)
 	if got := bp.defaultBranch("", t.TempDir()); got != "" {
 		t.Fatalf("second defaultBranch = %q, want empty while latched", got)
 	}
-	if n := countLines(readTemplateGitCalls(t, gitLog)); n != 1 {
-		t.Fatalf("git invocations = %d, want exactly 1 (the latch must skip the second dir)", n)
+	if calls := readTemplateGitCalls(t, gitLog); calls != "" {
+		t.Fatalf("latched build probed git for the second dir:\n%s", calls)
 	}
 	if n := strings.Count(stderr.String(), "\n"); n != 1 {
 		t.Fatalf("stderr lines = %d, want exactly 1:\n%s", n, stderr.String())
@@ -1559,47 +1575,59 @@ func TestBuildParamsDefaultBranchMissedDeadlineLatchesBuild(t *testing.T) {
 
 // The latch lives on one build's params: a fresh params value probes again.
 func TestBuildParamsDefaultBranchFreshParamsProbeAgain(t *testing.T) {
-	gitLog := installBlockingGitForTemplate(t)
+	installBlockingGitForTemplate(t)
 	first, _ := newProbeTestParams(t)
 	second, _ := newProbeTestParams(t)
 
 	first.defaultBranch("", t.TempDir())
-	second.defaultBranch("", t.TempDir())
-	if n := countLines(readTemplateGitCalls(t, gitLog)); n != 2 {
-		t.Fatalf("git invocations = %d, want 2 (one per build)", n)
+	if !first.gitLatch.tripped() {
+		t.Fatal("latch not tripped by a missed deadline")
+	}
+	gitLog := answerLaterProbes(t, second)
+	if got := second.defaultBranch("", t.TempDir()); got != "develop" {
+		t.Fatalf("fresh params defaultBranch = %q, want the probed branch", got)
+	}
+	if n := countLines(readTemplateGitCalls(t, gitLog)); n != 1 {
+		t.Fatalf("git invocations = %d, want 1 for the fresh build", n)
 	}
 }
 
 // Params built as a literal carry no latch (allocator_plan.go); each call then
 // pays its own deadline and nothing panics.
 func TestBuildParamsDefaultBranchNilLatchPaysEachDeadline(t *testing.T) {
-	gitLog := installBlockingGitForTemplate(t)
+	installBlockingGitForTemplate(t)
 	bp, _ := newProbeTestParams(t)
 	bp.gitLatch = nil
 
-	for i := 0; i < 2; i++ {
-		if got := bp.defaultBranch("", t.TempDir()); got != "" {
-			t.Fatalf("call %d defaultBranch = %q, want empty", i, got)
-		}
+	if got := bp.defaultBranch("", t.TempDir()); got != "" {
+		t.Fatalf("first defaultBranch = %q, want empty on a missed deadline", got)
 	}
-	if n := countLines(readTemplateGitCalls(t, gitLog)); n != 2 {
-		t.Fatalf("git invocations = %d, want 2 (no latch, no sharing)", n)
+	gitLog := answerLaterProbes(t, bp)
+	if got := bp.defaultBranch("", t.TempDir()); got != "develop" {
+		t.Fatalf("second defaultBranch = %q, want the probed branch (no latch, no sharing)", got)
+	}
+	if n := countLines(readTemplateGitCalls(t, gitLog)); n != 1 {
+		t.Fatalf("git invocations = %d, want 1 for the second call", n)
 	}
 }
 
 // Build params are copied by value (build_desired_state.go, allocator_index.go);
 // the latch must be shared across the copies.
 func TestBuildParamsDefaultBranchCopySharesLatch(t *testing.T) {
-	gitLog := installBlockingGitForTemplate(t)
+	installBlockingGitForTemplate(t)
 	bp, _ := newProbeTestParams(t)
 	cp := *bp
 
 	bp.defaultBranch("", t.TempDir())
+	if !bp.gitLatch.tripped() {
+		t.Fatal("latch not tripped by a missed deadline")
+	}
+	gitLog := answerLaterProbes(t, &cp)
 	if got := cp.defaultBranch("", t.TempDir()); got != "" {
 		t.Fatalf("copy defaultBranch = %q, want empty while the original is latched", got)
 	}
-	if n := countLines(readTemplateGitCalls(t, gitLog)); n != 1 {
-		t.Fatalf("git invocations = %d, want 1 shared across the copy", n)
+	if calls := readTemplateGitCalls(t, gitLog); calls != "" {
+		t.Fatalf("copy probed git although the original is latched:\n%s", calls)
 	}
 }
 
@@ -1647,7 +1675,7 @@ func TestGitProbeLatchTripsOnce(t *testing.T) {
 // through the constructor, not a literal, so a constructor that forgets the
 // latch fails here.
 func TestNewAgentBuildParamsWiresTheProbeLatch(t *testing.T) {
-	gitLog := installBlockingGitForTemplate(t)
+	installBlockingGitForTemplate(t)
 	bp := newAgentBuildParams("bright-lights", t.TempDir(), &config.City{}, nil, testBeaconTime, nil, io.Discard)
 	if bp.gitLatch == nil {
 		t.Fatal("newAgentBuildParams left gitLatch nil: the build would pay one deadline per agent")
@@ -1658,11 +1686,12 @@ func TestNewAgentBuildParamsWiresTheProbeLatch(t *testing.T) {
 	if got := bp.defaultBranch("", t.TempDir()); got != "" {
 		t.Fatalf("first defaultBranch = %q, want empty on a missed deadline", got)
 	}
+	gitLog := answerLaterProbes(t, &cp)
 	if got := cp.defaultBranch("", t.TempDir()); got != "" {
 		t.Fatalf("copy defaultBranch = %q, want empty while latched", got)
 	}
-	if n := countLines(readTemplateGitCalls(t, gitLog)); n != 1 {
-		t.Fatalf("git invocations = %d, want 1 shared across the constructor's copies", n)
+	if calls := readTemplateGitCalls(t, gitLog); calls != "" {
+		t.Fatalf("copy probed git although the constructor's latch is tripped:\n%s", calls)
 	}
 }
 
@@ -1670,7 +1699,7 @@ func TestNewAgentBuildParamsWiresTheProbeLatch(t *testing.T) {
 // unset-dir "main" are answers that need no git, so they must still be given
 // after the latch trips, with no new spawn.
 func TestBuildParamsDefaultBranchTrippedLatchKeepsRecordedAndEmptyDirAnswers(t *testing.T) {
-	gitLog := installBlockingGitForTemplate(t)
+	installBlockingGitForTemplate(t)
 	bp, _ := newProbeTestParams(t)
 	bp.rigs = []config.Rig{{Name: "api", DefaultBranch: "release"}}
 
@@ -1680,14 +1709,15 @@ func TestBuildParamsDefaultBranchTrippedLatchKeepsRecordedAndEmptyDirAnswers(t *
 	if !bp.gitLatch.tripped() {
 		t.Fatal("latch not tripped by a missed deadline")
 	}
+	gitLog := answerLaterProbes(t, bp)
 	if got := bp.defaultBranch("api", t.TempDir()); got != "release" {
 		t.Fatalf("recorded rig value after trip = %q, want release", got)
 	}
 	if got := bp.defaultBranch("", ""); got != "main" {
 		t.Fatalf("empty dir after trip = %q, want main", got)
 	}
-	if n := countLines(readTemplateGitCalls(t, gitLog)); n != 1 {
-		t.Fatalf("git invocations = %d, want 1 (only the tripping probe)", n)
+	if calls := readTemplateGitCalls(t, gitLog); calls != "" {
+		t.Fatalf("answers after the trip probed git:\n%s", calls)
 	}
 }
 
