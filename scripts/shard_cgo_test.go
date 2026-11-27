@@ -197,6 +197,7 @@ func (f shardCGOFixture) env(t *testing.T) []string {
 	return []string{
 		"PATH=" + f.binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"HOME=" + filepath.Join(f.tmp, "home"),
+		"TMPDIR=" + f.tmp,
 		"SYS_USR_INCLUDE=" + f.sysInclude,
 		"SYS_USR_LIB_ROOT=" + f.sysLib,
 		"SYS_USR_LIB64_ROOT=" + f.sysLib64,
