@@ -104,6 +104,10 @@ var valueFlagsBySub = map[string]map[string]bool{
 	"reopen": {
 		"-r": true, "--reason": true, "--if-revision": true,
 	},
+	// heartbeat <id> [flags] takes only bd's global flags (--actor, --json,
+	// -q, -h/--help, ...) beyond the id; see rewriteBdHeartbeatArgs in
+	// cmd/gc/cmd_bd.go.
+	"heartbeat": {},
 	"delete": {
 		"--from-file": true, "--if-revision": true,
 	},
@@ -193,7 +197,8 @@ var boolFlagsBySub = map[string]map[string]bool{
 		"--claim-next": true, "--continue": true, "-f": true, "--force": true,
 		"--no-auto": true, "--suggest-next": true,
 	},
-	"reopen": {},
+	"reopen":    {},
+	"heartbeat": {},
 	"delete": {
 		"--cascade": true, "--dry-run": true, "-f": true, "--force": true,
 	},

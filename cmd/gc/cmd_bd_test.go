@@ -2449,10 +2449,15 @@ func TestGcBdHeartbeatForwardsNativeLeaseRefresh(t *testing.T) {
 }
 
 // TestRewriteBdHeartbeatArgs covers the arg-rewrite edge cases without the
-// full city/bd harness: exactly one issue id is required, and non-heartbeat
-// commands pass through untouched so the generic bd passthrough is intact.
+// full city/bd harness: exactly one issue id is required, non-heartbeat
+// commands pass through untouched so the generic bd passthrough is intact,
+// and bd's own flags (--json, --actor, -q, -h/--help) are forwarded rather
+// than refused (gastownhall/gascity#8859).
 func TestRewriteBdHeartbeatArgs(t *testing.T) {
 	t.Run("rejects wrong arity, flag-as-id, or whitespace id", func(t *testing.T) {
+		// Preserved from before #8859: a bare flag standing in for a missing
+		// id, or a malformed id, must still be refused. This is NOT one of
+		// the cases #8859 changes.
 		for _, args := range [][]string{
 			{"heartbeat"},
 			{"heartbeat", "demo-abc", "extra"},
@@ -2486,6 +2491,126 @@ func TestRewriteBdHeartbeatArgs(t *testing.T) {
 		}
 		if len(out) != len(in) || out[0] != "list" || out[2] != "open" {
 			t.Fatalf("rewriteBdHeartbeatArgs(%q) = %q, want passthrough", in, out)
+		}
+	})
+	t.Run("passes --help and -h through unchanged, with or without an id", func(t *testing.T) {
+		for _, args := range [][]string{
+			{"heartbeat", "--help"},
+			{"heartbeat", "-h"},
+			{"heartbeat", "demo-abc", "--help"},
+		} {
+			out, err := rewriteBdHeartbeatArgs(args)
+			if err != nil {
+				t.Fatalf("rewriteBdHeartbeatArgs(%q) unexpected error: %v", args, err)
+			}
+			if len(out) != len(args) {
+				t.Fatalf("rewriteBdHeartbeatArgs(%q) = %q, want unchanged passthrough", args, out)
+			}
+			for i, a := range args {
+				if out[i] != a {
+					t.Fatalf("rewriteBdHeartbeatArgs(%q) = %q, want unchanged passthrough", args, out)
+				}
+			}
+		}
+	})
+	t.Run("forwards bd's own flags around a valid id", func(t *testing.T) {
+		for _, args := range [][]string{
+			{"heartbeat", "demo-abc", "--json"},
+			{"heartbeat", "demo-abc", "--actor", "alice"},
+			{"heartbeat", "demo-abc", "-q"},
+			{"heartbeat", "--json", "demo-abc"},
+		} {
+			out, err := rewriteBdHeartbeatArgs(args)
+			if err != nil {
+				t.Fatalf("rewriteBdHeartbeatArgs(%q) unexpected error: %v", args, err)
+			}
+			if len(out) != len(args) {
+				t.Fatalf("rewriteBdHeartbeatArgs(%q) = %q, want unchanged passthrough", args, out)
+			}
+			for i, a := range args {
+				if out[i] != a {
+					t.Fatalf("rewriteBdHeartbeatArgs(%q) = %q, want unchanged passthrough", args, out)
+				}
+			}
+		}
+	})
+	t.Run("finds the id (and still refuses a malformed one) when a global flag precedes the verb", func(t *testing.T) {
+		out, err := rewriteBdHeartbeatArgs([]string{"--json", "heartbeat", "demo-abc"})
+		if err != nil {
+			t.Fatalf("rewriteBdHeartbeatArgs unexpected error: %v", err)
+		}
+		if len(out) != 3 || out[0] != "--json" || out[1] != "heartbeat" || out[2] != "demo-abc" {
+			t.Fatalf("rewriteBdHeartbeatArgs = %q, want unchanged passthrough", out)
+		}
+		if _, err := rewriteBdHeartbeatArgs([]string{"--json", "heartbeat", " demo-abc"}); err == nil {
+			t.Fatalf("rewriteBdHeartbeatArgs([--json heartbeat ' demo-abc']) = nil error, want usage error for the malformed id")
+		}
+	})
+	t.Run("the hb alias gets the same id validation as heartbeat", func(t *testing.T) {
+		out, err := rewriteBdHeartbeatArgs([]string{"hb", "demo-abc"})
+		if err != nil {
+			t.Fatalf("rewriteBdHeartbeatArgs unexpected error: %v", err)
+		}
+		if len(out) != 2 || out[0] != "hb" || out[1] != "demo-abc" {
+			t.Fatalf("rewriteBdHeartbeatArgs = %q, want unchanged passthrough", out)
+		}
+		if _, err := rewriteBdHeartbeatArgs([]string{"hb", " demo-abc"}); err == nil {
+			t.Fatalf("rewriteBdHeartbeatArgs([hb ' demo-abc']) = nil error, want usage error for the malformed id")
+		}
+	})
+}
+
+// TestDoBdHeartbeatHelpAndFlagsForwarded is the issue's own acceptance test
+// (gastownhall/gascity#8859), adapted into this file: `gc bd heartbeat
+// --help` must show bd's own help and exit 0, and bd's own flags placed
+// after a valid id must reach bd unchanged, through the full doBd path
+// (city/scope resolution, write-ID guard, bd subprocess invocation) rather
+// than just the arg-rewrite function in isolation.
+func TestDoBdHeartbeatHelpAndFlagsForwarded(t *testing.T) {
+	t.Run("heartbeat --help exits 0 and forwards --help to bd", func(t *testing.T) {
+		capture := filepath.Join(t.TempDir(), "gc-bd-args.txt")
+		silentFallbackTestSetup(t, "#!/bin/sh\nprintf '%s' \"$*\" > \"${CAPTURE_PATH}\"\n")
+		t.Setenv("CAPTURE_PATH", capture)
+
+		var stdout, stderr bytes.Buffer
+		if got := doBd([]string{"heartbeat", "--help"}, &stdout, &stderr); got != 0 {
+			t.Fatalf("doBd(heartbeat --help) = %d, want 0; stderr=%q", got, stderr.String())
+		}
+		data, err := os.ReadFile(capture)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if gotArgs := string(data); gotArgs != "heartbeat --help" {
+			t.Fatalf("forwarded args = %q, want %q", gotArgs, "heartbeat --help")
+		}
+	})
+	t.Run("heartbeat <id> --json forwards the flag to bd alongside the id", func(t *testing.T) {
+		capture := filepath.Join(t.TempDir(), "gc-bd-args.txt")
+		silentFallbackTestSetup(t, "#!/bin/sh\nprintf '%s' \"$*\" > \"${CAPTURE_PATH}\"\n")
+		t.Setenv("CAPTURE_PATH", capture)
+
+		var stdout, stderr bytes.Buffer
+		if got := doBd([]string{"heartbeat", "demo-abc", "--json"}, &stdout, &stderr); got != 0 {
+			t.Fatalf("doBd(heartbeat demo-abc --json) = %d, want 0; stderr=%q", got, stderr.String())
+		}
+		data, err := os.ReadFile(capture)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if gotArgs := string(data); gotArgs != "heartbeat demo-abc --json" {
+			t.Fatalf("forwarded args = %q, want %q", gotArgs, "heartbeat demo-abc --json")
+		}
+	})
+	t.Run("a malformed id is still refused with a global flag before the verb, before bd is ever invoked", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		if got := doBd([]string{"--json", "heartbeat", " demo-abc"}, &stdout, &stderr); got == 0 {
+			t.Fatalf("doBd(--json heartbeat ' demo-abc') = 0, want refusal; stdout=%q", stdout.String())
+		}
+	})
+	t.Run("a malformed id is still refused through the hb alias, before bd is ever invoked", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		if got := doBd([]string{"hb", " demo-abc"}, &stdout, &stderr); got == 0 {
+			t.Fatalf("doBd(hb ' demo-abc') = 0, want refusal; stdout=%q", stdout.String())
 		}
 	})
 }
