@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/config"
@@ -17,14 +18,24 @@ import (
 // (which binds cfg.API.Port) and a supervisor-managed city (which is reached
 // on the supervisor's port via city-scoped routes) depends on the hosting mode
 // the live per-city controller socket reports and on which city grants the
-// supervisor requires, so tests swap these to exercise each route without a
-// running controller or supervisor. (gascity ga-tp7)
+// supervisor requires, and on whether a listener accepts connections at a
+// standalone controller's [api] endpoint, so tests swap these to exercise each
+// route without a running controller, supervisor or listener. (gascity ga-tp7,
+// #5761)
 var (
 	apiRouteControllerIdentityHook    = probeControllerIdentity
 	apiRouteSupervisorClientHook      = supervisorCityAPIClient
 	apiRouteSupervisorGrantsHook      = supervisorRequiresCityGrants
 	apiRouteSupervisorWriteGrantsHook = supervisorRequiresCityWriteGrants
+	apiRouteStandaloneListenerHook    = standaloneAPIListenerAccepts
 )
+
+// standaloneAPIProbeTimeout bounds the single dial standaloneAPIListenerAccepts
+// makes to a standalone controller's [api] endpoint: the budget of the
+// controller-socket dial in probeControllerIdentity. The endpoint is on this
+// host, so an unbound port refuses at once; the timeout only bounds a hung
+// listener, which a real request would also fail against.
+const standaloneAPIProbeTimeout = 500 * time.Millisecond
 
 // apiClient returns an API client if a controller with a mutable API server
 // is running for the city at cityPath. Returns nil if no controller is running,
@@ -45,8 +56,9 @@ var (
 // mints no grant, so the supervisor would refuse the gated calls with a 401
 // that no caller falls back from, and apiClient cannot tell a caller's read
 // from its write. A standalone controller, or one predating identify (hosting
-// mode unknown), gets its [api] port's HTTP endpoint, or nil when none is
-// usable so the caller uses its local fallback. With no live socket apiClient
+// mode unknown), gets its [api] port's HTTP endpoint when a listener accepts
+// connections there, or nil when none is usable or nothing listens on it, so
+// the caller uses its local fallback. With no live socket apiClient
 // returns the supervisor-managed client. Callers whose local fallback is
 // missing or prohibitively expensive use supervisorFallthroughAPIClient
 // instead. (gascity ga-tp7, ra-r9hm6v, #5262)
@@ -65,8 +77,8 @@ func apiClient(cityPath string) *api.Client {
 // fallback, it routes to the supervisor-managed client instead in two shapes:
 // a supervisor-hosted city whose supervisor requires grants (these callers
 // handle a refusal as they handle any other API error), and a live controller
-// of unknown hosting mode without a usable [api] port — the shape of a
-// supervisor-managed city whose supervisor predates identify. A controller
+// of unknown hosting mode without a usable, listening [api] port — the shape
+// of a supervisor-managed city whose supervisor predates identify. A controller
 // that identifies as standalone serves only its own [api] port, so it is
 // never sent to the supervisor, and each call resolves the supervisor-managed
 // client at most once.
@@ -193,31 +205,58 @@ func routeAPIClient(cityPath string, route apiRoute) *api.Client {
 // standaloneControllerClient builds an API client for a standalone controller
 // that binds cfg.API.Port from city.toml. It returns nil, which apiClient hands
 // back to its caller, when no usable standalone HTTP endpoint exists: the
-// config is unreadable, [api] port is unset, or the listener binds a
-// non-loopback address without allow_mutations.
+// config is unreadable, [api] port is unset, the listener binds a non-loopback
+// address without allow_mutations, or nothing accepts connections there. A
+// supervisor ignores a city's [api] port, and a standalone controller binds it
+// only after its socket answers and only if the listen succeeds, so the port
+// being configured does not mean it is served. (#5761)
 func standaloneControllerClient(cityPath string) *api.Client {
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	cfg, err := config.Load(fsys.OSFS{}, tomlPath)
 	if err != nil {
 		return nil
 	}
-	baseURL, ok := standaloneControllerBaseURL(cfg)
-	if !ok {
+	addr, ok := standaloneControllerAddr(cfg)
+	if !ok || !apiRouteStandaloneListenerHook(addr) {
 		return nil
 	}
 	// Standalone controller serves /v0/city/{cityName}/... routes via
 	// api.NewSupervisorMux, so per-city method calls need a city-scoped
 	// client. Derive the city name from config; the controller only
 	// serves one city in standalone mode.
-	return api.NewCityScopedClient(baseURL, standaloneControllerCityName(cfg, cityPath))
+	return api.NewCityScopedClient("http://"+addr, standaloneControllerCityName(cfg, cityPath))
 }
 
-// standaloneControllerBaseURL returns the base URL standaloneControllerClient
-// dials for a standalone controller serving cfg's [api] section, and false when
-// that section names no usable endpoint: [api] port is unset, or the listener
-// binds a non-loopback address without allow_mutations (the API then runs
-// read-only, so the CLI does not route through it).
+// standaloneAPIListenerAccepts reports whether a listener accepts a TCP
+// connection at addr within standaloneAPIProbeTimeout. It dials once and
+// closes the connection.
+func standaloneAPIListenerAccepts(addr string) bool {
+	conn, err := net.DialTimeout("tcp", addr, standaloneAPIProbeTimeout)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close() // The probe sent nothing; a close error does not change that something accepted.
+	return true
+}
+
+// standaloneControllerBaseURL returns the base URL of the HTTP endpoint cfg's
+// [api] section configures for a standalone controller, and false when that
+// section names no usable endpoint (standaloneControllerAddr). It is derived
+// from configuration only; whether anything listens there is not checked.
 func standaloneControllerBaseURL(cfg *config.City) (string, bool) {
+	addr, ok := standaloneControllerAddr(cfg)
+	if !ok {
+		return "", false
+	}
+	return "http://" + addr, true
+}
+
+// standaloneControllerAddr returns the host:port of the HTTP endpoint cfg's
+// [api] section configures for a standalone controller, and false when that
+// section names no usable endpoint: [api] port is unset, or the listener binds
+// a non-loopback address without allow_mutations (the API then runs read-only,
+// so the CLI does not route through it).
+func standaloneControllerAddr(cfg *config.City) (string, bool) {
 	if cfg == nil || cfg.API.Port <= 0 {
 		return "", false
 	}
@@ -225,7 +264,7 @@ func standaloneControllerBaseURL(cfg *config.City) (string, bool) {
 	if bind != "127.0.0.1" && bind != "localhost" && bind != "::1" && !cfg.API.AllowMutations {
 		return "", false
 	}
-	return fmt.Sprintf("http://%s", net.JoinHostPort(bind, strconv.Itoa(cfg.API.Port))), true
+	return net.JoinHostPort(bind, strconv.Itoa(cfg.API.Port)), true
 }
 
 // cityStatusAPIURL returns the base URL of the HTTP API that serves the city,
@@ -264,17 +303,23 @@ func standaloneControllerCityName(cfg *config.City, cityPath string) string {
 //
 // The closed set mirrors the enabler's reason codes (ga-71l): "escape-hatch"
 // (GC_NO_API truthy), "non-loopback-bind" (a standalone controller's API bound
-// to non-localhost with mutations disallowed), "grant-required" (a
-// supervisor-hosted city whose supervisor requires city grants),
-// "controller-down" (everything else — no controller, config missing, API
-// port unset, no supervisor-managed client).
+// to non-localhost with mutations disallowed), "api-port-unbound" (a live
+// controller that is not supervisor-hosted, whose usable [api] port has
+// nothing accepting connections), "grant-required" (a supervisor-hosted city
+// whose supervisor requires city grants), "controller-down" (everything else —
+// no controller, config missing, API port unset, no supervisor-managed
+// client).
 func apiClientFallbackReason(cityPath string) string {
 	return routeFallbackReason(cityPath, apiRouteGeneral)
 }
 
 // routeFallbackReason returns the apiClientFallbackReason code for a nil from
 // routeAPIClient with the same route. A supervisor-hosted city's [api] bind is
-// never the reason: the supervisor ignores that port.
+// never the reason: the supervisor ignores that port. A live controller that is
+// not supervisor-hosted and whose usable [api] port gave a nil client can only
+// have failed routeAPIClient's listener probe, so the reason is
+// "api-port-unbound" without dialing the port again: a second dial would double
+// the cost and could disagree with the routing decision it explains.
 func routeFallbackReason(cityPath string, route apiRoute) string {
 	if disabled, _ := classifyGCNoAPI(os.Getenv("GC_NO_API")); disabled {
 		return "escape-hatch"
@@ -290,10 +335,10 @@ func routeFallbackReason(cityPath string, route apiRoute) string {
 	default:
 		tomlPath := filepath.Join(cityPath, "city.toml")
 		if cfg, err := config.Load(fsys.OSFS{}, tomlPath); err == nil && cfg.API.Port > 0 {
-			bind := cfg.API.BindOrDefault()
-			if bind != "127.0.0.1" && bind != "localhost" && bind != "::1" && !cfg.API.AllowMutations {
+			if _, ok := standaloneControllerAddr(cfg); !ok {
 				return "non-loopback-bind"
 			}
+			return "api-port-unbound"
 		}
 	}
 	return "controller-down"
