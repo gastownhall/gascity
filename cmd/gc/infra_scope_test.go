@@ -267,19 +267,26 @@ func startDirectManagedDolt(t *testing.T) (managedDoltStartedProcess, string) {
 }
 
 func TestManagedDoltSpawnWrappedInInfraScope(t *testing.T) {
-	t.Run("from a session", func(t *testing.T) {
-		logPath := installInfraScopeHost(t, wrappableFromSession)
-		started, configPath := startDirectManagedDolt(t)
-		waitForSystemdRunInvocation(t, logPath, " -- dolt sql-server --config "+configPath)
-		assertScopedInvocation(t, logPath, started.InfraScope, "gascity infra: managed dolt")
-	})
+	for _, tc := range []struct {
+		name string
+		host infraScopeHost
+	}{
+		{name: "from a session", host: wrappableFromSession},
+		{name: "outside a session in a user service", host: infraScopeHost{cgroup: userServiceCgroup}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logPath := installInfraScopeHost(t, tc.host)
+			started, configPath := startDirectManagedDolt(t)
+			waitForSystemdRunInvocation(t, logPath, " -- dolt sql-server --config "+configPath)
+			assertScopedInvocation(t, logPath, started.InfraScope, "gascity infra: managed dolt")
+		})
+	}
 	// Each of these stays in its caller's cgroup.
 	for _, tc := range []struct {
 		name     string
 		host     infraScopeHost
 		sliceEnv string
 	}{
-		{name: "outside a session", host: infraScopeHost{linger: true, cgroup: userManagerCgroup}},
 		{name: "from a session with GC_INFRA_SLICE=off", host: wrappableFromSession, sliceEnv: "off"},
 		{name: "from a session in a system service", host: infraScopeHost{session: true, linger: true, cgroup: supervisorSliceServiceCgroup}},
 	} {
@@ -328,13 +335,28 @@ func TestManagedDoltStateRecordsInfraScope(t *testing.T) {
 
 // The bd provider script the supervisor launches runs `gc dolt-state
 // start-managed` with the supervisor's environment: BEADS_ACTOR (one of the
-// session-scoped keys) is set, GC_SESSION_ID is not. Its Dolt stays where
-// the supervisor's tree runs.
-func TestSupervisorLaunchedProviderSpawnStaysUnwrapped(t *testing.T) {
-	logPath := installInfraScopeHost(t, infraScopeHost{linger: true, cgroup: userManagerCgroup})
+// session-scoped keys) is set, GC_SESSION_ID is not. Where the supervisor's
+// tree runs decides, as for any other caller: under the user manager (the
+// supervisor's user unit) the Dolt server gets a scope of its own, so a
+// restart of that unit does not take the store with it.
+func TestSupervisorLaunchedProviderSpawnWrappedUnderUserManager(t *testing.T) {
+	logPath := installInfraScopeHost(t, infraScopeHost{cgroup: userManagerCgroup})
 	t.Setenv("BEADS_ACTOR", "gc-supervisor")
-	startDirectManagedDolt(t)
+	started, configPath := startDirectManagedDolt(t)
+	waitForSystemdRunInvocation(t, logPath, " -- dolt sql-server --config "+configPath)
+	assertScopedInvocation(t, logPath, started.InfraScope, "gascity infra: managed dolt")
+}
+
+// In a system service with GC_INFRA_SLICE unset, the supervisor-launched
+// provider's Dolt server stays where the operator placed the supervisor.
+func TestSupervisorLaunchedProviderSpawnStaysUnwrappedInSystemService(t *testing.T) {
+	logPath := installInfraScopeHost(t, infraScopeHost{linger: true, cgroup: supervisorSliceServiceCgroup})
+	t.Setenv("BEADS_ACTOR", "gc-supervisor")
+	started, _ := startDirectManagedDolt(t)
 	assertNoSystemdRun(t, logPath)
+	if started.InfraScope != "" {
+		t.Fatalf("unwrapped spawn recorded infra scope %q, want none", started.InfraScope)
+	}
 }
 
 func TestScopeWatchdogSpawnWrappedInInfraScope(t *testing.T) {
