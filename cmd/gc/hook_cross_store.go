@@ -701,8 +701,8 @@ func (e *hookSecondaryStoreFailure) Unwrap() []error {
 }
 
 // hookStoreFailureReport reports the failed reads of one hook invocation. The
-// claim loop reads its stores more than once (paced retries, the claim-time
-// re-validation, a reselection after a lost race), and one unreadable store is
+// claim loop reads its stores more than once (paced retries, a reselection
+// after a lost race), and one unreadable store is
 // one fact, so each store is reported once per invocation.
 //
 // A failed query is recorded through emit, the work-query-failure event: the
@@ -1017,55 +1017,6 @@ func hookRankCandidate(row map[string]any) hookCandidateRank {
 		rank.priority = int(p)
 	}
 	return rank
-}
-
-// claimStoreWithFallback re-validates the discovery-selected store for
-// claim-time freshness, then falls back to federated re-selection across all
-// stores when that store has emptied since discovery. It exists because
-// gc hook --claim selects the first store with ready work, then must commit to
-// one store for the claim mutation. Re-running only the selected store would
-// drain as "no work" whenever its claimable row was taken between discovery and
-// claim — even though a later federated store still has ready routed work. The
-// returned output is the work-query result the claim should act on, paired with
-// the store it came from so the mutation runs against that store's bd context.
-// (The narrow window between this re-validation and the bd update --claim is
-// still handled by the claim itself skipping rows it cannot take.)
-//
-// A re-validation error on the selected store is returned as itself only when
-// that store is the primary (own) store. A secondary store erroring at claim
-// time falls through to re-selection, which reads every store again under
-// bestStoreWithWork's rules: work in a store that answers is taken, and with no
-// work anywhere that store's failed read is the answer.
-//
-// # One leg means nothing to fall back TO, so there is nothing to re-validate
-//
-// The whole reason to re-read is the LATER store: draining as "no work" when a
-// federated peer still has ready routed work is the strand this exists to
-// prevent. A single-leg fan-out — every federated city after S3, where the
-// primary's reader answers for the whole plan — has no later store, so the
-// second read can only pay another full city-wide query for a row the claim
-// itself re-checks anyway (`bd update --claim` skips rows it cannot take). On
-// mc's topology that read is the more expensive half of the claim.
-//
-// discovered is the output selection already read from this store, moments ago.
-//
-// noted is forwarded to bestStoreWithWork for its failed-secondary reports.
-func claimStoreWithFallback(command string, stores []hookStore, selected, primary hookStore, discovered string, run hookStoreRunner, noted ...hookStoreFailureNote) (string, hookStore, error) {
-	if len(stores) == 1 {
-		return discovered, selected, nil
-	}
-	selectedOut, err := run(hookStoreCommand(selected, command), selected.dir, selected.env)
-	if err != nil {
-		if sameHookStore(selected, primary) {
-			return "", hookStore{}, err
-		}
-		return bestStoreWithWork(command, stores, primary, run, noted...)
-	}
-	ready := filterUnreadyHookCandidates(normalizeWorkQueryOutput(strings.TrimSpace(selectedOut)), time.Now())
-	if workQueryHasReadyWork(ready) {
-		return selectedOut, selected, nil
-	}
-	return bestStoreWithWork(command, stores, primary, run, noted...)
 }
 
 // hookClaimReadsPerTick counts the work-query runs one claim attempt performs
