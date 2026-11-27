@@ -78,7 +78,7 @@ func ReleaseStaleConfiguredNameClaims(store beads.SessionStore, cfg *config.City
 		// that merely persisted the name is left alone (sjarmak review, #3373).
 		//
 		// Ownership must be scoped to identity — the configured identity whose
-		// runtime name this bead reserves. wasConfiguredNamedSession(b) is owner-
+		// runtime name this bead reserves. WasConfiguredNamedSession(b) is owner-
 		// AGNOSTIC (it only asks "is this bead SOME configured named session?"),
 		// so a bead recorded for a DIFFERENT configured identity B that merely
 		// persisted identity A's runtime session_name would wrongly clear A's

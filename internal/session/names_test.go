@@ -1207,7 +1207,7 @@ func TestEnsureSessionAliasAvailable_DrainedNamedPredecessorBlocksLiveSelfOwnerC
 // later loosening of the condition fails here rather than silently handing a
 // canonical alias to a claimant that only asserted ownership.
 //
-// The mismatched-identity case is the one wasConfiguredNamedSession alone
+// The mismatched-identity case is the one WasConfiguredNamedSession alone
 // cannot catch: it is owner-AGNOSTIC, so the owner-scoped
 // configuredNamedIdentitySignalsMatch (the recognizer name_claim_sweep.go
 // adopted for the identical trap in review #3373) is what refuses it.
@@ -1293,7 +1293,7 @@ func TestEnsureSessionAliasAvailable_SelfOwnerExceptionRefusesUnqualifiedHolders
 // A closed, ephemeral, pool-managed session slot that reserved a configured
 // named identity's bare session_name (because it was materialized through the
 // pool path rather than the named-session path) must not permanently squat
-// that name. wasConfiguredNamedSession(b) is false for such a bead — no
+// that name. WasConfiguredNamedSession(b) is false for such a bead — no
 // configured_named_session flag, no configured_named_identity — so the
 // existing closed-bead release exception in
 // ensureSessionNameAvailableForSelfAndOwner never fires for it.

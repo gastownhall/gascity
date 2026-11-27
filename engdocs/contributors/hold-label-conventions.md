@@ -131,6 +131,17 @@ that parks with a label of its own should also set a bd status (`blocked` or
 `deferred`) or a canonical hold, or the controller will treat the bead as
 detached and restore its route.
 
+The detached-orphan sweep leaves one more empty route alone, hold or not:
+work whose session back-reference names a configured named session with a
+`name` of its own, apart from its template. The route that session's bead
+carries is the template's, so restoring it would hand the seat's work to the
+template's pool; the sweep leaves the bead unrouted and counts it as `vetoed`
+on its pass line. A named session declared without `name` serves its
+template's route itself, so its detached work is restored like any other.
+This exemption is not a way to park work: `gc.run_target` route recovery does
+not make it, so park a named seat's work by hand the same way as any other
+bead, with `bd set-state <id> hold=<value>` or a `blocked`/`deferred` status.
+
 ## See also
 
 - `bd show ga-tug8ry.1` — the architecture decision: full live census,

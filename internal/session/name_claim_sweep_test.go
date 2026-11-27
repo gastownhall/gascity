@@ -183,7 +183,7 @@ func TestReleaseStaleConfiguredNameClaims_IgnoresUnconfiguredName(t *testing.T) 
 // as a DIFFERENT configured identity B (flag + configured_named_identity =
 // gastown.witness). The sweep must NOT clear A's claim: recognizing the bead as
 // merely *some* configured named session (the owner-agnostic
-// wasConfiguredNamedSession path) would release it — exactly the "unrelated bead
+// WasConfiguredNamedSession path) would release it — exactly the "unrelated bead
 // that merely persisted the name" the doc-comment promises to leave alone.
 func TestReleaseStaleConfiguredNameClaims_IgnoresMismatchedOwner(t *testing.T) {
 	store := beads.NewMemStore()
