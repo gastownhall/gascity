@@ -801,6 +801,18 @@ const (
 // reopen hook (test handle built directly from a storage value) keeps the prior
 // fail-fast behavior.
 //
+// A transient failure is NOT proof the endpoint moved: go-sql-driver returns the
+// same "invalid connection" for a read that outlived the pool read deadline on
+// a healthy server as for a hard-killed one. So before reconnecting, a failure
+// that got past the dial asks the failing pool for one bounded ping
+// (endpointAnswers). A pool that answers ends the read with
+// ErrNativeReadDeadline on that pass: replaying the same read under the same
+// deadline against the same server cannot finish it. A failed or slow ping, a
+// pool another reader already replaced, or a handle that exports no pool
+// reconnects as before. An exhausted budget is typed
+// ErrNativeReadBudgetExhausted and a failed reconnect
+// ErrNativeReadRecoveryFailed; their text is unchanged.
+//
 // What "transient" means is decided by classifyNativeDoltReadError, which runs
 // a typed table (indeterminate commit, serialization conflict, open circuit,
 // MySQL 1049/1045, sentinel connection-level failures) AHEAD of the substring
@@ -860,7 +872,7 @@ func (s *NativeDoltStore) withReadRetryContext(parent context.Context, fn func(c
 				return rcErr
 			}
 			if ctxErr := ctx.Err(); ctxErr != nil {
-				return s.proxiedReadBudgetVerdict(nativeReadRetryBudgetError(ctxErr, rcErr))
+				return s.proxiedReadBudgetVerdict(nativeReadRetryBudgetOutcome(parent, ctxErr, rcErr))
 			}
 			if classifyNativeDoltReadError(rcErr, s.readLane()).disposition != nativeReadTransient {
 				return rcErr
@@ -868,7 +880,7 @@ func (s *NativeDoltStore) withReadRetryContext(parent context.Context, fn func(c
 			// A proxy mid-restart is worth another pass while the budget remains.
 			select {
 			case <-ctx.Done():
-				return s.proxiedReadBudgetVerdict(nativeReadRetryBudgetError(ctx.Err(), rcErr))
+				return s.proxiedReadBudgetVerdict(nativeReadRetryBudgetOutcome(parent, ctx.Err(), rcErr))
 			case <-time.After(nativeReadRetryBackoff):
 			}
 			continue
@@ -879,7 +891,7 @@ func (s *NativeDoltStore) withReadRetryContext(parent context.Context, fn func(c
 			return nil
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return s.proxiedReadBudgetVerdict(nativeReadRetryBudgetError(ctxErr, opErr))
+			return s.proxiedReadBudgetVerdict(nativeReadRetryBudgetOutcome(parent, ctxErr, opErr))
 		}
 		reopen, closed := s.reopenState()
 		if closed {
@@ -911,8 +923,22 @@ func (s *NativeDoltStore) withReadRetryContext(parent context.Context, fn func(c
 			if reopen == nil {
 				return opErr
 			}
+			// Reconnect only without evidence the endpoint is fine: a pool
+			// that still answers a ping did not lose its server, and a fresh
+			// pool with the same read deadline would replay the same failure.
+			// A dial-stage failure never reached the endpoint, so it reconnects
+			// without asking.
+			if !isNativeReadDialStage(opErr) {
+				answered := s.endpointAnswers(ctx, gen)
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return s.proxiedReadBudgetVerdict(nativeReadRetryBudgetOutcome(parent, ctxErr, opErr))
+				}
+				if answered {
+					return s.proxiedReadDeadlineVerdict(newNativeReadDeadlineError(opErr))
+				}
+			}
 			if rcErr := s.reconnect(ctx, gen); rcErr != nil {
-				reconnectErr := fmt.Errorf("native Dolt reconnect after transient read error (%w): %w", opErr, rcErr)
+				reconnectErr := newNativeReadRecoveryError(fmt.Errorf("native Dolt reconnect after transient read error (%w): %w", opErr, rcErr))
 				// A verdict the reopen hook produced is already the answer: the
 				// proxied ladder has been walked inside the hook, and looping
 				// here would bury a typed refusal under the budget error the
@@ -925,7 +951,7 @@ func (s *NativeDoltStore) withReadRetryContext(parent context.Context, fn func(c
 				// worth another pass while the budget remains; a non-transient
 				// reconnect failure or an exhausted budget is terminal.
 				if ctxErr := ctx.Err(); ctxErr != nil {
-					return s.proxiedReadBudgetVerdict(nativeReadRetryBudgetError(ctxErr, reconnectErr))
+					return s.proxiedReadBudgetVerdict(nativeReadRetryBudgetOutcome(parent, ctxErr, reconnectErr))
 				}
 				if classifyNativeDoltReadError(rcErr, s.readLane()).disposition != nativeReadTransient {
 					return reconnectErr
@@ -936,7 +962,7 @@ func (s *NativeDoltStore) withReadRetryContext(parent context.Context, fn func(c
 		// instead of sleeping past the wall.
 		select {
 		case <-ctx.Done():
-			return s.proxiedReadBudgetVerdict(nativeReadRetryBudgetError(ctx.Err(), opErr))
+			return s.proxiedReadBudgetVerdict(nativeReadRetryBudgetOutcome(parent, ctx.Err(), opErr))
 		case <-time.After(backoff):
 		}
 	}
@@ -1015,7 +1041,7 @@ func (s *NativeDoltStore) repinStalePool(ctx context.Context, observedGen, servi
 		return nil
 	}
 	if err := s.reconnect(ctx, observedGen); err != nil {
-		return fmt.Errorf("native Dolt re-pin after a proxy generation change: %w", err)
+		return newNativeReadRecoveryError(fmt.Errorf("native Dolt re-pin after a proxy generation change: %w", err))
 	}
 	return nil
 }
