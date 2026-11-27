@@ -639,6 +639,69 @@ func TestProvider_StartQuotesStagedSecretEnv(t *testing.T) {
 	}
 }
 
+// TestProvider_StartEscapesEnvValueEndingInSemicolon covers an inert env value
+// that ends in ";". On the argv path tmux's command parser reads an argument
+// ending in ";" as a command separator, which splits new-session and fails it,
+// so the final ";" goes out as "\;", which tmux reads back as ";". A value
+// already ending in "\;" gets the same escape, so it too arrives as given (see
+// runtime.TmuxLiteralArgs). A ";" anywhere else is not a separator and is left
+// alone.
+func TestProvider_StartEscapesEnvValueEndingInSemicolon(t *testing.T) {
+	f := &fakeRunner{respond: func(argv []string) ([]byte, int, error) {
+		if isTmux("has-session")(argv) {
+			return nil, 1, nil
+		}
+		return nil, 0, nil
+	}}
+	cfg := runtime.Config{
+		Command: "agent",
+		Env:     map[string]string{"GC_PROVIDER": "p;", "GC_RIG": `r\;`, "GC_ALIAS": "a;b"},
+	}
+	if err := providerWith(f).Start(context.Background(), "s", cfg); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	got := firstCall(f, isTmux("new-session"))
+	want := []string{
+		"tmux", "new-session", "-d", "-P", "-F", "#{pane_id}", "-s", "s",
+		"-e", "GC_ALIAS=a;b",
+		"-e", `GC_PROVIDER=p\;`,
+		"-e", `GC_RIG=r\\;`,
+		"agent",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("new-session argv =\n  %#v\nwant\n  %#v", got, want)
+	}
+}
+
+// TestProvider_StartStagedEnvValueEndingInSemicolonIsNotEscaped is the
+// staged-file twin: inside the tmux command file every argument is single-
+// quoted, where ";" is literal, so a value ending in ";" is written as given.
+func TestProvider_StartStagedEnvValueEndingInSemicolonIsNotEscaped(t *testing.T) {
+	f := &fakeRunner{respond: answerStaging(func(argv []string) ([]byte, int, error) {
+		if isTmux("has-session")(argv) {
+			return nil, 1, nil
+		}
+		return nil, 0, nil
+	})}
+	cfg := runtime.Config{
+		Command: "agent",
+		Env:     map[string]string{"ANTHROPIC_AUTH_TOKEN": "sk-test-not-a-real-credential", "GC_PROVIDER": "p;"},
+	}
+	if err := providerWith(f).Start(context.Background(), "s", cfg); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	script := stdinFor(f, isStagingScript)
+	wantLine := tmuxCommandLine([]string{
+		"new-session", "-d", "-P", "-F", "#{pane_id}", "-s", "s",
+		"-e", "ANTHROPIC_AUTH_TOKEN=sk-test-not-a-real-credential",
+		"-e", "GC_PROVIDER=p;",
+		"agent",
+	})
+	if !strings.Contains(script, wantLine) {
+		t.Errorf("staged tmux command file missing the new-session line:\n%s\nwant:\n%s", script, wantLine)
+	}
+}
+
 func TestProvider_StartTransportFailureIsNotDuplicate(t *testing.T) {
 	// If the box is unreachable, the has-session precheck reads not-running and
 	// new-session then transport-fails: Start must error, never ErrSessionExists.
