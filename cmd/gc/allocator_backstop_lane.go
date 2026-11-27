@@ -890,7 +890,7 @@ func runBackstopDemandRepairs(ctx context.Context, env externalReadsEnv, stderr 
 	}
 	routed, routedStores, routedRefs, _ := collectOpenUnassignedRoutedWork(env.CityPath, cfg, env.CityStore, env.RigStores, env.SuspendedRigPaths, stderr, nil, nil)
 	repairPoolSlotWorkDirClobber(cfg, routed, routedStores, stderr)
-	canonicalizeLegacyBoundUnassignedRoutedWork(cfg, routed, routedStores, stderr)
+	canonicalizeLegacyBoundUnassignedRoutedWork(cfg, routed, routedStores, routedRefs, stderr).log(stderr, "canonicalizeLegacyBoundUnassignedRoutedWork")
 	collapseSlotSuffixedRoutedWork(cfg, routed, routedStores, stderr)
 	return repairControlDispatcherRoutesForStoreScope(env.CityPath, cfg, routed, routedStores, routedRefs, stderr)
 }

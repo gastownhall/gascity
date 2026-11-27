@@ -738,7 +738,7 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 		repairsStart = trace.demandNow()
 		repairPoolSlotWorkDirClobber(cfg, unassignedRoutedBeads, unassignedRoutedStores, stderr)
 		repairDone = trace.demandNow()
-		canonicalizeLegacyBoundUnassignedRoutedWork(cfg, unassignedRoutedBeads, unassignedRoutedStores, stderr)
+		canonicalizeLegacyBoundUnassignedRoutedWork(cfg, unassignedRoutedBeads, unassignedRoutedStores, unassignedRoutedStoreRefs, stderr).log(stderr, "canonicalizeLegacyBoundUnassignedRoutedWork")
 		canonicalizeDone := trace.demandNow()
 		// Same pass, same reason, different legacy form: a route stamped at a
 		// live slot ("<base>-N") is a load-balancing HINT that every raw reader
@@ -6695,9 +6695,18 @@ func canonicalizeLegacyBoundAssignedWork(cfg *config.City, workBeads []beads.Bea
 // no writes, and a route that is already canonical or resolves to no configured
 // agent is left untouched. A write failure is logged and skipped — recovery is
 // best-effort and must never block reconciliation.
-func canonicalizeLegacyBoundUnassignedRoutedWork(cfg *config.City, workBeads []beads.Bead, workStores []beads.Store, stderr io.Writer) {
-	if cfg == nil || len(workBeads) != len(workStores) {
-		return
+//
+// Shared-leg rule: workRefs names the store leg each row was collected under
+// (index-aligned with workBeads/workStores, as repairControlDispatcherRoutesForStoreScope
+// takes them). On a leg other cities also read (legacyRehomeLegIsOwn) a rewrite
+// is allowed only when it strips a binding segment this city mints on that leg's
+// rig (legacyRehomeAllowed); every other rewrite is refused and reported, so two
+// cities sharing one rig store cannot canonicalize each other's canonical
+// identities back and forth (#5846). The caller logs the returned report.
+func canonicalizeLegacyBoundUnassignedRoutedWork(cfg *config.City, workBeads []beads.Bead, workStores []beads.Store, workRefs []string, stderr io.Writer) legacyRehomeReport {
+	var report legacyRehomeReport
+	if cfg == nil || len(workBeads) != len(workStores) || len(workRefs) != len(workBeads) {
+		return report
 	}
 	for i, wb := range workBeads {
 		if wb.Status != "open" || strings.TrimSpace(wb.Assignee) != "" {
@@ -6717,15 +6726,39 @@ func canonicalizeLegacyBoundUnassignedRoutedWork(cfg *config.City, workBeads []b
 		// the per-bead agent scan off the steady-state backlog; if that cost bites,
 		// narrow it by config shape (any agent with a BindingName) rather than by
 		// route spelling.
-		canonicalRouted := normalizeAgentTemplateIdentity(cfg, routedTo)
+		agent := findAgentByTemplate(cfg, routedTo)
+		canonicalRouted := ""
+		if agent != nil {
+			canonicalRouted = agent.QualifiedName()
+		}
 		if canonicalRouted == "" || canonicalRouted == routedTo {
+			continue
+		}
+		own := legacyRehomeLegIsOwn(workRefs[i])
+		if !legacyRehomeAllowed(cfg, own, routedTo, agent) {
+			report.refuse(legacyRehomeEntry{
+				ID:    wb.ID,
+				Leg:   workRefs[i],
+				Field: beadmeta.RoutedToMetadataKey,
+				From:  routedTo,
+				To:    canonicalRouted,
+			})
 			continue
 		}
 		opts := beads.UpdateOpts{Metadata: map[string]string{beadmeta.RoutedToMetadataKey: canonicalRouted}}
 		if err := store.Update(wb.ID, opts); err != nil && stderr != nil {
 			fmt.Fprintf(stderr, "canonicalizeLegacyBoundUnassignedRoutedWork: %s: %v\n", wb.ID, err) //nolint:errcheck
+			continue
 		}
+		report.rehomed(legacyRehomeEntry{
+			ID:    wb.ID,
+			Leg:   workRefs[i],
+			Field: beadmeta.RoutedToMetadataKey,
+			From:  routedTo,
+			To:    canonicalRouted,
+		})
 	}
+	return report
 }
 
 // collectOpenUnassignedRoutedWork gathers open, unassigned, pool-routed work from

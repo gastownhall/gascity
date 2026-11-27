@@ -345,7 +345,7 @@ func TestCanonicalizeLegacyBoundUnassignedRoutedWorkRehomesRoute(t *testing.T) {
 	mem := beads.NewMemStoreFrom(0, []beads.Bead{wb}, nil)
 	store := &updateCountingStore{Store: mem}
 
-	canonicalizeLegacyBoundUnassignedRoutedWork(cfg, []beads.Bead{wb}, []beads.Store{store}, io.Discard)
+	canonicalizeLegacyBoundUnassignedRoutedWork(cfg, []beads.Bead{wb}, []beads.Store{store}, []string{"city:test-city"}, io.Discard)
 
 	got, err := mem.Get("wb-1")
 	if err != nil {
@@ -364,7 +364,7 @@ func TestCanonicalizeLegacyBoundUnassignedRoutedWorkRehomesRoute(t *testing.T) {
 	// Idempotent: a second pass over the now-canonical bead writes nothing.
 	rehomed, _ := mem.Get("wb-1")
 	store.updates = 0
-	canonicalizeLegacyBoundUnassignedRoutedWork(cfg, []beads.Bead{rehomed}, []beads.Store{store}, io.Discard)
+	canonicalizeLegacyBoundUnassignedRoutedWork(cfg, []beads.Bead{rehomed}, []beads.Store{store}, []string{"city:test-city"}, io.Discard)
 	if store.updates != 0 {
 		t.Errorf("second pass wrote %d times, want 0 (re-home must be idempotent)", store.updates)
 	}
@@ -401,7 +401,7 @@ func TestCanonicalizeLegacyUnboundUnassignedRoutedWorkRehomesToImportedBindingPr
 			mem := beads.NewMemStoreFrom(0, []beads.Bead{wb}, nil)
 			store := &updateCountingStore{Store: mem}
 
-			canonicalizeLegacyBoundUnassignedRoutedWork(cfg, []beads.Bead{wb}, []beads.Store{store}, io.Discard)
+			canonicalizeLegacyBoundUnassignedRoutedWork(cfg, []beads.Bead{wb}, []beads.Store{store}, []string{"city:test-city"}, io.Discard)
 
 			got, err := mem.Get("wb-import-route")
 			if err != nil {
@@ -416,7 +416,7 @@ func TestCanonicalizeLegacyUnboundUnassignedRoutedWorkRehomesToImportedBindingPr
 
 			rehomed, _ := mem.Get("wb-import-route")
 			store.updates = 0
-			canonicalizeLegacyBoundUnassignedRoutedWork(cfg, []beads.Bead{rehomed}, []beads.Store{store}, io.Discard)
+			canonicalizeLegacyBoundUnassignedRoutedWork(cfg, []beads.Bead{rehomed}, []beads.Store{store}, []string{"city:test-city"}, io.Discard)
 			if store.updates != 0 {
 				t.Errorf("second pass wrote %d times, want 0 (import-binding route re-home must be idempotent)", store.updates)
 			}
@@ -448,7 +448,7 @@ func TestCanonicalizeLegacyBoundUnassignedRoutedWorkSkipsNonMigration(t *testing
 		t.Run(name, func(t *testing.T) {
 			mem := beads.NewMemStoreFrom(0, []beads.Bead{wb}, nil)
 			store := &updateCountingStore{Store: mem}
-			canonicalizeLegacyBoundUnassignedRoutedWork(cfg, []beads.Bead{wb}, []beads.Store{store}, io.Discard)
+			canonicalizeLegacyBoundUnassignedRoutedWork(cfg, []beads.Bead{wb}, []beads.Store{store}, []string{"city:test-city"}, io.Discard)
 			if store.updates != 0 {
 				t.Errorf("%s: expected no re-home, got %d writes", name, store.updates)
 			}
@@ -475,7 +475,7 @@ func TestCanonicalizeLegacyBoundUnassignedRoutedWorkCanonicalWorkerClaims(t *tes
 		t.Fatal("precondition: legacy-routed bead must not match the canonical route before re-home")
 	}
 
-	canonicalizeLegacyBoundUnassignedRoutedWork(cfg, []beads.Bead{wb}, []beads.Store{mem}, io.Discard)
+	canonicalizeLegacyBoundUnassignedRoutedWork(cfg, []beads.Bead{wb}, []beads.Store{mem}, []string{"city:test-city"}, io.Discard)
 	rehomed, err := mem.Get("wb-claim")
 	if err != nil {
 		t.Fatalf("Get(wb-claim): %v", err)

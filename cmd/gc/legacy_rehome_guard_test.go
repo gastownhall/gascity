@@ -1,0 +1,235 @@
+package main
+
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+)
+
+// TestCanonicalizeLegacyRoutedWorkLeavesForeignBindingOnSharedRigLeg is AC-1 of
+// the #5846 design: city A's only omp agent is unbound "qcore/omp" and it mints
+// no "pool" binding on rig qcore, so an open unassigned bead on the shared
+// "rig:qcore" leg routed to "qcore/pool.omp" is another city's canonical work.
+// The re-home must not issue an Update, must leave gc.routed_to alone, and must
+// report the refusal instead of silently rewriting somebody else's row.
+func TestCanonicalizeLegacyRoutedWorkLeavesForeignBindingOnSharedRigLeg(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{poolAgent("omp", "qcore", intPtr(3), 0)}}
+	const foreignCanonical = "qcore/pool.omp"
+
+	wb := workBead("wb-fx", foreignCanonical, "", "open", 2)
+	mem := beads.NewMemStoreFrom(0, []beads.Bead{wb}, nil)
+	store := &updateCountingStore{Store: mem}
+
+	report := canonicalizeLegacyBoundUnassignedRoutedWork(cfg, []beads.Bead{wb}, []beads.Store{store}, []string{"rig:qcore"}, io.Discard)
+
+	if store.updates != 0 {
+		t.Errorf("refused rewrite still issued %d Update call(s), want 0", store.updates)
+	}
+	got, err := mem.Get("wb-fx")
+	if err != nil {
+		t.Fatalf("Get(wb-fx): %v", err)
+	}
+	if routed := got.Metadata["gc.routed_to"]; routed != foreignCanonical {
+		t.Errorf("gc.routed_to = %q, want %q (foreign canonical route left alone)", routed, foreignCanonical)
+	}
+	if len(report.Rehomed) != 0 {
+		t.Errorf("report rehomed %+v, want none", report.Rehomed)
+	}
+	if len(report.Refused) != 1 {
+		t.Fatalf("report refused %+v, want exactly the foreign strip", report.Refused)
+	}
+	want := legacyRehomeEntry{ID: "wb-fx", Leg: "rig:qcore", Field: "gc.routed_to", From: foreignCanonical, To: "qcore/omp"}
+	if report.Refused[0] != want {
+		t.Errorf("refusal = %+v, want %+v", report.Refused[0], want)
+	}
+}
+
+// TestLegacyRehomeLegIsOwn pins the leg classification: the city's own legs are
+// the empty ref (the assigned arm's city vocabulary), a scoped city ref, and a
+// relocated-class ref; a rig leg and any unrecognized spelling are shared, so
+// unknown refs fail closed.
+func TestLegacyRehomeLegIsOwn(t *testing.T) {
+	cases := map[string]bool{
+		"":                 true,  // assigned arm's city vocabulary
+		"city:gascity":     true,  // routed arm's city vocabulary
+		"class:ga-classes": true,  // relocated class binding, city scope
+		"rig:qcore":        false, // a rig other cities attach too
+		"qcore":            false, // assigned arm's bare rig vocabulary
+		"weird:x":          false, // unrecognized spelling fails closed
+	}
+	for ref, want := range cases {
+		if got := legacyRehomeLegIsOwn(ref); got != want {
+			t.Errorf("legacyRehomeLegIsOwn(%q) = %v, want %v", ref, got, want)
+		}
+	}
+}
+
+// TestLegacyRehomeAllowedSharedLeg pins the guard predicate itself: own legs
+// keep today's behavior for both directions, and a shared leg refuses the strip
+// of any binding this city does not mint on the leg's rig.
+func TestLegacyRehomeAllowedSharedLeg(t *testing.T) {
+	unbound := poolAgent("omp", "qcore", intPtr(3), 0)
+	minted := &config.City{
+		Imports: map[string]config.Import{"pool": {Source: "./packs/pool"}},
+		Agents:  []config.Agent{unbound},
+	}
+	notMinted := &config.City{Agents: []config.Agent{unbound}}
+
+	cases := []struct {
+		name  string
+		cfg   *config.City
+		own   bool
+		from  string
+		agent *config.Agent
+		want  bool
+	}{
+		{"own leg strips as today", minted, true, "qcore/pool.omp", &unbound, true},
+		{"shared strip this city mints", minted, false, "qcore/pool.omp", &unbound, true},
+		{"shared strip of a foreign binding", notMinted, false, "qcore/pool.omp", &unbound, false},
+		{"shared strip with an empty binding", notMinted, false, "qcore/.omp", &unbound, false},
+		{"shared rewrite of a non-bound form", notMinted, false, "qcore/omp-1", &unbound, false},
+		{"unresolvable agent refuses", notMinted, false, "qcore/pool.omp", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := legacyRehomeAllowed(tc.cfg, tc.own, tc.from, tc.agent); got != tc.want {
+				t.Errorf("legacyRehomeAllowed(own=%v, from=%q) = %v, want %v", tc.own, tc.from, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCanonicalizeLegacyRoutedWorkRefusesBindingThisCityDoesNotMint covers the
+// mint-source edges of cityMintsBindingOnRig from the re-home side:
+// [defaults.rig.imports] alone binds nothing (gc copies it into each rig's own
+// import table when the rig is added), and a binding imported only on another
+// rig says nothing about this one.
+func TestCanonicalizeLegacyRoutedWorkRefusesBindingThisCityDoesNotMint(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  *config.City
+	}{
+		{
+			name: "default rig imports alone",
+			cfg: &config.City{
+				DefaultRigImports: map[string]config.Import{"pool": {Source: "./packs/pool"}},
+				Agents:            []config.Agent{poolAgent("omp", "qcore", intPtr(3), 0)},
+			},
+		},
+		{
+			name: "binding imported only on another rig",
+			cfg: &config.City{
+				Rigs: []config.Rig{{
+					Name:    "other",
+					Imports: map[string]config.Import{"pool": {Source: "./packs/pool"}},
+				}},
+				Agents: []config.Agent{poolAgent("omp", "qcore", intPtr(3), 0)},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			wb := workBead("wb-fx", "qcore/pool.omp", "", "open", 2)
+			mem := beads.NewMemStoreFrom(0, []beads.Bead{wb}, nil)
+			store := &updateCountingStore{Store: mem}
+
+			report := canonicalizeLegacyBoundUnassignedRoutedWork(tc.cfg, []beads.Bead{wb}, []beads.Store{store}, []string{"rig:qcore"}, io.Discard)
+
+			if store.updates != 0 {
+				t.Errorf("%s: rewrote the route anyway (%d update(s))", tc.name, store.updates)
+			}
+			if len(report.Refused) != 1 {
+				t.Errorf("%s: refused %+v, want the foreign strip", tc.name, report.Refused)
+			}
+		})
+	}
+}
+
+// TestCanonicalizeLegacyRoutedRehomeMismatchedRefsWritesNothing pins the refs
+// contract for the routed arm: workRefs must be index-aligned with
+// workBeads/workStores, and a length mismatch writes nothing, like the
+// beads/stores mismatch rule.
+func TestCanonicalizeLegacyRoutedRehomeMismatchedRefsWritesNothing(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{poolAgent("planner", "rig-A", intPtr(5), 0)}}
+	const legacy = "rig-A/gc.planner"
+
+	wb := workBead("wb-route", legacy, "", "open", 5)
+	mem := beads.NewMemStoreFrom(0, []beads.Bead{wb}, nil)
+	store := &updateCountingStore{Store: mem}
+	canonicalizeLegacyBoundUnassignedRoutedWork(cfg, []beads.Bead{wb}, []beads.Store{store}, nil, io.Discard)
+	if store.updates != 0 {
+		t.Errorf("routed arm wrote %d time(s) with mismatched refs", store.updates)
+	}
+}
+
+// TestLegacyRehomeReportLog pins the audit trail: one line per rewrite naming
+// the bead, the leg, and the quoted identity pair, plus at most one refusal
+// summary per pass — grouped by from->to pair, exact counts, IDs sampled at
+// five — and nothing when nothing was refused. Identities are %q-quoted: they
+// are untrusted text read off rows another city wrote.
+func TestLegacyRehomeReportLog(t *testing.T) {
+	t.Run("empty report logs nothing", func(t *testing.T) {
+		var buf bytes.Buffer
+		(legacyRehomeReport{}).log(&buf, "canonicalizeLegacyBoundUnassignedRoutedWork")
+		if buf.Len() != 0 {
+			t.Errorf("empty report logged %q, want nothing", buf.String())
+		}
+	})
+
+	t.Run("one line per rewrite, one summary per pass", func(t *testing.T) {
+		var buf bytes.Buffer
+		var rep legacyRehomeReport
+		rep.rehomed(legacyRehomeEntry{ID: "ga-1", Leg: "rig:qcore", Field: "assignee", From: "qcore/gc.omp", To: "qcore/omp"})
+		rep.refuse(legacyRehomeEntry{ID: "ga-2", Leg: "rig:qcore", Field: "gc.routed_to", From: "qcore/pool.omp", To: "qcore/omp"})
+		rep.refuse(legacyRehomeEntry{ID: "ga-3", Leg: "rig:qcore", Field: "gc.routed_to", From: "qcore/pool.omp", To: "qcore/omp"})
+		rep.log(&buf, "canonicalizeLegacyBoundAssignedWork")
+
+		lines := strings.Split(strings.TrimSuffix(buf.String(), "\n"), "\n")
+		wantLines := []string{
+			`canonicalizeLegacyBoundAssignedWork: rehomed ga-1 on rig:qcore: assignee "qcore/gc.omp" -> "qcore/omp"`,
+			`canonicalizeLegacyBoundAssignedWork: refused 2 foreign legacy re-home(s) this pass: "qcore/pool.omp" -> "qcore/omp" (2: ga-2, ga-3)`,
+		}
+		if !slices.Equal(lines, wantLines) {
+			t.Errorf("log lines\n got  %q\n want %q", lines, wantLines)
+		}
+	})
+
+	t.Run("refusals are grouped, sorted and sampled", func(t *testing.T) {
+		var buf bytes.Buffer
+		var rep legacyRehomeReport
+		// Deliberately out of pair order; the second pair's seven IDs sample at
+		// five with "+2 more".
+		rep.refuse(legacyRehomeEntry{ID: "ga-b1", Leg: "rig:qcore", Field: "gc.routed_to", From: "qcore/zz.omp", To: "qcore/omp"})
+		for i := 0; i < 7; i++ {
+			rep.refuse(legacyRehomeEntry{ID: fmt.Sprintf("ga-a%d", i+1), Leg: "rig:qcore", Field: "gc.routed_to", From: "qcore/pool.omp", To: "qcore/omp"})
+		}
+		rep.log(&buf, "canonicalizeLegacyBoundUnassignedRoutedWork")
+
+		lines := strings.Split(strings.TrimSuffix(buf.String(), "\n"), "\n")
+		if len(lines) != 1 {
+			t.Fatalf("got %d lines, want one summary: %q", len(lines), lines)
+		}
+		want := `canonicalizeLegacyBoundUnassignedRoutedWork: refused 8 foreign legacy re-home(s) this pass: ` +
+			`"qcore/pool.omp" -> "qcore/omp" (7: ga-a1, ga-a2, ga-a3, ga-a4, ga-a5 +2 more), ` +
+			`"qcore/zz.omp" -> "qcore/omp" (1: ga-b1)`
+		if lines[0] != want {
+			t.Errorf("summary\n got  %s\n want %s", lines[0], want)
+		}
+	})
+
+	t.Run("commas and newlines in identities are escaped", func(t *testing.T) {
+		var buf bytes.Buffer
+		var rep legacyRehomeReport
+		rep.refuse(legacyRehomeEntry{ID: "ga-x", Leg: "weird:x", Field: "gc.routed_to", From: "evil,id\nforge", To: "qcore/omp"})
+		rep.log(&buf, "canonicalizeLegacyBoundUnassignedRoutedWork")
+		if !strings.Contains(buf.String(), `"evil,id\nforge"`) {
+			t.Errorf("identity not %q-quoted: %q", buf.String(), buf.String())
+		}
+	})
+}

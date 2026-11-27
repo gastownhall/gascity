@@ -169,7 +169,12 @@ func (c *v2DemandMigrationsCheck) sweep(fix bool, stderr io.Writer) demandMigrat
 		s.problems = append(s.problems, "unassigned routed collection partial")
 	}
 	repairPoolSlotWorkDirClobber(c.cfg, routed, writes(demandMigrationRepairs[0], routedStores, routedRefs), stderr)
-	canonicalizeLegacyBoundUnassignedRoutedWork(c.cfg, routed, writes(demandMigrationRepairs[2], routedStores, routedRefs), stderr)
+	routedRehome := canonicalizeLegacyBoundUnassignedRoutedWork(c.cfg, routed, writes(demandMigrationRepairs[2], routedStores, routedRefs), routedRefs, stderr)
+	if fix {
+		// The re-home audit goes to the --fix output. A dry run discards it: its
+		// writer is the run's log buffer, and buffered lines are read problems.
+		routedRehome.log(stderr, demandMigrationRepairs[2])
+	}
 	collapseSlotSuffixedRoutedWork(c.cfg, routed, writes(demandMigrationRepairs[3], routedStores, routedRefs), stderr)
 	return s
 }
