@@ -3955,7 +3955,20 @@ type Agent struct {
 	// AutoReclaimStaleClaims opts this agent into gc hook --claim attempting
 	// a scoped stale-lease reclaim (via `bd reclaim --id`) when a
 	// route-matched candidate's only claim blocker is an existing assignee.
-	// Off by default; staleness is decided entirely by bd's own lease TTL.
+	// Off by default. Staleness is decided by bd's claim lease alone, not by
+	// whether the holder is still running: with bd's defaults a claim's lease
+	// lasts 5 minutes, only the holder's `gc bd heartbeat` renews it, and
+	// `bd reclaim` reverts the bead once its lease has been expired for 10
+	// minutes. A live holder that has not heartbeated for about 15 minutes
+	// therefore looks stale, and its bead is served to this agent while the
+	// holder still runs it. Enable this only when every agent that can hold
+	// the beads this agent's work_query serves heartbeats well within the
+	// 5-minute lease.
+	// Candidates come from this agent's work_query. The default work_query's
+	// routed tier serves only unassigned beads, so the reclaim acts only when
+	// a custom work_query also serves route-matched beads held by another
+	// assignee. Cities on the default work_query recover beads held by dead
+	// sessions through the controller's per-tick dead-assignee release.
 	AutoReclaimStaleClaims bool `toml:"auto_reclaim_stale_claims,omitempty"`
 	// InstallAgentHooks overrides workspace-level install_agent_hooks for this agent.
 	// When set, replaces (not adds to) the workspace default.

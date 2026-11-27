@@ -271,7 +271,7 @@
         },
         "auto_reclaim_stale_claims": {
           "type": "boolean",
-          "description": "AutoReclaimStaleClaims opts this agent into gc hook --claim attempting\na scoped stale-lease reclaim (via `bd reclaim --id`) when a\nroute-matched candidate's only claim blocker is an existing assignee.\nOff by default; staleness is decided entirely by bd's own lease TTL."
+          "description": "AutoReclaimStaleClaims opts this agent into gc hook --claim attempting\na scoped stale-lease reclaim (via `bd reclaim --id`) when a\nroute-matched candidate's only claim blocker is an existing assignee.\nOff by default. Staleness is decided by bd's claim lease alone, not by\nwhether the holder is still running: with bd's defaults a claim's lease\nlasts 5 minutes, only the holder's `gc bd heartbeat` renews it, and\n`bd reclaim` reverts the bead once its lease has been expired for 10\nminutes. A live holder that has not heartbeated for about 15 minutes\ntherefore looks stale, and its bead is served to this agent while the\nholder still runs it. Enable this only when every agent that can hold\nthe beads this agent's work_query serves heartbeats well within the\n5-minute lease.\nCandidates come from this agent's work_query. The default work_query's\nrouted tier serves only unassigned beads, so the reclaim acts only when\na custom work_query also serves route-matched beads held by another\nassignee. Cities on the default work_query recover beads held by dead\nsessions through the controller's per-tick dead-assignee release."
         },
         "install_agent_hooks": {
           "items": {

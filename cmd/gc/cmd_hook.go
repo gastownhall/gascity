@@ -618,6 +618,11 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			StartedFence: hookStartedFenceOf(os.Environ()),
 			// The fenced row, so the worktree check costs no extra read.
 			PoolSeat: hookClaimPoolSeatFor(cityPath, cityName, cfg.Rigs, fencedSession, &a),
+			// The agent's opt-in to the scoped stale-lease reclaim lane
+			// (ga-7rj87d): the resolved agent already carries patches, rig
+			// overrides and the pool template's value, so every layer that
+			// can set the knob reaches the claim door.
+			AutoReclaimStaleClaims: a.AutoReclaimStaleClaims,
 		}
 		var provisionWorktree hookProvisionWorktreeFunc
 		if opts.Worktree {

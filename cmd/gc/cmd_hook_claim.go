@@ -648,8 +648,9 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		// Not adopted — the canonical store named another owner, or the bead is
 		// held under a legacy spelling that could not be moved to this worker's
 		// actor. Fall through to the claim tiers: neither tier can match this
-		// row anyway (ready requires open, eligible requires an empty
-		// assignee), so this ends in the shared drain unless there is other
+		// row anyway (ready requires open; eligible requires an empty assignee,
+		// and its opt-in reclaim lane skips rows held under this session's
+		// identity), so this ends in the shared drain unless there is other
 		// work to do. Draining is the point — an unclosable bead in hand is the
 		// #5716 loop, while a drain leaves the bead in place, adoptable by the
 		// next attempt once the store recovers, and the operator with the
@@ -1145,8 +1146,12 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			// opt-in reclaim attempt before being skipped. Off by default
 			// (NFR4/NFR5): the flag check short-circuits before
 			// hookCandidateReclaimEligible or ops.ReclaimStale ever run, so the
-			// flag-off path is byte-for-byte unchanged.
-			if !opts.AutoReclaimStaleClaims || !hookCandidateReclaimEligible(candidate, opts.RouteTargets, now) {
+			// flag-off path is byte-for-byte unchanged. A row held under this
+			// session's own identity is not another holder's claim: the
+			// adoption tier judges it, and when that tier refused it (the
+			// canonical store names another owner) its drain stands.
+			if !opts.AutoReclaimStaleClaims || !hookCandidateReclaimEligible(candidate, opts.RouteTargets, now) ||
+				hookClaimHasIdentity(candidate.Assignee, opts.IdentityCandidates) {
 				continue
 			}
 			if ops.claimWindowSpent() {
