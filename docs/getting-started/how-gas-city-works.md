@@ -105,9 +105,9 @@ evaluates due triggers and fires them.
 A **rig** is *where* the work happens — an external project, usually a git repo,
 registered with the city with `gc rig add <path>`. A rig carries a repo, its own
 **bead namespace**, and an **agent scope**. Its directory can live anywhere on
-disk, inside or outside the city. Isolation is by bead-ID prefix, not a separate
-database: the city and all its rigs share one underlying store, and reads and
-writes are filtered to the current scope's prefix. Work slung in one rig stays
+disk, inside or outside the city. One managed Dolt server holds one database
+per scope (the city and each rig), and bead IDs carry the scope's prefix, so
+`gc bd` routes each read and write to the right database. Work slung in one rig stays
 logically isolated from the others, and rig-scoped agents are instantiated once
 per rig.
 

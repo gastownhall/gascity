@@ -1032,3 +1032,36 @@ func TestTraceFlushCurrentBatchWaitBudgetDegrades(t *testing.T) {
 		t.Fatalf("stderr = %q, want slow_storage_degraded", stderr.String())
 	}
 }
+
+// TestAwakeDecisionTraceFieldsCarryReasonAndAssignedWork pins the payload
+// fragment that lets `gc trace` show WHY ComputeAwakeSet woke or slept a
+// session (gcf-duhz8).
+func TestAwakeDecisionTraceFieldsCarryReasonAndAssignedWork(t *testing.T) {
+	got := awakeDecisionTraceFields(AwakeDecision{
+		ShouldWake:         true,
+		Reason:             "assigned-work",
+		HasAssignedWork:    true,
+		AssignedWorkBeadID: "gc-42",
+	}, true)
+	want := traceRecordPayload{
+		"awake_reason":          "assigned-work",
+		"has_assigned_work":     true,
+		"assigned_work_bead_id": "gc-42",
+	}
+	if !maps.Equal(got, want) {
+		t.Fatalf("fields = %#v, want %#v", got, want)
+	}
+
+	// No decision for the session at all: say so instead of emitting an
+	// empty reason that reads like a computed one.
+	got = awakeDecisionTraceFields(AwakeDecision{}, false)
+	if got["awake_reason"] != "no-decision" {
+		t.Fatalf("awake_reason without decision = %#v, want no-decision", got["awake_reason"])
+	}
+	if got["has_assigned_work"] != false {
+		t.Fatalf("has_assigned_work without decision = %#v, want false", got["has_assigned_work"])
+	}
+	if _, ok := got["assigned_work_bead_id"]; ok {
+		t.Fatalf("assigned_work_bead_id must be omitted when empty: %#v", got)
+	}
+}
