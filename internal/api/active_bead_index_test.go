@@ -2,7 +2,10 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 
@@ -114,6 +117,67 @@ func TestAgentListReadsEachStoreOnce(t *testing.T) {
 			}
 			if got := backing.count() - before; got > tc.wantBacking {
 				t.Errorf("GET /agents over %d rows made %d in_progress reads of the backing store, want at most %d", len(names), got, tc.wantBacking)
+			}
+		})
+	}
+}
+
+// TestSessionListReadsEachStoreOnce: both session-list handlers resolve a
+// page's active beads with one in_progress read of each rig store the page
+// reaches, however many rows and identities (session id, runtime name,
+// alias, template) ask, and still name each row's own bead from its own rig.
+func TestSessionListReadsEachStoreOnce(t *testing.T) {
+	for _, handler := range []string{"huma", "legacy"} {
+		t.Run(handler, func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			fs.cfg.Rigs = append(fs.cfg.Rigs,
+				config.Rig{Name: "alpha", Path: "/tmp/alpha"},
+				config.Rig{Name: "beta", Path: "/tmp/beta"},
+			)
+			alpha := &activeReadCountingStore{Store: &beads.MemStore{IDPrefix: "alpha"}}
+			beta := &activeReadCountingStore{Store: &beads.MemStore{IDPrefix: "beta"}}
+			fs.stores["alpha"] = alpha
+			fs.stores["beta"] = beta
+			want := map[string]string{}
+			for i := range 6 {
+				info := createTestSession(t, fs.cityBeadStore, fs.sp, fmt.Sprintf("session %d", i))
+				store := alpha.Store
+				if i >= 3 {
+					store = beta.Store
+				}
+				want[info.ID] = addActiveWork(t, store, info.ID)
+			}
+			srv := New(fs)
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest("GET", cityURL(fs, "/sessions"), nil)
+			if handler == "legacy" {
+				req = httptest.NewRequest("GET", "/v0/sessions", nil)
+				srv.handleSessionList(rec, req)
+			} else {
+				newTestCityHandlerWith(t, fs, srv).ServeHTTP(rec, req)
+			}
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET /sessions status = %d: %s", rec.Code, rec.Body.String())
+			}
+			var resp struct {
+				Items []sessionResponse `json:"items"`
+			}
+			if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if len(resp.Items) != len(want) {
+				t.Fatalf("GET /sessions listed %d sessions, want %d", len(resp.Items), len(want))
+			}
+			for _, item := range resp.Items {
+				if item.ActiveBead != want[item.ID] {
+					t.Errorf("session %s active_bead = %q, want %q", item.ID, item.ActiveBead, want[item.ID])
+				}
+			}
+			for name, store := range map[string]*activeReadCountingStore{"alpha": alpha, "beta": beta} {
+				if n := store.count(); n != 1 {
+					t.Errorf("rig %s: %d in_progress reads for a page of %d sessions, want 1", name, n, len(want))
+				}
 			}
 		})
 	}

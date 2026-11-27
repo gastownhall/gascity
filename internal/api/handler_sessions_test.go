@@ -1109,9 +1109,9 @@ func TestHandleSessionListActiveBeadUsesCachedLookup(t *testing.T) {
 	}
 
 	resp := sessionResponse{}
-	srv.enrichSessionResponse(&resp, info, fs.Config(), sessionResponseCapabilityHandle{
+	srv.enrichSessionResponseWithKeyedPaths(&resp, info, fs.Config(), sessionResponseCapabilityHandle{
 		state: worker.State{Phase: worker.PhaseReady},
-	}, false, false, false, 0)
+	}, false, srv.newActiveBeadIndex().lookup, false, 0, nil)
 
 	if !resp.Running {
 		t.Fatal("Running = false, want true")
@@ -1401,9 +1401,9 @@ func TestHandleSessionListActiveBeadUsesCachedListWhenAvailable(t *testing.T) {
 	}
 
 	resp := sessionResponse{}
-	srv.enrichSessionResponse(&resp, info, fs.Config(), sessionResponseCapabilityHandle{
+	srv.enrichSessionResponseWithKeyedPaths(&resp, info, fs.Config(), sessionResponseCapabilityHandle{
 		state: worker.State{Phase: worker.PhaseReady},
-	}, false, false, false, 0)
+	}, false, srv.newActiveBeadIndex().lookup, false, 0, nil)
 
 	if got := resp.ActiveBead; got != work.ID {
 		t.Fatalf("active_bead = %q, want cached %q", got, work.ID)
@@ -1441,7 +1441,7 @@ func TestHandleSessionGetActiveBeadUsesLiveLookup(t *testing.T) {
 	resp := sessionResponse{}
 	srv.enrichSessionResponse(&resp, info, fs.Config(), sessionResponseCapabilityHandle{
 		state: worker.State{Phase: worker.PhaseReady},
-	}, false, true, true, 0)
+	}, false, true, 0)
 
 	if !resp.Running {
 		t.Fatal("Running = false, want true")
