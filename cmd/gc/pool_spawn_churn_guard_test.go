@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -290,5 +291,188 @@ func TestPoolSpawnChurnGuardRecordsCoolingDownOncePerEpisode(t *testing.T) {
 	if p.Template != "claude" || p.Cause != events.PoolSpawnChurnCauseTripped || p.Seats != 3 ||
 		!p.Since.Equal(since) || p.Until == nil || !p.Until.Equal(wantUntil) || p.Episode == "" {
 		t.Fatalf("payload = %+v, want claude/tripped/3 seats/since %s/until %s", p, since, wantUntil)
+	}
+}
+
+// AC-6 (ga-s5l1ms): after a hold runs out exactly one probe seat is
+// admitted; its churn doubles the hold (capped at 30 min) and records the
+// cooling-down again with cause probe_failed; a close of a seat created
+// before the probe is a straggler and changes nothing.
+func TestPoolSpawnChurnGuardProbeFailureDoublesTheHold(t *testing.T) {
+	h := newPoolSpawnChurnHarness(t)
+	base := h.now
+	for i := 0; i < 3; i++ {
+		h.now = base.Add(time.Duration(i) * 3 * time.Minute)
+		h.churnBlindSeat()
+	}
+	probeFailures := func() (n int, last events.PoolSpawnChurnPayload) {
+		for _, e := range h.recorded {
+			if e.Type != events.SessionPoolSpawnChurnCoolingDown {
+				continue
+			}
+			var p events.PoolSpawnChurnPayload
+			if err := json.Unmarshal(e.Payload, &p); err != nil {
+				h.t.Fatal(err)
+			}
+			if p.Cause == events.PoolSpawnChurnCauseProbeFailed {
+				n++
+				last = p
+			}
+		}
+		return n, last
+	}
+	// Hold until base+11m; the first pass after admits one probe seat.
+	h.now = base.Add(11*time.Minute + time.Second)
+	if got := h.guard.allowance()["claude"]; got != 1 {
+		t.Fatalf("allowance after the hold = %d, want 1 probe seat", got)
+	}
+	holds := []time.Duration{10 * time.Minute, 20 * time.Minute, 30 * time.Minute, 30 * time.Minute}
+	at := base.Add(12 * time.Minute)
+	wantUntil := base.Add(11 * time.Minute) // first probe admission reference
+	_ = wantUntil
+	for i, hold := range holds {
+		h.now = at
+		h.churnBlindSeat() // the probe seat churns
+		wantUntil = at.Add(hold)
+		if got := h.guard.allowance()["claude"]; got != 0 {
+			t.Fatalf("allowance after probe failure %d = %d, want 0", i+1, got)
+		}
+		n, last := probeFailures()
+		if n != i+1 {
+			t.Fatalf("probe-failure events = %d after %d failures, want %d", n, i+1, i+1)
+		}
+		if last.Cause != events.PoolSpawnChurnCauseProbeFailed || last.Until == nil || !last.Until.Equal(wantUntil) || last.Seats != 4+i {
+			t.Fatalf("probe-failure %d payload = %+v, want until %s and %d seats", i+1, last, wantUntil, 4+i)
+		}
+		at = wantUntil.Add(time.Second)
+		h.now = at
+		if got := h.guard.allowance()["claude"]; got != 1 {
+			t.Fatalf("allowance after doubled hold %d = %d, want 1 probe seat", i+1, got)
+		}
+		at = at.Add(time.Minute)
+	}
+}
+
+// AC-6: a close of a seat created before the probe is a straggler — work the
+// pool had already started — and neither fails the probe nor trips again.
+func TestPoolSpawnChurnGuardIgnoresStragglerClosesDuringAProbe(t *testing.T) {
+	h := newPoolSpawnChurnHarness(t)
+	base := h.now
+	for i := 0; i < 3; i++ {
+		h.now = base.Add(time.Duration(i) * 3 * time.Minute)
+		h.churnBlindSeat()
+	}
+	h.now = base.Add(11*time.Minute + time.Second)
+	if got := h.guard.allowance()["claude"]; got != 1 {
+		t.Fatalf("allowance after the hold = %d, want 1 probe seat", got)
+	}
+	// A seat created during the hold, before the probe admission, closes now.
+	h.now = base.Add(12 * time.Minute)
+	h.seats++
+	id := fmt.Sprintf("gcg-session-%d", h.seats)
+	pool := map[string]string{"pool_managed": "true"}
+	h.seatEvent(events.BeadCreated, id, base.Add(7*time.Minute), pool)
+	h.seatEvent(events.BeadUpdated, id, base.Add(8*time.Minute), map[string]string{
+		"pool_managed":         "true",
+		"creation_complete_at": base.Add(8 * time.Minute).UTC().Format(time.RFC3339),
+	})
+	h.seatEvent(events.BeadClosed, id, h.now, pool)
+	if got := h.guard.allowance()["claude"]; got != 1 {
+		t.Fatalf("a straggler close ended the probe: allowance = %d, want still 1", got)
+	}
+	for _, e := range h.recorded {
+		if e.Type == events.SessionPoolSpawnChurnCoolingDown {
+			var p events.PoolSpawnChurnPayload
+			if err := json.Unmarshal(e.Payload, &p); err != nil {
+				t.Fatal(err)
+			}
+			if p.Cause == events.PoolSpawnChurnCauseProbeFailed {
+				t.Fatalf("a straggler close recorded a probe failure: %+v", p)
+			}
+		}
+	}
+}
+
+// AC-6: a counted seat's claim ends the episode — the resumed event is
+// recorded with cause claimed and the template's full blind count returns.
+func TestPoolSpawnChurnGuardClaimEndsEpisodeWithResumedEvent(t *testing.T) {
+	h := newPoolSpawnChurnHarness(t)
+	base := h.now
+	for i := 0; i < 3; i++ {
+		h.now = base.Add(time.Duration(i) * 3 * time.Minute)
+		h.churnBlindSeat()
+	}
+	h.now = base.Add(7 * time.Minute)
+	h.seats++
+	id := fmt.Sprintf("gcg-session-%d", h.seats)
+	pool := map[string]string{"pool_managed": "true"}
+	h.seatEvent(events.BeadCreated, id, h.now, pool)
+	h.seatEvent(events.BeadUpdated, id, h.now, map[string]string{
+		"pool_managed":         "true",
+		"creation_complete_at": h.now.UTC().Format(time.RFC3339),
+	})
+	claimCell := fmt.Sprintf(`{"v":1,"claims":[{"store":"city","bead":"bd-7","gen":2,"at":%q,"via":"claim"}]}`, h.now.UTC().Format(time.RFC3339Nano))
+	h.seatEvent(events.BeadUpdated, id, h.now, map[string]string{
+		"pool_managed": "true",
+		"work_started": claimCell,
+	})
+	allow := h.guard.allowance()
+	if _, ok := allow["claude"]; ok {
+		t.Fatalf("a claim did not end the episode: %v, want no hold (full blind count returns)", allow)
+	}
+	var resumed int
+	for _, e := range h.recorded {
+		if e.Type != events.SessionPoolSpawnChurnResumed {
+			continue
+		}
+		resumed++
+		var p events.PoolSpawnChurnPayload
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			t.Fatal(err)
+		}
+		if p.Cause != events.PoolSpawnChurnCauseClaimed || p.Template != "claude" || p.Seats != 3 || p.Episode == "" {
+			t.Fatalf("resumed payload = %+v, want claude/claimed/3 seats", p)
+		}
+	}
+	if resumed != 1 {
+		t.Fatalf("resumed events = %d, want exactly 1", resumed)
+	}
+}
+
+// AC-6: a config change to the template's scale_check, work_query,
+// authoritative flag or provider ends the hold: the change may have been the
+// fix, so the guard drops the template's state and records the resume.
+func TestPoolSpawnChurnGuardConfigChangeEndsHold(t *testing.T) {
+	h := newPoolSpawnChurnHarness(t)
+	base := h.now
+	h.guard.configure(&config.City{Agents: []config.Agent{{Name: "claude"}}})
+	for i := 0; i < 3; i++ {
+		h.now = base.Add(time.Duration(i) * 3 * time.Minute)
+		h.churnBlindSeat()
+	}
+	if got := h.guard.allowance()["claude"]; got != 0 {
+		t.Fatalf("allowance under the hold = %d, want 0", got)
+	}
+	h.guard.configure(&config.City{Agents: []config.Agent{{Name: "claude", ScaleCheck: "echo 1"}}})
+	allow := h.guard.allowance()
+	if _, ok := allow["claude"]; ok {
+		t.Fatalf("a config change kept the hold: %v", allow)
+	}
+	var resumed int
+	for _, e := range h.recorded {
+		if e.Type != events.SessionPoolSpawnChurnResumed {
+			continue
+		}
+		resumed++
+		var p events.PoolSpawnChurnPayload
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			t.Fatal(err)
+		}
+		if p.Cause != events.PoolSpawnChurnCauseConfigChanged || p.Template != "claude" {
+			t.Fatalf("resumed payload = %+v, want claude/config_changed", p)
+		}
+	}
+	if resumed != 1 {
+		t.Fatalf("resumed events = %d, want exactly 1", resumed)
 	}
 }

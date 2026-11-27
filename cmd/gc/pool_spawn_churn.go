@@ -177,6 +177,7 @@ func (g *poolSpawnChurnGuard) configure(cfg *config.City) {
 			signatures[a.QualifiedName()] = poolSpawnChurnSignature(a)
 		}
 	}
+	now := g.now()
 	g.mu.Lock()
 	g.signatures = signatures
 	for name, t := range g.templates {
@@ -189,6 +190,23 @@ func (g *poolSpawnChurnGuard) configure(cfg *config.City) {
 		}
 		if t.episode != nil {
 			fmt.Fprintf(g.stderr, "pool spawn-churn guard: %s's hold ends with a config change\n", name) //nolint:errcheck // best-effort stderr
+			if g.record != nil {
+				payload, _ := json.Marshal(events.PoolSpawnChurnPayload{ //nolint:errchkjson // a struct of strings, ints and times always marshals
+					Template: name,
+					Episode:  t.episode.id,
+					Cause:    events.PoolSpawnChurnCauseConfigChanged,
+					Seats:    t.episode.seats,
+					Since:    t.episode.since.UTC(),
+				})
+				g.record(events.Event{
+					Type:    events.SessionPoolSpawnChurnResumed,
+					Ts:      now.UTC(),
+					Actor:   "controller",
+					Subject: name,
+					Message: fmt.Sprintf("Pool %s's scale_check, work_query or provider changed, ending its churn hold; its full blind demand counts again.", name),
+					Payload: payload,
+				})
+			}
 		}
 		delete(g.templates, name)
 	}
@@ -247,7 +265,9 @@ func (g *poolSpawnChurnGuard) observeSeat(b beads.Bead, created, closed bool, at
 	if created {
 		seat.sawCreate = true
 	}
-	if !b.CreatedAt.IsZero() {
+	if !b.CreatedAt.IsZero() && (seat.created.IsZero() || b.CreatedAt.Before(seat.created)) {
+		// Sticky and earliest: a later snapshot's CreatedAt (a close event
+		// stamped now, say) must not move a seat's creation forward in time.
 		seat.created = b.CreatedAt
 	}
 	if strings.TrimSpace(b.Metadata["pool_managed"]) == "true" {
@@ -397,6 +417,26 @@ func (g *poolSpawnChurnGuard) probeFailedLocked(template string, ep *poolSpawnCh
 	ep.until = claimStallLater(at, g.now()).Add(poolSpawnChurnHold(ep.holds))
 	fmt.Fprintf(g.stderr, "pool spawn-churn guard: %s's probe seat churned too (%d seats in all); withholding its blind demand until %s\n", //nolint:errcheck // best-effort stderr
 		template, ep.seats, ep.until.UTC().Format(time.RFC3339))
+	if g.record != nil {
+		until := ep.until
+		payload, _ := json.Marshal(events.PoolSpawnChurnPayload{ //nolint:errchkjson // a struct of strings, ints and times always marshals
+			Template: template,
+			Episode:  ep.id,
+			Cause:    events.PoolSpawnChurnCauseProbeFailed,
+			Seats:    ep.seats,
+			Since:    ep.since.UTC(),
+			Until:    &until,
+		})
+		g.record(events.Event{
+			Type:    events.SessionPoolSpawnChurnCoolingDown,
+			Ts:      claimStallLater(at, g.now()).UTC(),
+			Actor:   "controller",
+			Subject: template,
+			Message: fmt.Sprintf("Pool %s's probe seat churned too (%d seats in the episode). No unnamed scale_check seats spawn for it until %s; a claim still ends the hold.",
+				template, ep.seats, until.UTC().Format(time.RFC3339)),
+			Payload: payload,
+		})
+	}
 }
 
 // probes reports whether seat is the probe ep admitted: created since the
@@ -415,9 +455,27 @@ func (g *poolSpawnChurnGuard) claimedLocked(seat *poolSpawnChurnSeat) {
 	}
 	t := g.templateFor(seat.template)
 	t.streak = nil
-	if t.episode != nil {
+	if ep := t.episode; ep != nil {
 		fmt.Fprintf(g.stderr, "pool spawn-churn guard: %s claims work again; its blind demand counts again\n", seat.template) //nolint:errcheck // best-effort stderr
 		t.episode = nil
+		if g.record != nil {
+			payload, _ := json.Marshal(events.PoolSpawnChurnPayload{ //nolint:errchkjson // a struct of strings, ints and times always marshals
+				Template: seat.template,
+				Episode:  ep.id,
+				Cause:    events.PoolSpawnChurnCauseClaimed,
+				Seats:    ep.seats,
+				Since:    ep.since.UTC(),
+			})
+			g.record(events.Event{
+				Type:    events.SessionPoolSpawnChurnResumed,
+				Ts:      claimStallLater(seat.claimAt, g.now()).UTC(),
+				Actor:   "controller",
+				Subject: seat.template,
+				Message: fmt.Sprintf("Pool %s claims work again after %d churned seats since %s; its full blind demand counts again.",
+					seat.template, ep.seats, ep.since.UTC().Format(time.RFC3339)),
+				Payload: payload,
+			})
+		}
 	}
 }
 
