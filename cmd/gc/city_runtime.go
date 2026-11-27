@@ -1015,6 +1015,15 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// on its own lane with only the controller (pending_interaction_lane.go).
 	// Its event-log rebuild runs on that lane too, so it never delays a tick.
 	defer cr.startPendingInteractionLane(ctx)()
+	// The closed order-tracking retention sweep runs on its own paced lane
+	// (order_tracking_retention_lane.go), started once the city is ready so
+	// its first pass never delays startup (#6429). Defers run LIFO, so this
+	// lane is canceled and joined before the first-registered defer
+	// cr.shutdown() closes the storage binding: the sweep is never
+	// mid-store-call when its handles close. The join covers run() returning,
+	// not the supervisor's forced stop, which bounds its own wait
+	// (runCityShutdownBounded).
+	defer cr.startOrderTrackingRetentionLane(ctx)()
 	// Track pool instance liveness for death detection.
 	var prevPoolRunning map[string]bool
 	runTick := func(trigger string) {

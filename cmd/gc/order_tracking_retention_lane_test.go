@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"io"
-	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
