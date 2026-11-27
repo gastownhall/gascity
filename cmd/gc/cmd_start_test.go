@@ -2278,3 +2278,36 @@ func TestStartStandaloneBuildsSessionProviderFromResolvedCityConfig(t *testing.T
 		t.Errorf("city path = %q, want %q", gotCityPath, cityPath)
 	}
 }
+
+// The idle tracker carries the progress-stall content anchor, so a city that
+// sets only a stall timeout still gets one (ga-4m00q9q3).
+func TestBuildIdleTracker_StallTimeoutOnlyBuildsTracker(t *testing.T) {
+	tests := []struct {
+		name    string
+		session config.SessionConfig
+		wantNil bool
+	}{
+		{name: "progress stall timeout", session: config.SessionConfig{ProgressStallTimeout: "30m"}},
+		{name: "claim holder stall timeout", session: config.SessionConfig{ClaimHolderStallTimeout: "20m"}},
+		{name: "no stall timeout", wantNil: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Session:   tt.session,
+				Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+			}
+			it := buildIdleTracker(cfg, "test-city", "", runtime.NewFake())
+			if tt.wantNil {
+				if it != nil {
+					t.Fatalf("buildIdleTracker = %#v, want nil with no idle or stall timeout", it)
+				}
+				return
+			}
+			if _, ok := it.(*memoryIdleTracker); !ok {
+				t.Fatalf("buildIdleTracker = %#v, want a *memoryIdleTracker", it)
+			}
+		})
+	}
+}
