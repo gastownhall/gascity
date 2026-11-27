@@ -282,6 +282,7 @@ go_library(
         "schemas/maintenance/dolt-gc/result.schema.json",
         "schemas/maintenance/status/result.schema.json",
         "schemas/nudge/drop/result.schema.json",
+        "schemas/breaker/status/result.schema.json",
         "schemas/perf/run/result.schema.json",
         "schemas/perf/session-new/result.schema.json",
         "schemas/analyze/work-record/result.schema.json",

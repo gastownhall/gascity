@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "gc breaker status --json success result",
+  "type": "object",
+  "required": [
+    "ok",
+    "outcome",
+    "enabled"
+  ],
+  "properties": {
+    "ok": { "const": true },
+    "outcome": { "type": "string" },
+    "error": { "type": "string" },
+    "reconciler_mode": { "type": "string" },
+    "enabled": { "type": "boolean" },
+    "state": { "type": "string" },
+    "reason": { "type": "string" },
+    "trips": { "type": "integer" },
+    "backoff_cap_ms": { "type": "integer" },
+    "next_probe_at": { "type": "string" },
+    "open_since": { "type": "string" },
+    "probe_in_flight": { "type": "boolean" }
+  },
+  "additionalProperties": true
+}
