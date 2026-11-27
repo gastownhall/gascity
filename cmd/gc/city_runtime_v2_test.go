@@ -1354,13 +1354,25 @@ func passRecords(records []SessionReconcilerTraceRecord) []SessionReconcilerTrac
 func TestV2MaintenanceTraceRecordsReconcilePass(t *testing.T) {
 	t.Run("v2", func(t *testing.T) {
 		cr, _ := newPhaseFixtureRuntime(t, false, true)
-		attachTestV2(t, cr)
+		rt := attachTestV2(t, cr)
+		emitRecord := rt.planner.emitRecord
+		rt.planner.emitRecord = func(fields map[string]any) {
+			// Boot readiness precedes pass observation. Hold the ready pass's
+			// record until shutdown to exercise that ordering deterministically.
+			if rt.bootState() == plannerBootReady {
+				<-rt.planner.quit
+			}
+			emitRecord(fields)
+		}
 		bootTestV2(t, cr)
 		runFixtureTick(cr, "patrol")
 		runFixtureTick(cr, "patrol")
 		if n := cr.legacySessionEntries.Load(); n != 0 {
 			t.Errorf("legacySessionEntries = %d after v2 ticks, want 0", n)
 		}
+		// Join the in-flight pass, including its deferred trace emission,
+		// before closing the tracer and reading its records.
+		rt.stop()
 		records := closeTrace(t, cr)
 		recs := passRecords(records)
 		if len(recs) != 2 || recs[0].TickID == recs[1].TickID {
@@ -1389,7 +1401,7 @@ func TestV2MaintenanceTraceRecordsReconcilePass(t *testing.T) {
 		}
 		var v2 []SessionReconcilerTraceRecord
 		for _, r := range records {
-			if r.SiteCode == TraceSiteReconcilePass && r.Fields["operation_name"] == "v2_pass" {
+			if r.SiteCode == TraceSiteReconcilePass && r.Fields["operation_name"] == "v2_pass" && r.Fields["boot"] == plannerBootReady {
 				v2 = append(v2, r)
 			}
 		}
