@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -20,7 +22,7 @@ import (
 // agent-get). Split out of huma_handlers_sessions.go to isolate read-side
 // logic from mutations and streaming.
 
-func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInput) (*ListOutput[sessionResponse], error) {
+func (s *Server) humaHandleSessionList(ctx context.Context, input *SessionListInput) (*ListOutput[sessionResponse], error) {
 	index := s.latestIndex()
 	store := s.state.Stores().Sessions()
 	if store == (beads.SessionStore{}) {
@@ -33,8 +35,25 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	if err != nil {
 		return nil, err
 	}
-	mgr := s.sessionManager(store)
 	cfg := s.state.Config()
+	if input.Peek {
+		return s.buildSessionList(input, store, cfg, seek, index)
+	}
+	// A list without peek output shares a fresh build with the identical
+	// readers that arrive while it runs (listBuildSharer). The list has no
+	// response cache: every reader gets a build that started after it
+	// arrived, and the event index captured when that build started.
+	key := cacheKeyFor("sessions", input) + "#cfg=" + strconv.FormatUint(s.configGeneration(cfg), 10)
+	in := *input
+	return s.sessionListBuilds.share(ctx, s, key, func(context.Context) (*ListOutput[sessionResponse], error) {
+		return s.buildSessionList(&in, store, cfg, seek, s.latestIndex())
+	})
+}
+
+// buildSessionList builds the session page input asks for, from store and
+// cfg, starting after seek, as a build that saw event index.
+func (s *Server) buildSessionList(input *SessionListInput, store beads.SessionStore, cfg *config.City, seek *keysetKey, index uint64) (*ListOutput[sessionResponse], error) {
+	mgr := s.sessionManager(store)
 
 	listings, partialErrors, err := sessionReadModelListings(session.NewStore(store), input.State)
 	if err != nil {
@@ -82,9 +101,12 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	}
 	keyedTranscriptPaths := session.ResolveKeyedTranscriptPaths(sessionTranscriptLookupCandidates(pageSessions), s.sessionLogPaths(), sessionTranscriptProviderFallback(cfg))
 	page := make([]sessionResponse, len(pageSessions))
+	// A failed active-work read leaves only active_bead empty, so it is not
+	// a partial roster (activeBeadIndex.partialErrors).
+	activeBeads := s.newActiveBeadIndex()
 	for j, sess := range pageSessions {
 		page[j] = sessionResponseWithReason(sess, responseByID[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
-		s.enrichSessionResponseWithKeyedPaths(&page[j], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0, keyedTranscriptPaths)
+		s.enrichSessionResponseWithKeyedPaths(&page[j], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, activeBeads.lookup, false, 0, keyedTranscriptPaths)
 	}
 	if input.WakeReasons {
 		s.setSessionListWakeReasons(page, pageSessions, listings)
@@ -183,7 +205,7 @@ func (s *Server) humaHandleSessionGet(ctx context.Context, input *SessionGetInpu
 	}
 	wantPeek := input.Peek && !input.PeekStrict
 	resp := sessionResponseWithReason(info, pr, cfg, s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
-	s.enrichSessionResponse(&resp, info, cfg, sp, wantPeek, true, true, input.PeekLines)
+	s.enrichSessionResponse(&resp, info, cfg, sp, wantPeek, true, input.PeekLines)
 	if input.PeekStrict {
 		resp.LastOutput = strictOutput
 	}

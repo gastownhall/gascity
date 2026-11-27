@@ -5,6 +5,7 @@ load("//tools/bazel/rules:go_variant_test.bzl", "go_variant_test")
 go_library(
     name = "api",
     srcs = [
+        "active_bead_index.go",
         "agent_resolution.go",
         "beads_graph_federation.go",
         "blocking.go",
@@ -133,6 +134,7 @@ go_library(
         "idempotency_hash.go",
         "idempotency_helper.go",
         "keyset_page.go",
+        "list_build_share.go",
         "logwatcher.go",
         "loopback_transport.go",
         "middleware.go",
@@ -288,6 +290,7 @@ go_test(
     name = "api_test",
     srcs = [
         "acp_permission_stream_test.go",
+        "active_bead_index_test.go",
         "actor_helpers_test.go",
         "agent_resolution_test.go",
         "apierr_guard_test.go",
@@ -455,6 +458,7 @@ go_test(
         "idempotency_test.go",
         "initiator_test.go",
         "keyset_page_test.go",
+        "list_build_share_test.go",
         "logwatcher_test.go",
         "loopback_transport_test.go",
         "mail_session_inbox_test.go",

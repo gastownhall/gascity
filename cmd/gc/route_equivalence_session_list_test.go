@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -529,6 +530,103 @@ func TestSessionListAPIRouteRefusesAPartialAnswer(t *testing.T) {
 				t.Errorf("stderr = %q, want route=api reason=error and the listing failure", got.stderr)
 			}
 		})
+	}
+}
+
+// sessionListFailingWorkStore is a rig work store whose in_progress reads
+// fail, as a rig's do while its bd or Dolt backend is down or restarting and
+// no store cache answers for it. It counts those reads.
+type sessionListFailingWorkStore struct {
+	beads.Store
+	reads atomic.Int64
+}
+
+// List fails every in_progress read and passes every other read through.
+func (s *sessionListFailingWorkStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Status != "in_progress" {
+		return s.Store.List(query)
+	}
+	s.reads.Add(1)
+	return nil, errors.New("bd list: exit status 1")
+}
+
+// TestSessionListRouteEquivalenceWithAFailingRigWorkStore pins that a rig
+// work store the server cannot read leaves gc session list whole. The API
+// reads a rig's work store to fill an active session's active_bead, which the
+// CLI does not print; the local read reads no work store. A partial GET
+// /sessions answer fails the listing
+// (TestSessionListAPIRouteRefusesAPartialAnswer), so the server must not
+// report that read as a partial roster: the supervisor-hosted and remote
+// routes exit 0 and print what the local read prints, --json and table.
+func TestSessionListRouteEquivalenceWithAFailingRigWorkStore(t *testing.T) {
+	clearInheritedCityRoutingEnv(t)
+	h := newCharCity(t, charCityBasic+"\n[session]\nprovider = \"fake\"\n", func(t *testing.T, store beads.Store) {
+		seedSessionListEquivalence(t, store)
+	})
+	fake, ok := h.cs.SessionProvider().(*runtime.Fake)
+	if !ok {
+		t.Fatalf("harness session provider is %T, want *runtime.Fake", h.cs.SessionProvider())
+	}
+	origBuild := buildSessionProviderByName
+	t.Cleanup(func() { buildSessionProviderByName = origBuild })
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return fake, nil
+	}
+	if err := fake.Start(context.Background(), "eq-active", runtime.Config{}); err != nil {
+		t.Fatalf("fake.Start: %v", err)
+	}
+	fake.SetActivity("eq-active", time.Date(2026, 10, 28, 14, 0, 0, 0, time.UTC))
+
+	failing := &sessionListFailingWorkStore{Store: beads.NewMemStore()}
+	h.cs.mu.Lock()
+	rigs := make(map[string]beads.Store, len(h.cs.beadStores)+1)
+	for name, store := range h.cs.beadStores {
+		rigs[name] = store
+	}
+	rigs["alpha"] = failing
+	h.cs.beadStores = rigs
+	h.cs.rigStoresGen++ // the store epoch keys on it (city_stores.go)
+	h.cs.mu.Unlock()
+
+	hosted, remote := sessionListLanesOver(t, h, func(base http.Handler) http.Handler { return base })
+	sessionListHostedBy(t, hosted)
+
+	for _, jsonOut := range []bool{true, false} {
+		var args []string
+		if jsonOut {
+			args = append(args, "--json")
+		}
+		label := fmt.Sprintf("json=%v", jsonOut)
+		code, want, stderr := runSessionListCLIExit(t, h.cityPath, true, args...)
+		if code != 0 {
+			t.Fatalf("%s local: exit %d, stderr %q; want exit 0", label, code, stderr)
+		}
+
+		got := map[string]string{}
+		code, stdout, stderr := runSessionListCLIExit(t, h.cityPath, false, args...)
+		if code != 0 || !strings.Contains(stderr, "cmd=session list route=api") {
+			t.Fatalf("%s supervisor-hosted: exit %d, stdout %q, stderr %q; want exit 0 on the API route", label, code, stdout, stderr)
+		}
+		got["supervisor-hosted"] = stdout
+		var remoteOut, remoteErr bytes.Buffer
+		if code := routeSessionList("", "", "", remote, "", jsonOut, &remoteOut, &remoteErr); code != 0 || !strings.Contains(remoteErr.String(), "route=api") {
+			t.Fatalf("%s remote: exit %d, stdout %q, stderr %q; want exit 0 on the API route", label, code, remoteOut.String(), remoteErr.String())
+		}
+		got["remote"] = remoteOut.String()
+
+		for lane, out := range got {
+			if !jsonOut {
+				assertSessionListTablesMatch(t, label+" "+lane, want, out)
+				continue
+			}
+			decodeSessionListDoc(t, out)
+			if diff := chartest.JSONShapeDiff(stripRedacted(t, []byte(want)), []byte(out), sessionListAdditiveKeys); diff != "" {
+				t.Errorf("%s %s document differs from the local one: %s\nlocal: %s\n%s: %s", label, lane, diff, want, lane, out)
+			}
+		}
+	}
+	if failing.reads.Load() == 0 {
+		t.Fatal("no API listing read the failing rig work store, so the test did not reach the active-work lookup")
 	}
 }
 

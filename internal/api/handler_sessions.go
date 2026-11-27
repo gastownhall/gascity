@@ -354,9 +354,12 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	keyedTranscriptPaths := session.ResolveKeyedTranscriptPaths(sessionTranscriptLookupCandidates(pageSessions), s.sessionLogPaths(), sessionTranscriptProviderFallback(cfg))
 	items := make([]sessionResponse, len(pageSessions))
 	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
+	// A failed active-work read leaves only active_bead empty, so it is not
+	// a partial roster (activeBeadIndex.partialErrors).
+	activeBeads := s.newActiveBeadIndex()
 	for i, sess := range pageSessions {
 		items[i] = sessionResponseWithReason(sess, responseByID[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
-		s.enrichSessionResponseWithKeyedPaths(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0, keyedTranscriptPaths)
+		s.enrichSessionResponseWithKeyedPaths(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, activeBeads.lookup, false, 0, keyedTranscriptPaths)
 	}
 
 	if !pp.IsPaging {
@@ -416,7 +419,7 @@ func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 	resp := sessionResponseWithReason(info, pr, cfg, s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
 	handle, err := s.workerHandleForSession(store, id)
 	if err == nil {
-		s.enrichSessionResponse(&resp, info, cfg, handle, wantPeek, true, true, 0)
+		s.enrichSessionResponse(&resp, info, cfg, handle, wantPeek, true, 0)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -644,19 +647,26 @@ func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
 // 5-line dashboard preview.
 const defaultSessionPeekLines = 5
 
-// enrichSessionResponse populates runtime fields on a session response:
-// running state, active bead, peek output, and model/context metadata.
+// activeBeadLookup resolves a session's active bead from its identities in
+// priority order, optionally narrowed to one rig. A list build passes its
+// activeBeadIndex's lookup; a single-session read passes the live lookup.
+type activeBeadLookup func(rig string, assignees ...string) string
+
+// enrichSessionResponse populates runtime fields on a single session's
+// response: running state, active bead (read live, past any store cache),
+// peek output, and model/context metadata.
 //
 // peekLines controls the line count for the preview when wantPeek is true.
 // Zero means "use default" (defaultSessionPeekLines).
-func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info, cfg *config.City, runtimeHandle any, wantPeek, liveActiveBead, allowWorkdirTranscriptDiscovery bool, peekLines int) {
-	s.enrichSessionResponseWithKeyedPaths(resp, info, cfg, runtimeHandle, wantPeek, liveActiveBead, allowWorkdirTranscriptDiscovery, peekLines, nil)
+func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info, cfg *config.City, runtimeHandle any, wantPeek, allowWorkdirTranscriptDiscovery bool, peekLines int) {
+	s.enrichSessionResponseWithKeyedPaths(resp, info, cfg, runtimeHandle, wantPeek, s.findLiveActiveBeadForAssignees, allowWorkdirTranscriptDiscovery, peekLines, nil)
 }
 
 // enrichSessionResponseWithKeyedPaths accepts an optional page-level map of
 // exact transcript paths. A non-nil map is authoritative, including misses,
 // so list callers can batch Codex discovery once instead of scanning per row.
-func (s *Server) enrichSessionResponseWithKeyedPaths(resp *sessionResponse, info session.Info, cfg *config.City, runtimeHandle any, wantPeek, liveActiveBead, allowWorkdirTranscriptDiscovery bool, peekLines int, keyedTranscriptPaths map[string]string) {
+// activeBead resolves the session's active bead.
+func (s *Server) enrichSessionResponseWithKeyedPaths(resp *sessionResponse, info session.Info, cfg *config.City, runtimeHandle any, wantPeek bool, activeBead activeBeadLookup, allowWorkdirTranscriptDiscovery bool, peekLines int, keyedTranscriptPaths map[string]string) {
 	if info.Closed || runtimeHandle == nil {
 		return
 	}
@@ -684,11 +694,7 @@ func (s *Server) enrichSessionResponseWithKeyedPaths(resp *sessionResponse, info
 	// A previous fix accidentally passed info.Alias as the first positional
 	// (rig) argument, which silently narrowed the search to a rig named after
 	// the alias — so alias-assigned work still disappeared from ActiveBead.
-	if liveActiveBead {
-		resp.ActiveBead = s.findLiveActiveBeadForAssignees("", info.ID, info.SessionName, info.Alias, info.Template)
-	} else {
-		resp.ActiveBead = s.findActiveBeadForAssignees("", info.ID, info.SessionName, info.Alias, info.Template)
-	}
+	resp.ActiveBead = activeBead("", info.ID, info.SessionName, info.Alias, info.Template)
 
 	// Peek preview (opt-in, only when running). peekLines=0 means "use
 	// default" so existing callers that omit the query param keep the

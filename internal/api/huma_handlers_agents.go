@@ -93,15 +93,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	bucket := responseCacheTimeBucket(started)
 
 	cfg := s.state.Config()
-	sp := s.state.SessionProvider()
-	cityName := s.state.CityName()
-	sessTmpl := cfg.Workspace.SessionTemplate
 	wantPeek := input.Peek
-
-	// Raw config drives accurate provenance detection (pack-derived vs.
-	// city-native). Optional capability: when absent, agentOrigin falls
-	// back to the patch-presence heuristic.
-	rawCfg := s.rawConfig()
 
 	// The agent list keys its response cache on a TIME bucket, not the event
 	// index: on a busy city the sequence advances between polls, so an
@@ -128,6 +120,35 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 			return &ListOutput[agentResponse]{Index: hit.Index, Body: hit.Body}, nil
 		}
 	}
+	if cacheKey == "" {
+		return s.buildAgentList(ctx, input, cfg, cacheKey, index, started, bucket)
+	}
+	// A cache miss shares a fresh build with the identical readers that miss
+	// while it runs (listBuildSharer). A shared build captures its event
+	// index and start time when it starts, not when its first reader queued
+	// it, so its list and its index agree.
+	in := *input
+	return s.agentListBuilds.share(ctx, s, cacheKey, func(ctx context.Context) (*ListOutput[agentResponse], error) {
+		index := s.latestIndex()
+		started := time.Now()
+		return s.buildAgentList(ctx, &in, cfg, cacheKey, index, started, responseCacheTimeBucket(started))
+	})
+}
+
+// buildAgentList builds the agent list input asks for from cfg, the snapshot
+// cacheKey was derived from. A complete list is cached under cacheKey, unless
+// it is "", as a build that started at started, in time bucket bucket, and
+// saw event index.
+func (s *Server) buildAgentList(ctx context.Context, input *AgentListInput, cfg *config.City, cacheKey string, index uint64, started time.Time, bucket uint64) (*ListOutput[agentResponse], error) {
+	sp := s.state.SessionProvider()
+	cityName := s.state.CityName()
+	sessTmpl := cfg.Workspace.SessionTemplate
+	wantPeek := input.Peek
+
+	// Raw config drives accurate provenance detection (pack-derived vs.
+	// city-native). Optional capability: when absent, agentOrigin falls
+	// back to the patch-presence heuristic.
+	rawCfg := s.rawConfig()
 
 	// Active graph-resident work, indexed once per request by agent session
 	// name (nil on a single-store city). Computed after the cache-hit return
@@ -151,6 +172,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	runtimeSessions := s.newAgentSessionResolver(ctx, cfg, cityName)
 
 	pools := newRequestSessionListing(sp)
+	activeBeads := s.newActiveBeadIndex()
 	var agents []agentResponse
 	var partialErrors []string
 	for _, a := range cfg.Agents {
@@ -285,7 +307,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 				}
 			}
 
-			resp.ActiveBead = s.findActiveBeadForAssignees(ea.rig, sessionID, sessionName, ea.qualifiedName)
+			resp.ActiveBead = activeBeads.lookup(ea.rig, sessionID, sessionName, ea.qualifiedName)
 			// A relocated-graph wisp names its assignee after the session, not
 			// the work store, so the work-store lookup above misses it. Fall
 			// back to the graph bead and use its timestamp as the activity
@@ -322,6 +344,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 		}
 	}
 	partialErrors = append(partialErrors, runtimeSessions.partialErrors()...)
+	partialErrors = append(partialErrors, activeBeads.partialErrors()...)
 
 	if agents == nil {
 		agents = []agentResponse{}

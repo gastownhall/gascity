@@ -545,9 +545,9 @@ func TestHandleAgentListCachesAcrossIndexChanges(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("first agents = %d, want 200", rec.Code)
 	}
-	perBuild := store.listByAssigneeCalls
+	perBuild := store.listCalls
 	if perBuild == 0 {
-		t.Fatal("first agents issued no assignee lookups; the build count cannot tell a hit from a rebuild")
+		t.Fatal("first agents issued no store reads; the build count cannot tell a hit from a rebuild")
 	}
 	builtIndex := responseIndex(t, rec)
 
@@ -558,8 +558,8 @@ func TestHandleAgentListCachesAcrossIndexChanges(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("agents after event %d = %d, want 200", i, rec.Code)
 		}
-		if store.listByAssigneeCalls != perBuild {
-			t.Fatalf("assignee lookups after event %d = %d, want %d (one build; the cache must survive sequence churn)", i, store.listByAssigneeCalls, perBuild)
+		if store.listCalls != perBuild {
+			t.Fatalf("store reads after event %d = %d, want %d (one build; the cache must survive sequence churn)", i, store.listCalls, perBuild)
 		}
 		// The cached body predates the events recorded since its build, so
 		// the hit must report the build index, not the live head.
@@ -591,9 +591,9 @@ func TestHandleAgentListServesRecentBodyAfterBucketRollover(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("first agents = %d, want 200", rec.Code)
 	}
-	perBuild := store.listByAssigneeCalls
+	perBuild := store.listCalls
 	if perBuild == 0 {
-		t.Fatal("first agents issued no assignee lookups; the build count cannot tell a hit from a rebuild")
+		t.Fatal("first agents issued no store reads; the build count cannot tell a hit from a rebuild")
 	}
 	builtIndex := responseIndex(t, rec)
 	state.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
@@ -603,8 +603,8 @@ func TestHandleAgentListServesRecentBodyAfterBucketRollover(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("second agents = %d, want 200", rec.Code)
 	}
-	if store.listByAssigneeCalls != perBuild {
-		t.Fatalf("assignee lookups = %d, want %d: the repeat was rebuilt instead of served from the TTL floor", store.listByAssigneeCalls, perBuild)
+	if store.listCalls != perBuild {
+		t.Fatalf("store reads = %d, want %d: the repeat was rebuilt instead of served from the TTL floor", store.listCalls, perBuild)
 	}
 	if got := responseIndex(t, rec); got != builtIndex {
 		t.Fatalf("X-GC-Index = %d, want the build index %d on a TTL-floor hit", got, builtIndex)
@@ -632,9 +632,9 @@ func TestHandleAgentListRebuildsAfterTTLFloor(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("first agents = %d, want 200", rec.Code)
 	}
-	perBuild := store.listByAssigneeCalls
+	perBuild := store.listCalls
 	if perBuild == 0 {
-		t.Fatal("first agents issued no assignee lookups; the build count cannot tell a hit from a rebuild")
+		t.Fatal("first agents issued no store reads; the build count cannot tell a hit from a rebuild")
 	}
 	state.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
 	head, err := state.eventProv.LatestSeq()
@@ -647,8 +647,8 @@ func TestHandleAgentListRebuildsAfterTTLFloor(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("second agents = %d, want 200", rec.Code)
 	}
-	if want := 2 * perBuild; store.listByAssigneeCalls != want {
-		t.Fatalf("assignee lookups = %d, want %d: a list older than the floor was served instead of rebuilt", store.listByAssigneeCalls, want)
+	if want := 2 * perBuild; store.listCalls != want {
+		t.Fatalf("store reads = %d, want %d: a list older than the floor was served instead of rebuilt", store.listCalls, want)
 	}
 	if got := responseIndex(t, rec); got != head {
 		t.Fatalf("X-GC-Index = %d, want the head %d the rebuilt list was read at", got, head)
@@ -692,25 +692,25 @@ func TestHandleAgentListRebuildsCheapListAfterEvent(t *testing.T) {
 	}
 }
 
-// gatedAssigneeStore parks the first active-bead lookup a list build makes
-// until open is called, so a test can hold that build open while another one
-// runs. Later lookups pass straight through.
-type gatedAssigneeStore struct {
+// gatedWorkReadStore parks the first active-work read a list build makes
+// until open is called, so a test can hold that build open while the state
+// changes behind it. Later reads pass straight through.
+type gatedWorkReadStore struct {
 	beads.Store
-	lookups   atomic.Int64
+	reads     atomic.Int64
 	parked    atomic.Bool
 	entered   chan struct{}
 	release   chan struct{}
 	closeOnce sync.Once
 }
 
-func newGatedAssigneeStore() *gatedAssigneeStore {
-	return &gatedAssigneeStore{Store: beads.NewMemStore(), entered: make(chan struct{}), release: make(chan struct{})}
+func newGatedWorkReadStore() *gatedWorkReadStore {
+	return &gatedWorkReadStore{Store: beads.NewMemStore(), entered: make(chan struct{}), release: make(chan struct{})}
 }
 
-func (s *gatedAssigneeStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	if query.Assignee != "" {
-		s.lookups.Add(1)
+func (s *gatedWorkReadStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Status == "in_progress" {
+		s.reads.Add(1)
 		if s.parked.CompareAndSwap(false, true) {
 			close(s.entered)
 			<-s.release
@@ -719,27 +719,33 @@ func (s *gatedAssigneeStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	return s.Store.List(query)
 }
 
-// open releases the parked lookup; it is safe to call more than once.
-func (s *gatedAssigneeStore) open() { s.closeOnce.Do(func() { close(s.release) }) }
+// open releases the parked read; it is safe to call more than once.
+func (s *gatedWorkReadStore) open() { s.closeOnce.Do(func() { close(s.release) }) }
 
-// TestHandleAgentListKeepsLaterStartedBuild pins the overlap rule: on a loaded
-// city list builds overlap and can finish out of order, and the age floor
-// serves whatever the slot holds. A build that started first and finishes
-// last must not replace the list a later-started build cached, or requests
-// are served the older list and X-GC-Index steps back.
+// TestHandleAgentListKeepsLaterStartedBuild pins what a repeat sees when a
+// list build runs while the state changes: a reader arriving behind a running
+// build joins the one build queued after it, that build reads the newer state
+// when it starts, and the cache ends up holding its newer list — a repeat is
+// served from the cache at the newer X-GC-Index, not rebuilt, and never
+// stepped back to the older build's view.
 func TestHandleAgentListKeepsLaterStartedBuild(t *testing.T) {
 	pinAgentListCache(t, time.Hour, time.Hour)
 	// Every build counts as slow, so a cached list is served across index
-	// changes and the slot alone decides what the repeat gets.
+	// changes and the cache alone decides what the repeat gets.
 	pinAgentListBuildsSlow(t)
 
 	state := newFakeState(t)
-	gate := newGatedAssigneeStore()
+	gate := newGatedWorkReadStore()
 	state.stores["myrig"] = gate
-	h := newTestCityHandler(t, state)
+	srv := New(state)
+	// joins reports each reader taking its build: whether it started one
+	// or joined the build queued behind the running one.
+	joins := make(chan bool, 4)
+	srv.agentListBuilds.joined = func(_ string, started bool) { joins <- started }
+	h := newTestCityHandlerWith(t, state, srv)
 
 	// The first build reads the worker stopped, then parks in its
-	// active-bead lookup.
+	// active-work read.
 	var first *httptest.ResponseRecorder
 	firstDone := make(chan struct{})
 	go func() {
@@ -751,37 +757,56 @@ func TestHandleAgentListKeepsLaterStartedBuild(t *testing.T) {
 		<-firstDone
 	})
 	select {
+	case started := <-joins:
+		if !started {
+			t.Fatal("the first reader did not start a build")
+		}
+	case <-firstDone:
+		t.Fatal("first reader finished without taking a shared build")
+	}
+	select {
 	case <-gate.entered:
 	case <-firstDone:
-		t.Fatal("first build finished without an active-bead lookup; the test cannot hold it open")
+		t.Fatal("first build finished without an active-work read; the test cannot hold it open")
 	}
 
-	// While it is parked, the worker starts and a second build caches the
-	// newer list.
+	// While the first build is parked, the worker starts. A second reader
+	// joins the build queued behind the running one.
 	if err := state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}); err != nil {
 		t.Fatalf("start myrig--worker: %v", err)
 	}
 	state.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "gc", Subject: "myrig--worker"})
-	newer, newerIndex := listedWorker(t, getAgents(h, state))
-	if !newer.Running {
-		t.Fatal("second build read myrig/worker stopped after its session started")
+	var second *httptest.ResponseRecorder
+	secondDone := make(chan struct{})
+	go func() {
+		defer close(secondDone)
+		second = getAgents(h, state)
+	}()
+	if started := <-joins; started {
+		t.Fatal("the second reader started a build beside the parked one instead of queuing behind it")
 	}
 
-	// The first build finishes last and tries to cache its older list.
+	// The first build finishes with its older view, then the queued build
+	// starts, reads the started worker and caches the newer list.
 	gate.open()
 	<-firstDone
+	<-secondDone
+	newer, newerIndex := listedWorker(t, second)
+	if !newer.Running {
+		t.Fatal("queued build read myrig/worker stopped after its session started")
+	}
 	older, olderIndex := listedWorker(t, first)
 	if older.Running || olderIndex >= newerIndex {
 		t.Fatalf("first build read running=%v at index %d, want a stopped worker before index %d; the test no longer models an older build", older.Running, olderIndex, newerIndex)
 	}
 
-	lookups := gate.lookups.Load()
+	reads := gate.reads.Load()
 	row, index := listedWorker(t, getAgents(h, state))
 	if !row.Running || index != newerIndex {
-		t.Fatalf("repeat served running=%v at X-GC-Index %d, want the later-started build's running=true at %d: the build that finished last replaced it", row.Running, index, newerIndex)
+		t.Fatalf("repeat served running=%v at X-GC-Index %d, want the queued build's running=true at %d: the older build's list won the cache", row.Running, index, newerIndex)
 	}
-	if got := gate.lookups.Load(); got != lookups {
-		t.Fatalf("assignee lookups = %d after the repeat, want %d: it was rebuilt, not served from the cache", got, lookups)
+	if got := gate.reads.Load(); got != reads {
+		t.Fatalf("active-work reads = %d after the repeat, want %d: it was rebuilt, not served from the cache", got, reads)
 	}
 }
 
@@ -853,9 +878,9 @@ func TestHandleAgentListBlockingBypassesTimeCache(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("first blocking agents = %d, want 200", rec.Code)
 	}
-	perBuild := store.listByAssigneeCalls
+	perBuild := store.listCalls
 	if perBuild == 0 {
-		t.Fatal("first blocking agents issued no assignee lookups; the build count cannot tell a hit from a rebuild")
+		t.Fatal("first blocking agents issued no store reads; the build count cannot tell a hit from a rebuild")
 	}
 
 	rec = httptest.NewRecorder()
@@ -863,8 +888,8 @@ func TestHandleAgentListBlockingBypassesTimeCache(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("second blocking agents = %d, want 200", rec.Code)
 	}
-	if want := 2 * perBuild; store.listByAssigneeCalls != want {
-		t.Fatalf("assignee lookups after second blocking request = %d, want %d (blocking must bypass the cache)", store.listByAssigneeCalls, want)
+	if want := 2 * perBuild; store.listCalls != want {
+		t.Fatalf("store reads after second blocking request = %d, want %d (blocking must bypass the cache)", store.listCalls, want)
 	}
 }
 
@@ -938,9 +963,9 @@ func TestHandleAgentListPeekBypassesCache(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("priming agents = %d, want 200", rec.Code)
 	}
-	perBuild := store.listByAssigneeCalls
+	perBuild := store.listCalls
 	if perBuild == 0 {
-		t.Fatal("priming agents build issued no assignee-scoped List calls")
+		t.Fatal("priming agents build issued no store reads")
 	}
 
 	peekList := func() agentListWire {
@@ -979,8 +1004,8 @@ func TestHandleAgentListPeekBypassesCache(t *testing.T) {
 	if row.LastOutput != "two" {
 		t.Fatalf("peek last_output = %q, want %q (peek requests must rebuild on every request)", row.LastOutput, "two")
 	}
-	if got := store.listByAssigneeCalls; got != 3*perBuild {
-		t.Fatalf("assignee List calls after prime + two peeks = %d, want %d (one prime build plus one rebuild per peek)", got, 3*perBuild)
+	if got := store.listCalls; got != 3*perBuild {
+		t.Fatalf("store reads after prime + two peeks = %d, want %d (one prime build plus one rebuild per peek)", got, 3*perBuild)
 	}
 
 	// The peek requests must not have disturbed the plain list's cache.
@@ -989,8 +1014,8 @@ func TestHandleAgentListPeekBypassesCache(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("plain agents after peeks = %d, want 200", rec.Code)
 	}
-	if got := store.listByAssigneeCalls; got != 3*perBuild {
-		t.Fatalf("assignee List calls after plain repeat = %d, want %d (peek requests must not evict the plain cache)", got, 3*perBuild)
+	if got := store.listCalls; got != 3*perBuild {
+		t.Fatalf("store reads after plain repeat = %d, want %d (peek requests must not evict the plain cache)", got, 3*perBuild)
 	}
 }
 

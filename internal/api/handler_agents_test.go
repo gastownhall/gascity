@@ -45,7 +45,7 @@ type activeBeadQueryStore struct {
 }
 
 func (s *activeBeadQueryStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	if query.Status == "in_progress" && (query.Assignee != "" || len(query.Assignees) > 0) {
+	if query.Status == "in_progress" {
 		s.queries = append(s.queries, query)
 	}
 	return s.Store.List(query)
@@ -910,10 +910,13 @@ func TestAgentListActiveBeadUsesCachedLookup(t *testing.T) {
 		t.Fatalf("active_bead = %q, want %q", got, work.ID)
 	}
 	if len(store.queries) != 1 {
-		t.Fatalf("active-bead queries = %d, want 1", len(store.queries))
+		t.Fatalf("active-bead queries = %d, want 1: the list's active-bead join reads each reached store once per build, not once per identity", len(store.queries))
 	}
 	if store.queries[0].Live {
 		t.Fatal("agent list active-bead lookup should stay cached")
+	}
+	if store.queries[0].Assignee != "" || len(store.queries[0].Assignees) > 0 {
+		t.Fatalf("agent list active-bead query narrowed by assignee (%+v), want one batched in_progress read over the whole store", store.queries[0])
 	}
 }
 
@@ -2007,7 +2010,7 @@ func lookupActiveBead(srv *Server, live bool, rig string, assignees ...string) s
 	if live {
 		return srv.findLiveActiveBeadForAssignees(rig, assignees...)
 	}
-	return srv.findActiveBeadForAssignees(rig, assignees...)
+	return srv.newActiveBeadIndex().lookup(rig, assignees...)
 }
 
 // TestActiveBeadLookupSkipsSuspendedRig: a rig suspended by effective state
@@ -2208,7 +2211,7 @@ func TestActiveBeadLookupSuspensionStateEdges(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		got := New(l.state).findActiveBeadForAssignees("", "session-id")
+		got := New(l.state).newActiveBeadIndex().lookup("", "session-id")
 
 		if l.alpha.listCalls != 0 {
 			t.Errorf("suspended_on_start rig alpha List calls = %d, want 0", l.alpha.listCalls)
@@ -2261,7 +2264,7 @@ func TestActiveBeadLookupLogsUnreadableSuspensionStateOnce(t *testing.T) {
 	srv := New(l.state)
 	lookupRows := func() {
 		for range 3 {
-			srv.findActiveBeadForAssignees("", "session-id")
+			srv.newActiveBeadIndex().lookup("", "session-id")
 		}
 	}
 	var logs bytes.Buffer

@@ -382,71 +382,17 @@ func rigTemplateInstance(cfg *config.City, name string) (template, rig string, o
 	return instance.QualifiedName(), rig, true
 }
 
-// findActiveBeadForAssignees returns the ID of the first in_progress bead
-// assigned to the given identities using the cached active snapshot. If rig is
-// non-empty, only that rig's store is searched; otherwise all stores are
-// searched. A store only rigs suspended by effective state reach is never
-// searched (activeBeadSearchScope). Returns "" if no match.
-func (s *Server) findActiveBeadForAssignees(rig string, assignees ...string) string {
-	return s.findActiveBeadForAssigneesWithFreshness(rig, false, assignees...)
-}
-
 // findLiveActiveBeadForAssignees returns the ID of the first in_progress bead
 // assigned to the given identities, bypassing the cache. Use this on
-// lower-frequency detail views where external reassignment freshness matters.
-// A store only rigs suspended by effective state reach is never searched.
+// lower-frequency detail views where external reassignment freshness matters;
+// a list build resolves its rows through an activeBeadIndex instead. If rig is
+// non-empty, only that rig's store is searched; otherwise all stores are
+// searched. A store only rigs suspended by effective state reach is never
+// searched (activeBeadSearchScope). Precedence is identity order first, then
+// store order, then newest first within a store. Returns "" if no match.
 func (s *Server) findLiveActiveBeadForAssignees(rig string, assignees ...string) string {
-	return s.findActiveBeadForAssigneesWithFreshness(rig, true, assignees...)
-}
-
-// findActiveBeadForAssigneesWithFreshness returns the in_progress bead of the
-// highest-priority identity: identity order first, then store order, then
-// newest first within a store. Cached reads use a targeted ListQuery with
-// Limit=1 per identity and store, stopping at the first match; live reads go
-// through findLiveActiveBeadInStores. Both read only the stores
-// activeBeadSearchScope picks.
-func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, assignees ...string) string {
 	stores, rigNames := activeBeadSearchScope(workStoresByName(s.state.Stores(), s.state.CityName()), s.loadCacheColdRigs(), rig)
-	seen := make(map[string]bool, len(assignees))
-	var unique []string
-	for _, assignee := range assignees {
-		assignee = strings.TrimSpace(assignee)
-		if assignee == "" || seen[assignee] {
-			continue
-		}
-		seen[assignee] = true
-		unique = append(unique, assignee)
-	}
-	if live {
-		return findLiveActiveBeadInStores(stores, rigNames, unique)
-	}
-	for _, assignee := range unique {
-		for _, rn := range rigNames {
-			query := beads.ListQuery{
-				Assignee: assignee,
-				Status:   "in_progress",
-				Limit:    1,
-				Sort:     beads.SortCreatedDesc,
-			}
-			if cached, ok := beads.As[beads.CachedLister](stores[rn]); ok {
-				matches, cacheOK := cached.CachedList(query)
-				if cacheOK {
-					if len(matches) > 0 {
-						return matches[0].ID
-					}
-					continue
-				}
-			}
-			matches, err := stores[rn].List(query)
-			if err != nil {
-				continue
-			}
-			if len(matches) > 0 {
-				return matches[0].ID
-			}
-		}
-	}
-	return ""
+	return findLiveActiveBeadInStores(stores, rigNames, uniqueActiveBeadIdentities(assignees))
 }
 
 // activeBeadSearchScope returns the stores an active-bead lookup may read and
@@ -491,7 +437,7 @@ func activeBeadSearchScope(all map[string]beads.WorkStore, cold map[string]bool,
 // work: how far a store narrows its call varies. DoltliteReadStore filters
 // with assignee IN (...), NativeDoltStore and BdStore issue one keyed read per
 // identity, and SQLiteStore reads the store's whole in_progress set and
-// filters it client-side. Precedence matches the cached path. Reading stops
+// filters it client-side. Precedence matches activeBeadIndex.lookup. Reading stops
 // once the first identity has a match, since no later store can outrank it.
 func findLiveActiveBeadInStores(stores map[string]beads.WorkStore, rigNames, identities []string) string {
 	if len(identities) == 0 {
