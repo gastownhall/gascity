@@ -641,7 +641,13 @@ func ensurePoolSessionIdentifiersAvailable(
 	identifiers poolSessionIdentifiers,
 ) error {
 	for index, name := range identifiers.availabilityNames {
-		if err := ensurePoolSessionNameAvailable(store, cfg, snapshot, name, identity.AgentName); err != nil {
+		claim := poolRuntimeNameClaim
+		if identifiers.beadScoped && index == 0 {
+			// A bead-scoped pool's first name is only its identity lease: the
+			// runtime name comes from the new bead's ID.
+			claim = poolIdentityLeaseClaim
+		}
+		if err := ensurePoolSessionNameAvailable(store, cfg, snapshot, name, identity.AgentName, claim); err != nil {
 			if errors.Is(err, sessionpkg.ErrSessionNameExists) {
 				if index == 0 {
 					return fmt.Errorf("%w: template %q identity %q wants %q: %w", errPoolSessionNameUnavailable, template, identity.AgentName, name, err)
@@ -660,12 +666,31 @@ func ensurePoolSessionIdentifiersAvailable(
 // its own runtime name" from "a stranger squatting it", and they reject the
 // pool's own name forever (the config-reservation and identifier-collision
 // lanes both key off it).
-func ensurePoolSessionNameAvailable(store beads.Store, cfg *config.City, snapshot *sessionBeadSnapshot, name, selfOwner string) error {
+func ensurePoolSessionNameAvailable(store beads.Store, cfg *config.City, snapshot *sessionBeadSnapshot, name, selfOwner string, claim poolNameClaim) error {
 	if openSessionNameTaken(snapshot, name) {
 		return fmt.Errorf("%w: %q conflicts with live pool snapshot", sessionpkg.ErrSessionNameExists, name)
 	}
-	return sessionpkg.EnsureSessionNameAvailableWithConfigForOwner(beads.SessionStore{Store: store}, cfg, name, "", selfOwner)
+	sessions := beads.SessionStore{Store: store}
+	if claim == poolIdentityLeaseClaim {
+		return sessionpkg.EnsurePoolIdentityLeaseAvailableWithConfig(sessions, cfg, name, selfOwner)
+	}
+	return sessionpkg.EnsureSessionNameAvailableWithConfigForOwner(sessions, cfg, name, "", selfOwner)
 }
+
+// poolNameClaim is what a fresh pool bead claims with a name it must prove
+// available.
+type poolNameClaim int
+
+const (
+	// poolRuntimeNameClaim is a runtime session name, held by every open
+	// session identifier that matches it.
+	poolRuntimeNameClaim poolNameClaim = iota
+	// poolIdentityLeaseClaim is a bead-scoped pool's identity lease, which is
+	// not a runtime name. An open manual session holds it only through a name
+	// it explicitly claimed (session_name or alias), not through the
+	// identifiers derived from the template it was started from.
+	poolIdentityLeaseClaim
+)
 
 // poolRuntimeSessionName is the identity-derived name for a pool instance with
 // no configured tmux_alias. Since v1.5.0 it is the slot's identity lease and

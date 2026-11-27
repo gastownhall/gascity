@@ -5931,6 +5931,12 @@ func claimFreshPoolSlotInfo(bp *agentBuildParams, cfgAgent *config.Agent, usedSl
 			if isFailedCreateSessionInfo(info) {
 				continue
 			}
+			if isManualSessionInfoForAgent(info, cfgAgent) && !manualSessionClaimsName(info, cfgAgent.QualifiedName()) {
+				// A manual session holds the canonical seat only through a name
+				// it explicitly claimed, not through the identifiers derived
+				// from the template it was started from.
+				continue
+			}
 			if infoIdentifiesAsCanonical(info, cfgAgent.QualifiedName()) {
 				return 0, fmt.Errorf("%w: canonical pool template %q is held by session %s", errPoolSessionNameUnavailable, cfgAgent.QualifiedName(), info.ID)
 			}
@@ -6037,6 +6043,14 @@ func beadIdentifiesAsCanonical(bead beads.Bead, canonical string) bool {
 		strings.TrimSpace(bead.Metadata["alias"]) == canonical ||
 		strings.TrimSpace(bead.Title) == canonical ||
 		containsString(bead.Labels, "agent:"+canonical)
+}
+
+// manualSessionClaimsName reports whether a manual session explicitly claimed
+// name as its alias or runtime session name.
+func manualSessionClaimsName(info session.Info, name string) bool {
+	name = strings.TrimSpace(name)
+	return name != "" &&
+		(strings.TrimSpace(info.Alias) == name || strings.TrimSpace(info.SessionNameMetadata) == name)
 }
 
 // infoIdentifiesAsCanonical is the session.Info mirror of beadIdentifiesAsCanonical.
