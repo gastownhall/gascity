@@ -3735,11 +3735,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					fmt.Fprintf(stderr, "session reconciler: skipping abrupt restart-requested kill for pinned named session %s (bead %s)\n", name, id) //nolint:errcheck
 					continue
 				}
+				var releasedSince time.Time
 				if runtimeRunning {
 					if err := controllerKillSessionRow(cityPath, store, sp, cfg, infoByID[id]); err != nil {
 						fmt.Fprintf(stderr, "session reconciler: stopping restart-requested %s: %v\n", name, err) //nolint:errcheck
 						continue
 					}
+					// Wall clock, not clk: a fresh read compares runtime
+					// listing times, which are wall-clock.
+					releasedSince = time.Now()
 				}
 				if identity := namedSessionIdentityInfo(infoByID[id]); identity != "" {
 					if err := resetSessionCircuitBreakerState(store, id, identity, cb); err != nil {
@@ -3806,15 +3810,27 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						}
 					}
 					fmt.Fprintf(stdout, "Stopped restart-requested session '%s'\n", name) //nolint:errcheck
-					// Yield this tick so the kill and the next wake run
-					// on separate reconciler passes; the new start should
-					// not race the tmux alias release.
-					continue
+					// Start again in this pass only once a fresh read
+					// proves the name absent: a start that still finds
+					// the name adopts the old runtime and drops the
+					// reset. Unproven, the start waits for the next pass.
+					if !confirmRuntimeReleased(ctx, sp, tp.Hints.ProcessNames, name, releasedSince) {
+						fmt.Fprintf(stderr, "session reconciler: restart-requested %s stopped, but its runtime name is not confirmed released; it starts on the next pass\n", name) //nolint:errcheck
+						if reconcileOpts.asyncFollowUp != nil {
+							reconcileOpts.asyncFollowUp()
+						}
+						continue
+					}
+					// Released: fall through like the already-dead
+					// branch below, so the wake decision starts the
+					// fresh session in this pass.
+					running, alive = false, false
 				}
-				// Runtime was already dead — no kill happened, no alias
-				// release to wait on. Fall through so the wake decision
-				// can pick up the freshly cleared metadata and emit a
-				// start_candidate on this same tick. See #2345.
+				// Fall through so the wake decision can pick up the freshly
+				// cleared metadata and emit a start_candidate on this same
+				// tick: either the runtime was already dead (no kill
+				// happened, no alias release to wait on; #2345), or the kill
+				// was just confirmed released above.
 			}
 		}
 
