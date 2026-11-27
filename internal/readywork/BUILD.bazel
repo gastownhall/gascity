@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "readywork",
     srcs = [
+        "admission.go",
         "crossstore.go",
         "doc.go",
         "pushdown.go",
@@ -15,6 +16,7 @@ go_library(
     deps = [
         "//internal/beads",
         "//internal/fanout",
+        "//internal/inputadmission",
         "//internal/storeref",
     ],
 )
@@ -26,6 +28,7 @@ go_test(
         "enrich_test.go",
         "federate_test.go",
         "handle_legs_test.go",
+        "native_input_admission_test.go",
         "pushdown_test.go",
         "query_test.go",
         "testenv_import_test.go",

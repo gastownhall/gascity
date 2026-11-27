@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/fanout"
@@ -126,7 +127,7 @@ func verdictOfCopies(id string, copies []heldCopy) blockerVerdict {
 	var held *heldCopy
 	for i, c := range copies {
 		holders = append(holders, c.label)
-		if beads.DependencySatisfied(c.bead.Status, beads.ReadinessWorkOutcome(c.bead.Metadata)) {
+		if beads.DependencyCopySatisfied(c.bead) {
 			continue
 		}
 		if held == nil || (held.bead.Status == "closed" && c.bead.Status != "closed") {
@@ -558,61 +559,6 @@ func legDeps(ctx context.Context, leg Leg, ids []string) (map[string][]beads.Dep
 	return out, nil
 }
 
-// gate returns the rows of items no blocker holds, in their order, judging
-// only as many as the bound needs: rows are judged a chunk at a time, grouped
-// by the leg that served them, until limit rows are kept or items run out.
-func (cs *crossStore) gate(ctx context.Context, owners map[string]int, items []beads.Bead, limit int) ([]beads.Bead, error) {
-	if cs == nil || len(items) == 0 {
-		if limit > 0 && len(items) > limit {
-			items = items[:limit]
-		}
-		return items, nil
-	}
-	chunk := len(items)
-	if limit > 0 {
-		chunk = limit + boundedSlack
-	}
-	var kept []beads.Bead
-	for start := 0; start < len(items) && (limit <= 0 || len(kept) < limit); start += chunk {
-		part := items[start:min(start+chunk, len(items))]
-		byLeg := make(map[int][]beads.Bead)
-		var order []int
-		for _, row := range part {
-			idx, ok := owners[row.ID]
-			if !ok {
-				continue
-			}
-			if _, seen := byLeg[idx]; !seen {
-				order = append(order, idx)
-			}
-			byLeg[idx] = append(byLeg[idx], row)
-		}
-		blocked := make(map[string]bool, len(part))
-		errs := make([]error, len(order))
-		results := make([]map[string]bool, len(order))
-		fanout.Bounded(len(order), LegFanOut, func(i int) {
-			results[i], errs[i] = cs.blockedRows(ctx, order[i], byLeg[order[i]])
-		})
-		for i, err := range errs {
-			if err != nil {
-				return nil, err
-			}
-			for id, b := range results[i] {
-				blocked[id] = b
-			}
-		}
-		for _, row := range part {
-			if !blocked[row.ID] {
-				kept = append(kept, row)
-			}
-		}
-	}
-	if limit > 0 && len(kept) > limit {
-		kept = kept[:limit]
-	}
-	return kept, nil
-}
-
 // blockerStatuses resolves, for the in-progress tier, each target of a row
 // served by legs[own], keyed by the target as written. A target with no entry
 // is not a blocker of the row and is omitted from blocked_by.
@@ -688,8 +634,9 @@ func blockerStatuses(ctx context.Context, cs *crossStore, legs []Leg, own int, t
 // cached snapshot of each store) so reads each of them once, not once per
 // snapshot. Build one for each pass.
 type LegGate struct {
-	cs *crossStore
-	q  beads.ReadyQuery
+	cs   *crossStore
+	rows *rowGate
+	q    beads.ReadyQuery
 
 	mu       sync.Mutex
 	listings map[int]*legListing
@@ -708,7 +655,7 @@ func NewLegGate(legs []Leg, q beads.ReadyQuery) *LegGate {
 	if cs == nil {
 		return nil
 	}
-	return &LegGate{cs: cs, q: q, listings: make(map[int]*legListing)}
+	return &LegGate{cs: cs, rows: newRowGate(legs, cs, time.Now()), q: q, listings: make(map[int]*legListing)}
 }
 
 // Gate gates rows, which legs[own] served from its own Ready. An own outside
@@ -734,7 +681,7 @@ func (g *LegGate) Gate(ctx context.Context, own int, rows []beads.Bead) ([]beads
 		return nil, fmt.Errorf("%s store: %w", g.cs.legs[own].Label, listed.err)
 	}
 	items = g.cs.mergeStranded(own, listed.rows, items, owners)
-	return g.cs.gate(ctx, owners, items, 0)
+	return g.rows.gate(ctx, owners, items, 0)
 }
 
 // listing reads legs[own]'s absent-blocker listing, once for the gate's life.

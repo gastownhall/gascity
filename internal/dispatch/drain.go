@@ -483,28 +483,10 @@ func drainConvoyMembers(store beads.GraphStore, convoyID string, opts ProcessOpt
 	if err != nil {
 		return nil, err
 	}
-	var merged []beads.Bead
-	at := make(map[string]int)
-	for _, member := range union.Items {
-		i, seen := at[member.ID]
-		if !seen {
-			at[member.ID] = len(merged)
-			merged = append(merged, member)
-			continue
-		}
-		if convoycore.IsUnresolvedTrackedItem(merged[i]) && !convoycore.IsUnresolvedTrackedItem(member) {
-			merged[i] = member
-		}
-	}
-	// Same order convoycore.MembersIn returns within one store, so the manifest
-	// row order does not depend on which store answered first.
-	slices.SortStableFunc(merged, func(a, b beads.Bead) int {
-		if c := a.CreatedAt.Compare(b.CreatedAt); c != 0 {
-			return c
-		}
-		return strings.Compare(a.ID, b.ID)
-	})
-	return merged, nil
+	// UnionMembers sorts in the order convoycore.MembersIn returns within one
+	// store, so the manifest row order does not depend on which store
+	// answered first.
+	return convoycore.UnionMembers(union.Items), nil
 }
 
 func loadDrainManifestMembers(store beads.GraphStore, controlID string, manifest drainManifest, opts ProcessOptions) ([]beads.Bead, error) {

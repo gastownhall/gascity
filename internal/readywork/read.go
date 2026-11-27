@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/fanout"
@@ -140,6 +141,7 @@ func CutUntilUnblocked(rows []ReadyBead) []ReadyBead {
 // answer at its first unblocked row when untilUnblocked is set.
 func readCompiled(ctx context.Context, legs []Leg, c compiled, untilUnblocked bool) ([]ReadyBead, error) {
 	cs := newCrossStore(legs)
+	gate := newRowGate(legs, cs, time.Now())
 	items, owners, err := readCandidates(ctx, legs, c, cs)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return nil, ctxErr
@@ -150,9 +152,10 @@ func readCompiled(ctx context.Context, legs []Leg, c compiled, untilUnblocked bo
 	if c.status == "" {
 		// On a split city the ready arm re-judges cross-store blockers
 		// (crossstore.go): it adds the rows a store strands behind an absent
-		// blocker, then withholds every row a blocker still holds. Elsewhere
-		// cs is nil and this is the stores' own answer.
-		items, err = readyAnswer(ctx, cs, c, items, owners)
+		// blocker, then withholds every row a blocker still holds. On every
+		// city it withholds the rows whose workflow input is not admissible
+		// (admission.go).
+		items, err = readyAnswer(ctx, cs, gate, c, items, owners)
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
 		}
@@ -189,17 +192,16 @@ func readCompiled(ctx context.Context, legs []Leg, c compiled, untilUnblocked bo
 
 // readyAnswer turns the ready arm's merged candidates into its answer: the
 // stranded rows added, the predicates applied, the order imposed, the bound
-// applied after the cross-store gate. A bounded read already sized each leg's
-// cut past the rows the gate holds (boundedRead), and every verdict is
-// memoized, so the gate here re-reads nothing it has judged.
-func readyAnswer(ctx context.Context, cs *crossStore, c compiled, items []beads.Bead, owners map[string]int) ([]beads.Bead, error) {
+// applied after the gate (the cross-store rule and input admission). Every
+// verdict is memoized, so the gate re-reads nothing it has judged.
+func readyAnswer(ctx context.Context, cs *crossStore, gate *rowGate, c compiled, items []beads.Bead, owners map[string]int) ([]beads.Bead, error) {
 	items, err := cs.addStranded(ctx, readyReadQuery(c), items, owners)
 	if err != nil {
 		return nil, err
 	}
 	items = c.filter(items)
 	c.order(items)
-	return cs.gate(ctx, owners, items, c.query.Limit)
+	return gate.gate(ctx, owners, items, c.query.Limit)
 }
 
 // readCandidates reads the merged candidate set from the legs, and which leg
