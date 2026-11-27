@@ -93,15 +93,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	bucket := responseCacheTimeBucket(started)
 
 	cfg := s.state.Config()
-	sp := s.state.SessionProvider()
-	cityName := s.state.CityName()
-	sessTmpl := cfg.Workspace.SessionTemplate
 	wantPeek := input.Peek
-
-	// Raw config drives accurate provenance detection (pack-derived vs.
-	// city-native). Optional capability: when absent, agentOrigin falls
-	// back to the patch-presence heuristic.
-	rawCfg := s.rawConfig()
 
 	// The agent list keys its response cache on a TIME bucket, not the event
 	// index: on a busy city the sequence advances between polls, so an
@@ -128,6 +120,31 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 			return &ListOutput[agentResponse]{Index: hit.Index, Body: hit.Body}, nil
 		}
 	}
+	if cacheKey == "" {
+		return s.buildAgentList(ctx, input, cfg, cacheKey, index, started, bucket)
+	}
+	// A cache miss shares a fresh build with the identical readers that miss
+	// while it runs (listBuildSharer).
+	in := *input
+	return s.agentListBuilds.share(ctx, s, cacheKey, func(ctx context.Context) (*ListOutput[agentResponse], error) {
+		return s.buildAgentList(ctx, &in, cfg, cacheKey, index, started, bucket)
+	})
+}
+
+// buildAgentList builds the agent list input asks for from cfg, the snapshot
+// cacheKey was derived from. A complete list is cached under cacheKey, unless
+// it is "", as a build that started at started, in time bucket bucket, and
+// saw event index.
+func (s *Server) buildAgentList(ctx context.Context, input *AgentListInput, cfg *config.City, cacheKey string, index uint64, started time.Time, bucket uint64) (*ListOutput[agentResponse], error) {
+	sp := s.state.SessionProvider()
+	cityName := s.state.CityName()
+	sessTmpl := cfg.Workspace.SessionTemplate
+	wantPeek := input.Peek
+
+	// Raw config drives accurate provenance detection (pack-derived vs.
+	// city-native). Optional capability: when absent, agentOrigin falls
+	// back to the patch-presence heuristic.
+	rawCfg := s.rawConfig()
 
 	// Active graph-resident work, indexed once per request by agent session
 	// name (nil on a single-store city). Computed after the cache-hit return

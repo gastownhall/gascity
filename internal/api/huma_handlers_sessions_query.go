@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -20,7 +22,7 @@ import (
 // agent-get). Split out of huma_handlers_sessions.go to isolate read-side
 // logic from mutations and streaming.
 
-func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInput) (*ListOutput[sessionResponse], error) {
+func (s *Server) humaHandleSessionList(ctx context.Context, input *SessionListInput) (*ListOutput[sessionResponse], error) {
 	index := s.latestIndex()
 	store := s.state.Stores().Sessions()
 	if store == (beads.SessionStore{}) {
@@ -33,8 +35,25 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	if err != nil {
 		return nil, err
 	}
-	mgr := s.sessionManager(store)
 	cfg := s.state.Config()
+	if input.Peek {
+		return s.buildSessionList(input, store, cfg, seek, index)
+	}
+	// A list without peek output shares a fresh build with the identical
+	// readers that arrive while it runs (listBuildSharer). The list has no
+	// response cache: every reader gets a build that started after it
+	// arrived.
+	key := cacheKeyFor("sessions", input) + "#cfg=" + strconv.FormatUint(s.configGeneration(cfg), 10)
+	in := *input
+	return s.sessionListBuilds.share(ctx, s, key, func(context.Context) (*ListOutput[sessionResponse], error) {
+		return s.buildSessionList(&in, store, cfg, seek, index)
+	})
+}
+
+// buildSessionList builds the session page input asks for, from store and
+// cfg, starting after seek, as a build that saw event index.
+func (s *Server) buildSessionList(input *SessionListInput, store beads.SessionStore, cfg *config.City, seek *keysetKey, index uint64) (*ListOutput[sessionResponse], error) {
+	mgr := s.sessionManager(store)
 
 	listings, partialErrors, err := sessionReadModelListings(session.NewStore(store), input.State)
 	if err != nil {
