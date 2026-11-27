@@ -991,7 +991,9 @@ func workflowWorkLiveJQ() string {
 // relocated workflow are not in the store `bd` reaches.
 //
 // Every failure returns 1, which serves the root: the gate keeps its fail-open
-// contract.
+// contract. A member read that fails, or whose output jq cannot parse, also
+// names the root on stderr (workflowMemberReadFailure), because the stuck
+// root it may re-serve is otherwise invisible.
 func workflowWorkDoneFunctionScript(topo QueryTopology) string {
 	memberFilter := ` --metadata-field "` + beadmeta.RootBeadIDMetadataKey + `=$1"`
 	limit := ` --json --limit=` + strconv.Itoa(workflowMemberReadLimit)
@@ -1005,22 +1007,34 @@ func workflowWorkDoneFunctionScript(topo QueryTopology) string {
 		return `bd list` + memberFilter + ` --status=` + status + limit
 	}
 	verdict := func(printfArgs, jq string) string {
-		return `$(printf ` + printfArgs + ` | jq -rs --arg root "$1" ` + shellquote.Quote(jq) + ` 2>/dev/null)`
+		return `$(printf ` + printfArgs + ` | jq -rs --arg root "$1" ` + shellquote.Quote(jq) + ` 2>/dev/null)` +
+			workflowMemberReadFailure("is not valid JSON")
 	}
 	script := workflowWorkDoneFunction + `() { ` +
-		`gc_wf_closed=$(` + read("closed") + `) || return 1; ` +
-		`gc_wf_ran=` + verdict(`"%s" "$gc_wf_closed"`, workflowWorkRanJQ()) + ` || return 1; ` +
+		`gc_wf_closed=$(` + read("closed") + `)` + workflowMemberReadFailure("failed") + `; ` +
+		`gc_wf_ran=` + verdict(`"%s" "$gc_wf_closed"`, workflowWorkRanJQ()) + `; ` +
 		`[ "$gc_wf_ran" = "true" ] || return 1; `
 	if topo.FederatedReady {
-		script += `gc_wf_open=$(` + read("open") + `) || return 1; ` +
-			`gc_wf_in_progress=$(` + read("in_progress") + `) || return 1; ` +
-			`gc_wf_blocked=$(` + read("blocked") + `) || return 1; ` +
-			`gc_wf_live=` + verdict(`"%s\n%s\n%s\n" "$gc_wf_open" "$gc_wf_in_progress" "$gc_wf_blocked"`, workflowWorkLiveJQ()) + ` || return 1; `
+		script += `gc_wf_open=$(` + read("open") + `)` + workflowMemberReadFailure("failed") + `; ` +
+			`gc_wf_in_progress=$(` + read("in_progress") + `)` + workflowMemberReadFailure("failed") + `; ` +
+			`gc_wf_blocked=$(` + read("blocked") + `)` + workflowMemberReadFailure("failed") + `; ` +
+			`gc_wf_live=` + verdict(`"%s\n%s\n%s\n" "$gc_wf_open" "$gc_wf_in_progress" "$gc_wf_blocked"`, workflowWorkLiveJQ()) + `; `
 	} else {
-		script += `gc_wf_open=$(` + read("") + `) || return 1; ` +
-			`gc_wf_live=` + verdict(`"%s" "$gc_wf_open"`, workflowWorkLiveJQ()) + ` || return 1; `
+		script += `gc_wf_open=$(` + read("") + `)` + workflowMemberReadFailure("failed") + `; ` +
+			`gc_wf_live=` + verdict(`"%s" "$gc_wf_open"`, workflowWorkLiveJQ()) + `; `
 	}
 	return script + `[ "$gc_wf_live" = "false" ]; }; `
+}
+
+// workflowMemberReadFailure returns the clause gc_workflow_work_done appends to
+// a member read or its jq verdict: it reports the failure on stderr, naming the
+// root ($1) and the exit status, and returns 1 so the root is served. Unlike
+// workQueryFailureClause it does not fail the query, because the read only
+// decides whether a candidate is skipped and serving it is the safe answer.
+func workflowMemberReadFailure(failure string) string {
+	return ` || { gc_rc=$?; ` +
+		`printf "gc work query: workflow member read for %s ` + failure + ` (exit %s); serving it\n" "$1" "$gc_rc" >&2; ` +
+		`return 1; }`
 }
 
 // serveOrdinaryInProgressCandidateScript selects the first non-anchor row from

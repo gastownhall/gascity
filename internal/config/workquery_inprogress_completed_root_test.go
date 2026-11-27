@@ -351,3 +351,28 @@ func TestInProgressTierServesRootOnlyAndFreshWorkflowRoots(t *testing.T) {
 		}
 	}
 }
+
+// TestInProgressTierServesWorkflowRootWhenMemberReadFails covers AC-4: a member
+// read the gate cannot trust serves the root, keeps the query's exit 0, and
+// says so on stderr naming the root.
+func TestInProgressTierServesWorkflowRootWhenMemberReadFails(t *testing.T) {
+	const root = "wf-root-4"
+	members := finishedMemberShapes(root)["finalizer open"]
+	for _, failure := range []string{"fail", "garbage"} {
+		for _, form := range inProgressTierForms() {
+			t.Run(failure+"/"+form.name, func(t *testing.T) {
+				run := runInProgressTierForm(t, form, workflowRootFake{
+					inProgress: jsonRows(workflowRootJSON(root, ``)),
+					members:    members,
+					memberRead: failure,
+				})
+				if ids := run.ids(t); len(ids) != 1 || ids[0] != root {
+					t.Fatalf("root was not served on a %s member read: %v (stdout %q)", failure, ids, run.stdout)
+				}
+				if !strings.Contains(run.stderr, "gc work query: workflow member read for "+root) {
+					t.Fatalf("no diagnostic naming the root on a %s member read; stderr=%q", failure, run.stderr)
+				}
+			})
+		}
+	}
+}
