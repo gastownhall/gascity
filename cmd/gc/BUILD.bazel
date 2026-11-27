@@ -2506,6 +2506,7 @@ go_test(
         "status_api_url_test.go",
         "status_json_schema_contract_test.go",
         "status_provider_test.go",
+        "status_timeouts_other_test.go",
         "status_timeouts_windows_test.go",
         "storage_boot_conditional_writes_test.go",
         "storage_boot_outcome_event_test.go",
