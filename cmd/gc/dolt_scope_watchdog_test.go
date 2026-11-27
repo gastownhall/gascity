@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -402,6 +403,64 @@ func TestManagedDoltScopeWatchdogDoesNotInheritSessionIdentity(t *testing.T) {
 		if !strings.HasPrefix(env["PATH"], fakeDoltDir) {
 			t.Errorf("%s pid %d PATH = %q, want the parent's PATH carried through", proc.name, proc.pid, env["PATH"])
 		}
+	}
+}
+
+// TestManagedDoltScopeWatchdogForwardsAStopRightAfterItsHandshake: a SIGTERM
+// that reaches the scope watchdog as soon as its parent has read the
+// handshake is logged and forwarded, so the server stops with it. A unit
+// stop can land at any moment of a start; a watchdog not yet registered for
+// the signal dies of it with the default action and leaves its server
+// running unsupervised.
+func TestManagedDoltScopeWatchdogForwardsAStopRightAfterItsHandshake(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("reads /proc/<pid>/stat")
+	}
+	dir := t.TempDir()
+	fakeDoltDir := writeFakeDoltSQLServer(t)
+	configPath := filepath.Join(dir, "dolt-config.yaml")
+	logPath := filepath.Join(dir, "dolt.log")
+	if err := os.WriteFile(configPath, []byte("log_level: debug\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatalf("open log file: %v", err)
+	}
+	defer logFile.Close() //nolint:errcheck
+	parentEnv := removeEnvKey(os.Environ(), "PATH")
+	parentEnv = append(parentEnv, "PATH="+fakeDoltDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	started, err := startManagedDoltSQLServerWithScopeWatchdogEnv("", configPath, logPath, logFile, parentEnv)
+	if err != nil {
+		t.Fatalf("start managed dolt with scope watchdog: %v", err)
+	}
+	t.Cleanup(func() {
+		cleanupManagedDoltTestPID(t, started.PID)
+		cleanupManagedDoltTestPID(t, started.WatchdogPID)
+	})
+	if err := syscall.Kill(started.WatchdogPID, syscall.SIGTERM); err != nil {
+		t.Fatalf("SIGTERM scope watchdog pid %d: %v", started.WatchdogPID, err)
+	}
+
+	for _, proc := range []struct {
+		name string
+		pid  int
+	}{
+		{name: "dolt sql-server", pid: started.PID},
+		{name: "scope watchdog", pid: started.WatchdogPID},
+	} {
+		if !infraPollUntil(10*time.Second, func() bool { return !processAlive(proc.pid) }) {
+			logData, _ := os.ReadFile(logPath)
+			t.Fatalf("%s pid %d alive 10s after the scope watchdog's SIGTERM; watchdog log:\n%s", proc.name, proc.pid, logData)
+		}
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read watchdog log: %v", err)
+	}
+	if !strings.Contains(string(logData), scopeWatchdogReceivedTERMLog) {
+		t.Fatalf("watchdog log missing %q; log:\n%s", scopeWatchdogReceivedTERMLog, logData)
 	}
 }
 

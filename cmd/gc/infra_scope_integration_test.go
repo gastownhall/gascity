@@ -54,7 +54,6 @@ func TestInfraScopedManagedDoltPIDIdentityUnderRealSystemd(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("systemd user scopes are Linux-only")
 	}
-	t.Setenv(infraSessionIdentityEnv, "gc-infra-scope-integration")
 	t.Setenv(infraSliceEnv, infraScopeIntegrationSlice)
 	if err := infraScopeSuitsCaller(); err != nil {
 		t.Skipf("infrastructure scoping does not apply to this caller: %v", err)

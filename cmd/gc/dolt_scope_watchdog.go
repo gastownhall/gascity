@@ -213,6 +213,15 @@ func runManagedDoltScopeWatchdog(args []string, stdout, stderr *os.File) int {
 	}
 	defer logFile.Close() //nolint:errcheck
 
+	// Register for the stop signals before the server exists. A stop that
+	// arrived before registration would kill the watchdog with the default
+	// action and leave the server it had started running unsupervised; caught
+	// at any point after the start, it is logged and forwarded once the loop
+	// below runs.
+	signals := make(chan os.Signal, 2)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(signals)
+
 	cmd := exec.Command("dolt", "sql-server", "--config", configFile)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -257,10 +266,6 @@ func runManagedDoltScopeWatchdog(args []string, stdout, stderr *os.File) int {
 
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
-
-	signals := make(chan os.Signal, 2)
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(signals)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()

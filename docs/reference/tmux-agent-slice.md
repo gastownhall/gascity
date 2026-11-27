@@ -79,44 +79,46 @@ loginctl enable-linger <user>
 
 ## City infrastructure (GC_INFRA_SLICE)
 
-A cgroup-wide kill of an agent's scope kills everything in it. If that agent
-started the city's managed Dolt server (a `gc` or `bd` call that autostarts
-it), the store would go down with the agent. So a gc command run from inside
-an agent session starts the managed Dolt server in a transient scope of its
-own:
+A cgroup-wide kill of an agent's scope kills everything in it, and stopping
+a user service under systemd's default `KillMode=control-group` signals its
+whole control group. If that agent or service started the city's managed
+Dolt server (a `gc` or `bd` call that autostarts it), the store would go
+down with it. So whichever gc command autostarts the managed Dolt server
+(from an agent session, a user or bot service, a timer unit or a pane)
+starts it in a transient scope of its own, whenever that move suits the
+caller:
 
 ```
 systemd-run --user --scope --slice=${GC_INFRA_SLICE:-gascity-infra.slice} --collect --quiet \
   --unit=gascity-infra-<random>.scope --description="gascity infra: managed dolt for city <path>" -- <command>
 ```
 
-gc wraps the spawn only when both hold:
-
-1. **The gc process runs inside an agent session**: it carries the
-   `GC_SESSION_ID` gc gives every session. Other gc processes (the
-   supervisor, whether a bare fork or a systemd/launchd service; a CLI run
-   from a login shell; the bd provider script the supervisor launches) have
-   no session cgroup to escape, so their spawns stay exactly as before.
-2. **The move suits the gc process's cgroup**: it can neither shorten the
-   server's life nor undo where the operator placed it.
+gc wraps the spawn only when the move suits the gc process's cgroup: it
+can neither shorten the server's life nor undo where the operator placed it.
 
 Scopes live under `user@<uid>.service`, which systemd stops, with every
 scope in it, when the user's last session ends, unless the user lingers
 (`/var/lib/systemd/linger/<user>`, set by `loginctl enable-linger <user>`).
-Where the gc process runs decides condition 2:
+Where the gc process runs decides whether the move suits it:
 
-| Where the gc process runs | Condition 2 holds |
+| Where the gc process runs | The move suits it |
 |---|---|
-| Under `user@<uid>.service` (a `GC_AGENT_SLICE` pane scope, tmux's own pane scopes) | always: it dies with the user manager anyway |
+| Under `user@<uid>.service` (a `GC_AGENT_SLICE` pane scope, tmux's own pane scopes, a user, bot or timer service) | always: it dies with the user manager anyway |
 | A login session's scope (`user-<uid>.slice/session-<id>.scope`) | when the user lingers: without lingering the session's scope can outlive logout (`KillUserProcesses=no`) while a user scope would not |
 | Anywhere else: a system service or slice (the supervisor run as a system service, whose agents share its cgroup), a container's root cgroup | only when `GC_INFRA_SLICE` names a slice and the user lingers |
 
-A gc process outside the user's own sessions has no session cgroup to
-escape. Moving its server would only trade the cgroup the operator chose,
-with that cgroup's limits and memory protection, for the user manager's
+A gc process in a system service, a system slice or a container's root
+cgroup runs where the operator placed it. Moving its server would only trade
+that cgroup, with its limits and memory protection, for the user manager's
 slice, so gc leaves the server in place unless the operator names a slice.
 
-| Spawn | Wrapped from a session |
+A gc that runs in a system service, a container, or a login session without
+lingering therefore leaves the managed Dolt in the caller's cgroup, and
+stopping that unit stops the store. Give such a unit `KillMode=process` (as
+gc's own supervisor unit does), or opt in with `GC_INFRA_SLICE=<slice>` and
+lingering.
+
+| Spawn | Wrapped when the move suits the caller |
 |---|---|
 | Managed Dolt server (or its scope watchdog, whose server inherits its scope) | yes |
 | `gc supervisor start` fork, and the fork `gc start` falls back to | no |
@@ -145,10 +147,11 @@ login session's scope puts it under that watch.
 
 Unlike `GC_AGENT_SLICE`, scoping is on by default. `GC_INFRA_SLICE` names
 the slice, and naming one, even `gascity-infra.slice`, also opts in a gc
-process outside the user's own sessions (condition 2).
+process in a system service, system slice or container (the last row of the
+table above).
 `GC_INFRA_SLICE=off` (or `0`, `false`) turns scoping off: every spawn
 stays in its caller's cgroup exactly as before, and gc never probes the
-user manager. When scoping does not apply (condition 2 does not hold; no
+user manager. When scoping does not apply (the move does not suit the caller; no
 `systemd-run`; no user bus; macOS) gc checks once per process (the
 `systemd-run` probe is bounded at 5 seconds) and starts the server
 unwrapped exactly as before, warning only when `GC_INFRA_SLICE` names a

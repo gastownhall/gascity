@@ -36,10 +36,16 @@ const fakeCgroupEnv = "FAKE_CGROUP_SCOPE"
 // fakeInfraScopeName is the fake scope the fake systemd-run moves commands to.
 const fakeInfraScopeName = "fake-infra-scope"
 
+// testSessionIdentityEnv is the session identity gc gives every agent
+// session. The infrastructure scope rule does not read it; the fake host sets
+// it to show that.
+const testSessionIdentityEnv = "GC_SESSION_ID"
+
 // infraScopeHost describes the host facts the infrastructure scope rule
-// reads.
+// reads, and whether the gc process carries a session identity, which does
+// not affect the verdict.
 type infraScopeHost struct {
-	session bool   // the gc process carries GC_SESSION_ID
+	session bool   // the gc process carries GC_SESSION_ID; no effect on the verdict
 	linger  bool   // /var/lib/systemd/linger/<user> exists
 	cgroup  string // the gc process's cgroup v2 path; empty means loginSessionCgroup
 }
@@ -53,6 +59,9 @@ const (
 	// userManagerCgroup is a scope under the user manager, such as a
 	// GC_AGENT_SLICE pane scope.
 	userManagerCgroup = "/user.slice/user-<uid>.slice/user@<uid>.service/app.slice/run-r1.scope"
+	// userServiceCgroup is a user service that is not an agent session,
+	// such as a one-shot or bot service a timer or the operator runs.
+	userServiceCgroup = "/user.slice/user-<uid>.slice/user@<uid>.service/app.slice/nudge-drainer.service"
 	// supervisorSliceServiceCgroup is the supervisor run as a system
 	// service in a slice of its own; its agent panes share its cgroup.
 	supervisorSliceServiceCgroup = "/gascity.slice/gascity-prod.slice/gascity-supervisor.service"
@@ -91,9 +100,9 @@ func installInfraScopeHost(t *testing.T, h infraScopeHost) string {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv(infraSliceEnv, "")
 	if h.session {
-		t.Setenv(infraSessionIdentityEnv, "gc-test-session")
+		t.Setenv(testSessionIdentityEnv, "gc-test-session")
 	} else {
-		t.Setenv(infraSessionIdentityEnv, "")
+		t.Setenv(testSessionIdentityEnv, "")
 	}
 
 	lingerDir := filepath.Join(dir, "linger")
@@ -209,6 +218,45 @@ func writeMarkingFakeDolt(t *testing.T) (string, string) {
 	return dir, marker
 }
 
+// scopeWatchdogReceivedTERMLog is the line the scope watchdog logs when a
+// SIGTERM reaches it, just before it forwards the stop to its dolt server:
+// the signature of the #5910 report.
+const scopeWatchdogReceivedTERMLog = "gc scope watchdog: received terminated"
+
+// writeMarkingFakeDoltDyingAfterWatchdogStop writes a fake dolt that records
+// it is running and then stays up, exiting on a SIGTERM only once logPath
+// holds scopeWatchdogReceivedTERMLog. A unit stop signals the server and the
+// watchdog together: the server cannot exit before the watchdog has taken
+// the stop (the watchdog would then log the server's exit instead), and the
+// watchdog's forward, sent after that line, always brings a trap run that
+// sees it, so the SIGKILL escalation's grace never matters. Each TERM
+// re-reads the log instead of counting signals: the shell runs its trap once
+// for all the TERMs that reach it before the trap runs, so the unit stop and
+// the forward can count as one. The shell waits on a background sleep, which
+// a trapped TERM interrupts at once. The trap is set before the marker is
+// written and the shell stays the process image, so once the marker exists
+// no TERM takes the default action and no waitForFinalImage dance is needed.
+func writeMarkingFakeDoltDyingAfterWatchdogStop(t *testing.T, logPath string) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "dolt.started")
+	script := "#!/bin/sh\n" +
+		"[ \"$1\" = sql-server ] || { echo \"unexpected dolt args: $*\" >&2; exit 2; }\n" +
+		"stop_taken() {\n" +
+		"  while IFS= read -r line; do\n" +
+		"    case $line in *'" + scopeWatchdogReceivedTERMLog + "'*) return 0 ;; esac\n" +
+		"  done < '" + logPath + "'\n" +
+		"  return 1\n" +
+		"}\n" +
+		"trap 'stop_taken && exit 0' TERM\n" +
+		": > '" + marker + "'\n" +
+		"while :; do sleep 1 & wait $!; done\n"
+	if err := os.WriteFile(filepath.Join(dir, "dolt"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake dolt: %v", err)
+	}
+	return dir, marker
+}
+
 const infraScopePrefix = "--user --scope --slice=gascity-infra.slice --collect --quiet "
 
 // infraUnitPattern is the transient scope unit name gc gives a scoped spawn.
@@ -264,31 +312,45 @@ func startDirectManagedDolt(t *testing.T) (managedDoltStartedProcess, string) {
 }
 
 func TestManagedDoltSpawnWrappedInInfraScope(t *testing.T) {
-	t.Run("from a session", func(t *testing.T) {
-		logPath := installInfraScopeHost(t, wrappableFromSession)
-		started, configPath := startDirectManagedDolt(t)
-		waitForSystemdRunInvocation(t, logPath, " -- dolt sql-server --config "+configPath)
-		assertScopedInvocation(t, logPath, started.InfraScope, "gascity infra: managed dolt")
-	})
-	// Each of these stays in its caller's cgroup.
+	for _, tc := range []struct {
+		name string
+		host infraScopeHost
+	}{
+		{name: "from a session", host: wrappableFromSession},
+		{name: "outside a session in a user service", host: infraScopeHost{cgroup: userServiceCgroup}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logPath := installInfraScopeHost(t, tc.host)
+			started, configPath := startDirectManagedDolt(t)
+			waitForSystemdRunInvocation(t, logPath, " -- dolt sql-server --config "+configPath)
+			assertScopedInvocation(t, logPath, started.InfraScope, "gascity infra: managed dolt")
+		})
+	}
+	// Each of these stays in its caller's cgroup, with or without a session,
+	// and never runs systemd-run, not even for the probe.
 	for _, tc := range []struct {
 		name     string
 		host     infraScopeHost
 		sliceEnv string
 	}{
-		{name: "outside a session", host: infraScopeHost{linger: true, cgroup: userManagerCgroup}},
-		{name: "from a session with GC_INFRA_SLICE=off", host: wrappableFromSession, sliceEnv: "off"},
-		{name: "from a session in a system service", host: infraScopeHost{session: true, linger: true, cgroup: supervisorSliceServiceCgroup}},
+		{name: "with GC_INFRA_SLICE=off", host: infraScopeHost{linger: true, cgroup: userServiceCgroup}, sliceEnv: "off"},
+		{name: "from a login session without lingering", host: infraScopeHost{cgroup: loginSessionCgroup}},
+		{name: "in a system service", host: infraScopeHost{linger: true, cgroup: supervisorSliceServiceCgroup}},
+		{name: "in a container root", host: infraScopeHost{linger: true, cgroup: containerRootCgroup}},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			logPath := installInfraScopeHost(t, tc.host)
-			t.Setenv(infraSliceEnv, tc.sliceEnv)
-			started, _ := startDirectManagedDolt(t)
-			assertNoSystemdRun(t, logPath)
-			if started.InfraScope != "" {
-				t.Fatalf("unwrapped spawn recorded infra scope %q, want none", started.InfraScope)
-			}
-		})
+		for _, session := range []bool{false, true} {
+			host := tc.host
+			host.session = session
+			t.Run(fmt.Sprintf("%s/session=%t", tc.name, session), func(t *testing.T) {
+				logPath := installInfraScopeHost(t, host)
+				t.Setenv(infraSliceEnv, tc.sliceEnv)
+				started, _ := startDirectManagedDolt(t)
+				assertNoSystemdRun(t, logPath)
+				if started.InfraScope != "" {
+					t.Fatalf("unwrapped spawn recorded infra scope %q, want none", started.InfraScope)
+				}
+			})
+		}
 	}
 }
 
@@ -325,13 +387,28 @@ func TestManagedDoltStateRecordsInfraScope(t *testing.T) {
 
 // The bd provider script the supervisor launches runs `gc dolt-state
 // start-managed` with the supervisor's environment: BEADS_ACTOR (one of the
-// session-scoped keys) is set, GC_SESSION_ID is not. Its Dolt stays where
-// the supervisor's tree runs.
-func TestSupervisorLaunchedProviderSpawnStaysUnwrapped(t *testing.T) {
-	logPath := installInfraScopeHost(t, infraScopeHost{linger: true, cgroup: userManagerCgroup})
+// session-scoped keys) is set, GC_SESSION_ID is not. Where the supervisor's
+// tree runs decides, as for any other caller: under the user manager (the
+// supervisor's user unit) the Dolt server gets a scope of its own, so a
+// restart of that unit does not take the store with it.
+func TestSupervisorLaunchedProviderSpawnWrappedUnderUserManager(t *testing.T) {
+	logPath := installInfraScopeHost(t, infraScopeHost{cgroup: userManagerCgroup})
 	t.Setenv("BEADS_ACTOR", "gc-supervisor")
-	startDirectManagedDolt(t)
+	started, configPath := startDirectManagedDolt(t)
+	waitForSystemdRunInvocation(t, logPath, " -- dolt sql-server --config "+configPath)
+	assertScopedInvocation(t, logPath, started.InfraScope, "gascity infra: managed dolt")
+}
+
+// In a system service with GC_INFRA_SLICE unset, the supervisor-launched
+// provider's Dolt server stays where the operator placed the supervisor.
+func TestSupervisorLaunchedProviderSpawnStaysUnwrappedInSystemService(t *testing.T) {
+	logPath := installInfraScopeHost(t, infraScopeHost{linger: true, cgroup: supervisorSliceServiceCgroup})
+	t.Setenv("BEADS_ACTOR", "gc-supervisor")
+	started, _ := startDirectManagedDolt(t)
 	assertNoSystemdRun(t, logPath)
+	if started.InfraScope != "" {
+		t.Fatalf("unwrapped spawn recorded infra scope %q, want none", started.InfraScope)
+	}
 }
 
 func TestScopeWatchdogSpawnWrappedInInfraScope(t *testing.T) {
@@ -363,32 +440,43 @@ func TestScopeWatchdogSpawnWrappedInInfraScope(t *testing.T) {
 		return configPath, started
 	}
 
-	t.Run("from a session", func(t *testing.T) {
-		logPath := installInfraScopeHost(t, wrappableFromSession)
-		configPath, started := start(t)
-		exe, err := managedDoltWatchdogExecutable()
-		if err != nil {
-			t.Fatalf("watchdog executable: %v", err)
-		}
-		waitForSystemdRunInvocation(t, logPath, " -- "+exe+" "+managedDoltScopeWatchdogArg+" "+configPath)
-		assertScopedInvocation(t, logPath, started.InfraScope, "gascity infra: managed dolt for city "+cityPath)
-		// The dolt server is the watchdog's child and inherits its scope;
-		// it is not wrapped a second time. (The other line is the probe.)
-		data, _ := os.ReadFile(logPath)
-		if n := strings.Count(string(data), " "+managedDoltScopeWatchdogArg+" "); n != 1 {
-			t.Fatalf("watchdog wrapped %d times, want 1; log:\n%s", n, data)
-		}
-		if strings.Contains(string(data), "-- dolt ") {
-			t.Fatalf("watchdog's dolt child was wrapped again; log:\n%s", data)
-		}
-	})
+	for _, tc := range []struct {
+		name string
+		host infraScopeHost
+	}{
+		{name: "from a session", host: wrappableFromSession},
+		// A user service stopped under KillMode=control-group would take
+		// a watchdog left in its cgroup, and the store, with it.
+		{name: "outside a session in a user service", host: infraScopeHost{cgroup: userServiceCgroup}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logPath := installInfraScopeHost(t, tc.host)
+			configPath, started := start(t)
+			exe, err := managedDoltWatchdogExecutable()
+			if err != nil {
+				t.Fatalf("watchdog executable: %v", err)
+			}
+			waitForSystemdRunInvocation(t, logPath, " -- "+exe+" "+managedDoltScopeWatchdogArg+" "+configPath)
+			assertScopedInvocation(t, logPath, started.InfraScope, "gascity infra: managed dolt for city "+cityPath)
+			// The dolt server is the watchdog's child and inherits its
+			// scope; it is not wrapped a second time. (The other line is
+			// the probe.)
+			data, _ := os.ReadFile(logPath)
+			if n := strings.Count(string(data), " "+managedDoltScopeWatchdogArg+" "); n != 1 {
+				t.Fatalf("watchdog wrapped %d times, want 1; log:\n%s", n, data)
+			}
+			if strings.Contains(string(data), "-- dolt ") {
+				t.Fatalf("watchdog's dolt child was wrapped again; log:\n%s", data)
+			}
+		})
+	}
 	for _, tc := range []struct {
 		name     string
 		host     infraScopeHost
 		sliceEnv string
 	}{
-		{name: "outside a session", host: infraScopeHost{linger: true, cgroup: userManagerCgroup}},
 		{name: "from a session with GC_INFRA_SLICE=off", host: wrappableFromSession, sliceEnv: "off"},
+		{name: "outside a session with GC_INFRA_SLICE=off", host: infraScopeHost{cgroup: userServiceCgroup}, sliceEnv: "off"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			logPath := installInfraScopeHost(t, tc.host)
@@ -439,6 +527,13 @@ func TestBareSupervisorForkNotWrappedInInfraScope(t *testing.T) {
 		fork(t)
 		assertNoSystemdRun(t, logPath)
 	})
+	// A user service's cgroup is one the scope suits, so dolt spawns from
+	// this caller are wrapped — the supervisor fork still never is.
+	t.Run("from a non-session user service", func(t *testing.T) {
+		logPath := installInfraScopeHost(t, infraScopeHost{linger: true, cgroup: userServiceCgroup})
+		fork(t)
+		assertNoSystemdRun(t, logPath)
+	})
 }
 
 // The drift respawn replaces the supervisor; like the bare fork it is never
@@ -464,17 +559,25 @@ func TestDriftSupervisorRespawnNotWrappedInInfraScope(t *testing.T) {
 		respawn(t)
 		assertNoSystemdRun(t, logPath)
 	})
+	// A user service's cgroup is one the scope suits, so dolt spawns from
+	// this caller are wrapped — the drift respawn still never is.
+	t.Run("from a non-session user service", func(t *testing.T) {
+		logPath := installInfraScopeHost(t, infraScopeHost{linger: true, cgroup: userServiceCgroup})
+		respawn(t)
+		assertNoSystemdRun(t, logPath)
+	})
 }
 
-// TestInfraArgvWrapsOnlyFromASessionWhenScopingKeepsLifetime is the rule's
-// truth table. A spawn is scoped only from inside an agent session, never
-// with GC_INFRA_SLICE=off, and only when a user-manager scope suits the
-// caller's cgroup: always under user@<uid>.service; from a login session's
-// scope when the user lingers; from anywhere else (a system service or
-// slice, a container's root) only when GC_INFRA_SLICE names a slice and the
-// user lingers. A spawn that stays unscoped never probes the host: the probe
-// itself creates a scope.
-func TestInfraArgvWrapsOnlyFromASessionWhenScopingKeepsLifetime(t *testing.T) {
+// TestInfraArgvWrapsWhenScopingKeepsLifetime is the rule's truth table. A
+// spawn is scoped never with GC_INFRA_SLICE=off, and otherwise only when a
+// user-manager scope suits the caller's cgroup: always under
+// user@<uid>.service; from a login session's scope when the user lingers;
+// from anywhere else (a system service or slice, a container's root) only
+// when GC_INFRA_SLICE names a slice and the user lingers. Whether the gc
+// process carries GC_SESSION_ID does not change the verdict: each case runs
+// with and without it. A spawn that stays unscoped never probes the host: the
+// probe itself creates a scope.
+func TestInfraArgvWrapsWhenScopingKeepsLifetime(t *testing.T) {
 	argv := []string{"dolt", "sql-server"}
 	cgroups := []struct {
 		name   string
@@ -482,38 +585,44 @@ func TestInfraArgvWrapsOnlyFromASessionWhenScopingKeepsLifetime(t *testing.T) {
 	}{
 		{"login_session", loginSessionCgroup},
 		{"user_manager", userManagerCgroup},
+		{"user_service", userServiceCgroup},
 		{"supervisor_slice_service", supervisorSliceServiceCgroup},
 		{"system_service", systemServiceCgroup},
 		{"container_root", containerRootCgroup},
 	}
-	for _, session := range []bool{false, true} {
-		for _, linger := range []bool{false, true} {
-			for _, cg := range cgroups {
-				for _, sliceEnv := range []string{"", "custom-infra.slice", "off"} {
+	for _, linger := range []bool{false, true} {
+		for _, cg := range cgroups {
+			for _, sliceEnv := range []string{"", "custom-infra.slice", "off"} {
+				var scoped bool
+				switch {
+				case sliceEnv == "off":
+				case cg.cgroup == userManagerCgroup, cg.cgroup == userServiceCgroup:
+					scoped = true
+				case cg.cgroup == loginSessionCgroup:
+					scoped = linger
+				default:
+					scoped = linger && sliceEnv != ""
+				}
+				for _, session := range []bool{false, true} {
 					h := infraScopeHost{session: session, linger: linger, cgroup: cg.cgroup}
-					name := fmt.Sprintf("session=%t/linger=%t/cgroup=%s/GC_INFRA_SLICE=%q", session, linger, cg.name, sliceEnv)
+					name := fmt.Sprintf("linger=%t/cgroup=%s/GC_INFRA_SLICE=%q/session=%t", linger, cg.name, sliceEnv, session)
 					t.Run(name, func(t *testing.T) {
 						logPath := installInfraScopeHost(t, h)
 						t.Setenv(infraSliceEnv, sliceEnv)
 						got, unit := infraArgv(infraTestDescription, argv)
 
-						var scoped bool
-						switch {
-						case !session || sliceEnv == "off":
-						case cg.cgroup == userManagerCgroup:
-							scoped = true
-						case cg.cgroup == loginSessionCgroup:
-							scoped = linger
-						default:
-							scoped = linger && sliceEnv != ""
-						}
 						want := argv
 						if scoped {
+							if !infraUnitPattern.MatchString(unit) {
+								t.Fatalf("infraArgv unit = %q, want %s", unit, infraUnitPattern)
+							}
 							slice := defaultInfraSlice
 							if sliceEnv != "" {
 								slice = sliceEnv
 							}
 							want = userscope.ScopeArgv(userscope.Scope{Slice: slice, Unit: unit, Description: infraTestDescription}, argv)
+						} else if unit != "" {
+							t.Fatalf("unwrapped infraArgv returned unit %q, want none", unit)
 						}
 						if !slices.Equal(got, want) {
 							t.Fatalf("infraArgv = %q, want %q", got, want)
@@ -659,10 +768,17 @@ func waitForFinalImage(t *testing.T, pid int, name string) {
 }
 
 // killFakeCgroup kills every process in the fake cgroup scope, the way a
-// runtime's cgroup-wide stop of an agent session does. It reads each
-// process's environment once: a process still exec'ing is passed over, so
-// wait for the target's final image first (waitForFinalImage).
+// runtime's cgroup-wide stop of an agent session does; see signalFakeCgroup.
 func killFakeCgroup(t *testing.T, scope string) {
+	t.Helper()
+	signalFakeCgroup(t, scope, syscall.SIGKILL)
+}
+
+// signalFakeCgroup sends sig to every process in the fake cgroup scope, the
+// way systemd signals a unit's control group when it stops the unit. It reads
+// each process's environment once: a process still exec'ing is passed over,
+// so wait for the target's final image first (waitForFinalImage).
+func signalFakeCgroup(t *testing.T, scope string, sig syscall.Signal) {
 	t.Helper()
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
@@ -678,7 +794,7 @@ func killFakeCgroup(t *testing.T, scope string) {
 		if err != nil || !bytes.Contains(environ, want) {
 			continue
 		}
-		_ = syscall.Kill(pid, syscall.SIGKILL)
+		_ = syscall.Kill(pid, sig)
 	}
 }
 
@@ -737,6 +853,114 @@ func TestAgentScopeKillSparesAgentStartedManagedDolt(t *testing.T) {
 				t.Fatalf("managed Dolt alive after the agent's cgroup kill = %t, want %t", alive, tc.wantAlive)
 			}
 		})
+	}
+}
+
+// TestCallerUnitStopSparesManagedDoltStartedOutsideASession reproduces
+// #5910: a gc/bd call from a user service that is not an agent session
+// autostarts the managed Dolt server, then the unit stops and systemd
+// SIGTERMs its control group (KillMode=control-group). Left in the caller's
+// cgroup the store dies with the unit, and the watchdog logs the report's
+// signature, "received terminated", as it forwards the stop; scoped, it
+// survives.
+func TestCallerUnitStopSparesManagedDoltStartedOutsideASession(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("fake cgroup signal reads /proc")
+	}
+	// startWatchdog starts the managed Dolt through its scope watchdog with
+	// this process's environment, as a provider-script gc does. Its fake
+	// dolt exits on a SIGTERM only once the watchdog has logged taking the
+	// unit stop (writeMarkingFakeDoltDyingAfterWatchdogStop), so the
+	// watchdog's "received terminated" line is never lost to a server that
+	// exited first. It returns the dolt log path.
+	startWatchdog := func(t *testing.T) (managedDoltStartedProcess, string) {
+		t.Helper()
+		dir := t.TempDir()
+		configPath := filepath.Join(dir, "dolt-config.yaml")
+		if err := os.WriteFile(configPath, []byte("log_level: debug\n"), 0o644); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		logFilePath := filepath.Join(dir, "dolt.log")
+		binDir, marker := writeMarkingFakeDoltDyingAfterWatchdogStop(t, logFilePath)
+		logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			t.Fatalf("open log file: %v", err)
+		}
+		t.Cleanup(func() { _ = logFile.Close() })
+		parentEnv := removeEnvKey(os.Environ(), "PATH")
+		parentEnv = append(parentEnv, "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+		started, err := startManagedDoltSQLServerWithScopeWatchdogEnv(t.TempDir(), configPath, logFilePath, logFile, parentEnv)
+		if err != nil {
+			t.Fatalf("start managed dolt with scope watchdog: %v", err)
+		}
+		killInfraScopeTestPID(t, started.PID)
+		killInfraScopeTestPID(t, started.WatchdogPID)
+		waitForFile(t, marker)
+		return started, logFilePath
+	}
+	// startDirect starts the managed Dolt without the watchdog. Its fake
+	// marks itself running before it execs its final image; a signal that
+	// scans it mid-exec misses it, so wait that out.
+	startDirect := func(t *testing.T) (managedDoltStartedProcess, string) {
+		t.Helper()
+		started, _ := startDirectManagedDolt(t)
+		waitForFinalImage(t, started.PID, fakeDoltFinalImage)
+		return started, ""
+	}
+	for _, shape := range []struct {
+		name  string
+		start func(t *testing.T) (managedDoltStartedProcess, string)
+	}{
+		{name: "direct", start: startDirect},
+		{name: "scope watchdog", start: startWatchdog},
+	} {
+		for _, tc := range []struct {
+			name      string
+			unscoped  bool
+			wantAlive bool
+		}{
+			{name: "without infrastructure scoping the store dies with the unit", unscoped: true, wantAlive: false},
+			{name: "scoped the store survives the unit", unscoped: false, wantAlive: true},
+		} {
+			t.Run(shape.name+"/"+tc.name, func(t *testing.T) {
+				installInfraScopeHost(t, infraScopeHost{session: false, linger: false, cgroup: userServiceCgroup})
+				if tc.unscoped {
+					disableInfraScopeForTests()
+				}
+				callerUnit := fmt.Sprintf("caller-unit-%d-%d", os.Getpid(), time.Now().UnixNano())
+				t.Setenv(fakeCgroupEnv, callerUnit)
+
+				started, logFilePath := shape.start(t)
+				pids := []int{started.PID}
+				if started.WatchdogPID > 0 {
+					pids = append(pids, started.WatchdogPID)
+				}
+				signalFakeCgroup(t, callerUnit, syscall.SIGTERM)
+
+				// A process the stop reached is gone within moments; one it
+				// spared is still running after the window.
+				window := 10 * time.Second
+				if tc.wantAlive {
+					window = 500 * time.Millisecond
+				}
+				for _, pid := range pids {
+					died := infraPollUntil(window, func() bool { return !processAlive(pid) })
+					if alive := !died; alive != tc.wantAlive {
+						t.Fatalf("pid %d (dolt %d, watchdog %d) alive after the caller unit's SIGTERM = %t, want %t",
+							pid, started.PID, started.WatchdogPID, alive, tc.wantAlive)
+					}
+				}
+				if logFilePath != "" && !tc.wantAlive {
+					data, err := os.ReadFile(logFilePath)
+					if err != nil {
+						t.Fatalf("read dolt log: %v", err)
+					}
+					if !strings.Contains(string(data), scopeWatchdogReceivedTERMLog) {
+						t.Fatalf("watchdog log missing the forwarded unit stop; log:\n%s", data)
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -810,31 +1034,6 @@ func TestInfraCommandWrapsResolvableExecutable(t *testing.T) {
 	cmd, unit := infraCommand(infraTestDescription, "sh", "-c", "true")
 	if want := infraTestScopeArgv(unit, []string{"sh", "-c", "true"}); !slices.Equal(cmd.Args, want) {
 		t.Fatalf("infraCommand args = %q, want %q", cmd.Args, want)
-	}
-}
-
-// TestProviderLifecycleEnvCarriesSessionIdentity: an agent's gc autostarts
-// the store through the provider script (gc-beads-bd.sh start → gc
-// dolt-state start-managed). That inner gc scopes the Dolt server only if
-// the provider env passes GC_SESSION_ID through, and must not invent one.
-func TestProviderLifecycleEnvCarriesSessionIdentity(t *testing.T) {
-	for _, session := range []bool{true, false} {
-		t.Run(fmt.Sprintf("session=%t", session), func(t *testing.T) {
-			cityPath := t.TempDir()
-			if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[beads]\nprovider = \"bd\"\n"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			want := ""
-			if session {
-				want = "gc-test-session"
-			}
-			// An empty value is no session identity to infraArgv.
-			t.Setenv(infraSessionIdentityEnv, want)
-			env := runtimeEnvEntriesToMap(mustProviderLifecycleProcessEnv(t, cityPath, "exec:"+gcBeadsBdScriptPath(cityPath)))
-			if got := env[infraSessionIdentityEnv]; got != want {
-				t.Fatalf("provider env %s = %q, want %q", infraSessionIdentityEnv, got, want)
-			}
-		})
 	}
 }
 
