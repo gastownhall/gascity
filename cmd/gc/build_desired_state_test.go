@@ -14870,3 +14870,103 @@ func TestMergeCollectedDemandKeepsBlindDemandWithoutAnAllowance(t *testing.T) {
 		})
 	}
 }
+
+// A held template keeps everything but the blind remainder of its count: its
+// named work beads, its fresh and in-flight seats, its min_active floor and,
+// for a control dispatcher, its whole count.
+func TestBlindSpawnAllowanceWithholdsOnlyTheBlindRemainder(t *testing.T) {
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	held := map[string]int{"claude": 0}
+	planFor := func(cfg *config.City, in collectedDemand, sessions []sessionpkg.Info) ([]PoolDesiredState, mergedDemand) {
+		merged := mergeCollectedDemand(cfg, in)
+		return computePoolDesiredStatesParkedAt(cfg, nil, nil, sessions, merged.ScaleCheckCounts, merged.ScaleCheckDemand, now, nil, nil), merged
+	}
+	claudeDemand := func(named ...string) collectedDemand {
+		return collectedDemand{
+			CustomCounts:        map[string]int{"claude": 3},
+			DefaultProbed:       true,
+			DefaultCounts:       map[string]int{"claude": len(named)},
+			DefaultDemand:       map[string]scaleCheckDemand{"claude": {Count: len(named), WorkBeadIDs: named}},
+			ColdWakeTemplates:   map[string]bool{"claude": true},
+			BlindSpawnAllowance: held,
+		}
+	}
+
+	t.Run("named work beads", func(t *testing.T) {
+		cfg := &config.City{Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)}}
+		states, merged := planFor(cfg, claudeDemand("gc-1"), nil)
+		if got := merged.ScaleCheckCounts["claude"]; got != 1 {
+			t.Fatalf("ScaleCheckCounts[claude] = %d, want its one named bead", got)
+		}
+		if got := merged.ScaleCheckDemand["claude"]; got.Count != 1 || len(got.WorkBeadIDs) != 1 || got.WorkBeadIDs[0] != "gc-1" {
+			t.Fatalf("ScaleCheckDemand[claude] = %+v, want gc-1 alone", got)
+		}
+		if blind, bound := blindAndBoundNewRequests(states, "claude"); blind != 0 || bound != 1 {
+			t.Fatalf("new requests: blind=%d bound=%d, want blind=0 bound=1", blind, bound)
+		}
+	})
+
+	t.Run("fresh seats", func(t *testing.T) {
+		cfg := &config.City{Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)}}
+		sessions := sessionInfosFromBeads([]beads.Bead{
+			protectedPoolSessionBeadAt("sess-1", now.Add(-30*time.Second)),
+			protectedPoolSessionBeadAt("sess-2", now.Add(-20*time.Second)),
+		})
+		states, _ := planFor(cfg, claudeDemand("gc-1"), sessions)
+		seats := map[string]bool{}
+		total := 0
+		for _, s := range states {
+			for _, r := range s.Requests {
+				if r.Template != "claude" {
+					continue
+				}
+				total++
+				if r.SessionBeadID == "" {
+					t.Fatalf("held template got a fresh seat request %+v, want only its existing seats", r)
+				}
+				seats[r.SessionBeadID] = true
+			}
+		}
+		if total != 2 || !seats["sess-1"] || !seats["sess-2"] {
+			t.Fatalf("requests = %d for seats %v, want sess-1 and sess-2 kept", total, seats)
+		}
+	})
+
+	t.Run("min_active floor", func(t *testing.T) {
+		cfg := &config.City{Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 2)}}
+		heldStates, _ := planFor(cfg, claudeDemand(), nil)
+		unclamped := claudeDemand()
+		unclamped.CustomCounts = map[string]int{"claude": 0}
+		unclamped.BlindSpawnAllowance = nil
+		floorStates, _ := planFor(cfg, unclamped, nil)
+		if got, want := PoolDesiredCounts(heldStates)["claude"], PoolDesiredCounts(floorStates)["claude"]; got != want || got < 2 {
+			t.Fatalf("held desired count = %d, want the min_active floor %d (>= 2)", got, want)
+		}
+	})
+
+	t.Run("control dispatcher", func(t *testing.T) {
+		dispatcher := config.Agent{
+			Name:              config.ControlDispatcherAgentName,
+			StartCommand:      config.ControlDispatcherStartCommandFor(config.ControlDispatcherAgentName),
+			MaxActiveSessions: intPtr(1),
+		}
+		cfg := &config.City{Agents: []config.Agent{dispatcher}}
+		name := dispatcher.QualifiedName()
+		in := collectedDemand{
+			CustomCounts:        map[string]int{name: 1},
+			BlindSpawnAllowance: map[string]int{name: 0},
+		}
+		if got := mergeCollectedDemand(cfg, in).ScaleCheckCounts[name]; got != 1 {
+			t.Fatalf("control dispatcher count = %d, want 1 (never limited)", got)
+		}
+	})
+
+	t.Run("inputs untouched", func(t *testing.T) {
+		cfg := &config.City{Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)}}
+		in := claudeDemand("gc-1")
+		_, _ = planFor(cfg, in, nil)
+		if in.CustomCounts["claude"] != 3 || in.DefaultDemand["claude"].Count != 1 || in.BlindSpawnAllowance["claude"] != 0 {
+			t.Fatalf("merge edited its input: %+v", in)
+		}
+	})
+}
