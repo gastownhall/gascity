@@ -1655,6 +1655,13 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	}
 
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if shouldHoldCitiesAfterUncleanExit(supCfg.Supervisor, previousExit) {
+		if cities, err := reg.List(); err != nil {
+			fmt.Fprintf(stderr, "gc supervisor: listing cities to hold after previous_exit=%s: %v\n", previousExit, err) //nolint:errcheck
+		} else {
+			holdRegisteredCitiesAfterUncleanExit(cities, previousExit, stderr)
+		}
+	}
 	if err := cleanupSupervisorWorkspaceServicesForSupervisorStart(supervisor.DefaultHome()); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: workspace-service startup cleanup: %v\n", err) //nolint:errcheck
 		return 1
