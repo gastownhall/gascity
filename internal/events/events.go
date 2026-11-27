@@ -86,6 +86,18 @@ const (
 	// the stalled provider claimed its work, or a config change moved the
 	// template off it. Any hold on the template's demand is lifted.
 	AgentClaimsResumed = "agent.claims_resumed"
+	// SessionPoolSpawnChurnCoolingDown fires when the controller's spawn-churn
+	// guard (cmd/gc/pool_spawn_churn.go) finds a pool template's blind seats,
+	// spawned for scale_check demand that names no work bead, waking and
+	// closing without claiming any work, several in a row. Until the hold in
+	// the payload ends, the template's blind demand spawns no seat; seats for
+	// named work beads are unaffected. It is recorded again, in the same
+	// episode, each time the one blind seat admitted after a hold churns too.
+	SessionPoolSpawnChurnCoolingDown = "session.pool_spawn_churn_cooling_down"
+	// SessionPoolSpawnChurnResumed fires when a spawn-churn episode ends: a
+	// blind seat of the template claimed work, or a config change reset the
+	// template. Its blind demand counts in full again.
+	SessionPoolSpawnChurnResumed = "session.pool_spawn_churn_resumed"
 	// HookClaimReclaimedStale fires when gc hook --claim (ga-7rj87d), opted in
 	// via config.Agent.AutoReclaimStaleClaims, recovers a route-matched
 	// candidate whose only claim blocker was another worker's stale (lease-
@@ -739,6 +751,7 @@ var KnownEventTypes = []string{
 	BeadClaimRejected, BeadClaimReleased,
 	BeadClaimFailed, BeadClaimLoopHeld,
 	AgentClaimsStalled, AgentClaimsResumed,
+	SessionPoolSpawnChurnCoolingDown, SessionPoolSpawnChurnResumed,
 	HookClaimReclaimedStale,
 	BeadDeadAssigneeReopened,
 	ExecutionWorkAssociated, ExecutionRunAnchored, ExecutionStepDefined, ExecutionStepStarted, ExecutionStepCompleted,

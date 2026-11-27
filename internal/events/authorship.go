@@ -227,16 +227,18 @@ var builtinAuthorship = map[string]Authorship{
 	ExecutionStepCompleted: AuthorController,
 	ExecutionStepStalled:   AuthorController,
 	// The work ladder's facts: the v2 lane step records them (rule 4).
-	WorkNudged:            AuthorController,
-	WorkNudgeFailed:       AuthorController,
-	WorkRecycleRequested:  AuthorController,
-	WorkReleased:          AuthorController,
-	WorkReleaseUnfinished: AuthorController,
-	WorkEscalated:         AuthorController,
-	WorkRateLimited:       AuthorController,
-	BeadClaimLoopHeld:     AuthorController, // the controller's claim-loop guard (cmd/gc/claim_loop_guard.go)
-	AgentClaimsStalled:    AuthorController, // the controller's claims-stall guard (cmd/gc/claim_stall_guard.go)
-	AgentClaimsResumed:    AuthorController,
+	WorkNudged:                       AuthorController,
+	WorkNudgeFailed:                  AuthorController,
+	WorkRecycleRequested:             AuthorController,
+	WorkReleased:                     AuthorController,
+	WorkReleaseUnfinished:            AuthorController,
+	WorkEscalated:                    AuthorController,
+	WorkRateLimited:                  AuthorController,
+	BeadClaimLoopHeld:                AuthorController, // the controller's claim-loop guard (cmd/gc/claim_loop_guard.go)
+	AgentClaimsStalled:               AuthorController, // the controller's claims-stall guard (cmd/gc/claim_stall_guard.go)
+	AgentClaimsResumed:               AuthorController,
+	SessionPoolSpawnChurnCoolingDown: AuthorController, // the controller's spawn-churn guard (cmd/gc/pool_spawn_churn.go)
+	SessionPoolSpawnChurnResumed:     AuthorController,
 
 	// Controller: the controller, the city, orders, async requests and the
 	// API server's integrations. city.* by D13; gc suspend, gc resume and gc

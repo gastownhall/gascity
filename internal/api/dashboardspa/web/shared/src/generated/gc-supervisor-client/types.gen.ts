@@ -1400,7 +1400,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | AgentClaimsPayload | BackendCredentialResolvedPayload | BeadClaimFailedPayload | BeadClaimLoopHeldPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlCheckUnlaunchablePayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | FactRecordedPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OpChangedPayload | OpsRecordingDegradedPayload | OrderInapplicablePayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestAcceptedPayload | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionClosedPayload | SessionConfigDriftDeferredPayload | SessionCreateSucceededPayload | SessionCreatedPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionProgramStatusShadowPayload | SessionResetStalledPayload | SessionStrandedClaimsPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StorageRigPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkLadderPayload | WorkRateLimitedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | AgentClaimsPayload | BackendCredentialResolvedPayload | BeadClaimFailedPayload | BeadClaimLoopHeldPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlCheckUnlaunchablePayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | FactRecordedPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OpChangedPayload | OpsRecordingDegradedPayload | OrderInapplicablePayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | PoolSpawnChurnPayload | ProjectIdentityStampedPayload | Record | RequestAcceptedPayload | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionClosedPayload | SessionConfigDriftDeferredPayload | SessionCreateSucceededPayload | SessionCreatedPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionProgramStatusShadowPayload | SessionResetStalledPayload | SessionStrandedClaimsPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StorageRigPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkLadderPayload | WorkRateLimitedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -2916,6 +2916,15 @@ export type PoolOverride = {
     Min: number | null;
     OnBoot: string | null;
     OnDeath: string | null;
+};
+
+export type PoolSpawnChurnPayload = {
+    cause: string;
+    episode: string;
+    seats?: number;
+    since: string;
+    template: string;
+    until?: string;
 };
 
 export type ProjectIdentityStampedPayload = {
@@ -6872,6 +6881,10 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSessionPendingCleared) | ({
     type: 'session.pool_slot_retired_at_drain_deadline';
 } & TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline) | ({
+    type: 'session.pool_spawn_churn_cooling_down';
+} & TypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown) | ({
+    type: 'session.pool_spawn_churn_resumed';
+} & TypedEventStreamEnvelopeSessionPoolSpawnChurnResumed) | ({
     type: 'session.program_status_shadow';
 } & TypedEventStreamEnvelopeSessionProgramStatusShadow) | ({
     type: 'session.quarantined';
@@ -8676,6 +8689,42 @@ export type TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.pool_spawn_churn_cooling_down
+ */
+export type TypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: PoolSpawnChurnPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.pool_spawn_churn_cooling_down';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope session.pool_spawn_churn_resumed
+ */
+export type TypedEventStreamEnvelopeSessionPoolSpawnChurnResumed = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: PoolSpawnChurnPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.pool_spawn_churn_resumed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.program_status_shadow
  */
 export type TypedEventStreamEnvelopeSessionProgramStatusShadow = {
@@ -9519,6 +9568,10 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSessionPendingCleared) | ({
     type: 'session.pool_slot_retired_at_drain_deadline';
 } & TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline) | ({
+    type: 'session.pool_spawn_churn_cooling_down';
+} & TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown) | ({
+    type: 'session.pool_spawn_churn_resumed';
+} & TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnResumed) | ({
     type: 'session.program_status_shadow';
 } & TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow) | ({
     type: 'session.quarantined';
@@ -11415,6 +11468,44 @@ export type TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline 
     subject?: string;
     ts: string;
     type: 'session.pool_slot_retired_at_drain_deadline';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.pool_spawn_churn_cooling_down
+ */
+export type TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: PoolSpawnChurnPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.pool_spawn_churn_cooling_down';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.pool_spawn_churn_resumed
+ */
+export type TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnResumed = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: PoolSpawnChurnPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.pool_spawn_churn_resumed';
     workflow?: WorkflowEventProjection;
 };
 
