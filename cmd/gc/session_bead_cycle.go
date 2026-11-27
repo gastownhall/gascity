@@ -3,12 +3,14 @@ package main
 import (
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
@@ -58,11 +60,11 @@ func recordCurrentBeadIDOnWake(info sessionpkg.Info, sessFront *sessionpkg.Store
 // close time or the live assignee after checking status.
 //
 // The topology only names which store owns the row. The row is then read from
-// that store with its cache layers peeled (uncachedBeadStore), as
-// freshAnchorBeadTerminal does: a rig leg is a CachingStore whose Get answers
-// a primed, undirtied row without a backing read, and a handoff or close made
-// by another process (`bd update --assignee`, `bd close`) reaches the backing
-// store alone. A cached row would report the old assignee and keep row A
+// that store's live reader (beads.LiveFor: past its policy and cache layers,
+// and any class layer above them), as freshAnchorBeadTerminal does: a rig leg
+// is a CachingStore whose Get answers a primed, undirtied row without a
+// backing read, and a handoff or close made by another process (`bd update
+// --assignee`, `bd close`) reaches the backing store alone. A cached row would report the old assignee and keep row A
 // deferring on a bead this session no longer owns.
 //
 // assignee is the live, trimmed assignee. ga-pvjbx3 Q3: the guard defers on an
@@ -83,7 +85,7 @@ func prevAssignedBeadStatus(topo storeref.Topology, id string) (open bool, assig
 	if err != nil {
 		return false, "", time.Time{}, err
 	}
-	b, err := uncachedBeadStore(owner.Store).Get(id)
+	b, err := beads.LiveFor(owner.Resident).Get(id)
 	if err != nil {
 		return false, "", time.Time{}, err
 	}
@@ -143,30 +145,42 @@ func sessionHasFreshInProgressClaim(sw *SeatWork, info sessionpkg.Info) (bool, e
 // freshAnchorBeadTerminal fetches the fresh-cycle guard's anchor bead
 // (ComputeAwakeSet's decision.AssignedWorkBeadID) with one fresh, uncached
 // read over the caller's residency topology and reports whether it is
-// already terminal (closed). ga-pvjbx3 Q2: the tick's assigned-work snapshot
-// can already be several minutes stale by the time the kill decision runs;
-// cycling a session onto an anchor that has since closed is pure loss — there
-// is no work left to reassign onto. An error (including a bead no leg holds)
-// is "could not tell", and the caller then proceeds to the cycle: Q1 has
-// already established that the session holds no claim a kill could cost.
+// already terminal (closed), together with its trimmed live assignee.
+// ga-pvjbx3 Q2: the tick's assigned-work snapshot can already be several
+// minutes stale by the time the kill decision runs; cycling a session onto an
+// anchor that has since closed is pure loss — there is no work left to
+// reassign onto. The same holds for an anchor that was released or handed to
+// another owner since the snapshot: the caller compares the returned assignee
+// with the session's own identifiers. Status and assignee come from the one
+// row, so they cannot disagree. An error (including a bead no leg holds) is
+// "could not tell", and the caller then proceeds to the cycle: Q1 has already
+// established that the session holds no claim a kill could cost.
 //
 // The topology only names which store owns the anchor. The row is then read
-// from that store with its cache layers peeled (uncachedBeadStore), and the
-// row the owner probe may already have read is discarded: a rig leg is a
+// from that store's live reader (beads.LiveFor), and the row the owner probe
+// may already have read is discarded: a rig leg is a
 // CachingStore whose Get answers a primed, undirtied row without a backing
 // read, and a close made by another process (`bd close`) reaches the backing
 // store alone. Reading through the cache would report that closed anchor as
 // live and cycle the session onto work that no longer exists.
-func freshAnchorBeadTerminal(topo storeref.Topology, anchorID string) (bool, error) {
+func freshAnchorBeadTerminal(topo storeref.Topology, anchorID string) (terminal bool, assignee string, err error) {
 	owner, err := byIDOwnerRowForTopology(topo, anchorID)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
-	anchor, err := uncachedBeadStore(owner.Store).Get(anchorID)
+	anchor, err := beads.LiveFor(owner.Resident).Get(anchorID)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
-	return convoycore.IsTerminalStatus(anchor.Status), nil
+	return convoycore.IsTerminalStatus(anchor.Status), strings.TrimSpace(anchor.Assignee), nil
+}
+
+// freshAnchorCycleSkippable reports whether the fresh-cycle guard must skip the
+// cycle, given the result of freshAnchorBeadTerminal: the live anchor is closed,
+// or it is no longer owned by one of the session's own identifiers. A read
+// error is "could not tell" and never skips.
+func freshAnchorCycleSkippable(terminal bool, assignee string, err error, identifiers []string) bool {
+	return err == nil && (terminal || !slices.Contains(identifiers, assignee))
 }
 
 // cycleAliveSessionForFreshReassign tears down a live wake_mode=fresh
@@ -186,8 +200,15 @@ func freshAnchorBeadTerminal(topo storeref.Topology, anchorID string) (bool, err
 // the next wake observes firstStart=true and uses the fresh-wake
 // conversation reset. We also update currently_processing_bead_id to the
 // new anchor so the divergence check does not refire on the next tick.
+//
+// A cycle that ran records a session.draining event on rec naming the session
+// and carrying the previous and new bead ids, so the kill is attributable from
+// `gc events` without reading the supervisor log. Every early return (no store,
+// no new bead, failed kill, failed breaker reset, failed handoff write) records
+// nothing. A nil rec is allowed and records nothing.
 func cycleAliveSessionForFreshReassign(
 	cityPath string,
+	rec events.Recorder,
 	info sessionpkg.Info,
 	tp TemplateParams,
 	sp runtime.Provider,
@@ -256,6 +277,15 @@ func cycleAliveSessionForFreshReassign(
 			continue
 		}
 		fold[key] = value
+	}
+	if rec != nil {
+		rec.Record(events.Event{
+			Type:      events.SessionDraining,
+			Actor:     "gc",
+			Subject:   tp.DisplayName(),
+			Message:   fmt.Sprintf("fresh-mode bead reassign: cycled session %s, bead %s -> %s", name, prevBeadID, newBeadID),
+			SessionID: info.ID,
+		})
 	}
 	if stdout != nil {
 		fmt.Fprintf(stdout, "Cycled fresh-mode session '%s' for bead reassign: %s → %s\n", name, prevBeadID, newBeadID) //nolint:errcheck

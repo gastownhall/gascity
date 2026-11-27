@@ -147,3 +147,182 @@ func TestPassthroughGCSideRefusesAMeasurementOfNothing(t *testing.T) {
 		t.Errorf("a floor 1.85s above the command's gc side gave marginal %v with no error; it would pass any gc side under 2s", got)
 	}
 }
+
+// floorScript stands in for the two gc processes MeasureMarginalOverFloor
+// samples. Every sample, of either kind, is one tick of the box's clock;
+// floorAt and gcSideAt get that tick and how many samples of their own kind
+// came before, and return what the sample measured.
+type floorScript struct {
+	floorAt, gcSideAt func(tick, n int) time.Duration
+	calls             []string
+	floors, gcSides   int
+}
+
+func (s *floorScript) floor() time.Duration {
+	d := s.floorAt(len(s.calls), s.floors)
+	s.calls = append(s.calls, "floor")
+	s.floors++
+	return d
+}
+
+func (s *floorScript) gcSide() time.Duration {
+	d := s.gcSideAt(len(s.calls), s.gcSides)
+	s.calls = append(s.calls, "gc-side")
+	s.gcSides++
+	return d
+}
+
+// loadedBox returns a floorScript for a floor and a gc side of fixed cost on a
+// box whose load slows every sample taken at a tick by loadPct(tick) percent.
+func loadedBox(floorCost, gcSideCost time.Duration, loadPct func(tick int) int) *floorScript {
+	return &floorScript{
+		floorAt:  func(tick, _ int) time.Duration { return floorCost * time.Duration(loadPct(tick)) / 100 },
+		gcSideAt: func(tick, _ int) time.Duration { return gcSideCost * time.Duration(loadPct(tick)) / 100 },
+	}
+}
+
+// TestMeasureMarginalOverFloorInterleavesTheTwo pins the order the floor and
+// the gc side are sampled in: alternately, a floor and then a gc side.
+//
+// Each best-of is a minimum over samples of one fixed cost plus whatever the
+// box was doing at that moment. Taken in two blocks, five floors and then five
+// gc sides, the two minima come from two different stretches of the box's
+// load, and their difference measures how the load moved between the blocks
+// as much as it measures the command (ga-97b2v9wd).
+func TestMeasureMarginalOverFloorInterleavesTheTwo(t *testing.T) {
+	box := loadedBox(60*time.Millisecond, 80*time.Millisecond, func(int) int { return 100 })
+	MeasureMarginalOverFloor(100*time.Millisecond, box.floor, box.gcSide)
+	if len(box.calls) == 0 {
+		t.Fatal("MeasureMarginalOverFloor took no samples")
+	}
+	for i, kind := range box.calls {
+		want := "floor"
+		if i%2 == 1 {
+			want = "gc-side"
+		}
+		if kind != want {
+			t.Fatalf("sample %d was a %s, want a %s: the samples were taken in the order %v, so the two minima need not come from the same stretch of load", i+1, kind, want, box.calls)
+		}
+	}
+}
+
+// TestMeasureMarginalOverFloorReadsThroughALoadBurst reproduces the
+// 2026-11-24 PR 9470 re-gate's reading (floor 272ms, gc side 144ms) with a
+// floor that does strictly less than the gc side: a 60ms process start beside
+// an 80ms gc side, on a box whose load runs at 4.53x for the first five
+// samples taken and settles at 1.8x. Sampled in two blocks, every floor lands
+// in the burst (271.8ms) and every gc side after it (144ms), and the floor
+// reads 128ms ABOVE the command it is subtracted from, though neither process
+// changed. Interleaved, both minima come from the settled stretch.
+func TestMeasureMarginalOverFloorReadsThroughALoadBurst(t *testing.T) {
+	burst := func(tick int) int {
+		if tick < 5 {
+			return 453
+		}
+		return 180
+	}
+	box := loadedBox(60*time.Millisecond, 80*time.Millisecond, burst)
+	m := MeasureMarginalOverFloor(100*time.Millisecond, box.floor, box.gcSide)
+	if m.Inverted {
+		t.Fatalf("a burst that came and went inverted the reading (floor %s, gc side %s over %d samples each, taken in the order %v): a floor of 60ms read above an 80ms gc side",
+			m.Floor, m.GCSide, m.Pairs, box.calls)
+	}
+	if m.Floor != 108*time.Millisecond || m.GCSide != 144*time.Millisecond || m.Marginal != 36*time.Millisecond {
+		t.Errorf("reading = floor %s, gc side %s, marginal %s; want 108ms, 144ms and 36ms, the two fixed costs at the settled load", m.Floor, m.GCSide, m.Marginal)
+	}
+	if m.Pairs != FloorMeasurementMinPairs {
+		t.Errorf("took %d pairs, want %d: interleaving alone keeps this burst out of the reading, so nothing should need re-measuring", m.Pairs, FloorMeasurementMinPairs)
+	}
+}
+
+// TestMeasureMarginalOverFloorRemeasuresAnInvertedReading pins what happens to
+// a reading whose floor sits more than the budget above the gc side. It is no
+// verdict on gc's side, so it is neither passed nor failed: it is measured
+// again, one more pair at a time. Here the first five floor samples come back
+// slow for a reason that is not the gc side's, and the sixth does not.
+func TestMeasureMarginalOverFloorRemeasuresAnInvertedReading(t *testing.T) {
+	box := &floorScript{
+		floorAt: func(_, n int) time.Duration {
+			if n < FloorMeasurementMinPairs {
+				return 300 * time.Millisecond
+			}
+			return 60 * time.Millisecond
+		},
+		gcSideAt: func(int, int) time.Duration { return 80 * time.Millisecond },
+	}
+	m := MeasureMarginalOverFloor(100*time.Millisecond, box.floor, box.gcSide)
+	if m.Inverted {
+		t.Fatalf("the reading stayed inverted (floor %s, gc side %s after %d samples each): an inverted reading must be measured again, not reported", m.Floor, m.GCSide, m.Pairs)
+	}
+	if m.Pairs != FloorMeasurementMinPairs+1 {
+		t.Errorf("took %d pairs, want %d: one more pair settles this reading", m.Pairs, FloorMeasurementMinPairs+1)
+	}
+	if m.Floor != 60*time.Millisecond || m.Marginal != 20*time.Millisecond {
+		t.Errorf("reading = floor %s, marginal %s; want 60ms and 20ms", m.Floor, m.Marginal)
+	}
+}
+
+// TestMeasureMarginalOverFloorReportsAPersistentInversion pins the end of the
+// re-measurement: a floor that never reads as one is still not a verdict on
+// the gc side. After every pair FloorMeasurementMaxPairs allows, the reading
+// comes back Inverted with no marginal, for the caller to report as
+// inconclusive, never as a pass.
+func TestMeasureMarginalOverFloorReportsAPersistentInversion(t *testing.T) {
+	box := &floorScript{
+		floorAt:  func(int, int) time.Duration { return 300 * time.Millisecond },
+		gcSideAt: func(int, int) time.Duration { return 80 * time.Millisecond },
+	}
+	m := MeasureMarginalOverFloor(100*time.Millisecond, box.floor, box.gcSide)
+	if !m.Inverted {
+		t.Fatalf("a floor 220ms above the gc side on every sample read as a floor (marginal %s after %d pairs)", m.Marginal, m.Pairs)
+	}
+	if m.Pairs != FloorMeasurementMaxPairs {
+		t.Errorf("took %d pairs, want all %d before giving up on the reading", m.Pairs, FloorMeasurementMaxPairs)
+	}
+	if m.Marginal != 0 {
+		t.Errorf("an inverted reading carried marginal %s; it has none", m.Marginal)
+	}
+}
+
+// TestMeasureMarginalOverFloorNeverRemeasuresAnOverBudgetReading is the other
+// half of not weakening the gate: only an inverted reading is measured again.
+// A gc side that really is over budget is a verdict, returned after the first
+// FloorMeasurementMinPairs pairs for the caller to fail, not sampled until a
+// quiet moment lets it through.
+func TestMeasureMarginalOverFloorNeverRemeasuresAnOverBudgetReading(t *testing.T) {
+	box := &floorScript{
+		floorAt:  func(int, int) time.Duration { return 60 * time.Millisecond },
+		gcSideAt: func(int, int) time.Duration { return 400 * time.Millisecond },
+	}
+	m := MeasureMarginalOverFloor(100*time.Millisecond, box.floor, box.gcSide)
+	if m.Inverted {
+		t.Fatalf("a gc side 340ms above the floor read as inverted")
+	}
+	if m.Pairs != FloorMeasurementMinPairs {
+		t.Errorf("took %d pairs, want %d: an over-budget reading must not be re-measured", m.Pairs, FloorMeasurementMinPairs)
+	}
+	if m.Marginal != 340*time.Millisecond {
+		t.Errorf("marginal = %s, want 340ms, over the 100ms budget for the caller to fail", m.Marginal)
+	}
+}
+
+// TestMeasureMarginalOverFloorKeepsTheBestSampleOfEach pins "the minimum": the
+// best floor and the best gc side are neither the first nor the last sample
+// taken, and every other sample is slower. The best of each is the closest any
+// sample got to the fixed cost; the last sample, or the largest, would read the
+// noise around it.
+func TestMeasureMarginalOverFloorKeepsTheBestSampleOfEach(t *testing.T) {
+	floors := []time.Duration{90, 60, 120, 75, 110}
+	gcSides := []time.Duration{200, 150, 220, 180, 210}
+	box := &floorScript{
+		floorAt:  func(_, n int) time.Duration { return floors[n%len(floors)] * time.Millisecond },
+		gcSideAt: func(_, n int) time.Duration { return gcSides[n%len(gcSides)] * time.Millisecond },
+	}
+	m := MeasureMarginalOverFloor(100*time.Millisecond, box.floor, box.gcSide)
+	if m.Inverted {
+		t.Fatalf("a floor 90ms below the gc side read as inverted (floor %s, gc side %s)", m.Floor, m.GCSide)
+	}
+	if m.Floor != 60*time.Millisecond || m.GCSide != 150*time.Millisecond || m.Marginal != 90*time.Millisecond {
+		t.Errorf("reading = floor %s, gc side %s, marginal %s; want 60ms, 150ms and 90ms, the best sample of each kind", m.Floor, m.GCSide, m.Marginal)
+	}
+}

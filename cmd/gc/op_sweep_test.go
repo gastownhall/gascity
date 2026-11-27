@@ -1321,6 +1321,22 @@ func TestOpSweepDefaultAutoNonSQLiteStoreSweepsLeftoversThenIdles(t *testing.T) 
 	}
 }
 
+// TestOpSweepIncapableLatchFollowsTheSessionsBinding pins incapableNow to the
+// sessions class on a split city (typed-stores T6c): the builtin default finds
+// a non-SQLite sessions binding unable to record ops, and the latch it sets
+// holds for that binding, not for the work store beside it.
+func TestOpSweepIncapableLatchFollowsTheSessionsBinding(t *testing.T) {
+	binding := newOpSweepStore()
+	cs := &controllerState{cityBeadStore: newOpSweepStore(), storageRoutes: splitRoutes(binding), rolloutFlags: rollout.ForTest(), beadsQuiescent: new(atomic.Bool)}
+	h := newOpSweepHarness(cs)
+	if h.s.safePass() {
+		t.Fatal("the pass panicked")
+	}
+	if !h.s.incapableNow() {
+		t.Fatalf("after a pass over a non-SQLite sessions binding incapableNow = false, want the latch held for it; logs=%q", h.logLines(""))
+	}
+}
+
 // The builtin auto default must see through every production wrapper around a
 // split city's SQLite sessions store: the controller's cache, the CLI's
 // emitting wrapper, and the stores the sweeper and doctor open. A wrapper that
@@ -1362,8 +1378,8 @@ func TestOpsBuiltinDefaultRecordsOnARealSplitCity(t *testing.T) {
 
 	// Sweeper over a controllerState that routes sessions to that cache.
 	cs := &controllerState{cityBeadStore: work, storageRoutes: ctlRoutes, cfg: cfg, cityPath: root, rolloutFlags: rollout.ForTest(), beadsQuiescent: new(atomic.Bool)}
-	if got := cs.SessionsBeadStore().Store; got != ctlSess.Store {
-		t.Fatalf("cs.SessionsBeadStore = %T, want the routed cache", got)
+	if got := cs.Stores().Sessions().Store; got != ctlSess.Store {
+		t.Fatalf("cs.Stores().Sessions() = %T, want the routed cache", got)
 	}
 	h := newOpSweepHarness(cs)
 	if h.s.safePass() {

@@ -38,6 +38,15 @@ type Options struct {
 	// SkipStartError classifies Start errors that should skip the current
 	// subtest instead of failing the provider conformance suite.
 	SkipStartError func(error) (reason string, ok bool)
+
+	// DuplicateStartReconnects declares that this provider's Start
+	// intentionally treats a second Start call for an already-running
+	// session name as a reconnect to the existing durable session rather
+	// than an error -- e.g. a provider backed by a durable,
+	// externally-addressable substrate meant to survive local-process
+	// restarts. When true, Start_DuplicateReturnsError instead asserts the
+	// second Start succeeds and the session is still reported running.
+	DuplicateStartReconnects bool
 }
 
 // RunProviderTests runs the full conformance suite against a Provider.
@@ -93,6 +102,15 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 		startOrSkip(t, opts, sp, name, cfg, "first Start")
 
 		err := startWithCleanup(t, sp, name, cfg)
+		if opts.DuplicateStartReconnects {
+			if err != nil {
+				t.Errorf("second Start should reconnect without error, got: %v", err)
+			}
+			if !sp.IsRunning(name) {
+				t.Error("IsRunning = false after duplicate Start reconnect, want true")
+			}
+			return
+		}
 		if err == nil {
 			t.Error("second Start should return error for duplicate name")
 		}
@@ -159,6 +177,47 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 		}
 		if obs.Running || obs.Alive {
 			t.Errorf("ObserveLivenessWithError after Stop = %+v, want absent", obs)
+		}
+	})
+
+	// v2's start (CONTRACT v5 S1): a provider v2 starts on, one that reads
+	// fresh, refuses a FreshOnly start over a name it holds with
+	// ErrSessionExists, and leaves the session it holds running.
+	t.Run("Start_FreshOnlyRefusesAHeldName", func(t *testing.T) {
+		sp, cfg, name := newSession(t)
+		if !runtime.FreshReadable(sp) {
+			return
+		}
+		startOrSkip(t, opts, sp, name, cfg, "Start")
+		fresh := cfg
+		fresh.FreshOnly = true
+		if err := sp.Start(context.Background(), name, fresh); !errors.Is(err, runtime.ErrSessionExists) {
+			t.Errorf("FreshOnly Start over a held name = %v, want ErrSessionExists", err)
+		}
+		if !sp.IsRunning(name) {
+			t.Error("the refused FreshOnly Start stopped the session it found")
+		}
+	})
+
+	// An attested listing (runtime.ListRunningWithAttestation) is proof of
+	// absence: it lists a started session, and does not list it once
+	// stopped.
+	t.Run("ListRunning_AttestedAfterStartAndStop", func(t *testing.T) {
+		sp, cfg, name := newSession(t)
+		if !runtime.ListRunningAttested(sp) {
+			return
+		}
+		startOrSkip(t, opts, sp, name, cfg, "Start")
+		names, attested, err := runtime.ListRunningWithAttestation(sp, name)
+		if err != nil || !attested || !contains(names, name) {
+			t.Fatalf("attested listing after Start = %v (attested %v), %v; want %q listed", names, attested, err, name)
+		}
+		if err := sp.Stop(name); err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+		names, attested, err = runtime.ListRunningWithAttestation(sp, name)
+		if err != nil || !attested || contains(names, name) {
+			t.Errorf("attested listing after Stop = %v (attested %v), %v; want %q absent", names, attested, err, name)
 		}
 	})
 
@@ -779,8 +838,8 @@ func RunSessionTests(t *testing.T, sp runtime.Provider, cfg runtime.Config, name
 	})
 
 	t.Run("SendKeys_MissingSession", func(t *testing.T) {
-		if err := sp.SendKeys("nonexistent-conformance-session", "Enter"); err != nil {
-			t.Errorf("SendKeys on missing session should not error: %v", err)
+		if err := sp.SendKeys("nonexistent-conformance-session", "Enter"); err != nil && !errors.Is(err, runtime.ErrSessionNotFound) {
+			t.Errorf("SendKeys on missing session error = %v, want nil or ErrSessionNotFound", err)
 		}
 	})
 
@@ -797,7 +856,8 @@ func RunSessionTests(t *testing.T, sp runtime.Provider, cfg runtime.Config, name
 	})
 
 	t.Run("Nudge_RunningSession", func(t *testing.T) {
-		if err := sp.Nudge(name, runtime.TextContent("hello")); err != nil {
+		// A delivery whose turn start went unobserved is still a delivery.
+		if err := sp.Nudge(name, runtime.TextContent("hello")); !runtime.NudgeDelivered(err) {
 			t.Errorf("Nudge: %v", err)
 		}
 	})

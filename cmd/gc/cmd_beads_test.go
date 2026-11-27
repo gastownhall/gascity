@@ -601,11 +601,11 @@ func TestRouteBeadsList_PartialAPIAnswerFailsTheListing(t *testing.T) {
 	}
 }
 
-func TestRouteBeadsList_StaleBannerOver30s(t *testing.T) {
+func TestRouteBeadsList_CacheAgeFooterOnStderr(t *testing.T) {
 	t.Setenv("GC_DEBUG", "0")
 	cityPath := writeBeadsTestCity(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("X-GC-Cache-Age-S", "45")
+		setBehindCacheHeaders(w)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}, "total": 0})
 	}))
@@ -616,8 +616,41 @@ func TestRouteBeadsList_StaleBannerOver30s(t *testing.T) {
 	if code := routeBeadsList(cityPath, c, "", "text", beadFilters{}, &stdout, &stderr); code != 0 {
 		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "cache age: 45s") {
-		t.Errorf("stale banner missing from human output:\n%s", stdout.String())
+	assertCacheAgeFooterOnStderr(t, stdout.String(), stderr.String())
+}
+
+// A supervisor that reports only X-GC-Cache-Age-S gets the conservative bound
+// of twice the slowest interval a cache has used (240 s), past which the
+// footer says the server does not report why.
+func TestRouteBeadsList_CacheAgeFooterFromAnOlderSupervisor(t *testing.T) {
+	t.Setenv("GC_DEBUG", "0")
+	cityPath := writeBeadsTestCity(t)
+	for _, tc := range []struct {
+		age, want string
+	}{
+		{"200", ""},
+		{"250", "(cache age: 250s — this read is over 240s old, and the server does not report why)\n"},
+	} {
+		t.Run(tc.age, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("X-GC-Cache-Age-S", tc.age)
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}, "total": 0})
+			}))
+			defer srv.Close()
+			c := api.NewCityScopedClient(srv.URL, "test-city")
+
+			var stdout, stderr bytes.Buffer
+			if code := routeBeadsList(cityPath, c, "", "text", beadFilters{}, &stdout, &stderr); code != 0 {
+				t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
+			}
+			if stderr.String() != tc.want {
+				t.Errorf("stderr = %q, want %q", stderr.String(), tc.want)
+			}
+			if strings.Contains(stdout.String(), "(cache age:") {
+				t.Errorf("stdout carries a cache-age footer:\n%s", stdout.String())
+			}
+		})
 	}
 }
 
