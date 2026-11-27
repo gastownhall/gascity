@@ -1,5 +1,16 @@
 # Example city.toml for Kubernetes deployment.
 #
+# Layout: this file is the city's city.toml, and the pack.toml and agents/
+# directory beside it in contrib/k8s are the city's root pack, which supplies
+# the "coder" and "mayor" agents. Copy all three into a new city directory:
+#
+#    mkdir my-k8s-city
+#    cp contrib/k8s/example-city.toml my-k8s-city/city.toml
+#    cp contrib/k8s/pack.toml my-k8s-city/pack.toml
+#    cp -r contrib/k8s/agents my-k8s-city/agents
+#    gc init --from my-k8s-city <city-path>
+#    gc doctor --fix --city <city-path>   # pins the builtin core and bd pack imports
+#
 # Two deployment modes:
 #
 # A) Local controller (demo mode):
@@ -24,8 +35,12 @@
 name = "my-k8s-city"
 provider = "claude"
 session_template = "{{.City}}-{{.Agent}}"
-# No worktree isolation in K8s Phase 1 — repo is cloned into the image.
-isolation = "none"
+# No worktree isolation in K8s Phase 1: the repo is cloned into the image.
+
+# The workspace provider must exist in the provider catalog; gc does not add
+# builtin aliases for you at load time.
+[providers.claude]
+base = "builtin:claude"
 
 # Native K8s session provider — uses client-go for direct API calls.
 # Eliminates subprocess overhead vs the exec-based gc-session-k8s script.

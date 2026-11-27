@@ -1,4 +1,4 @@
-install_hooks = ["claude"]
+install_agent_hooks = ["claude"]
 process_names = ["claude"]
 ready_prompt_prefix = "claude"
 nudge = "Check your hook for work assignments."
