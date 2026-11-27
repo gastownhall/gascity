@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -14,6 +15,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/rest"
 
 	execerr "k8s.io/client-go/util/exec"
 
@@ -2805,5 +2807,76 @@ func TestRelaunchFailsClosedWhenTheRemoteStageRecordFails(t *testing.T) {
 	}
 	if findExecCmd(fake, "respawn-pane") != nil {
 		t.Error("the agent was respawned into a pod that could not be marked")
+	}
+}
+
+// TestBuildRESTConfigRaisesClientRateLimits pins issue #4390: session-list
+// enrichment issues one pod GET per active session, so the controller's REST
+// client must not run at client-go's default rate limiter (QPS 5 / Burst 10),
+// which serializes those GETs and makes /sessions grow O(N) at fleet scale.
+func TestBuildRESTConfigRaisesClientRateLimits(t *testing.T) {
+	const clientGoDefaultQPS, clientGoDefaultBurst = 5, 10
+	kubeconfig := t.TempDir() + "/kubeconfig"
+	writeErr := os.WriteFile(kubeconfig, []byte(`apiVersion: v1
+kind: Config
+clusters:
+- name: c
+  cluster:
+    server: https://127.0.0.1:6443
+users:
+- name: u
+  user:
+    token: t
+contexts:
+- name: ctx
+  context:
+    cluster: c
+    user: u
+current-context: ctx
+`), 0o600)
+	if writeErr != nil {
+		t.Fatalf("writing kubeconfig: %v", writeErr)
+	}
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
+	t.Setenv("KUBERNETES_SERVICE_PORT", "")
+	t.Setenv("KUBECONFIG", kubeconfig)
+
+	cfg, err := buildRESTConfig("")
+	if err != nil {
+		t.Fatalf("buildRESTConfig: %v", err)
+	}
+	if cfg.QPS <= clientGoDefaultQPS {
+		t.Errorf("rest.Config QPS = %v, want > client-go default %d so per-session pod lookups are not client-side throttled", cfg.QPS, clientGoDefaultQPS)
+	}
+	if cfg.Burst <= clientGoDefaultBurst {
+		t.Errorf("rest.Config Burst = %d, want > client-go default %d so per-session pod lookups are not client-side throttled", cfg.Burst, clientGoDefaultBurst)
+	}
+}
+
+// TestWithClientRateLimits covers the rate-limit defaulting both
+// buildRESTConfig branches share: an unset (zero) QPS or Burst takes the
+// provider's limit, and an explicitly configured non-zero value is kept.
+func TestWithClientRateLimits(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		in        rest.Config
+		wantQPS   float32
+		wantBurst int
+	}{
+		{"unset", rest.Config{}, k8sClientQPS, k8sClientBurst},
+		{"explicit both", rest.Config{QPS: 7, Burst: 9}, 7, 9},
+		{"explicit QPS only", rest.Config{QPS: 200}, 200, k8sClientBurst},
+		{"explicit Burst only", rest.Config{Burst: 300}, k8sClientQPS, 300},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := tc.in
+			got := withClientRateLimits(&in)
+			if got != &in {
+				t.Fatal("withClientRateLimits must return the config it was given")
+			}
+			if got.QPS != tc.wantQPS || got.Burst != tc.wantBurst {
+				t.Fatalf("QPS/Burst = %v/%d, want %v/%d", got.QPS, got.Burst, tc.wantQPS, tc.wantBurst)
+			}
+		})
 	}
 }

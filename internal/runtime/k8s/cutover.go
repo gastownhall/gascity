@@ -2,6 +2,7 @@ package k8s
 
 import (
 	"context"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -23,6 +24,7 @@ var (
 	_ runtime.RelaunchProvider        = (*seamBackedProvider)(nil)
 	_ runtime.ListingAttestation      = (*seamBackedProvider)(nil)
 	_ runtime.SharedListing           = (*seamBackedProvider)(nil)
+	_ runtime.FreshLivenessObserver   = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked constructs a k8s provider served through the seams.
@@ -36,6 +38,38 @@ func NewSeamBacked(opts ...Option) (runtime.Provider, error) {
 	}
 	rt, tp := raw.Seams()
 	return &seamBackedProvider{Provider: runtime.NewProviderFromSeams(rt, tp), raw: raw}, nil
+}
+
+// IsRunning passes through to the underlying provider, whose pod snapshot
+// serves it, instead of the seam adapter's Runtime.Open.
+func (s *seamBackedProvider) IsRunning(name string) bool {
+	return s.raw.IsRunning(name)
+}
+
+// IsAttached passes through to the underlying provider. The seam path's
+// attach → Observe fan-out probes liveness twice more and reads activity and
+// processes for an answer the raw read gives alone: without a live tmux
+// session display-message fails, so the raw answer is false exactly when the
+// attach would have failed.
+func (s *seamBackedProvider) IsAttached(name string) bool {
+	return s.raw.IsAttached(name)
+}
+
+// GetLastActivity passes through to the underlying provider, which reads zero
+// without a running pod or tmux session, as the seam path's failed attach
+// does, and otherwise the same poke-discounted activity Observe reports.
+func (s *seamBackedProvider) GetLastActivity(name string) (time.Time, error) {
+	return s.raw.GetLastActivity(name)
+}
+
+// ObserveLivenessSince implements [runtime.FreshLivenessObserver]: this
+// provider's own liveness read (IsRunning, and ProcessAlive through the
+// seams), served from a pod listing whose LIST started at or after since.
+// It reads alive exactly where the plain read would on that listing.
+// Without it runtime.ObserveLivenessSince answers from the pod snapshot,
+// which can still show a pod another process deleted as not deleting.
+func (s *seamBackedProvider) ObserveLivenessSince(name string, processNames []string, since time.Time) (runtime.Liveness, error) {
+	return s.raw.observeLivenessSince(s, name, processNames, since), nil
 }
 
 // SleepCapability passes through to the underlying provider (non-seam).

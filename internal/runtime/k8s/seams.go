@@ -51,8 +51,10 @@ func (r *k8sRuntime) Provision(ctx context.Context, name string, req runtime.Pro
 }
 
 // Open re-resolves a running session by name without creating it (←IsRunning).
+// It lists the session's pod fresh rather than reading the pod snapshot: the
+// seam adapter's attach gates the driving verbs on it.
 func (r *k8sRuntime) Open(_ context.Context, name string) (runtime.Place, bool, error) {
-	if !r.p.IsRunning(name) {
+	if !r.p.isRunningFresh(name) {
 		return nil, false, nil
 	}
 	return &k8sPlace{p: r.p, name: name}, true, nil
@@ -125,8 +127,10 @@ func (pl *k8sPlace) Stage(_ context.Context, files []runtime.CopyEntry) error {
 	return nil
 }
 
+// IsRunning reports pod+tmux liveness over a fresh pod LIST (Transport.Open
+// gates the attachment on it).
 func (pl *k8sPlace) IsRunning(_ context.Context) (bool, error) {
-	return pl.p.IsRunning(pl.name), nil
+	return pl.p.isRunningFresh(pl.name), nil
 }
 
 // Teardown is Stop's where-half: delete the pod (←Stop).

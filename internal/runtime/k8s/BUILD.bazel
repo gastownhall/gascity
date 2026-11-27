@@ -7,6 +7,7 @@ go_library(
         "exec.go",
         "name.go",
         "pod.go",
+        "pod_snapshot.go",
         "provider.go",
         "seams.go",
         "staging.go",
@@ -28,6 +29,7 @@ go_library(
         "@io_k8s_client_go//tools/clientcmd",
         "@io_k8s_client_go//tools/remotecommand",
         "@io_k8s_client_go//util/exec",
+        "@org_golang_x_sync//singleflight",
     ],
 )
 
@@ -39,6 +41,7 @@ go_test(
         "exec_provider_test.go",
         "name_test.go",
         "pod_prompt_test.go",
+        "pod_snapshot_test.go",
         "pod_test.go",
         "provider_stale_probe_test.go",
         "provider_test.go",
@@ -59,6 +62,7 @@ go_test(
     deps = [
         "//internal/bazeltest",
         "//internal/runtime",
+        "//internal/runtime/hybrid",
         "//internal/runtime/runtimetest",
         "//internal/shellquote",
         "//internal/testenv",
@@ -66,6 +70,7 @@ go_test(
         "@io_k8s_apimachinery//pkg/api/errors",
         "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
         "@io_k8s_apimachinery//pkg/runtime/schema",
+        "@io_k8s_client_go//rest",
         "@io_k8s_client_go//util/exec",
     ],
 )

@@ -3,6 +3,7 @@ package runtime_test
 import (
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/auto"
@@ -73,6 +74,103 @@ func TestResolveBackendUnknownWhenAnyHopUnknown(t *testing.T) {
 	leaf, labels, known = runtime.ResolveBackend(local, "worker")
 	if leaf != local || labels != nil || !known {
 		t.Fatalf("ResolveBackend(leaf) = (%p, %v, %v), want the leaf itself, no labels, known", leaf, labels, known)
+	}
+}
+
+// cachedLeaf answers every liveness read from its cache and has no fresh read
+// (herdr, exec).
+type cachedLeaf struct {
+	runtime.Provider
+	cached runtime.Liveness
+}
+
+func (l cachedLeaf) ObserveLivenessWithError(string, []string) (runtime.Liveness, error) {
+	return l.cached, nil
+}
+
+// freshLeaf also reads past its cache (tmux, k8s). since is the boundary its
+// last fresh read was asked for.
+type freshLeaf struct {
+	cachedLeaf
+	fresh runtime.Liveness
+	since time.Time
+}
+
+func (l *freshLeaf) ObserveLivenessSince(_ string, _ []string, since time.Time) (runtime.Liveness, error) {
+	l.since = since
+	return l.fresh, nil
+}
+
+// guessingRouter routes every name to leaf without vouching for the route, as
+// auto does before SeedRoutes, and claims no fresh read of its own. Its own
+// read is its cached one.
+type guessingRouter struct {
+	cachedLeaf
+	leaf runtime.Provider
+}
+
+func (r guessingRouter) RouteFor(string) runtime.Route {
+	return runtime.Route{Backend: runtime.Backend{Label: "guess", Provider: r.leaf}}
+}
+
+// A composite that claims no fresh read (hybrid) answers from its leaves'
+// cached reads. After another process kills a session, that cache still reads
+// it alive. So ObserveLivenessSince reads the leaf serving the name, when the
+// route is known and that leaf can read fresh. A leaf without the fresh read,
+// or a route the composite cannot vouch for, keeps the composite's own read.
+// Kills: the fresh read of a hybrid-routed session (the heal confirmer, the
+// nudge fence, the ownerless reap) answered from the leaf's cache, or a
+// guessed route trusted.
+func TestObserveLivenessSinceReadsTheFreshLeafBehindARouter(t *testing.T) {
+	since := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	stale := runtime.Liveness{Running: true, Alive: true}
+	dead := runtime.Liveness{Running: true}
+	cached := cachedLeaf{Provider: runtime.NewFake(), cached: stale}
+	isRemote := func(name string) bool { return name == "remote-1" }
+	for _, tc := range []struct {
+		desc  string
+		build func(fresh *freshLeaf) runtime.Provider
+		name  string
+		want  runtime.Liveness
+		asked bool
+	}{
+		{
+			desc:  "hybrid reads the leaf serving the name fresh",
+			build: func(fresh *freshLeaf) runtime.Provider { return hybrid.New(cached, fresh, isRemote) },
+			name:  "remote-1",
+			want:  dead,
+			asked: true,
+		},
+		{
+			desc:  "auto's hybrid backend reads its leaf fresh",
+			build: func(fresh *freshLeaf) runtime.Provider { return auto.New(hybrid.New(cached, fresh, isRemote), cached) },
+			name:  "remote-1",
+			want:  dead,
+			asked: true,
+		},
+		{
+			desc:  "a leaf without the fresh read keeps the composite's read",
+			build: func(fresh *freshLeaf) runtime.Provider { return hybrid.New(cached, fresh, isRemote) },
+			name:  "local-1",
+			want:  stale,
+		},
+		{
+			desc:  "a guessed route keeps the composite's read",
+			build: func(fresh *freshLeaf) runtime.Provider { return guessingRouter{cachedLeaf: cached, leaf: fresh} },
+			name:  "worker",
+			want:  stale,
+		},
+	} {
+		t.Run(tc.desc, func(t *testing.T) {
+			fresh := &freshLeaf{cachedLeaf: cached, fresh: dead}
+			got, err := runtime.ObserveLivenessSince(tc.build(fresh), tc.name, nil, since)
+			if err != nil || got != tc.want {
+				t.Errorf("ObserveLivenessSince(%q) = (%+v, %v), want %+v", tc.name, got, err, tc.want)
+			}
+			if asked := !fresh.since.IsZero(); asked != tc.asked || asked && !fresh.since.Equal(since) {
+				t.Errorf("fresh leaf asked = %v (since %v), want asked = %v (since %v)", asked, fresh.since, tc.asked, since)
+			}
+		})
 	}
 }
 
