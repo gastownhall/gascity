@@ -43,16 +43,53 @@ func failingPS(t *testing.T) {
 	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
 }
 
+// reapSignalAfterFirst makes probeSignal answer ESRCH for pid after the first
+// probe, modeling a parent that reaps the PID once Alive has already observed it.
+func reapSignalAfterFirst(t *testing.T, pid int) {
+	t.Helper()
+	orig := probeSignal
+	var calls atomic.Int32
+	probeSignal = func(p int, sig syscall.Signal) error {
+		if p == pid && int(calls.Add(1)) > 1 {
+			return syscall.ESRCH
+		}
+		return orig(p, sig)
+	}
+	t.Cleanup(func() { probeSignal = orig })
+}
+
 // A PID reaped between Alive's kill(0) probe and its /proc read used to fall
 // through to the ps zombie check, which finds nothing for a vanished PID and so
-// reported it alive. With /proc mounted, a missing entry means the process is
-// gone.
+// reported it alive. The follow-up probe sees the PID gone.
 func TestAliveReportsDeadWhenProcessVanishesAfterSignalProbe(t *testing.T) {
 	failingPS(t)
 	self := os.Getpid()
 	vanishAfter(t, self, 0)
+	reapSignalAfterFirst(t, self)
 	if Alive(self) {
 		t.Fatal("Alive = true for a PID whose /proc entry vanished after kill(0); a reaped process must read as dead")
+	}
+}
+
+// A PID reaped after /proc/<pid>/stat was opened but before it was read does
+// not fail with ENOENT: the open already succeeded, so the kernel answers the
+// read with ESRCH. That error is not fs.ErrNotExist, so it must be settled by
+// the follow-up probe rather than by the missing-entry check.
+func TestAliveReportsDeadWhenStatReadRacesReap(t *testing.T) {
+	failingPS(t)
+	self := os.Getpid()
+	target := filepath.Join("/proc", strconv.Itoa(self), "stat")
+	orig := readProcStat
+	readProcStat = func(path string) ([]byte, error) {
+		if path == target {
+			return nil, &fs.PathError{Op: "read", Path: path, Err: syscall.ESRCH}
+		}
+		return orig(path)
+	}
+	t.Cleanup(func() { readProcStat = orig })
+	reapSignalAfterFirst(t, self)
+	if Alive(self) {
+		t.Fatal("Alive = true for a PID reaped between opening and reading its /proc stat; a reaped process must read as dead")
 	}
 }
 
@@ -68,6 +105,7 @@ func TestAliveWithStartTimeReportsDeadWhenProcessVanishesDuringIdentityRead(t *t
 	}
 	failingPS(t)
 	vanishAfter(t, self, 1)
+	reapSignalAfterFirst(t, self)
 	if AliveWithStartTime(self, token) {
 		t.Fatal("AliveWithStartTime = true for a PID that vanished before its start time could be read")
 	}

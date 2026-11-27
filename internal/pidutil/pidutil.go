@@ -149,24 +149,30 @@ func StartTime(pid int) (string, error) {
 // when the original start time could not be captured before the wait. A
 // non-empty startTime that no longer matches means the PID was recycled: the
 // original target is dead, so this returns false. When the current start time
-// cannot be read despite Alive reporting true (a transient race, or a host
-// where neither /proc nor ps can answer), it re-checks Alive: a live process
-// keeps the conservative answer rather than inventing a death, while one reaped
-// between the two probes reads as dead.
+// cannot be read despite Alive reporting true, liveness is probed again: a
+// process that exited and was reaped in between reads as dead, while a live
+// PID on a host where neither /proc nor ps can answer keeps the conservative
+// Alive answer rather than an invented death.
 func AliveWithStartTime(pid int, startTime string) bool {
-	if !Alive(pid) {
+	return platformAliveWithStartTime(pid, startTime)
+}
+
+// aliveWithStartTime is AliveWithStartTime over its liveness and identity
+// probes. They read the process table at different instants, so a PID can be
+// reaped between them; taking them as arguments lets each platform supply its
+// own and lets tests place that reap deterministically.
+func aliveWithStartTime(alive func(int) bool, startTimeOf func(int) (string, error), pid int, startTime string) bool {
+	if !alive(pid) {
 		return false
 	}
 	if startTime == "" {
 		return true
 	}
-	current, err := StartTime(pid)
+	current, err := startTimeOf(pid)
 	if err != nil {
-		// Re-probe rather than answer true outright: a process reaped
-		// between the Alive check above and the identity read is gone, while
-		// a live one with an unreadable identity keeps the conservative
-		// answer.
-		return Alive(pid)
+		// The process may have exited and been reaped since the liveness
+		// probe, which is exactly when its start time stops being readable.
+		return alive(pid)
 	}
 	return current == startTime
 }

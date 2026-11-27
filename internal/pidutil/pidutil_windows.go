@@ -46,6 +46,13 @@ func platformAlive(pid int) bool {
 	return true
 }
 
+// platformAliveWithStartTime combines Alive and StartTime directly. Alive here
+// reads an exited process's wait state from its handle, so there is no
+// zombie-reap window between probes for a test seam to pin.
+func platformAliveWithStartTime(pid int, startTime string) bool {
+	return aliveWithStartTime(Alive, StartTime, pid, startTime)
+}
+
 func platformStartTime(pid int) (string, error) {
 	handle, err := openProcessForQuery(pid)
 	if err != nil {
