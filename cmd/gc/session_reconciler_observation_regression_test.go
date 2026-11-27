@@ -111,7 +111,7 @@ func TestNamedSessionActiveUseReasonInfoKeepsNonSentinelActivityErrorsBestEffort
 	}
 
 	reason, active, err := shouldDeferNamedSessionConfigDrift(
-		env.createSessionInfo("worker", "worker"), nil, sp, "worker", env.clk, "drift-key",
+		env.createSessionInfo("worker", "worker"), nil, sp, "worker", env.clk, "drift-key", nil,
 	)
 	if err != nil || active || reason != "" {
 		t.Fatalf("non-sentinel activity error = (%q, %v, %v), want legacy best-effort inactive", reason, active, err)
@@ -471,7 +471,7 @@ func TestNamedActiveUseDefersOnAttachProbeError(t *testing.T) {
 	if reason, active, err := namedSessionActiveUseReasonInfo(info, env.sp, "worker", env.clk); err != nil || !active || reason != "attach_unknown" {
 		t.Fatalf("namedSessionActiveUseReasonInfo = (%q, %v, %v), want (attach_unknown, true, nil)", reason, active, err)
 	}
-	if reason, deferred, err := shouldDeferNamedSessionConfigDrift(info, nil, env.sp, "worker", env.clk, "drift-key"); err != nil || !deferred || reason != "attach_unknown" {
+	if reason, deferred, err := shouldDeferNamedSessionConfigDrift(info, nil, env.sp, "worker", env.clk, "drift-key", nil); err != nil || !deferred || reason != "attach_unknown" {
 		t.Fatalf("shouldDeferNamedSessionConfigDrift = (%q, %v, %v), want (attach_unknown, true, nil)", reason, deferred, err)
 	}
 }

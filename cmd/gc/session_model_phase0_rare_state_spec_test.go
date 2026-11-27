@@ -399,7 +399,7 @@ func TestShouldDeferNamedSessionConfigDriftBoundsUnknownActivity(t *testing.T) {
 		t.Fatalf("Create session bead: %v", err)
 	}
 
-	reason, deferDrift, err := shouldDeferNamedSessionConfigDrift(sessiontest.SeedBead(t, session), sessionFrontDoor(store), provider, name, clk, "drift-1")
+	reason, deferDrift, err := shouldDeferNamedSessionConfigDrift(sessiontest.SeedBead(t, session), sessionFrontDoor(store), provider, name, clk, "drift-1", nil)
 	if err != nil {
 		t.Fatalf("shouldDeferNamedSessionConfigDrift: %v", err)
 	}
@@ -421,7 +421,7 @@ func TestShouldDeferNamedSessionConfigDriftBoundsUnknownActivity(t *testing.T) {
 	}
 
 	clk.Time = clk.Now().Add(namedSessionActivityThreshold + time.Second)
-	_, deferDrift, err = shouldDeferNamedSessionConfigDrift(sessiontest.SeedBead(t, session), sessionFrontDoor(store), provider, name, clk, "drift-1")
+	_, deferDrift, err = shouldDeferNamedSessionConfigDrift(sessiontest.SeedBead(t, session), sessionFrontDoor(store), provider, name, clk, "drift-1", nil)
 	if err != nil {
 		t.Fatalf("shouldDeferNamedSessionConfigDrift after threshold: %v", err)
 	}
@@ -429,7 +429,7 @@ func TestShouldDeferNamedSessionConfigDriftBoundsUnknownActivity(t *testing.T) {
 		t.Fatal("expected unknown-activity config drift to stop deferring after threshold")
 	}
 
-	reason, deferDrift, err = shouldDeferNamedSessionConfigDrift(sessiontest.SeedBead(t, session), sessionFrontDoor(store), provider, name, clk, "drift-2")
+	reason, deferDrift, err = shouldDeferNamedSessionConfigDrift(sessiontest.SeedBead(t, session), sessionFrontDoor(store), provider, name, clk, "drift-2", nil)
 	if err != nil {
 		t.Fatalf("shouldDeferNamedSessionConfigDrift new drift: %v", err)
 	}
@@ -476,7 +476,7 @@ func TestShouldDeferNamedSessionConfigDriftDoesNotDeferWhenMarkerWriteFails(t *t
 		},
 	}
 
-	_, deferDrift, err := shouldDeferNamedSessionConfigDrift(sessiontest.SeedBead(t, session), sessionFrontDoor(beads.NewMemStore()), provider, name, clk, "drift-1")
+	_, deferDrift, err := shouldDeferNamedSessionConfigDrift(sessiontest.SeedBead(t, session), sessionFrontDoor(beads.NewMemStore()), provider, name, clk, "drift-1", nil)
 	if err == nil {
 		t.Fatal("expected marker write error")
 	}
@@ -1135,5 +1135,107 @@ func phase0RetiredCanonicalState(state string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// TestShouldDeferPinnedNamedSessionConfigDriftBoundsCommandOnly proves the
+// core contract of the pinned-session Command-drift window (issue #348):
+//
+//   - Command-only drift on a PINNED named session is deferred for a bounded
+//     window, then stops deferring (so the reconciler applies the model change),
+//     but ONLY once the session is quiet (turn boundary).
+//   - While the session still reports active use (recent activity), the applied
+//     restart keeps waiting.
+//   - Non-Command drift on a pinned session keeps the unconditional deferral.
+func TestShouldDeferPinnedNamedSessionConfigDriftBoundsCommandOnly(t *testing.T) {
+	clk := &clock.Fake{Time: time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	name := "mayor"
+	if err := sp.Start(context.Background(), name, runtime.Config{Command: "old"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	var provider runtime.Provider = sp
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title: name,
+		Type:  sessionBeadType,
+		Metadata: map[string]string{
+			"session_name":               name,
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "mayor",
+			namedSessionModeMetadata:     "always",
+			"pin_awake":                  "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+
+	// Command-only drift: bounded window, then still-waiting at a busy boundary.
+	reason, deferDrift, err := shouldDeferNamedSessionConfigDrift(sessiontest.SeedBead(t, session), sessionFrontDoor(store), provider, name, clk, "drift-1", []string{"Command"})
+	if err != nil {
+		t.Fatalf("initial pinned command drift: %v", err)
+	}
+	if !deferDrift || reason != "pinned_command" {
+		t.Fatalf("initial = (%q,%v), want (pinned_command,true)", reason, deferDrift)
+	}
+
+	session, err = store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := session.Metadata[namedSessionConfigDriftDeferredKeyMetadata]; got != "drift-1" {
+		t.Fatalf("deferred key = %q, want drift-1", got)
+	}
+
+	// Past the window, but the session reports activity within the threshold:
+	// the restart must keep waiting for a turn boundary.
+	clk.Time = clk.Now().Add(namedSessionPinnedCommandDriftDeferralLimit + time.Second)
+	sp.SetActivity(name, clk.Now().Add(-time.Second))
+	reason, deferDrift, err = shouldDeferNamedSessionConfigDrift(sessiontest.SeedBead(t, session), sessionFrontDoor(store), provider, name, clk, "drift-1", []string{"Command"})
+	if err != nil {
+		t.Fatalf("pinned command drift at busy boundary: %v", err)
+	}
+	if !deferDrift || reason != "pinned_command_wait_recent_activity" {
+		t.Fatalf("busy-boundary = (%q,%v), want (pinned_command_wait_recent_activity,true)", reason, deferDrift)
+	}
+
+	// Session goes quiet (activity older than the threshold): now the pinned
+	// Command drift stops deferring, so the caller restarts on the new command.
+	sp.SetActivity(name, clk.Now().Add(-(namedSessionActivityThreshold + time.Minute)))
+	_, deferDrift, err = shouldDeferNamedSessionConfigDrift(sessiontest.SeedBead(t, session), sessionFrontDoor(store), provider, name, clk, "drift-1", []string{"Command"})
+	if err != nil {
+		t.Fatalf("pinned command drift at quiet boundary: %v", err)
+	}
+	if deferDrift {
+		t.Fatal("expected pinned Command drift to stop deferring once the session is quiet")
+	}
+
+	// Non-Command drift on a pinned session keeps the unconditional deferral,
+	// even long after any window would have lapsed.
+	reason, deferDrift, err = shouldDeferNamedSessionConfigDrift(sessiontest.SeedBead(t, session), sessionFrontDoor(store), provider, name, clk, "drift-2", []string{"Env"})
+	if err != nil {
+		t.Fatalf("pinned non-command drift: %v", err)
+	}
+	if !deferDrift || reason != "pinned" {
+		t.Fatalf("non-command = (%q,%v), want (pinned,true)", reason, deferDrift)
+	}
+
+	// A mixed Command+Env episode is NOT Command-only: the pin still wins.
+	reason, deferDrift, err = shouldDeferNamedSessionConfigDrift(sessiontest.SeedBead(t, session), sessionFrontDoor(store), provider, name, clk, "drift-3", []string{"Command", "Env"})
+	if err != nil {
+		t.Fatalf("pinned mixed drift: %v", err)
+	}
+	if !deferDrift || reason != "pinned" {
+		t.Fatalf("mixed = (%q,%v), want (pinned,true)", reason, deferDrift)
+	}
+
+	// An empty breakdown (no per-field hashes) is treated as non-Command.
+	reason, deferDrift, err = shouldDeferNamedSessionConfigDrift(sessiontest.SeedBead(t, session), sessionFrontDoor(store), provider, name, clk, "drift-4", nil)
+	if err != nil {
+		t.Fatalf("pinned empty-breakdown drift: %v", err)
+	}
+	if !deferDrift || reason != "pinned" {
+		t.Fatalf("empty breakdown = (%q,%v), want (pinned,true)", reason, deferDrift)
 	}
 }
