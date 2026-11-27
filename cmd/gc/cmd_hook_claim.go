@@ -113,6 +113,14 @@ var hookClaimMutationTimeout = 10 * time.Second
 // claimable; the straddle unwind fires only past window + that reserve.
 var hookClaimWindowDefault = hookWorkQueryTimeout + hookClaimMutationTimeout
 
+// hookClaimProgressInterval is how long a `gc hook --claim` invocation runs
+// before it reports progress on stderr, and the least time between two of its
+// progress lines (hookClaimProgress). A claim may legitimately spend most of
+// hookClaimWindowDefault reading stores, and without a line an agent cannot
+// tell that wait from a hang. A package var, like hookWorkQueryTimeout, so
+// tests can set it.
+var hookClaimProgressInterval = 15 * time.Second
+
 // hookClaimNonTurnEnvMarkers are the environment markers that prove a
 // `gc hook --claim` process is a provider CALLBACK rather than an agent turn.
 // gc sets all three itself: GC_HOOK_CALLBACK_LANE on every child of the managed
@@ -347,6 +355,9 @@ type hookClaimOps struct {
 	// fresh one each time the loop copies the ops.
 	InvokedAt   time.Time
 	ClaimWindow time.Duration
+	// progress reports a long-running claim on stderr (hookClaimProgress). It
+	// is set by claimHookWorkWithRunner and nil for every other caller.
+	progress *hookClaimProgress
 	// ClassRoute is the relocated coordination-class binding these seams
 	// escalate to, or nil on a city that relocates nothing. It is not a seam:
 	// it is here so claimHookWorkWithRunner — the only caller that knows the

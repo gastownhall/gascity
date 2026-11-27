@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
@@ -195,5 +197,58 @@ func TestClaimHookWorkReadRetryRereadsOnlyFailedStores(t *testing.T) {
 			t.Fatalf("events = %+v, want exactly one failure event naming riga", h.events)
 		}
 		assertStoreReads(t, h, map[string]int{"/city": 1, "/riga": 1 + hookClaimQueryRetryAttempts, "/rigb": 1})
+	})
+}
+
+// AC-4: past hookClaimProgressInterval, a claim still working prints one
+// progress line on stderr at its next phase boundary, then no other until
+// another interval passes. Stdout and the exit code do not change.
+func TestClaimHookWorkReportsProgressPastThreshold(t *testing.T) {
+	withFastClaimRetries(t)
+	prevInterval := hookClaimProgressInterval
+	hookClaimProgressInterval = 15 * time.Second
+	t.Cleanup(func() { hookClaimProgressInterval = prevInterval })
+
+	start := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	claim := func(t *testing.T, step time.Duration) (string, int, string, []int) {
+		t.Helper()
+		now := start
+		var stdout, stderr bytes.Buffer
+		var linesAtRead []int
+		run := func(_, _ string, _ []string) (string, error) {
+			linesAtRead = append(linesAtRead, strings.Count(stderr.String(), "still working"))
+			now = now.Add(step)
+			return "[]", nil
+		}
+		h := newFailureHookHarness()
+		ops := h.ops()
+		ops.Now = func() time.Time { return now }
+		ops.InvokedAt = start
+		ops.ClaimWindow = 160 * time.Second
+		stores := answerReuseStores()
+		code := claimHookWorkWithRunner("work-query", stores[0].dir, stores[0].env, stores, failureClaimOptions(), ops,
+			run, h.emitFailure, &stdout, &stderr)
+		return stdout.String(), code, stderr.String(), linesAtRead
+	}
+
+	t.Run("past threshold", func(t *testing.T) {
+		stdout, code, stderr, linesAtRead := claim(t, 10*time.Second)
+		frozenStdout, frozenCode, _, _ := claim(t, 0)
+		if stdout != frozenStdout || code != frozenCode {
+			t.Fatalf("claim = (%q, %d), want the frozen-clock (%q, %d)", stdout, code, frozenStdout, frozenCode)
+		}
+		if want := []int{0, 0, 1, 1}; fmt.Sprint(linesAtRead) != fmt.Sprint(want) {
+			t.Fatalf("progress lines before each read = %v, want %v; stderr=%s", linesAtRead, want, stderr)
+		}
+		want := `gc hook --claim: still working after 20s of the 160s claim window: reading rig "rigb" store (2 of 4 stores answered, 0 claim races lost)` + "\n"
+		if stderr != want {
+			t.Fatalf("stderr = %q, want exactly %q", stderr, want)
+		}
+	})
+	t.Run("under threshold", func(t *testing.T) {
+		_, _, stderr, _ := claim(t, 0)
+		if strings.Contains(stderr, "still working") {
+			t.Fatalf("stderr = %q, want no progress line on a claim under the threshold", stderr)
+		}
 	})
 }

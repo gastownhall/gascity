@@ -1187,6 +1187,9 @@ type hookStoreAnswers struct {
 	// run, so answeredSince can tell an answer from before a mark from one
 	// after it.
 	runs int
+	// beforeRun, when set, is called before each query runs (the claim's
+	// progress report, hookClaimProgress).
+	beforeRun func(dir string, env []string)
 }
 
 // hookStoreAnswer is one saved successful read and the run that produced it.
@@ -1221,6 +1224,9 @@ func (a *hookStoreAnswers) read(command, dir string, env []string) (string, erro
 // removes the saved answer when the run fails.
 func (a *hookStoreAnswers) reread(command, dir string, env []string) (string, error) {
 	key := hookStoreAnswerKey(command, dir, env)
+	if a.beforeRun != nil {
+		a.beforeRun(dir, env)
+	}
 	out, err := a.run(command, dir, env)
 	a.runs++
 	if err != nil {

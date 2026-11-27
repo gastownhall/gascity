@@ -1019,6 +1019,11 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 	// fresh re-read.
 	answers := newHookStoreAnswers(run)
 	multiLeg := len(stores) > 1
+	progress := &hookClaimProgress{ops: &ops, stderr: stderr, stores: stores, primary: primary, answers: answers}
+	ops.progress = progress
+	answers.beforeRun = func(dir string, env []string) {
+		progress.phase("reading " + progress.storeLabel(hookStore{dir: dir, env: env}))
+	}
 	remaining := stores
 	// claimsErrored aggregates the per-store signal that a store reported ready
 	// work but every eligible claim mutation errored, so the shared drain below can
@@ -1061,6 +1066,7 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		}
 		storeOps := ops
 		storeOps.Runner = func(string, string) (string, error) { return claimOutput, nil }
+		progress.phase("claiming from " + progress.storeLabel(claimStore))
 		res := tryHookClaim(workQuery, storeDir, &storeOpts, &storeOps, stdout, stderr)
 		if res.terminal {
 			return res.code
@@ -1077,6 +1083,7 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		// signal to the shared drain. The reselection ranks the answers this
 		// invocation already holds, so only the store it picks is read again.
 		remaining = removeHookStore(remaining, claimStore)
+		progress.racesLost++
 	}
 	reportHookClaimLeftToAnotherSession(left, claimOpts.PoolSeat, stderr)
 	return writeHookClaimNoWork(claimOpts, ops, claimsErrored, workDir, stdout, stderr)
@@ -1177,6 +1184,7 @@ func selectStoreWithWorkRetrying(workQuery string, stores []hookStore, primary h
 		if ops.claimWindowSpentAfter(hookClaimQueryRetryInterval) {
 			return out, selected, hookClaimRetryWindowClosed(err, ops)
 		}
+		ops.progress.phase(fmt.Sprintf("pausing %s before retrying failed store reads (retry %d of %d)", hookClaimQueryRetryInterval, attempt+1, hookClaimQueryRetryAttempts))
 		ops.sleepOrWallClock(hookClaimQueryRetryInterval)
 		if ops.claimWindowSpentAfter(0) {
 			return out, selected, hookClaimRetryWindowClosed(err, ops)
@@ -1184,6 +1192,64 @@ func selectStoreWithWorkRetrying(workQuery string, stores []hookStore, primary h
 		out, selected, err = bestStoreWithWork(workQuery, stores, primary, run, noted...)
 	}
 	return out, selected, err
+}
+
+// hookClaimProgress reports a `gc hook --claim` invocation that is still
+// working on stderr, so an agent can tell a slow claim from a hung one. Once
+// the invocation is hookClaimProgressInterval old, phase prints one line at the
+// next phase boundary (a store read, a claim attempt, a retry pause), and then
+// at most one line per interval. Time is read only through ops, so a test
+// drives it with a fake clock. Stdout, the exit code and events are untouched.
+type hookClaimProgress struct {
+	ops     *hookClaimOps
+	stderr  io.Writer
+	stores  []hookStore
+	primary hookStore
+	answers *hookStoreAnswers
+	// racesLost counts the stores the claim loop dropped after acquiring
+	// nothing from them.
+	racesLost int
+	printed   bool
+	printedAt time.Duration
+}
+
+// phase reports the claim is entering phase, when a progress line is due. A
+// nil receiver reports nothing.
+func (p *hookClaimProgress) phase(phase string) {
+	if p == nil {
+		return
+	}
+	age := p.ops.invocationAge()
+	if age < hookClaimProgressInterval || (p.printed && age-p.printedAt < hookClaimProgressInterval) {
+		return
+	}
+	p.printed, p.printedAt = true, age
+	races := "claim races"
+	if p.racesLost == 1 {
+		races = "claim race"
+	}
+	fmt.Fprintf(p.stderr, "gc hook --claim: still working after %ds of the %ds claim window: %s (%d of %d stores answered, %d %s lost)\n", //nolint:errcheck // best-effort stderr
+		int(age/time.Second), int(p.ops.claimWindowOrDefault()/time.Second), phase, len(p.answers.saved), len(p.stores), p.racesLost, races)
+}
+
+// storeLabel names the fan-out store that reads st's dir and env.
+func (p *hookClaimProgress) storeLabel(st hookStore) string {
+	for _, candidate := range p.stores {
+		if sameHookStore(candidate, st) {
+			st = candidate
+			break
+		}
+	}
+	switch {
+	case st.rig != "":
+		return fmt.Sprintf("rig %q store", st.rig)
+	case sameHookStore(st, p.primary):
+		return "this agent's own store"
+	case st.storeRef != "":
+		return fmt.Sprintf("store %q", st.storeRef)
+	default:
+		return fmt.Sprintf("store at %s", st.dir)
+	}
 }
 
 // hookClaimRetryWindowClosed annotates the last claim-read error with the reason
