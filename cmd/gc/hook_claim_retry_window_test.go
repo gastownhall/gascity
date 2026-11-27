@@ -453,3 +453,41 @@ func TestFederatedClaimRunsNoReadBetweenSelectionAndCAS(t *testing.T) {
 		})
 	}
 }
+
+// The case the claim-time re-read used to guard: the selected store's row is
+// lost to another claimant at CAS time while a later leg still holds routed
+// work. The claim loop drops the store and reselects, so the later work is
+// claimed and the seat does not drain no_work.
+func TestFederatedClaimLostCASFallsThroughToLaterLeg(t *testing.T) {
+	withProductionClaimRetryPacing(t)
+	b := newBudgetClaimHarness()
+	stores := budgetLegs("alpha")
+	b.leg("/city", time.Second,
+		hookRunnerAnswer{out: `[{"id":"own-1","status":"open","priority":0,"metadata":{"gc.routed_to":"rig/worker"}}]`})
+	b.leg("/rig-alpha", time.Second,
+		hookRunnerAnswer{out: `[{"id":"alpha-1","status":"open","priority":3,"metadata":{"gc.routed_to":"rig/worker"}}]`})
+	ops := b.ops()
+	ops.Claim = func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+		b.claims = append(b.claims, beadID)
+		if beadID == "own-1" {
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: "gc__other-seat"}, false, nil
+		}
+		return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee}, true, nil
+	}
+
+	code, stdout, stderr := b.claim(stores, ops)
+
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr)
+	}
+	if want := []string{"own-1", "alpha-1"}; strings.Join(b.claims, ",") != strings.Join(want, ",") {
+		t.Fatalf("claim attempts = %v, want %v (the lost own row, then the later leg)", b.claims, want)
+	}
+	result := decodeTurnBoundResult(t, stdout)
+	if result.Action != "work" || result.BeadID != "alpha-1" {
+		t.Fatalf("result = %+v, want action=work bead_id=alpha-1, never a no_work drain", result)
+	}
+	if b.drained {
+		t.Fatal("drain was acknowledged although the later leg's work was claimed")
+	}
+}
