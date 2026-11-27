@@ -7,7 +7,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -58,8 +57,9 @@ func buildAwakeInputFromReconcilerWithObservationErrors(
 ) (AwakeInput, map[string]error) {
 	// Load runtime suspension state once against the in-scope city path so
 	// suspension resolves against the controlled city rather than the
-	// process cwd.
-	suspState, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
+	// process cwd. An unreadable file suspends nothing here
+	// (loadSuspensionStateForPass), so it puts no session to sleep.
+	suspState := loadSuspensionStateForPass(cfg, cityPath)
 	input := newAwakeInputFromSnapshot(
 		cfg,
 		func(a *config.Agent) bool { return isAgentEffectivelySuspendedWith(cfg, cityPath, a, suspState) },

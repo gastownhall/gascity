@@ -12,12 +12,15 @@ func cpuPSI(avg10 string) []byte {
 	return []byte("some avg10=" + avg10 + " avg60=1.00 avg300=1.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n")
 }
 
-// fakeCPUPressure serves body (or err) as the CPU PSI file for the test.
+// fakeCPUPressure serves body (or err) as the CPU PSI file for the test, on a
+// platform that exposes PSI: the gate reads the fake as it reads
+// /proc/pressure/cpu on Linux, whatever the platform running the test.
 func fakeCPUPressure(t *testing.T, body []byte, err error) {
 	t.Helper()
-	saved := hostPressureReadFile
-	t.Cleanup(func() { hostPressureReadFile = saved })
+	savedRead, savedSupported := hostPressureReadFile, hostPressureSupported
+	t.Cleanup(func() { hostPressureReadFile, hostPressureSupported = savedRead, savedSupported })
 	hostPressureReadFile = func(string) ([]byte, error) { return body, err }
+	hostPressureSupported = true
 }
 
 // highHostPressure is a reading above the default threshold.
@@ -191,10 +194,8 @@ func TestHostPressureThresholdEdges(t *testing.T) {
 // AC-6: on a platform without PSI the CPU gate never holds and never warns.
 func TestHostPressureOffLinuxNeverHolds(t *testing.T) {
 	resetHostPressureWarnings(t)
-	saved := hostPressureSupported
-	t.Cleanup(func() { hostPressureSupported = saved })
-	hostPressureSupported = false
 	fakeCPUPressure(t, cpuPSI("99.00"), nil)
+	hostPressureSupported = false // fakeCPUPressure's cleanup restores it
 	var stderr strings.Builder
 	if p := readHostPressure(&stderr); p.High || stderr.Len() != 0 {
 		t.Fatalf("off Linux: reading %+v stderr %q, want never high, no warning", p, stderr.String())

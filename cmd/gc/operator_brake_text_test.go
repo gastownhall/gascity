@@ -22,10 +22,11 @@ func TestStopHelpNamesSuspendAndTheHandEditForm(t *testing.T) {
 	}
 }
 
-// AC-8: the supervisor's forced-shutdown message points at gc suspend.
+// AC-8: the supervisor's forced-shutdown message points at gc suspend, naming
+// the city by its path, which still resolves after the city is unregistered.
 func TestForcedShutdownMessageNamesSuspend(t *testing.T) {
-	msg := forcedShutdownMessage("bright-lights", 20*time.Second)
-	for _, want := range []string{"bright-lights", "20s", "forcing shutdown", "gc suspend"} {
+	msg := forcedShutdownMessage("bright-lights", "/srv/cities/bright-lights", 20*time.Second)
+	for _, want := range []string{"bright-lights", "20s", "forcing shutdown", "`gc suspend /srv/cities/bright-lights`"} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("forced-shutdown message %q does not name %q", msg, want)
 		}

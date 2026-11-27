@@ -3344,47 +3344,6 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 			},
 		},
 		{
-			name: "suspend city",
-			mutate: func(cs *controllerState) error {
-				return cs.SuspendCity()
-			},
-			verify: func(t *testing.T, cfg *config.City, cityDir string) {
-				t.Helper()
-				if cfg.Workspace.Suspended || cfg.Workspace.SuspendedOnStart {
-					t.Fatal("city.toml workspace must remain untouched by SuspendCity (runtime state owns the change)")
-				}
-				st, err := suspensionstate.Load(fsys.OSFS{}, cityDir)
-				if err != nil {
-					t.Fatalf("load city state: %v", err)
-				}
-				if !suspensionstate.IsCitySuspended(st) {
-					t.Fatal("city should be explicit-suspended in runtime state after SuspendCity")
-				}
-			},
-		},
-		{
-			name: "resume city",
-			initial: func(cfg *config.City) {
-				cfg.Workspace.SuspendedOnStart = true
-			},
-			mutate: func(cs *controllerState) error {
-				return cs.ResumeCity()
-			},
-			verify: func(t *testing.T, cfg *config.City, cityDir string) {
-				t.Helper()
-				if !cfg.Workspace.SuspendedOnStart {
-					t.Fatal("suspended_on_start should remain set in city.toml; ResumeCity records the override in runtime state")
-				}
-				st, err := suspensionstate.Load(fsys.OSFS{}, cityDir)
-				if err != nil {
-					t.Fatalf("load city state: %v", err)
-				}
-				if v, ok := suspensionstate.ExplicitCity(st); !ok || v {
-					t.Fatalf("city should have explicit resume in runtime state; got (%v, %v)", v, ok)
-				}
-			},
-		},
-		{
 			name: "enable order",
 			mutate: func(cs *controllerState) error {
 				return cs.EnableOrder("nightly", "rig1")
@@ -3761,7 +3720,69 @@ func TestControllerStateCitySuspensionRecordsEvents(t *testing.T) {
 			if gotEvents[0].Actor != tc.wantActor {
 				t.Fatalf("recorded event actor = %q, want %q", gotEvents[0].Actor, tc.wantActor)
 			}
+
+			// The suspension file is runtime state: the controller is woken
+			// for a pass, which re-reads it, and no config reload is asked.
+			select {
+			case <-cs.pokeCh:
+			default:
+				t.Fatal("city suspension change did not wake the controller")
+			}
+			if cs.configDirty.Load() {
+				t.Fatal("city suspension change marked the config dirty; the suspension file is not config")
+			}
 		})
+	}
+}
+
+// The API's city suspend is the brake, and the suspension file is runtime
+// state: over a city.toml that does not parse it records the city suspended,
+// records city.suspended and wakes the controller. Resume is not the brake: it
+// refuses that config before it writes, so its error never leaves the city
+// resumed, records nothing and wakes nothing.
+func TestControllerStateCitySuspensionOverAnUnparseableCityTOML(t *testing.T) {
+	cs, tomlPath := newControllerStateMutationHarness(t)
+	ep := events.NewFake()
+	cs.eventProv = ep
+	cfg, _, err := cs.loadCurrentConfigSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs.cfg = cfg // a published config, as a running controller holds
+	if err := os.WriteFile(tomlPath, []byte("[workspace\nname = "), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cs.SuspendCity(); err != nil {
+		t.Fatalf("SuspendCity over an unparseable city.toml: %v", err)
+	}
+	st, err := suspensionstate.Load(fsys.OSFS{}, cs.cityPath)
+	if err != nil || !suspensionstate.IsCitySuspended(st) {
+		t.Fatalf("after SuspendCity: state %+v err %v, want the city suspended", st, err)
+	}
+	select {
+	case <-cs.pokeCh:
+	default:
+		t.Fatal("SuspendCity did not wake the controller")
+	}
+	if got, err := ep.List(events.Filter{}); err != nil || len(got) != 1 || got[0].Type != events.CitySuspended {
+		t.Fatalf("events after SuspendCity = %+v (%v), want one %s", got, err, events.CitySuspended)
+	}
+
+	if err := cs.ResumeCity(); err == nil {
+		t.Fatal("ResumeCity over an unparseable city.toml succeeded, want a refusal")
+	}
+	st, err = suspensionstate.Load(fsys.OSFS{}, cs.cityPath)
+	if err != nil || !suspensionstate.IsCitySuspended(st) {
+		t.Fatalf("after the refused ResumeCity: state %+v err %v, want the city still suspended", st, err)
+	}
+	select {
+	case <-cs.pokeCh:
+		t.Fatal("the refused ResumeCity woke the controller")
+	default:
+	}
+	if got, err := ep.List(events.Filter{}); err != nil || len(got) != 1 {
+		t.Fatalf("events after the refused ResumeCity = %+v (%v), want only the city.suspended", got, err)
 	}
 }
 

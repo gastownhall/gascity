@@ -577,7 +577,9 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 	stderr io.Writer,
 	opts desiredStateOptions,
 ) DesiredStateResult {
-	citySt, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
+	// An unreadable suspension file suspends nothing here
+	// (loadSuspensionStateForPass): the pass holds its starts on it instead.
+	citySt := loadSuspensionStateForPass(cfg, cityPath)
 	if effectiveCitySuspended(cfg, citySt) {
 		return DesiredStateResult{}
 	}
@@ -590,7 +592,7 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 	bp.sessionSnapshotComplete = store == nil || (sessionBeads != nil && sessionBeads.LoadError() == nil)
 
 	// Pre-compute suspended rig paths (config + runtime state).
-	suspendedRigPaths := buildSuspendedRigPathsForCity(cfg, cityPath)
+	suspendedRigPaths := suspendedRigPathsWithState(cfg, citySt)
 	bp.sessionCensusRigStores = cloneSessionCensusRigStores(rigStores)
 	bp.sessionCensusSuspendedRigPaths = cloneSessionCensusSuspendedRigPaths(suspendedRigPaths)
 
@@ -1842,7 +1844,7 @@ func refreshDesiredStateWithSessionBeads(
 	bp.sessionSnapshotComplete = false
 	bp.sessionOccupancyInfos = sessionOccupancyInfosForRefresh(result, sessionBeads)
 	bp.retiredPoolSeats = result.RetiredPoolSeats
-	applySessionBeadDesiredOverlay(bp, cfg, refreshed.State, buildSuspendedRigPathsForCity(cfg, cityPath), effectivePoolPartialRetentionTemplates(result), result.NamedScaleCheckPartialTemplates, stderr)
+	applySessionBeadDesiredOverlay(bp, cfg, refreshed.State, suspendedRigPathsWithState(cfg, loadSuspensionStateForPass(cfg, cityPath)), effectivePoolPartialRetentionTemplates(result), result.NamedScaleCheckPartialTemplates, stderr)
 	return refreshed
 }
 

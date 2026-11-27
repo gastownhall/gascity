@@ -770,11 +770,12 @@ func (e *Editor) requireRig(name string) error {
 
 // SuspendCity records an explicit "suspended" preference for the city
 // in .gc/runtime/suspension-state.json. The legacy `[workspace] suspended`
-// field in city.toml is no longer touched.
-func (e *Editor) SuspendCity() error {
-	cityPath := filepath.Dir(e.tomlPath)
-	t := true
-	return suspensionstate.SetCitySuspended(e.fs, cityPath, &t)
+// field in city.toml is no longer touched. Suspend is the brake, so it works
+// over a file that does not parse too: that file is replaced and its decode
+// error returned as discarded (suspensionstate.ForceCitySuspended). Resume
+// stays strict.
+func (e *Editor) SuspendCity() (discarded, err error) {
+	return suspensionstate.ForceCitySuspended(e.fs, filepath.Dir(e.tomlPath))
 }
 
 // ResumeCity records an explicit "resumed" preference in the runtime

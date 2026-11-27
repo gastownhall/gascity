@@ -33,7 +33,8 @@ func updateRigSuspension(fs fsys.FS, cityPath, rigName string, apply func(*suspe
 // pass that decides starts. A missing file is the zero State with no error. An
 // unreadable or unparseable file returns the zero State with an error naming
 // the file, so the caller holds starts instead of reading "not suspended".
-// The zero State keeps the city unsuspended, so nothing drains on that error.
+// The pass decides its drains from suspensionForPass, which suspends nothing
+// on that error.
 func readSuspensionForWake(cityPath string) (suspensionstate.State, error) {
 	if cityPath == "" {
 		return suspensionstate.State{}, nil
@@ -43,6 +44,47 @@ func readSuspensionForWake(cityPath string) (suspensionstate.State, error) {
 		return suspensionstate.State{}, fmt.Errorf("reading %s: %w", citylayout.SuspensionStateFile(cityPath), err)
 	}
 	return st, nil
+}
+
+// suspensionForPass is the suspension state a reconciler pass decides its
+// desired sessions, sleeps and drains from, given its read of the file: st
+// when the read succeeded. After a failed read the pass cannot tell what the
+// file holds, and the zero State would fall back to the authored
+// suspended_on_start defaults, draining a city or rig the operator resumed.
+// So it is an explicit resume of the city and of every rig in cfg instead,
+// which suspends nothing the file decides while GC_SUSPENDED and agent-level
+// suspension still apply. The pass holds every start and create on that
+// error (decideStartHold), so an unreadable file drains nothing and wakes
+// nothing.
+func suspensionForPass(cfg *config.City, st suspensionstate.State, readErr error) suspensionstate.State {
+	if readErr == nil {
+		return st
+	}
+	resumed := func() suspensionstate.Override {
+		no := false
+		return suspensionstate.Override{Suspended: &no}
+	}
+	view := suspensionstate.State{City: resumed()}
+	if cfg != nil && len(cfg.Rigs) > 0 {
+		view.Rigs = make(map[string]suspensionstate.Override, len(cfg.Rigs))
+		for i := range cfg.Rigs {
+			view.Rigs[cfg.Rigs[i].Name] = resumed()
+		}
+	}
+	return view
+}
+
+// loadSuspensionStateForPass reads the runtime suspension state a legacy
+// reconciler pass decides its desired sessions, sleeps and drains from: the
+// file as read, or after a failed read suspensionForPass's state, which
+// suspends nothing. The pass's start hold reads the same file through
+// readSuspensionForWake and holds every start on that error.
+func loadSuspensionStateForPass(cfg *config.City, cityPath string) suspensionstate.State {
+	if cityPath == "" {
+		return suspensionstate.State{}
+	}
+	st, err := loadSuspensionState(fsys.OSFS{}, cityPath)
+	return suspensionForPass(cfg, st, err)
 }
 
 // loadSuspensionStateBestEffort returns the runtime suspension state,

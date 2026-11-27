@@ -122,12 +122,13 @@ type World struct {
 	TransportRefused  map[string]string                     // by qualified name
 	ReadyWaits        map[string]bool                       // I10, by session bead ID
 	Templates         *templateMemo
-	// Suspension is the suspension state the pass read, for the live-claim
-	// veto's scope (liveClaimVetoApplies, the orphaned signal's L5).
+	// Suspension is the suspension state the pass decides from
+	// (suspensionForPass), for the live-claim veto's scope
+	// (liveClaimVetoApplies, the orphaned signal's L5).
 	Suspension suspensionstate.State
 	// SuspensionErr is the wake read's error when the suspension file exists
-	// but does not parse; Suspension is then the zero State, so nothing
-	// drains on it, and the pass holds its starts (decideStartHold).
+	// but does not parse; Suspension then suspends nothing, so nothing drains
+	// on it, and the pass holds its starts (decideStartHold).
 	SuspensionErr error
 	// HostPressure is the pass's host CPU pressure reading.
 	HostPressure hostPressure
@@ -233,6 +234,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	if e.Suspension != nil {
 		st, w.SuspensionErr = e.Suspension()
 	}
+	st = suspensionForPass(cfg, st, w.SuspensionErr)
 	w.CitySuspended, w.SuspendedRigPaths, w.Suspension = effectiveCitySuspended(cfg, st), suspendedRigPathsWithState(cfg, st), st
 	rec := e.Recording()
 	if e.Observations != nil {
@@ -413,9 +415,11 @@ func (e gatherEnv) externalReadsEnv() (externalReadsEnv, error) {
 	}
 	var st suspensionstate.State
 	if e.Suspension != nil {
-		// An unreadable file leaves the zero State: K1 reads every rig leg,
-		// as it does when no rig is suspended.
-		st, _ = e.Suspension()
+		// An unreadable file suspends no rig (suspensionForPass): K1 reads
+		// every rig leg, as gather's census does.
+		var err error
+		st, err = e.Suspension()
+		st = suspensionForPass(env.Cfg, st, err)
 	}
 	suspended, store, rigs := suspendedRigPathsWithState(env.Cfg, st), e.Sessions(), e.RigStores()
 	legs, err := sessionCensusStoreCandidates(e.CityPath, env.Cfg, store, rigs, suspended)

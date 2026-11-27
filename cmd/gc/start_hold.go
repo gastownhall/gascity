@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/suspensionstate"
@@ -74,6 +75,19 @@ func (cr *CityRuntime) wakeSuspension() (suspensionstate.State, error) {
 		fmt.Fprintf(cr.stderr, "gc: suspension file unreadable: %v; %s\n", err, suspensionWakeRemedy) //nolint:errcheck // best-effort stderr
 	}
 	return st, err
+}
+
+// oneShotStartHold is a one-shot `gc start` pass's hold on its starts. The
+// pass decides its drains and desired sessions as a controller's does, with an
+// unreadable suspension file suspending nothing (loadSuspensionStateForPass),
+// so it holds every start on that file as a controller's pass does, and prints
+// the file, the error and the remedy once.
+func oneShotStartHold(cityPath string, stderr io.Writer) startHold {
+	_, err := readSuspensionForWake(cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc start: suspension file unreadable: %v; %s\n", err, suspensionWakeRemedy) //nolint:errcheck // best-effort stderr
+	}
+	return decideStartHold(startHoldInput{SuspensionErr: err})
 }
 
 // tickStartHold is a legacy start run's hold at now: the main tick's and the

@@ -52,6 +52,13 @@ share the controller's publication transaction with runtime reloads. A rejected
 edit must remain absent from both disk and the API's cached raw config. Preserve
 that boundary when changing `mutateAndPoke` or runtime config publication.
 
+A city suspend or resume writes runtime state, the suspension file, not
+config, so it is not a config edit: nothing reloads or validates city.toml
+after its write (`writeCitySuspension`), and it wakes the controller for a pass,
+which re-reads the file. The brake must apply over a city.toml that does not
+parse, so keep it out of `mutateAndPoke`; resume checks that the config loads
+before it writes, so its error never leaves the city resumed.
+
 The controller's config locks have one order: the config transaction fence
 (`configTransactionMu`), then the publication lock (`publishMu`), then the
 `configedit.Editor` lock, then `updateMu`, then `mu`. A multi-file config

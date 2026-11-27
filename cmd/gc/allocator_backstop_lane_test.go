@@ -549,6 +549,39 @@ func TestK1StepsSkippedWhileCitySuspended(t *testing.T) {
 	}
 }
 
+// Kills the lane judging an unreadable suspension file as the zero state,
+// which falls back to suspended_on_start and skips the steps of a city the
+// operator resumed, while gather suspends nothing on that error
+// (suspensionForPass). Over a truncated file the steps run, as they do over a
+// readable explicit resume; the readable control with no override shows the
+// authored default suspends the city otherwise.
+func TestK1StepsRunOverAnUnreadableSuspensionFile(t *testing.T) {
+	for _, tc := range []struct {
+		name, file string
+		want       string
+	}{
+		{name: "unreadable file", file: `{"city":{"susp`, want: clobberLiveWorkDir},
+		{name: "readable explicit resume", file: `{"city":{"suspended":false}}`, want: clobberLiveWorkDir},
+		{name: "readable, no override", file: `{}`, want: clobberPoolSlot},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			cityPath := t.TempDir()
+			cfg := gaConfig()
+			cfg.Workspace.SuspendedOnStart = true
+			f := newClobberedRunFixture()
+			lane, _ := newTestBackstopLane(externalReadsEnv{CityPath: cityPath, Cfg: cfg, CityStore: f.mem, Sessions: f.sessions})
+			writeSuspension(t, cityPath, tc.file)
+			if !passAndJoin(ctx, at(lane, time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC))) {
+				t.Fatal("a pass declined")
+			}
+			if got := f.workDir(t); got != tc.want {
+				t.Errorf("suspended_on_start city, suspension file %q: gc.work_dir = %q, want %q", tc.file, got, tc.want)
+			}
+		})
+	}
+}
+
 // cancelOnListStore cancels a context on every List.
 type cancelOnListStore struct {
 	beads.Store
