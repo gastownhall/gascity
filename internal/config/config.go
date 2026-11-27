@@ -1485,6 +1485,21 @@ type BeadsConfig struct {
 	// "require" (guarded release or a typed refusal). Empty defaults to "off".
 	// Any other value fails config load.
 	GuardedRelease string `toml:"guarded_release,omitempty" jsonschema:"enum=off,enum=auto,enum=require"`
+	// ClaimAuthority selects the server-side claim-authority boundary for
+	// routed work: "off" (default: install no triggers; still publish this
+	// city's authorized claimants into a store another city armed), "auto"
+	// (arm every Dolt sql-server store that can host the boundary, loud
+	// degrade otherwise), or "require" (arm every store or refuse to start).
+	// An armed store refuses a routed claim or assignment whose assignee is
+	// not a live session, a configured named session, or listed in
+	// ClaimAuthorityAllow. No mode ever disarms a store; only
+	// `gc beads claim-authority disarm` does. GC_BEADS_CLAIM_AUTHORITY
+	// overrides it. Any other value fails config load.
+	ClaimAuthority string `toml:"claim_authority,omitempty" jsonschema:"enum=off,enum=auto,enum=require"`
+	// ClaimAuthorityAllow lists exact assignee identities, beyond live and
+	// configured named sessions, that an armed store accepts as claimants of
+	// routed work (for example a human operator's bd actor).
+	ClaimAuthorityAllow []string `toml:"claim_authority_allow,omitempty"`
 	// AllowSchemaBehindMigrate opts this city in to letting the linked beads
 	// library migrate its database forward when the database's own schema
 	// cursor trails the library's ceiling. Without it, the native-store
@@ -1605,6 +1620,16 @@ func (b BeadsConfig) NormalizedGuardedRelease() string {
 		return "off"
 	}
 	return b.GuardedRelease
+}
+
+// NormalizedClaimAuthority returns the configured claim-authority value,
+// mapping only the empty string to the built-in default "off". An unknown
+// non-empty value passes through verbatim; config load rejects it.
+func (b BeadsConfig) NormalizedClaimAuthority() string {
+	if b.ClaimAuthority == "" {
+		return "off"
+	}
+	return b.ClaimAuthority
 }
 
 // The beads.ledger_feed values.
@@ -5306,6 +5331,9 @@ func validateBeadsModes(b BeadsConfig) error {
 	if err := validateGuardedRelease(b.GuardedRelease); err != nil {
 		return err
 	}
+	if err := validateClaimAuthority(b.ClaimAuthority, b.ClaimAuthorityAllow); err != nil {
+		return err
+	}
 	if err := validateNativeTransport(b.NativeTransport); err != nil {
 		return err
 	}
@@ -5342,6 +5370,25 @@ func validateGuardedRelease(raw string) error {
 	}
 	if _, err := gate.ParseMode(raw); err != nil {
 		return fmt.Errorf("beads.guarded_release: %w", err)
+	}
+	return nil
+}
+
+// validateClaimAuthority rejects an out-of-enum beads.claim_authority value
+// and an empty beads.claim_authority_allow entry at load time. A typo silently
+// meaning "off" would leave an operator believing routed claims are fenced
+// server-side while every raw client can still claim, so the config fails to
+// load instead.
+func validateClaimAuthority(raw string, allow []string) error {
+	if strings.TrimSpace(raw) != "" {
+		if _, err := gate.ParseMode(raw); err != nil {
+			return fmt.Errorf("beads.claim_authority: %w", err)
+		}
+	}
+	for i, identity := range allow {
+		if strings.TrimSpace(identity) == "" {
+			return fmt.Errorf("beads.claim_authority_allow[%d]: empty identity", i)
+		}
 	}
 	return nil
 }

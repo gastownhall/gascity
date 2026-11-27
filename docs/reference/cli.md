@@ -432,6 +432,7 @@ gc beads
 | Subcommand | Description |
 |------------|-------------|
 | [gc beads city](#gc-beads-city) | Manage canonical city endpoint topology |
+| [gc beads claim-authority](#gc-beads-claim-authority) | Operate the claim-authority boundary of the city's bead stores |
 | [gc beads health](#gc-beads-health) | Check beads provider health |
 | [gc beads list](#gc-beads-list) | List beads (API-routed with bd fallback) |
 | [gc beads metadata-cas](#gc-beads-metadata-cas) | Atomically compare and set one metadata key in an exact local store |
@@ -517,6 +518,48 @@ gc beads city use-managed [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--dry-run` | bool |  | show the canonical changes without writing files |
+
+## gc beads claim-authority
+
+Operate the claim-authority boundary of the city's bead stores.
+
+An armed store refuses a routed claim by any identity no city published.
+The controller arms stores under [beads] claim_authority = "auto" or
+"require" and never disarms one; "gc doctor" reports each store's state.
+
+```
+gc beads claim-authority
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc beads claim-authority disarm](#gc-beads-claim-authority-disarm) | Remove the claim-authority triggers from the city's bead stores |
+
+## gc beads claim-authority disarm
+
+Remove the claim-authority triggers from the city's bead stores.
+
+Refuses a store while any publisher heartbeat advertises auto or require:
+set those cities to off first, or the next controller tick re-arms it.
+Refuses a store with no heartbeat at all, where co-tenant intent is
+unknown, unless --force is given. Published rows are left in place.
+
+```
+gc beads claim-authority disarm [flags]
+```
+
+**Example:**
+
+```
+gc beads claim-authority disarm
+gc beads claim-authority disarm --store rig/frontend
+gc beads claim-authority disarm --force
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--force` | bool |  | disarm a store that has no publisher heartbeat |
+| `--store` | string |  | disarm only this store ("city" or "rig/&lt;name&gt;") |
 
 ## gc beads health
 

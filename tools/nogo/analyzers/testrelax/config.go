@@ -46,6 +46,7 @@ var env = map[string]string{
 	"GC_ALLOW_PROD_DOLT_PORT_IN_TESTS":     "lets a test client reach the production Dolt port (ga-4c2ss6)",
 	"GC_BEADS_CONDITIONAL_WRITES":          "turns the beads compare-and-swap write fence (beads.conditional_writes) off, so a lost race clobbers a peer's write",
 	"GC_BEADS_GUARDED_RELEASE":             "turns the guarded release fence (beads.guarded_release) off, so a stale owner's release unclaims a re-claimed bead",
+	"GC_BEADS_CLAIM_AUTHORITY":             "turns the routed-claim authority boundary (beads.claim_authority) off, so a store nobody armed accepts any claimant",
 	"GC_OPS_CONTENT":                       "turns message op recording (ops.content) off, so a delivery the store cannot record runs where require refuses it, and a retry runs again instead of replaying its outcome",
 	"GC_OPS_CONTROL":                       "turns interrupt and respond op recording (ops.control) off, so a request the store cannot record runs where require refuses it, and a retry runs again instead of replaying its outcome",
 	"GC_OPS_LIFECYCLE":                     "turns lifecycle op recording (ops.lifecycle) off, so a request the store cannot record runs where require refuses it, and a retry runs again instead of replaying its outcome",

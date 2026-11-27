@@ -151,6 +151,7 @@ var builtinAuthorship = map[string]Authorship{
 	BeadClaimRejected:              AuthorWorker,
 	BeadClaimReleased:              AuthorWorker,
 	BeadClaimFailed:                AuthorWorker,
+	BeadClaimRefused:               AuthorWorker,
 	HookClaimReclaimedStale:        AuthorWorker,
 	ExecutionStepStarted:           AuthorWorker, // re-derived by the projector from a live step read (D13, CD §5)
 	ExecutionClaimWindowExpired:    AuthorWorker,

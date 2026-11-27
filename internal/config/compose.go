@@ -1215,6 +1215,8 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 		// still wins.
 		conditionalWrites := base.Beads.ConditionalWrites
 		guardedRelease := base.Beads.GuardedRelease
+		claimAuthority := base.Beads.ClaimAuthority
+		claimAuthorityAllow := base.Beads.ClaimAuthorityAllow
 		allowSchemaBehindMigrate := base.Beads.AllowSchemaBehindMigrate
 		proxiedIdleTimeout := base.Beads.ProxiedIdleTimeout
 		nativeTransport := base.Beads.NativeTransport
@@ -1226,6 +1228,12 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 		}
 		if !fragMeta.IsDefined("beads", "guarded_release") {
 			base.Beads.GuardedRelease = guardedRelease
+		}
+		if !fragMeta.IsDefined("beads", "claim_authority") {
+			base.Beads.ClaimAuthority = claimAuthority
+		}
+		if !fragMeta.IsDefined("beads", "claim_authority_allow") {
+			base.Beads.ClaimAuthorityAllow = claimAuthorityAllow
 		}
 		if !fragMeta.IsDefined("beads", "allow_schema_behind_migrate") {
 			base.Beads.AllowSchemaBehindMigrate = allowSchemaBehindMigrate

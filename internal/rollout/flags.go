@@ -21,6 +21,7 @@ type resolved[T any] struct {
 type Flags struct {
 	beadsConditionalWrites   resolved[Mode]
 	beadsGuardedRelease      resolved[Mode]
+	beadsClaimAuthority      resolved[Mode]
 	formulaV2                resolved[bool]
 	allowSchemaBehindMigrate resolved[bool]
 	opsContent               resolved[Mode]
@@ -38,6 +39,8 @@ func (f Flags) OriginOf(key string) Origin {
 		return f.beadsConditionalWrites.origin
 	case keyBeadsGuardedRelease:
 		return f.beadsGuardedRelease.origin
+	case keyBeadsClaimAuthority:
+		return f.beadsClaimAuthority.origin
 	case keyDaemonFormulaV2:
 		return f.formulaV2.origin
 	case keyBeadsAllowSchemaBehindMigrate:
@@ -71,6 +74,8 @@ func (f Flags) ValueOf(key string) string {
 		return string(f.beadsConditionalWrites.value)
 	case keyBeadsGuardedRelease:
 		return string(f.beadsGuardedRelease.value)
+	case keyBeadsClaimAuthority:
+		return string(f.beadsClaimAuthority.value)
 	case keyDaemonFormulaV2:
 		return strconv.FormatBool(f.formulaV2.value)
 	case keyBeadsAllowSchemaBehindMigrate:

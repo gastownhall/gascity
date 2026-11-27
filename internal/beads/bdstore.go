@@ -1951,12 +1951,20 @@ func isBdSQLUnsupportedInEmbeddedMode(err error) bool {
 // It returns ok=false with a nil error when bd refuses the claim because of
 // the bead's own state: another actor holds it, or its status is not claimable.
 // That is the conflict verdict SQLiteStore.Claim and NativeDoltStore.Claim
-// return for the same refusals. The caller controls the claim actor through the
-// store's CommandRunner environment, typically BEADS_ACTOR.
+// return for the same refusals. An armed store's claim-authority refusal is an
+// error matching ErrClaimNotAuthorized, never that conflict verdict. The caller
+// controls the claim actor through the store's CommandRunner environment,
+// typically BEADS_ACTOR.
 func (s *BdStore) Claim(id string) (Bead, bool, error) {
 	out, err := s.runBDTransientWriteOutput("update", id, "--claim", "--json")
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
+		// A claim-authority refusal is not a lost race: nobody else holds the
+		// bead, this assignee is not authorized. Classify it before the
+		// conflict match so it can never read as "already claimed".
+		if refused := ClassifyClaimAuthorityError(fmt.Errorf("claiming bead %q: %w: %s", id, err, msg)); errors.Is(refused, ErrClaimNotAuthorized) {
+			return Bead{}, false, refused
+		}
 		if isBdClaimConflictMessage(msg) || isBdClaimConflictMessage(err.Error()) {
 			return Bead{}, false, nil
 		}

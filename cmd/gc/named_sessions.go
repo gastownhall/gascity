@@ -68,6 +68,35 @@ func namedSessionAssigneeMatchesSpec(spec namedSessionSpec, identity, assignee s
 	return assignee == identity || assignee == strings.TrimSpace(spec.SessionName)
 }
 
+// namedSessionAssigneeForms lists every assignee under which a configured
+// named session holds work, running or not: for each configured named
+// session, the forms namedSessionAssigneeMatchesSpec accepts and the bare
+// pre-requalification identity, each kept only when
+// findNamedSessionSpecForAssignee resolves it back to that same session (the
+// lookup assigneePreservesNamedSessionRoute protects claims through).
+func namedSessionAssigneeForms(cfg *config.City, cityName string) []string {
+	if cfg == nil {
+		return nil
+	}
+	var forms []string
+	for i := range cfg.NamedSessions {
+		identity := cfg.NamedSessions[i].QualifiedName()
+		spec, ok := findNamedSessionSpec(cfg, cityName, identity)
+		if !ok {
+			continue
+		}
+		for _, form := range []string{identity, strings.TrimSpace(spec.SessionName), spec.BareIdentity} {
+			if form == "" || slices.Contains(forms, form) {
+				continue
+			}
+			if resolved, ok := findNamedSessionSpecForAssignee(cfg, cityName, form); ok && resolved.Named == spec.Named {
+				forms = append(forms, form)
+			}
+		}
+	}
+	return forms
+}
+
 // requalifiedPriorIdentity returns the bare identity a configured named
 // session row was renamed in place from when `gc rig add --adopt` requalified
 // it (gastownhall/gascity#5957), or "". identity is the row's configured named

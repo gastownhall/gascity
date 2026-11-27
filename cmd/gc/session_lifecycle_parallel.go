@@ -2865,6 +2865,7 @@ func startPreparedStartCandidate(
 	// the runtime-only handle borrows instead of taking the name's flock.
 	by := sessionActor(sessionpkg.ActorController, cityPath)
 	by.Lease = item.candidate.lease
+	publishClaimAuthorityBeforeStart(cityPath, cfg, item.candidate.info)
 	if store == nil || strings.TrimSpace(item.candidate.info.ID) == "" {
 		handle, err := runtimeWorkerHandleWithConfig(
 			cityPath,

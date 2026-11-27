@@ -2147,7 +2147,7 @@ func (s *NativeDoltStore) Claim(id, assignee string) (Bead, bool, error) {
 				return nativeClaimWisp(ctx, storage, id, assignee)
 			}
 		}
-		return Bead{}, false, nativeStoreError(id, err)
+		return Bead{}, false, ClassifyClaimAuthorityError(nativeStoreError(id, err))
 	}
 	return nativeClaimedBead(id, result.Issue)
 }
@@ -2223,7 +2223,7 @@ func nativeClaimWisp(ctx context.Context, storage beadslib.Storage, id, assignee
 		case errors.As(err, &unsupported):
 			return Bead{}, false, fmt.Errorf("claiming bead %q: %w (%w)", id, ErrWispNotClaimable, err)
 		}
-		return Bead{}, false, nativeStoreError(id, err)
+		return Bead{}, false, ClassifyClaimAuthorityError(nativeStoreError(id, err))
 	}
 	return nativeClaimedBead(id, result.Issue)
 }

@@ -62,6 +62,14 @@ const (
 	// (cmd/gc/claim_loop_guard.go): the same bead failing the same way for
 	// every seat a template spawns is a spawn loop, not a slow claim.
 	BeadClaimFailed = "bead.claim_failed"
+	// BeadClaimRefused fires when a store's claim-authority boundary refuses a
+	// claim gc made: the assignee is not an identity any city published for
+	// that store. It is not a lost race (BeadClaimRejected) and not a failed
+	// write to count toward the claim-loop guard (BeadClaimFailed): nothing was
+	// written, the bead is left as it was, and a later claim after the next
+	// publish can succeed. The payload names the bead, the assignee and the
+	// store that refused.
+	BeadClaimRefused = "bead.claim_refused"
 	// BeadClaimLoopHeld fires when the controller's claim-loop guard stops
 	// counting a bead in a template's default routed-work demand, because the
 	// template's seats failed to claim it with the same error enough times in a
@@ -737,7 +745,7 @@ var KnownEventTypes = []string{
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	BeadClaimRejected, BeadClaimReleased,
-	BeadClaimFailed, BeadClaimLoopHeld,
+	BeadClaimFailed, BeadClaimRefused, BeadClaimLoopHeld,
 	AgentClaimsStalled, AgentClaimsResumed,
 	HookClaimReclaimedStale,
 	BeadDeadAssigneeReopened,

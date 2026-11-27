@@ -98,6 +98,9 @@ func (h *hookCity) claimOps() hookClaimOps {
 	ops.EmitClaimFailed = func(beadID string, opts hookClaimOptions, err error) {
 		emitClaimFailedTo(h.recorder, beadID, opts, err)
 	}
+	ops.EmitClaimRefused = func(refusal hookClaimRefusal) {
+		emitClaimRefused(h.recorder(), refusal)
+	}
 	ops.EmitClaimReleased = func(release hookClaimReleaseRecord) {
 		emitClaimReleased(h.recorder(), release)
 	}

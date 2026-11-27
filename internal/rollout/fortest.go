@@ -18,6 +18,7 @@ func defaultFlags() Flags {
 	return Flags{
 		beadsConditionalWrites:   resolved[Mode]{value: Auto, origin: OriginBuiltin},
 		beadsGuardedRelease:      resolved[Mode]{value: Off, origin: OriginBuiltin},
+		beadsClaimAuthority:      resolved[Mode]{value: Off, origin: OriginBuiltin},
 		formulaV2:                resolved[bool]{value: true, origin: OriginBuiltin},
 		allowSchemaBehindMigrate: resolved[bool]{value: false, origin: OriginBuiltin},
 		opsContent:               resolved[Mode]{value: Auto, origin: OriginBuiltin},
