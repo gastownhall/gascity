@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/closeorder"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/platform/filelock"
 )
@@ -630,6 +631,54 @@ func WorkflowTree(store beads.MoleculeTarget, rootID string) ([]WorkflowTreeNode
 // the count of newly closed beads.
 func CloseWorkflowSubtree(store beads.MoleculeTarget, rootID string) (int, error) {
 	return CloseWorkflowSubtreeAs(store, rootID, beadmeta.OutcomeSkipped, WorkflowSubtreeClosedReason, nil)
+}
+
+// CancelWorkflowSubtree closes one workflow root and its open members as
+// canceled with the run-cancel close reason, stamping the cancel-intent marker
+// on the root alone and sparing its teardown tail. A nested drain item root is
+// canceled exactly like the run root: it is a workflow root in its own right,
+// so its own controls read gc.cancel_requested off it and its own teardown
+// tail still runs. This is the wind-down POST /runs/{id}/cancel performs per
+// workflow, and the one the claim-time failed-cancel recovery reuses.
+func CancelWorkflowSubtree(store beads.MoleculeTarget, rootID string) (int, error) {
+	exclude, err := molecule.TeardownTailExclusion(store, rootID)
+	if err != nil {
+		return 0, err
+	}
+	return CloseWorkflowSubtreeAsExcept(
+		store,
+		rootID,
+		beadmeta.OutcomeCanceled,
+		RunCanceledCloseReason,
+		map[string]string{beadmeta.CancelRequestedMetadataKey: "true"},
+		exclude,
+	)
+}
+
+// CancelWorkflowTree finishes the wind-down of a canceled run: it cancels the
+// workflow rooted at rootID and every drain item workflow nested under it,
+// deepest first (WorkflowTree's order), through CancelWorkflowSubtree.
+// Workflows already closed keep their outcome. It stops at the first error,
+// so the outer levels, the run root last of all, stay open for a retry to
+// find. It returns the count of newly closed beads, including those a failing
+// workflow closed before its error.
+func CancelWorkflowTree(store beads.MoleculeTarget, rootID string) (int, error) {
+	tree, err := WorkflowTree(store, rootID)
+	if err != nil {
+		return 0, fmt.Errorf("reading workflow tree of %s: %w", rootID, err)
+	}
+	total := 0
+	for _, node := range tree {
+		if node.Root.ID == "" || node.Root.Status == "closed" {
+			continue
+		}
+		n, err := CancelWorkflowSubtree(store, node.Root.ID)
+		total += n
+		if err != nil {
+			return total, fmt.Errorf("canceling workflow %s of run %s: %w", node.Root.ID, rootID, err)
+		}
+	}
+	return total, nil
 }
 
 // CloseWorkflowSubtreeAs closes the root and every open descendant of a workflow

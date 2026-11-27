@@ -133,6 +133,16 @@ type Formula struct {
 	// Patrol and release workflows should typically use "vapor" since they're operational.
 	Phase string `json:"phase,omitempty"`
 
+	// InputLifecycle declares who settles the workflow's input convoy:
+	// "external" (the default when empty) means another lane does, so input
+	// that is already terminal or handed off retires the workflow at claim
+	// time; "graph" means the workflow's own steps do, so the tail after that
+	// settlement (finalization, reporting, teardown) still runs. It is a
+	// formulas v2 workflow declaration that inherits like Phase, and "graph"
+	// requires a formula_compiler requirement of >=2.1.0. Compilation stamps
+	// gc.input_lifecycle=graph on the workflow root only.
+	InputLifecycle string `json:"input_lifecycle,omitempty" toml:"input_lifecycle,omitempty"`
+
 	// Pour controls whether steps are materialized as individual child issues.
 	// If true, each step becomes a DB row with dependency tracking (checkpoint recovery).
 	// If false (default), only the root issue is created; steps are read inline at prime time.
@@ -1340,6 +1350,7 @@ func (f *Formula) Validate() error {
 	if f.Type != "" && !f.Type.IsValid() {
 		errs = append(errs, fmt.Sprintf("type: invalid value %q (must be workflow, expansion, or aspect)", f.Type))
 	}
+	errs = append(errs, validateInputLifecycleDeclaration(f)...)
 
 	// Validate variables
 	for name, v := range f.Vars {
