@@ -55,6 +55,22 @@ var specs = []Spec{
 			"while the guarded-verb bd pin is untagged.",
 	},
 	{
+		Key:            keyBeadsClaimAuthority,
+		Category:       InfraRollout,
+		ConfigPath:     "beads.claim_authority",
+		EnvOverride:    envBeadsClaimAuthority,
+		EnvSemantics:   EnvOverrides,
+		Default:        Default{Mode: ptr(Off)},
+		Owner:          Owner{Bead: "ga-6mhbis", GitHub: "@gastownhall/gascity-admin"},
+		Expires:        "2027-06-30",
+		VersionAnchor:  "internal/beads/claim_authority.go",
+		SelectsBetween: [2]string{"client-side claim checks plus the orphan-release sweep", "server-side claim-authority triggers on routed work"},
+		Justification: "Refuse routed-work claims by identities with no live session at the Dolt " +
+			"write boundary, so a raw bd client sharing the root principal cannot claim work " +
+			"the controller would only release after the fact (#4437); gated so mixed fleets " +
+			"and shared rig stores can roll the boundary out store by store.",
+	},
+	{
 		Key:            keyDaemonFormulaV2,
 		Category:       InfraMigration,
 		ConfigPath:     "daemon.formula_v2",
@@ -167,6 +183,10 @@ func beadsConditionalWritesSpec() Spec { return specByKey(keyBeadsConditionalWri
 // beadsGuardedReleaseSpec returns the canonical Spec for the beads
 // guarded-release gate.
 func beadsGuardedReleaseSpec() Spec { return specByKey(keyBeadsGuardedRelease) }
+
+// beadsClaimAuthoritySpec returns the canonical Spec for the beads
+// claim-authority gate.
+func beadsClaimAuthoritySpec() Spec { return specByKey(keyBeadsClaimAuthority) }
 
 // beadsAllowSchemaBehindMigrateSpec returns the canonical Spec for the beads
 // allow-schema-behind-migrate gate.

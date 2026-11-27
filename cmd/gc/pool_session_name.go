@@ -167,6 +167,7 @@ func releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 	if result.snapshotQueryPartial() {
 		return nil
 	}
+	publishClaimAuthorityOnTick(cityPath, cfg, openSessionInfos)
 	return releaseOrphanedPoolAssignments(store, sessionStore, cfg, cityPath, openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStores, result.AssignedWorkStoreRefs, rigStores, protectedWakeWork, recordPhase, keeps)
 }
 

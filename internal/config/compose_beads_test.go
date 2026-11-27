@@ -400,3 +400,46 @@ func TestLedgerFeedSurvivesABeadsFragment(t *testing.T) {
 		}
 	}
 }
+
+// TestLoadWithIncludesPreservesClaimAuthorityAcrossBeadsFragment: a fragment
+// defining an unrelated [beads] key keeps the root's claim_authority and its
+// allowlist, and an out-of-enum value fails load.
+func TestLoadWithIncludesPreservesClaimAuthorityAcrossBeadsFragment(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["fragment.toml"]
+
+[workspace]
+name = "test"
+
+[beads]
+claim_authority = "auto"
+claim_authority_allow = ["operator"]
+`)
+	fs.Files["/city/fragment.toml"] = []byte(`
+[beads]
+bd_compatibility = "bd-1.0.5"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if got := cfg.Beads.NormalizedClaimAuthority(); got != "auto" {
+		t.Fatalf("NormalizedClaimAuthority = %q, want root auto to survive a [beads] fragment", got)
+	}
+	if len(cfg.Beads.ClaimAuthorityAllow) != 1 || cfg.Beads.ClaimAuthorityAllow[0] != "operator" {
+		t.Fatalf("ClaimAuthorityAllow = %v, want [operator]", cfg.Beads.ClaimAuthorityAllow)
+	}
+
+	bad := fsys.NewFake()
+	bad.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+
+[beads]
+claim_authority = "requre"
+`)
+	if _, _, err := LoadWithIncludes(bad, "/city/city.toml"); err == nil {
+		t.Fatal("LoadWithIncludes accepted claim_authority = \"requre\", want a load error")
+	}
+}

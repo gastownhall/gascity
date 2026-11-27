@@ -6,6 +6,7 @@ go_library(
         "capability.go",
         "doc.go",
         "flag_beads_allow_schema_behind_migrate.go",
+        "flag_beads_claim_authority.go",
         "flag_beads_conditional_writes.go",
         "flag_beads_guarded_release.go",
         "flag_daemon_formula_v2.go",
@@ -33,6 +34,7 @@ go_test(
     srcs = [
         "boundary_test.go",
         "capability_test.go",
+        "flag_beads_claim_authority_test.go",
         "flag_beads_guarded_release_test.go",
         "flag_ops_test.go",
         "flags_test.go",

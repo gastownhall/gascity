@@ -195,3 +195,77 @@ func TestClaimAuthorityRefusesUnpublishedRoutedClaims(t *testing.T) {
 		t.Fatal("the refused raw INSERT left a row behind")
 	}
 }
+
+func (f claimAuthorityFixture) reconcile(t *testing.T, pub ClaimAuthorityPublisher, prune bool, identities ...string) ClaimAuthorityReconcileReport {
+	t.Helper()
+	conn, err := f.db.Conn(t.Context())
+	if err != nil {
+		t.Fatalf("pin a connection: %v", err)
+	}
+	defer conn.Close() //nolint:errcheck // test cleanup
+	entries := make([]ClaimAuthorityEntry, 0, len(identities))
+	for _, identity := range identities {
+		entries = append(entries, ClaimAuthorityEntry{Identity: identity, Source: ClaimAuthoritySession})
+	}
+	report, err := ReconcileClaimAuthority(t.Context(), conn, ClaimAuthorityReconcile{
+		Publisher: pub, Entries: entries, Now: time.Now().UTC(), Prune: prune,
+	})
+	if err != nil {
+		t.Fatalf("ReconcileClaimAuthority(%s, prune=%v): %v", pub.Mode, prune, err)
+	}
+	return report
+}
+
+func testClaimAuthorityPublisher(city, mode string) ClaimAuthorityPublisher {
+	return ClaimAuthorityPublisher{Tag: ClaimAuthorityCityTag("/cities/"+city, city), City: city, Mode: mode}
+}
+
+func assertClaimed(t *testing.T, store *NativeDoltStore, id, assignee string) {
+	t.Helper()
+	got, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", id, err)
+	}
+	if got.Assignee != assignee {
+		t.Fatalf("Get(%s).Assignee = %q, want %q", id, got.Assignee, assignee)
+	}
+}
+
+// AC-2: an auto-mode reconcile publishes an open pool session's identities
+// before it arms, so that session claims routed work on both tiers; a
+// pre-start publish (prune=false) for a session that started mid-tick
+// authorizes it at once without dropping the identities already published.
+func TestClaimAuthorityPublishedPoolSessionCanClaim(t *testing.T) {
+	f := newClaimAuthorityFixture(t)
+	pub := testClaimAuthorityPublisher("alpha", ClaimAuthorityModeAuto)
+	const running = "rig/pool-1"
+
+	report := f.reconcile(t, pub, true, running, "pool-gc-abc")
+	if !report.Armed || !report.ArmedNow {
+		t.Fatalf("auto reconcile on a capable store = %+v, want it armed now", report)
+	}
+	for _, ephemeral := range []bool{false, true} {
+		t.Run(f.tableOf(ephemeral), func(t *testing.T) {
+			started := "rig/pool-started-" + f.tableOf(ephemeral)
+			bead := f.createRouted(t, ephemeral)
+			if _, _, err := f.store.Claim(bead.ID, running); err != nil {
+				t.Fatalf("published pool session %s claim: %v", running, err)
+			}
+			assertClaimed(t, f.store, bead.ID, running)
+
+			fresh := f.createRouted(t, ephemeral)
+			_, _, err := f.store.Claim(fresh.ID, started)
+			assertClaimAuthorityRefusal(t, "claim before the pre-start publish", err)
+			f.reconcile(t, pub, false, started)
+			if _, _, err := f.store.Claim(fresh.ID, started); err != nil {
+				t.Fatalf("claim by %s after its pre-start publish: %v", started, err)
+			}
+			assertClaimed(t, f.store, fresh.ID, started)
+
+			again := f.createRouted(t, ephemeral)
+			if _, _, err := f.store.Claim(again.ID, running); err != nil {
+				t.Fatalf("the additive pre-start publish dropped %s: %v", running, err)
+			}
+		})
+	}
+}
