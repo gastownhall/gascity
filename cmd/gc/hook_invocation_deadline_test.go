@@ -118,3 +118,67 @@ func TestHookNegativeTimeoutIsRefused(t *testing.T) {
 		t.Fatalf("stdout = %q, want nothing for a usage error", got)
 	}
 }
+
+// deadlineClaimFixture is the worked example of #5533's claim-side design:
+// `gc hook --claim --json --timeout 15s`. Reads end at W = start + 12s (the
+// deadline less the 3s archive margin), so the work time is 12s and the claim
+// machinery must derive a 4s mutation reserve (min(10s, work/3)) and an 8s
+// claim fence (min(window, work − reserve)) from the Deadline alone. The
+// recorder's ops carry that clock; readAdvance is how far the fake work query
+// moves it before answering.
+func deadlineClaimFixture(t *testing.T, readAdvance time.Duration) (*turnBoundClaimRecorder, hookClaimOps) {
+	t.Helper()
+	rec := &turnBoundClaimRecorder{}
+	ops := rec.ops(t, turnBoundRoutedWork)
+	clk := time.Now()
+	ops.Now = func() time.Time { return clk }
+	ops.Deadline = clk.Add(12 * time.Second)
+	ops.Runner = func(string, string) (string, error) {
+		clk = clk.Add(readAdvance)
+		return turnBoundRoutedWork, nil
+	}
+	return rec, ops
+}
+
+// TestHookClaimRefusesCandidatePastDeadlineFence pins AC-4: with a declared
+// invocation deadline, a claimable candidate the read reaches only AFTER the
+// claim fence (8s in, on the 15s shape) is refused before any mutation — no
+// claim write, nothing on stdout, a non-zero exit, and the
+// execution.claim_window_expired fact recorded. The fence keeps the turn
+// binding: a claim whose read outlived the fence cannot be handed to the turn
+// that asked for it.
+func TestHookClaimRefusesCandidatePastDeadlineFence(t *testing.T) {
+	rec, ops := deadlineClaimFixture(t, 8*time.Second+500*time.Millisecond)
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("query", "/rig", hookClaimOptions{
+		Assignee:     "worker-1",
+		RouteTargets: []string{"worker"},
+		DrainAck:     true,
+		JSON:         true,
+	}, ops, &stdout, &stderr)
+
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 (the candidate arrived past the deadline's claim fence); stderr=%s", code, stderr.String())
+	}
+	if len(rec.claims) != 0 {
+		t.Fatalf("claims = %v, want none: no claim mutation may be attempted past the fence", rec.claims)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want nothing: a refused candidate is not a work or drain result", stdout.String())
+	}
+	if rec.drainAcked {
+		t.Fatal("drain acknowledged for a candidate refused past the fence")
+	}
+	if len(rec.windowExpired) != 1 {
+		t.Fatalf("claim_window_expired records = %d, want 1 (the refusal must be the recorded fact)", len(rec.windowExpired))
+	}
+	if age := rec.windowExpired[0].InvocationAge; age < 8*time.Second {
+		t.Fatalf("event invocation age = %s, want the age past the 8s fence", age)
+	}
+	// The stderr names the DERIVED fence, so a mis-derived window (the
+	// unbounded 160s default, or the 12s work time) cannot pass silently.
+	if !strings.Contains(stderr.String(), "8s claim window") {
+		t.Fatalf("stderr %q does not name the deadline-derived 8s claim window", stderr.String())
+	}
+}

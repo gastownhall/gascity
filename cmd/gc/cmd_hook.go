@@ -976,6 +976,13 @@ func claimHookWorkProvisioning(ctx context.Context, city *hookCity, workQuery, w
 	if !proceed {
 		return 1
 	}
+	// The invocation's read end (W), when the caller declared a deadline: the
+	// claim fence and its mutation reserve fit inside what is left of it
+	// (applyDefaults). Without one, ctx carries no deadline and the claim
+	// keeps its own window and reserve.
+	if end, ok := ctx.Deadline(); ok {
+		ops.Deadline = end
+	}
 	// A kept claim is announced before its result is written; this announces
 	// whatever is left on the way out (a release, a reclaim, a claim that
 	// stopped on an error).

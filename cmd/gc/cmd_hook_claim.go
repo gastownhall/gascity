@@ -347,6 +347,20 @@ type hookClaimOps struct {
 	// fresh one each time the loop copies the ops.
 	InvokedAt   time.Time
 	ClaimWindow time.Duration
+	// Deadline is the invocation's read end (W): the deadline the caller
+	// declared (--timeout or the inherited GC_HOOK_DEADLINE) less the archive
+	// margin (hookInvocationReadContext), the instant by which the invocation's
+	// reads and its claim fence must be done. When set, applyDefaults fits the
+	// claim window and its mutation reserve inside the work time left
+	// (Deadline − InvokedAt). Zero — no declared deadline — keeps each at its
+	// own default, as before #5533.
+	Deadline time.Time
+	// ClaimReserve is the mutation budget a claim that passes the window fence
+	// owns (claimMutationContext). applyDefaults fills it: hookClaimMutationTimeout
+	// without a declared deadline, or min(that, a third of the work time) with
+	// one, so the reserve and the fence always split the work time between
+	// them and a claim inside the fence keeps a real budget.
+	ClaimReserve time.Duration
 	// ClassRoute is the relocated coordination-class binding these seams
 	// escalate to, or nil on a city that relocates nothing. It is not a seam:
 	// it is here so claimHookWorkWithRunner — the only caller that knows the
@@ -782,8 +796,32 @@ func (ops *hookClaimOps) applyDefaults() {
 	if ops.InvokedAt.IsZero() {
 		ops.InvokedAt = ops.Now()
 	}
-	if ops.ClaimWindow <= 0 {
-		ops.ClaimWindow = resolveHookClaimWindow()
+	if ops.Deadline.IsZero() {
+		if ops.ClaimWindow <= 0 {
+			ops.ClaimWindow = resolveHookClaimWindow()
+		}
+		if ops.ClaimReserve <= 0 {
+			ops.ClaimReserve = hookClaimMutationTimeout
+		}
+	} else {
+		// A declared invocation deadline (#5533) fits the fence and its reserve
+		// inside the work time left (Deadline − InvokedAt, the read end W):
+		// reserve = min(hookClaimMutationTimeout, work/3) and window =
+		// min(resolveHookClaimWindow(), work − reserve), floored at 1ns —
+		// claimWindowOrDefault reads <=0 as "unset", so a spent budget must
+		// read as spent, not as the default. The reserve never shrinks below a
+		// third of the work time, keeping the lesson below: a claim that
+		// passes the fence gets a real mutation budget, never the window's
+		// leftover sliver.
+		work := ops.Deadline.Sub(ops.InvokedAt)
+		if ops.ClaimReserve <= 0 {
+			ops.ClaimReserve = min(hookClaimMutationTimeout, work/3)
+		}
+		window := min(resolveHookClaimWindow(), work-ops.ClaimReserve)
+		if window < time.Nanosecond {
+			window = time.Nanosecond
+		}
+		ops.ClaimWindow = window
 	}
 }
 
