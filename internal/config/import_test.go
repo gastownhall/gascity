@@ -2957,3 +2957,21 @@ func TestDefaultRunRepoCacheGitFailureKeepsStderr(t *testing.T) {
 		}
 	})
 }
+
+func TestRunRepoCacheGitPutsConfigArgsBeforeCommand(t *testing.T) {
+	binDir := t.TempDir()
+	script := "#!/bin/sh\nfor arg in \"$@\"; do printf '%s\\n' \"$arg\"; done\n"
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+
+	got, err := RunRepoCacheGit(t.TempDir(), []string{"-c", "core.fsmonitor=false", "-c", "protocol.allow=never"}, "status", "--porcelain")
+	if err != nil {
+		t.Fatalf("RunRepoCacheGit: %v", err)
+	}
+	want := "-c\ncore.fsmonitor=false\n-c\nprotocol.allow=never\nstatus\n--porcelain"
+	if got != want {
+		t.Fatalf("git argv = %q, want %q", got, want)
+	}
+}
