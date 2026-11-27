@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -76,7 +79,12 @@ func cmdSuspend(args []string, jsonOut bool, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if c := apiClient(cityPath); c != nil {
-		err := c.SuspendCity()
+		// The brake must work when the API is wedged: an API that does not
+		// answer within suspendAPITimeout is a connection error, and the
+		// file is written directly.
+		ctx, cancel := context.WithTimeout(context.Background(), suspendAPITimeout)
+		err := c.SuspendCityContext(ctx)
+		cancel()
 		if err == nil {
 			return writeCitySuspensionSuccess(stdout, stderr, cityPath, true, jsonOut)
 		}
@@ -86,8 +94,22 @@ func cmdSuspend(args []string, jsonOut bool, stdout, stderr io.Writer) int {
 		}
 		// Connection error — fall through to direct mutation.
 	}
-	return doSuspendCity(fsys.OSFS{}, cityPath, true, jsonOut, stdout, stderr)
+	code := doSuspendCity(fsys.OSFS{}, cityPath, true, jsonOut, stdout, stderr)
+	if code == 0 {
+		// Best effort: a running controller re-reads the file on its next
+		// pass anyway; the poke only makes that pass come now.
+		_, _ = sendControllerCommandWithTimeouts(cityPath, "poke", suspendPokeTimeout, suspendPokeTimeout, suspendPokeTimeout)
+	}
+	return code
 }
+
+// suspendAPITimeout bounds `gc suspend`'s API call; past it the command
+// writes the suspension file itself.
+const suspendAPITimeout = 3 * time.Second
+
+// suspendPokeTimeout bounds each step of `gc suspend`'s controller poke after
+// a direct write.
+const suspendPokeTimeout = time.Second
 
 // cmdResume is the CLI entry point for resuming the city.
 func cmdResume(args []string, jsonOut bool, stdout, stderr io.Writer) int {
@@ -127,16 +149,32 @@ func doSuspendCity(fs fsys.FS, cityPath string, suspend bool, jsonOut bool, stdo
 		cmd = "gc resume"
 	}
 	// Validate city.toml parses so an unrelated config error surfaces
-	// clearly instead of being masked by the runtime-state write.
+	// clearly instead of being masked by the runtime-state write. Suspend is
+	// the brake, so a broken config only warns there.
 	if _, err := loadCityConfigForEditFS(fs, tomlPath); err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", cmd, err) //nolint:errcheck // best-effort stderr
-		return 1
+		if !suspend {
+			fmt.Fprintf(stderr, "%s: %v (fix city.toml, then run %s again)\n", cmd, err, cmd) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		fmt.Fprintf(stderr, "%s: warning: %v; suspending anyway\n", cmd, err) //nolint:errcheck // best-effort stderr
 	}
 
-	want := suspend
-	if err := suspensionstate.SetCitySuspended(fs, cityPath, &want); err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", cmd, err) //nolint:errcheck // best-effort stderr
-		return 1
+	stateFile := citylayout.SuspensionStateFile(cityPath)
+	if suspend {
+		discarded, err := suspensionstate.ForceCitySuspended(fs, cityPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: writing %s: %v\n", cmd, stateFile, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if discarded != nil {
+			fmt.Fprintf(stderr, "%s: replaced unreadable %s (%v)\n", cmd, stateFile, discarded) //nolint:errcheck // best-effort stderr
+		}
+	} else {
+		want := false
+		if err := suspensionstate.SetCitySuspended(fs, cityPath, &want); err != nil {
+			fmt.Fprintf(stderr, "%s: %s: %v (fix the JSON or remove the file, then run %s again)\n", cmd, stateFile, err, cmd) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 
 	// Record against the city whose state actually changed, not the
