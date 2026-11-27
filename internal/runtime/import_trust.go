@@ -21,11 +21,43 @@ func WorkspaceImportTrustRoot(ctx context.Context, dir string) string {
 	if strings.TrimSpace(dir) == "" {
 		return ""
 	}
-	out, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--git-common-dir").Output()
+	out, err := exec.CommandContext(ctx, "git", gitCommonDirArgs(dir)...).Output()
 	if err != nil {
 		return ""
 	}
-	common := strings.TrimSpace(string(out))
+	return importTrustRootFromGitCommonDir(dir, string(out))
+}
+
+// WorkspaceImportTrustRootInBox is WorkspaceImportTrustRoot for a session
+// whose agent runs inside a box that conn reaches (a pod, a remote host): it
+// runs the same git query in the box, against dir as the box names it, so the
+// root is a box path that the import paths the agent lists there can match. A
+// host-side root would name a directory the box does not have.
+//
+// It returns "" when dir is empty or when the query fails to run, exits
+// non-zero (dir is not inside a git repository, or the box has no git), or
+// prints nothing, so the external-imports modal is left for a human.
+func WorkspaceImportTrustRootInBox(ctx context.Context, conn ExecProvider, name, dir string) string {
+	if strings.TrimSpace(dir) == "" {
+		return ""
+	}
+	out, code, err := conn.Exec(ctx, name, append([]string{"git"}, gitCommonDirArgs(dir)...))
+	if err != nil || code != 0 {
+		return ""
+	}
+	return importTrustRootFromGitCommonDir(dir, string(out))
+}
+
+// gitCommonDirArgs is the git argv (without "git") that prints the common git
+// directory of the repository containing dir.
+func gitCommonDirArgs(dir string) []string {
+	return []string{"-C", dir, "rev-parse", "--git-common-dir"}
+}
+
+// importTrustRootFromGitCommonDir turns the output of `git -C dir rev-parse
+// --git-common-dir` into the repository root, or "" for empty output.
+func importTrustRootFromGitCommonDir(dir, out string) string {
+	common := strings.TrimSpace(out)
 	if common == "" {
 		return ""
 	}

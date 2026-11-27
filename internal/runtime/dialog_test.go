@@ -557,6 +557,62 @@ func TestContainsExternalImportsDialog(t *testing.T) {
 	}
 }
 
+// TestStartupDialogAwaitingAnswer: the check matches the imports modal and a
+// workspace-trust dialog while one is the last thing the agent drew, whichever
+// row its cursor is on. Their wording above a prompt the agent drew later, and
+// dialog-like wording in the agent's output, such as a rate-limit error, do
+// not match.
+func TestStartupDialogAwaitingAnswer(t *testing.T) {
+	t.Parallel()
+
+	const (
+		claudeTrustQuestion = "Quick safety check: Is this a project you created or one you trust?\n\n"
+		claudeTrustFooter   = "\n\nEnter to confirm · Esc to cancel"
+		claudeTrustOnTrust  = claudeTrustQuestion + "❯ Yes, I trust this folder\n  No, exit" + claudeTrustFooter
+		claudeTrustOnExit   = claudeTrustQuestion + "  Yes, I trust this folder\n❯ No, exit" + claudeTrustFooter
+		// claudeReady is Claude's empty composer and footer, drawn below
+		// whatever the agent printed before it.
+		claudeReady = "\n\n────────────────\n❯ \n────────────────\n  ? for shortcuts"
+		codexReady  = "\n\n› Implement {feature}\n\n  gpt-5.1-codex · ~/repo"
+	)
+	for name, screen := range map[string]string{
+		"imports modal":                              externalImportsDialogFixture(),
+		"imports modal below an earlier prompt":      "> earlier turn\n" + externalImportsDialogFixture(),
+		"claude trust, cursor on the trust row":      claudeTrustOnTrust,
+		"claude trust, cursor on No, exit below it":  claudeTrustOnExit,
+		"claude trust, captured with No, exit first": realTrustDialogNoExitSelected,
+		"claude trust in a box": "╭──────╮\n│ Quick safety check: Is this a project you created or one you trust? │\n" +
+			"│   Yes, I trust this folder │\n│ ❯ No, exit │\n╰──────╯",
+		"codex trust below its composer": codex0156TrustDialog,
+		"gemini trust":                   "Do you trust the files in this folder?\n  1. Trust folder (city)\n  2. Trust parent folder\n● 3. Don't trust",
+		"pi trust":                       " Trust project folder?\n\n /home/u/src/hold-court\n\n   Trust\n → Don't trust\n\n Enter to confirm · Esc to cancel",
+		"older codex trust":              "Do you trust the contents of this directory?",
+	} {
+		if !StartupDialogAwaitingAnswer(screen) {
+			t.Errorf("StartupDialogAwaitingAnswer(%s) = false, want true:\n%s", name, screen)
+		}
+	}
+	for name, screen := range map[string]string{
+		"empty pane":                              "",
+		"claude ready":                            "╭───╮\n│ ✻ Welcome to Claude Code! │\n╰───╯\n\n> ",
+		"claude composer":                         claudeComposer,
+		"codex ready":                             "› Implement {feature}\n\n  gpt-5.1-codex · ~/repo",
+		"shell":                                   "user@host:~/repo$ ",
+		"bypass mode status":                      "> \n  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+		"rate-limit error in a transcript":        "⏺ Bash(gh pr view 9140)\n  ⎿  gh: API rate limit exceeded for installation ID 1" + claudeReady,
+		"usage-limit notice in a transcript":      "⏺ Resuming.\n  ⎿  You've hit your limit · resets 3pm (UTC)" + claudeReady,
+		"trust wording in a transcript":           "⏺ The setup guide says to trust this folder before the first run." + claudeReady,
+		"trust wording above an older prompt":     "⏺ The setup guide says to trust this folder before the first run.\n\n> ",
+		"imports modal quoted in a transcript":    externalImportsDialogFixture() + claudeReady,
+		"claude trust above the composer":         claudeTrustOnExit + claudeReady,
+		"codex trust question above its composer": "  Trust this folder? Codex can read, edit, and run files here." + codexReady,
+	} {
+		if StartupDialogAwaitingAnswer(screen) {
+			t.Errorf("StartupDialogAwaitingAnswer(%s) = true, want false:\n%s", name, screen)
+		}
+	}
+}
+
 func TestParseExternalImportPaths(t *testing.T) {
 	t.Parallel()
 
