@@ -382,30 +382,15 @@ func rigTemplateInstance(cfg *config.City, name string) (template, rig string, o
 	return instance.QualifiedName(), rig, true
 }
 
-// findActiveBeadForAssignees returns the ID of the first in_progress bead
-// assigned to the given identities using the cached active snapshot. If rig is
-// non-empty, only that rig's store is searched; otherwise all stores are
-// searched. A store only rigs suspended by effective state reach is never
-// searched (activeBeadSearchScope). Returns "" if no match.
-func (s *Server) findActiveBeadForAssignees(rig string, assignees ...string) string {
-	return s.findActiveBeadForAssigneesWithFreshness(rig, false, assignees...)
-}
-
 // findLiveActiveBeadForAssignees returns the ID of the first in_progress bead
-// assigned to the given identities, bypassing the cache. Use this on
-// lower-frequency detail views where external reassignment freshness matters.
-// A store only rigs suspended by effective state reach is never searched.
+// assigned to the given identities, bypassing the cache: identity order
+// first, then store order, then newest first within a store
+// (findLiveActiveBeadInStores). Use this on lower-frequency detail views
+// where external reassignment freshness matters; the list views answer from
+// activeBeadIndex instead, one in_progress read per reached store per build.
+// A store only rigs suspended by effective state reach is never searched
+// (activeBeadSearchScope).
 func (s *Server) findLiveActiveBeadForAssignees(rig string, assignees ...string) string {
-	return s.findActiveBeadForAssigneesWithFreshness(rig, true, assignees...)
-}
-
-// findActiveBeadForAssigneesWithFreshness returns the in_progress bead of the
-// highest-priority identity: identity order first, then store order, then
-// newest first within a store. Cached reads use a targeted ListQuery with
-// Limit=1 per identity and store, stopping at the first match; live reads go
-// through findLiveActiveBeadInStores. Both read only the stores
-// activeBeadSearchScope picks.
-func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, assignees ...string) string {
 	stores, rigNames := activeBeadSearchScope(workStoresByName(s.state.Stores(), s.state.CityName()), s.loadCacheColdRigs(), rig)
 	seen := make(map[string]bool, len(assignees))
 	var unique []string
@@ -417,36 +402,7 @@ func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, 
 		seen[assignee] = true
 		unique = append(unique, assignee)
 	}
-	if live {
-		return findLiveActiveBeadInStores(stores, rigNames, unique)
-	}
-	for _, assignee := range unique {
-		for _, rn := range rigNames {
-			query := beads.ListQuery{
-				Assignee: assignee,
-				Status:   "in_progress",
-				Limit:    1,
-				Sort:     beads.SortCreatedDesc,
-			}
-			if cached, ok := beads.As[beads.CachedLister](stores[rn]); ok {
-				matches, cacheOK := cached.CachedList(query)
-				if cacheOK {
-					if len(matches) > 0 {
-						return matches[0].ID
-					}
-					continue
-				}
-			}
-			matches, err := stores[rn].List(query)
-			if err != nil {
-				continue
-			}
-			if len(matches) > 0 {
-				return matches[0].ID
-			}
-		}
-	}
-	return ""
+	return findLiveActiveBeadInStores(stores, rigNames, unique)
 }
 
 // activeBeadSearchScope returns the stores an active-bead lookup may read and

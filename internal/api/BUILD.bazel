@@ -289,6 +289,7 @@ go_test(
     name = "api_test",
     srcs = [
         "acp_permission_stream_test.go",
+        "active_bead_index_test.go",
         "actor_helpers_test.go",
         "agent_resolution_test.go",
         "apierr_guard_test.go",

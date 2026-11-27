@@ -59,7 +59,7 @@ func TestEnrichSessionResponseAcceptsStateAndPeekCapability(t *testing.T) {
 	}, nil, sessionResponseCapabilityHandle{
 		state:  worker.State{Phase: worker.PhaseReady},
 		output: "peek output",
-	}, true, srv.findActiveBeadForAssignees, false, 0)
+	}, true, srv.newActiveBeadIndex().lookup, false, 0)
 
 	if !resp.Running {
 		t.Fatal("Running = false, want true")

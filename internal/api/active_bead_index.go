@@ -16,17 +16,15 @@ type activeBeadLookup func(rig string, assignees ...string) string
 
 // activeBeadIndex answers a list build's per-row active-bead lookups from one
 // in_progress read per reached bead store, however many rows or identities
-// the list carries. The agent list used to run one cached List per identity
-// per store per row (findActiveBeadForAssignees), which multiplied the
-// slowest store's read by the roster on a large city. An index instead loads
-// each store once — the cached snapshot when the store serves one through a
-// typed handle (beads.As[beads.CachedLister]), one unfiltered in_progress
-// List otherwise — and keeps the first bead id per assignee in backend order.
+// the list carries — a list of N agents on a slow store must not multiply
+// that store's read by the roster. The index loads each store once — the
+// cached snapshot when the store serves one through a typed handle
+// (beads.As[beads.CachedLister]), one unfiltered in_progress List otherwise —
+// and keeps the first bead id per assignee in backend order.
 //
-// Precedence is the one findActiveBeadForAssigneesWithFreshness pinned:
-// identity order first, then store order, then newest-first within a store.
-// Scope (which stores a lookup may read; a store only cold rigs reach is
-// excluded, a scoped lookup reads its rig's store alone) is
+// Precedence: identity order first, then store order, then newest-first
+// within a store. Scope (which stores a lookup may read; a store only cold
+// rigs reach is excluded, a scoped lookup reads its rig's store alone) is
 // activeBeadSearchScope, resolved per lookup, so a store is read only once
 // some row reaches it. Loads are memoized per store, failures included: a
 // store that failed is not retried within the build, and a partial result

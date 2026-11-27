@@ -2002,12 +2002,13 @@ func suspendAlphaAtRuntime(t *testing.T, state *fakeState) {
 	}
 }
 
-// lookupActiveBead runs the cached or live active-bead lookup.
+// lookupActiveBead runs the live active-bead lookup, or — for the list
+// views' semantics — one lookup through a fresh per-build index.
 func lookupActiveBead(srv *Server, live bool, rig string, assignees ...string) string {
 	if live {
 		return srv.findLiveActiveBeadForAssignees(rig, assignees...)
 	}
-	return srv.findActiveBeadForAssignees(rig, assignees...)
+	return srv.newActiveBeadIndex().lookup(rig, assignees...)
 }
 
 // TestActiveBeadLookupSkipsSuspendedRig: a rig suspended by effective state
@@ -2208,7 +2209,7 @@ func TestActiveBeadLookupSuspensionStateEdges(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		got := New(l.state).findActiveBeadForAssignees("", "session-id")
+		got := New(l.state).newActiveBeadIndex().lookup("", "session-id")
 
 		if l.alpha.listCalls != 0 {
 			t.Errorf("suspended_on_start rig alpha List calls = %d, want 0", l.alpha.listCalls)
@@ -2261,7 +2262,7 @@ func TestActiveBeadLookupLogsUnreadableSuspensionStateOnce(t *testing.T) {
 	srv := New(l.state)
 	lookupRows := func() {
 		for range 3 {
-			srv.findActiveBeadForAssignees("", "session-id")
+			srv.newActiveBeadIndex().lookup("", "session-id")
 		}
 	}
 	var logs bytes.Buffer

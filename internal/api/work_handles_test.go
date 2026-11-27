@@ -163,16 +163,16 @@ func TestConvoyHandlersServeTheWorkStore(t *testing.T) {
 }
 
 // TestActiveBeadLookupServesTheWorkStore pins the active-bead lookup to the
-// work stores over every shape: the cached lookup and the live one both find
-// an agent's in-progress work bead in the city's work store.
+// work stores over every shape: the list-path index and the live one both
+// find an agent's in-progress work bead in the city's work store.
 func TestActiveBeadLookupServesTheWorkStore(t *testing.T) {
 	for _, shape := range workShapes {
 		t.Run(shape.name, func(t *testing.T) {
 			fs, work, _ := newWorkShapeState(t, shape)
 			task := mustCreateInProgress(t, work, "task", "worker")
 			srv := New(fs)
-			if got := srv.findActiveBeadForAssignees("", "worker"); got != task.ID {
-				t.Errorf("cached lookup = %q, want %s from the work store", got, task.ID)
+			if got := srv.newActiveBeadIndex().lookup("", "worker"); got != task.ID {
+				t.Errorf("index lookup = %q, want %s from the work store", got, task.ID)
 			}
 			if got := srv.findLiveActiveBeadForAssignees("", "worker"); got != task.ID {
 				t.Errorf("live lookup = %q, want %s from the work store", got, task.ID)
@@ -182,8 +182,8 @@ func TestActiveBeadLookupServesTheWorkStore(t *testing.T) {
 }
 
 // TestLiveActiveBeadLookupReadsPastTheCache: over a cached work store the live
-// lookup decides on the backing store's assignment and the cached lookup on
-// the cache's. Work reassigned behind the cache is the new owner's to a live
+// lookup decides on the backing store's assignment and the index on the
+// cache's. Work reassigned behind the cache is the new owner's to a live
 // read, so a handle that turned the live read into a cache read would still
 // name it for the old owner.
 func TestLiveActiveBeadLookupReadsPastTheCache(t *testing.T) {
@@ -203,8 +203,8 @@ func TestLiveActiveBeadLookupReadsPastTheCache(t *testing.T) {
 			if got := srv.findLiveActiveBeadForAssignees("", "worker"); got != "" {
 				t.Errorf("live lookup = %q, want none: the backing store reassigned it", got)
 			}
-			if got := srv.findActiveBeadForAssignees("", "worker"); got != task.ID {
-				t.Errorf("cached lookup = %q, want %s as the cache still shows it", got, task.ID)
+			if got := srv.newActiveBeadIndex().lookup("", "worker"); got != task.ID {
+				t.Errorf("index lookup = %q, want %s as the cache still shows it", got, task.ID)
 			}
 		})
 	}
@@ -213,7 +213,7 @@ func TestLiveActiveBeadLookupReadsPastTheCache(t *testing.T) {
 // TestActiveBeadLookupKeepsBeadStoresPrecedence pins workStoresByName to
 // BeadStores' shape (R4): the city sits at its name's sorted position among
 // the rigs, not first, so an assignee holding work in the city and in a rig
-// that sorts before it is answered from the rig, on the cached and the live
+// that sorts before it is answered from the rig, on the index and the live
 // path alike, as before; a rig named like the city replaces it.
 func TestActiveBeadLookupKeepsBeadStoresPrecedence(t *testing.T) {
 	fs := newFakeState(t)
@@ -223,8 +223,8 @@ func TestActiveBeadLookupKeepsBeadStoresPrecedence(t *testing.T) {
 	mustCreateInProgress(t, city, "city task", "worker")
 	rigTask := mustCreateInProgress(t, early, "rig task", "worker")
 	srv := New(fs)
-	if got := srv.findActiveBeadForAssignees("", "worker"); got != rigTask.ID {
-		t.Errorf("cached lookup = %q, want the rig's %s: aaa-rig sorts before test-city", got, rigTask.ID)
+	if got := srv.newActiveBeadIndex().lookup("", "worker"); got != rigTask.ID {
+		t.Errorf("index lookup = %q, want the rig's %s: aaa-rig sorts before test-city", got, rigTask.ID)
 	}
 	if got := srv.findLiveActiveBeadForAssignees("", "worker"); got != rigTask.ID {
 		t.Errorf("live lookup = %q, want the rig's %s", got, rigTask.ID)
@@ -234,8 +234,8 @@ func TestActiveBeadLookupKeepsBeadStoresPrecedence(t *testing.T) {
 	shadowTask := mustCreateInProgress(t, shadow, "shadow task", "other")
 	mustCreateInProgress(t, city, "hidden city task", "other")
 	fs.stores = map[string]beads.Store{fs.cityName: shadow}
-	if got := srv.findActiveBeadForAssignees("", "other"); got != shadowTask.ID {
-		t.Errorf("cached lookup = %q, want %s: a rig named like the city replaces the city store", got, shadowTask.ID)
+	if got := srv.newActiveBeadIndex().lookup("", "other"); got != shadowTask.ID {
+		t.Errorf("index lookup = %q, want %s: a rig named like the city replaces the city store", got, shadowTask.ID)
 	}
 }
 

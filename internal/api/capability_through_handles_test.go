@@ -112,11 +112,11 @@ func TestAPICapabilitiesReachTheStoreThroughAHandle(t *testing.T) {
 			if _, err := orderHistoryBeadsAcrossStoreInfosCachedFirst([]workflowStoreInfo{{ref: "city", store: wrap(store)}}, "o", 10, time.Time{}); err != nil || store.cachedLists.Load() != 1 {
 				t.Errorf("order history made %d cache-only lists (%v), want 1", store.cachedLists.Load(), err)
 			}
-			// handler_agents.go findActiveBeadForAssigneesWithFreshness: CachedLister.
+			// active_bead_index.go activeBeadIndex.loadStore: CachedLister.
 			state.stores = map[string]beads.Store{"myrig": wrap(store)}
 			routed := asHandedState{state}
 			store.cachedLists.Store(0)
-			New(routed).findActiveBeadForAssigneesWithFreshness("myrig", false, "worker")
+			New(routed).newActiveBeadIndex().lookup("myrig", "worker")
 			if store.cachedLists.Load() != 1 {
 				t.Errorf("the active-bead lookup made %d cache-only lists, want 1", store.cachedLists.Load())
 			}
