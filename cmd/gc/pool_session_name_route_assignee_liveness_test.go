@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -61,6 +62,7 @@ func TestReleaseOrphanedPoolAssignments_TemplateAssigneeSkippedWhenSessionLive(t
 		nil,
 		nil,
 		nil, nil,
+		time.Now(),
 	)
 
 	if len(released) != 0 {
@@ -91,6 +93,7 @@ func TestReleaseOrphanedPoolAssignments_TemplateAssigneeReleasedWhenNoLiveSessio
 		nil,
 		nil,
 		nil, nil,
+		time.Now(),
 	)
 
 	if len(released) != 1 || released[0].ID != work.ID {
@@ -128,6 +131,7 @@ func TestReleaseOrphanedPoolAssignments_DeadNamedAssigneeReleasedDespiteLiveTemp
 		nil,
 		nil,
 		nil, nil,
+		time.Now(),
 	)
 
 	if len(released) != 1 || released[0].ID != work.ID {
@@ -164,6 +168,7 @@ func TestReleaseOrphanedPoolAssignments_TemplateAssigneeReleasedWhenOnlyNamedSes
 		nil,
 		nil,
 		nil, nil,
+		time.Now(),
 	)
 
 	if len(released) != 1 || released[0].ID != work.ID {
@@ -216,6 +221,7 @@ func TestReleaseOrphanedPoolAssignments_TemplateAssigneeSkippedWhenSessionLiveIn
 		nil,
 		nil,
 		nil, nil,
+		time.Now(),
 	)
 
 	if len(released) != 0 {
@@ -249,6 +255,7 @@ func TestReleaseOrphanedPoolAssignments_TemplateAssigneeReleasedWhenLiveSessionS
 		nil,
 		nil,
 		nil, nil,
+		time.Now(),
 	)
 
 	if len(released) != 1 || released[0].ID != work.ID {

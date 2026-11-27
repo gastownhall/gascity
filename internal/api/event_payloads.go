@@ -667,6 +667,34 @@ func BeadDeadAssigneeReopenedPayloadJSON(beadID, deadAssignee, routedTo string) 
 	return b
 }
 
+// BeadRouteAwayReleasedPayload is the typed payload for
+// bead.route_away_released events. Emitted when the reconciler releases a
+// claimed work bead routed away from its live Holder: RoutedTo names a pool
+// the holder does not serve and the RoutedAt handoff has settled, so the
+// reconciler clears the assignee and the RoutedTo pool can claim BeadID.
+type BeadRouteAwayReleasedPayload struct {
+	BeadID   string `json:"bead_id" doc:"ID of the released work bead (also the envelope Subject)."`
+	Holder   string `json:"holder,omitempty" doc:"The live session identity that held the claim, cleared by the release."`
+	RoutedTo string `json:"routed_to,omitempty" doc:"The gc.routed_to target the bead was handed off to."`
+	RoutedAt string `json:"routed_at,omitempty" doc:"The gc.routed_at stamp of the handoff (RFC 3339), when set."`
+}
+
+// IsEventPayload marks BeadRouteAwayReleasedPayload as an events.Payload variant.
+func (BeadRouteAwayReleasedPayload) IsEventPayload() {}
+
+// BeadRouteAwayReleasedPayloadJSON builds the JSON wire form for attachment
+// to an events.Event.Payload field. Holder, RoutedTo and RoutedAt are emitted
+// only when non-empty.
+func BeadRouteAwayReleasedPayloadJSON(beadID, holder, routedTo, routedAt string) json.RawMessage {
+	b, _ := json.Marshal(BeadRouteAwayReleasedPayload{
+		BeadID:   beadID,
+		Holder:   holder,
+		RoutedTo: routedTo,
+		RoutedAt: routedAt,
+	})
+	return b
+}
+
 // SessionUnknownStatePayload carries the machine-readable context for a
 // session.unknown_state event: a session bead whose metadata state the
 // reconciler does not recognize and therefore skips (forward-compatible
@@ -891,6 +919,7 @@ func init() {
 	events.RegisterPayload(events.BeadClosed, BeadEventPayload{})
 	events.RegisterPayload(events.BeadDeleted, BeadEventPayload{})
 	events.RegisterPayload(events.BeadDeadAssigneeReopened, BeadDeadAssigneeReopenedPayload{})
+	events.RegisterPayload(events.BeadRouteAwayReleased, BeadRouteAwayReleasedPayload{})
 
 	// session.* / convoy.* / controller.* / city.* / order.* /
 	// provider.* — these events carry no structured payload today;

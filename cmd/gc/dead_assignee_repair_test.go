@@ -302,6 +302,7 @@ func TestReleaseOrphanedPoolAssignments_SkipsLiveAssigneeStaysAssigned(t *testin
 		sessionInfosFromBeads([]beads.Bead{live}),
 		[]beads.Bead{work},
 		nil, nil, nil, nil, nil, nil,
+		time.Now(),
 	)
 	if len(released) != 0 {
 		t.Fatalf("live assignee must not be released, got %v", released)
@@ -357,6 +358,7 @@ func TestReleaseOrphanedPoolAssignments_NilSessionsStoreFallsBackToWorkStore(t *
 		nil, // empty snapshot: the two snapshot gates miss, so the live re-read decides
 		[]beads.Bead{work},
 		nil, nil, nil, nil, nil, nil,
+		time.Now(),
 	)
 	if len(released) != 0 {
 		t.Fatalf("a live assignee was released with a nil sessions store, got %v; "+

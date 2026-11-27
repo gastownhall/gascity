@@ -15,7 +15,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -154,7 +153,7 @@ Examples:
 	cmd.Flags().StringVar(&merge, "merge", "", "merge strategy: direct, mr, or local")
 	cmd.Flags().BoolVar(&noConvoy, "no-convoy", false, "skip auto-convoy creation")
 	cmd.Flags().BoolVar(&owned, "owned", false, "mark auto-convoy as owned (skip auto-close)")
-	cmd.Flags().BoolVar(&reassign, "reassign", false, "clear any existing human assignee before routing (for human→pool handoff)")
+	cmd.Flags().BoolVar(&reassign, "reassign", false, "clear the bead's assignee and reopen it before routing, so the target can claim it at once (without it, the controller releases another agent's live claim to a pool target once the route is 90s old)")
 	cmd.Flags().StringVar(&onFormula, "on", "", "attach wisp from formula to bead before routing")
 	cmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "show what would be done without executing")
 	cmd.Flags().BoolVar(&noFormula, "no-formula", false, "suppress default formula (route raw bead)")
@@ -944,11 +943,7 @@ func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	default:
 		return fmt.Errorf("built-in sling routing requires a store")
 	}
-	routedTo := req.Target
-	if r.deps.Cfg != nil {
-		routedTo = agentutil.NormalizePoolRouteTarget(r.deps.Cfg, req.Target)
-	}
-	if err := store.SetMetadata(req.BeadID, beadmeta.RoutedToMetadataKey, routedTo); err != nil {
+	if err := sling.SetBuiltInRoute(store, r.deps.Cfg, req, time.Now()); err != nil {
 		return fmt.Errorf("setting gc.routed_to on %s: %w", req.BeadID, err)
 	}
 	return nil

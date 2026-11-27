@@ -47,8 +47,9 @@ const (
 	releaseStrandedRepair
 	releaseOrphan // the confirmed orphan and the dead-assignee sweep: one policy
 	releaseRetired
-	releaseLadder  // the work ladder's release of an unstarted claim (PHASE1-2 §6.5)
-	releaseStalled // the claim an execution-stalled stop gives back (releaseStalledClaim)
+	releaseLadder    // the work ladder's release of an unstarted claim (PHASE1-2 §6.5)
+	releaseStalled   // the claim an execution-stalled stop gives back (releaseStalledClaim)
+	releaseRouteAway // a live holder's claim on a bead routed to another pool (routeAwayJudge.release)
 )
 
 // laneRule says when a released claim's route counts as served.
@@ -81,6 +82,10 @@ type releasePolicy struct {
 	// detached holds a claim carrying gc.detached until its probe attests the
 	// runtime dead (detachedProbeAllowsOrphanRelease).
 	detached bool
+	// judgedRow is the pool release of the row its caller read live and
+	// judged (releaseJudgedRow): one write fenced on that row's revision, or,
+	// on a store that cannot fence one, on its status and assignee.
+	judgedRow bool
 }
 
 var (
@@ -116,6 +121,12 @@ var (
 //     its slot for it (ReleaseOutcome.HeldDetached);
 //   - the execution-stalled stop gives back the claim it stopped the seat
 //     for under the stranded repair's rules, without the detached hold;
+//   - the route-away release gives back a live holder's claim on a bead
+//     routed to another pool as the orphan releases do, but its one write is
+//     fenced on the row its caller read live and judged (releaseJudgedRow):
+//     on that row's revision, since the orphan write's status-and-assignee
+//     fence cannot see a route change, and on its status and assignee only
+//     where the store cannot fence a revision (a bd without --if-revision);
 //   - the other paths give a claim carrying gc.detached back unprobed. The
 //     cascade and the retired-session sweep release from a row already
 //     closed or archived: a claim they kept would stay assigned to a seat
@@ -132,6 +143,7 @@ var releasePolicies = map[releaseWhy]releasePolicy{
 	releaseRetired:        {statuses: openOrStarted, lane: laneCarried, seatRoute: true},
 	releaseLadder:         {statuses: startedOnly, lane: laneCarried, seatRoute: true},
 	releaseStalled:        {statuses: openOrStarted, lane: laneCarried, seatRoute: true},
+	releaseRouteAway:      {statuses: openOrStarted, lane: laneDirect, detached: true, judgedRow: true},
 }
 
 // Why a claim was kept or failed.
@@ -141,6 +153,7 @@ const (
 	keptUnservedRoute = "unserved-route"
 	keptMoved         = "moved"
 	keptDetachedHeld  = "detached-held" // its gc.detached probe did not attest the runtime dead
+	keptUnfenced      = "unfenced"      // the store can fence the release neither on the claim's revision nor on its status and assignee
 	failedBudget      = "budget"
 )
 
@@ -411,6 +424,9 @@ func releaseServed(c seatWorkHit, wa workAssignment, p releasePolicy, fallback s
 		}
 	}
 	clearDetached := strings.TrimSpace(c.bead.Metadata[detachedProbeMetadataKey]) != ""
+	if p.judgedRow {
+		return releaseJudgedRow(c, clearDetached)
+	}
 	if p.pool {
 		if !releaseOrphanedPoolAssignment(c.store, c.bead, clearDetached) {
 			return keptMoved, nil
@@ -421,6 +437,61 @@ func releaseServed(c seatWorkHit, wa workAssignment, p releasePolicy, fallback s
 		return "", wa.ReleaseDetachedWorkBead(c.bead, fallback)
 	}
 	return "", wa.ReleaseWorkBead(c.bead, fallback)
+}
+
+// releaseJudgedRow writes the pool release (poolReleaseUpdate) of claim c,
+// the row its caller read live and judged, as ONE write fenced on that row.
+// Where the store can fence a revision, the write is an UpdateIfMatch on
+// c.bead's revision: any write since, a route change included, fails the
+// fence, and the claim is kept as moved. A store that cannot (no conditional
+// writer, or ErrConditionalWriteUnsupported: a bd without --if-revision, the
+// DoltLite read store) fences the write on c.bead's status and assignee
+// instead (releaseJudgedRowIfAssignment).
+func releaseJudgedRow(c seatWorkHit, clearDetached bool) (string, error) {
+	update := poolReleaseUpdate(clearDetached)
+	writer, ok := beads.ConditionalWriterForTarget(c.store)
+	if !ok {
+		return releaseJudgedRowIfAssignment(c, update)
+	}
+	switch err := writer.UpdateIfMatch(c.bead.ID, c.bead.Revision, update); {
+	case err == nil:
+		return "", nil
+	case beads.IsPreconditionFailed(err), errors.Is(err, beads.ErrNotFound):
+		return keptMoved, nil
+	case beads.IsConditionalWriteUnsupported(err):
+		return releaseJudgedRowIfAssignment(c, update)
+	default:
+		return "", fmt.Errorf("releasing %q at revision %d: %w", c.bead.ID, c.bead.Revision, err)
+	}
+}
+
+// releaseJudgedRowIfAssignment is releaseJudgedRow's write on a store that
+// cannot fence a revision: ONE guarded update (beads.AssignmentGuardedUpdater,
+// `bd update --if-status --if-assignee` on BdStore) that lands only while the
+// bead still has c.bead's status and assignee, so a claim taken, given back
+// or closed since the caller's read is kept as moved. The guard sees neither
+// the route nor the labels, so a route change or a person's label landing
+// between that read and this write is released anyway: a window of one store
+// round trip, the one every orphan release on such a store accepts
+// (releasePoolAssignmentWithRecheck). It is not releaseAssignmentFenced,
+// whose other tier re-reads the bead and fences on a revision no one judged.
+// A store that can fence neither way keeps the claim as unfenced.
+func releaseJudgedRowIfAssignment(c seatWorkHit, update beads.UpdateOpts) (string, error) {
+	updater, ok := beads.AssignmentGuardedUpdaterFor(c.store)
+	if !ok {
+		return keptUnfenced, nil
+	}
+	assignee := strings.TrimSpace(c.bead.Assignee)
+	switch updated, err := updater.UpdateIfAssignment(c.bead.ID, c.bead.Status, assignee, update); {
+	case err == nil && updated:
+		return "", nil
+	case err == nil:
+		return keptMoved, nil
+	case beads.IsConditionalWriteUnsupported(err):
+		return keptUnfenced, nil
+	default:
+		return "", fmt.Errorf("releasing %q while %s by %q: %w", c.bead.ID, c.bead.Status, assignee, err)
+	}
 }
 
 // releaseRoute is the lane a released claim is demanded and claimed through,

@@ -990,12 +990,13 @@ func finalizeInStore(opts SlingOpts, deps SlingDeps, beadStore beads.MoleculeTar
 			return result, fmt.Errorf("%w", err)
 		}
 		req := RouteRequest{
-			BeadID:  beadID,
-			Target:  agentutil.RoutedToIdentity(&a),
-			WorkDir: rigDir,
-			Env:     slingEnv,
-			Force:   opts.Force,
-			Store:   beadStore,
+			BeadID:        beadID,
+			Target:        agentutil.RoutedToIdentity(&a),
+			WorkDir:       rigDir,
+			Env:           slingEnv,
+			Force:         opts.Force,
+			Store:         beadStore,
+			PriorRoutedTo: bead.Metadata[beadmeta.RoutedToMetadataKey],
 		}
 		if err := deps.Router.Route(context.Background(), req); err != nil {
 			telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, err)
@@ -2453,11 +2454,12 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 				continue
 			}
 			req := RouteRequest{
-				BeadID:  child.ID,
-				Target:  a.QualifiedName(),
-				WorkDir: rigDir,
-				Env:     childEnv,
-				Force:   opts.Force,
+				BeadID:        child.ID,
+				Target:        a.QualifiedName(),
+				WorkDir:       rigDir,
+				Env:           childEnv,
+				Force:         opts.Force,
+				PriorRoutedTo: child.Metadata[beadmeta.RoutedToMetadataKey],
 			}
 			if err := deps.Router.Route(context.Background(), req); err != nil {
 				childResult.fail(err)

@@ -162,17 +162,24 @@ const (
 	// otherwise-silent repair into an observable signal (mirrors the
 	// bead.claim_rejected shape).
 	BeadDeadAssigneeReopened = "bead.dead_assignee_reopened"
-	MailSent                 = "mail.sent"
-	MailRead                 = "mail.read"
-	MailArchived             = "mail.archived"
-	MailMarkedRead           = "mail.marked_read"
-	MailMarkedUnread         = "mail.marked_unread"
-	MailReplied              = "mail.replied"
-	MailDeleted              = "mail.deleted"
-	SessionDraining          = "session.draining"
-	SessionUndrained         = "session.undrained"
-	SessionQuarantined       = "session.quarantined"
-	SessionIdleKilled        = "session.idle_killed"
+	// BeadRouteAwayReleased fires when the reconciler releases a claimed work
+	// bead that was routed away from its holder: gc.routed_to names a pool the
+	// holder's live session does not serve, and the handoff has settled.
+	// releaseOrphanedPoolAssignments clears the assignee so the routed-to pool
+	// can claim it; the holder lives, so this is not a dead-assignee reopen.
+	// Subject carries the bead ID; the payload is BeadRouteAwayReleasedPayload.
+	BeadRouteAwayReleased = "bead.route_away_released"
+	MailSent              = "mail.sent"
+	MailRead              = "mail.read"
+	MailArchived          = "mail.archived"
+	MailMarkedRead        = "mail.marked_read"
+	MailMarkedUnread      = "mail.marked_unread"
+	MailReplied           = "mail.replied"
+	MailDeleted           = "mail.deleted"
+	SessionDraining       = "session.draining"
+	SessionUndrained      = "session.undrained"
+	SessionQuarantined    = "session.quarantined"
+	SessionIdleKilled     = "session.idle_killed"
 	// SessionMaxAgeKilled fires when the controller preemptively restarts a
 	// long-running session because its wall-clock age exceeded the agent's
 	// max_session_age threshold. Motivating case: provider SDKs that cache
@@ -740,7 +747,7 @@ var KnownEventTypes = []string{
 	BeadClaimFailed, BeadClaimLoopHeld,
 	AgentClaimsStalled, AgentClaimsResumed,
 	HookClaimReclaimedStale,
-	BeadDeadAssigneeReopened,
+	BeadDeadAssigneeReopened, BeadRouteAwayReleased,
 	ExecutionWorkAssociated, ExecutionRunAnchored, ExecutionStepDefined, ExecutionStepStarted, ExecutionStepCompleted,
 	ExecutionClaimWindowExpired,
 	ExecutionStepStalled,

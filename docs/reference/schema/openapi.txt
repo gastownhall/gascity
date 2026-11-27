@@ -1356,6 +1356,31 @@
         ],
         "type": "object"
       },
+      "BeadRouteAwayReleasedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "bead_id": {
+            "description": "ID of the released work bead (also the envelope Subject).",
+            "type": "string"
+          },
+          "holder": {
+            "description": "The live session identity that held the claim, cleared by the release.",
+            "type": "string"
+          },
+          "routed_at": {
+            "description": "The gc.routed_at stamp of the handoff (RFC 3339), when set.",
+            "type": "string"
+          },
+          "routed_to": {
+            "description": "The gc.routed_to target the bead was handed off to.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "bead_id"
+        ],
+        "type": "object"
+      },
       "BeadUpdateBody": {
         "additionalProperties": false,
         "properties": {
@@ -3472,6 +3497,9 @@
           },
           {
             "$ref": "#/components/schemas/BeadEventPayload"
+          },
+          {
+            "$ref": "#/components/schemas/BeadRouteAwayReleasedPayload"
           },
           {
             "$ref": "#/components/schemas/BeadWorktreeReapSkippedPayload"
@@ -15014,6 +15042,7 @@
             "bead.created": "#/components/schemas/TypedEventStreamEnvelopeBeadCreated",
             "bead.dead_assignee_reopened": "#/components/schemas/TypedEventStreamEnvelopeBeadDeadAssigneeReopened",
             "bead.deleted": "#/components/schemas/TypedEventStreamEnvelopeBeadDeleted",
+            "bead.route_away_released": "#/components/schemas/TypedEventStreamEnvelopeBeadRouteAwayReleased",
             "bead.updated": "#/components/schemas/TypedEventStreamEnvelopeBeadUpdated",
             "bead.worktree.reap_skipped": "#/components/schemas/TypedEventStreamEnvelopeBeadWorktreeReapSkipped",
             "bead.worktree.reaped": "#/components/schemas/TypedEventStreamEnvelopeBeadWorktreeReaped",
@@ -15170,6 +15199,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadDeleted"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadRouteAwayReleased"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadUpdated"
@@ -16162,6 +16194,63 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope bead.deleted",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeBeadRouteAwayReleased": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BeadRouteAwayReleasedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "bead.route_away_released",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope bead.route_away_released",
         "type": "object"
       },
       "TypedEventStreamEnvelopeBeadUpdated": {
@@ -17217,6 +17306,7 @@
                 "agent.claims_resumed",
                 "hook.claim.reclaimed_stale",
                 "bead.dead_assignee_reopened",
+                "bead.route_away_released",
                 "execution.work_associated",
                 "execution.run_anchored",
                 "execution.step_defined",
@@ -23208,6 +23298,7 @@
             "bead.created": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadCreated",
             "bead.dead_assignee_reopened": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadDeadAssigneeReopened",
             "bead.deleted": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadDeleted",
+            "bead.route_away_released": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadRouteAwayReleased",
             "bead.updated": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadUpdated",
             "bead.worktree.reap_skipped": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped",
             "bead.worktree.reaped": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadWorktreeReaped",
@@ -23364,6 +23455,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadDeleted"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadRouteAwayReleased"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadUpdated"
@@ -24400,6 +24494,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope bead.deleted",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeBeadRouteAwayReleased": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BeadRouteAwayReleasedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "bead.route_away_released",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope bead.route_away_released",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeBeadUpdated": {
@@ -25526,6 +25681,7 @@
                 "agent.claims_resumed",
                 "hook.claim.reclaimed_stale",
                 "bead.dead_assignee_reopened",
+                "bead.route_away_released",
                 "execution.work_associated",
                 "execution.run_anchored",
                 "execution.step_defined",

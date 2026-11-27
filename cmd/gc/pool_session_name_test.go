@@ -2459,6 +2459,7 @@ func releaseProbeAssignments(store *conditionalReleaseProbeStore, work beads.Bea
 		nil,
 		nil,
 		nil, nil,
+		time.Now(),
 	)
 }
 
@@ -2767,7 +2768,7 @@ func releaseOrphanedPoolAssignmentsFromBeads(
 	}
 	// Single-store fixtures: the session class resolves to the work store, which
 	// is what a city without a [storage.classes] sessions binding does.
-	return releaseOrphanedPoolAssignments(store, beads.SessionStore{Store: store}, cfg, cityPath, infos, assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, rigStores, nil, nil, nil)
+	return releaseOrphanedPoolAssignments(store, beads.SessionStore{Store: store}, cfg, cityPath, infos, assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, rigStores, nil, nil, nil, time.Now())
 }
 
 // gcSweepSessionBeadsFromBeads projects raw session beads to session.Info and
@@ -2873,6 +2874,7 @@ func TestReleaseOrphanedPoolAssignments_SkipsLiveModernPoolSessionWhenLiveListMi
 		nil,
 		nil,
 		nil, nil,
+		time.Now(),
 	)
 	if len(released) != 0 {
 		t.Fatalf("released = %v, want none — the owning pool session is live", released)

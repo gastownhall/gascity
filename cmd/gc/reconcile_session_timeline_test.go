@@ -1491,8 +1491,13 @@ func idleTimeoutTimeline() []timelineFixture {
 		"runtime:" + chatName:             "idle-rewake-lag",
 		"provider:RemoveMeta " + chatName: "§12.2#38 start-meta-clears",
 	}
+	// The claim is routed to chat itself: a claim on a bead routed to another
+	// pool is released to that pool (routeAwayJudge), leaving the session no
+	// assigned work to defer on.
+	claim := tlClaim("in_progress", chatName)
+	claim[0].Metadata["gc.routed_to"] = "chat"
 	busy := tlFixture("an idle named session holding assigned work defers until its streak is exhausted", chatIdling,
-		[]parityRow{named}, tlClaim("in_progress", chatName), []simRuntime{tlLive("gc-c")},
+		[]parityRow{named}, claim, []simRuntime{tlLive("gc-c")},
 		[]parityStep{
 			{Name: "active", Op: active},
 			{Name: "idle past idle_timeout", Advance: 6 * time.Minute, Ticks: 6},
