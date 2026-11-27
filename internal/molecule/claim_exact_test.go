@@ -15,6 +15,53 @@ import (
 
 func strp(s string) *string { return &s }
 
+func TestReserveContinuationDoesNotOverwriteChangedMembers(t *testing.T) {
+	for _, change := range []string{"none", "owner", "root", "group", "status", "hold", "control"} {
+		t.Run(change, func(t *testing.T) {
+			store := beads.NewMemStore()
+			observed := mustCreateExactClaimBead(t, store)
+			update := beads.UpdateOpts{}
+			switch change {
+			case "owner":
+				update.Assignee = strp("another-session")
+			case "root":
+				update.Metadata = map[string]string{beadmeta.RootBeadIDMetadataKey: "other-root"}
+			case "group":
+				update.Metadata = map[string]string{beadmeta.ContinuationGroupMetadataKey: "other-group"}
+			case "status":
+				update.Status = strp("closed")
+			case "hold":
+				observed.Labels = []string{beadmeta.HoldExternalLabel}
+			case "control":
+				observed.Metadata[beadmeta.KindMetadataKey] = "workflow-finalize"
+			}
+			if change != "none" && change != "hold" && change != "control" {
+				if err := store.Update(observed.ID, update); err != nil {
+					t.Fatal(err)
+				}
+			}
+			reserved, err := ReserveContinuation(beadstest.GraphMolecule(store), observed, "session-a")
+			if err != nil || reserved != (change == "none") {
+				t.Fatalf("reserved=%v err=%v", reserved, err)
+			}
+			got, err := store.Get(observed.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := ""
+			if change == "none" {
+				want = "session-a"
+			}
+			if change == "owner" {
+				want = "another-session"
+			}
+			if got.Assignee != want {
+				t.Fatalf("assignee=%q want %q", got.Assignee, want)
+			}
+		})
+	}
+}
+
 func mustCreateExactClaimBead(t *testing.T, store *beads.MemStore) beads.Bead {
 	t.Helper()
 	b, err := store.Create(beads.Bead{

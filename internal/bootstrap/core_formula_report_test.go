@@ -70,6 +70,28 @@ func TestCoreMolPolecatReportCompilesWriteReportTerminalStep(t *testing.T) {
 	}
 }
 
+func TestCoreReportAuthoredContinuation(t *testing.T) {
+	recipe := compileCorePolecatReport(t)
+	for _, name := range []string{"load-context", "workspace-setup", "preflight-tests", "implement", "self-review", "write-report"} {
+		step := recipe.StepByID("mol-polecat-report." + name)
+		if step == nil {
+			t.Fatalf("missing authored step %s", name)
+		}
+		if step.Metadata["gc.continuation_group"] != "report" || step.Metadata["gc.session_affinity"] != "require" {
+			t.Errorf("step %s lacks report session affinity: %v", name, step.Metadata)
+		}
+	}
+	for _, name := range []string{"mol-polecat-report", "mol-polecat-report.workflow-finalize"} {
+		step := recipe.StepByID(name)
+		if step == nil {
+			t.Fatalf("missing structural step %s", name)
+		}
+		if step.Metadata["gc.continuation_group"] != "" || step.Metadata["gc.session_affinity"] != "" {
+			t.Errorf("structural step %s opted into worker continuation: %v", name, step.Metadata)
+		}
+	}
+}
+
 func TestCoreMolPolecatReportWriteReportStepRecordsNoteAndAvoidsPRFlow(t *testing.T) {
 	recipe := compileCorePolecatReport(t)
 	writeReport := recipe.StepByID("mol-polecat-report.write-report")

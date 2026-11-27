@@ -76,6 +76,15 @@ func hookClaimSchemaReasonEnums(t *testing.T) (all, drain []string) {
 	if err != nil {
 		t.Fatalf("reading %s: %v", hookClaimResultSchemaPath, err)
 	}
+	var envelope struct {
+		Defs map[string]json.RawMessage `json:"$defs"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if v1, ok := envelope.Defs["v1"]; ok {
+		raw = v1
+	}
 	var schema struct {
 		Properties struct {
 			Reason struct {
