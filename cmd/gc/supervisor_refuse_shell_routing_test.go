@@ -27,3 +27,21 @@ func TestSupervisorServiceExtraEnvRefusesShellOnlyRoutingNames(t *testing.T) {
 		}
 	}
 }
+
+// The explicit opt-in: a routing-class name from the calling shell is persisted
+// when it is listed in GC_SUPERVISOR_ENV. Refs gastownhall/gascity#9257.
+func TestSupervisorServiceExtraEnvPersistsOptedInRoutingName(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("GC_SUPERVISOR_ENV", "ANTHROPIC_BASE_URL")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "credential-test-value")
+	t.Setenv("ANTHROPIC_BASE_URL", "https://routing.example.test")
+
+	got := make(map[string]string)
+	for _, entry := range supervisorServiceExtraEnv() {
+		got[entry.Name] = entry.Value
+	}
+
+	if got["ANTHROPIC_BASE_URL"] != "https://routing.example.test" {
+		t.Errorf("ANTHROPIC_BASE_URL listed in GC_SUPERVISOR_ENV was not persisted; got %q", got["ANTHROPIC_BASE_URL"])
+	}
+}
