@@ -60,7 +60,10 @@ type gatherEnv struct {
 	Capacity     func() *endpointCapacityGuard
 	Health       func() *providerHealthSnapshot
 	Episodes     func() (map[string]session.StartupHealthEpisode, error)
-	Suspension   func() suspensionstate.State
+	// Suspension is the controller's wake read of the suspension file
+	// (readSuspensionForWake): an unreadable file is an error, not "not
+	// suspended".
+	Suspension func() (suspensionstate.State, error)
 	// Templates builds env's template resolver, at now. Gather calls it once
 	// per env generation, when the memo is rebuilt, and memoizes what it
 	// resolves (templateMemo). Nil resolves nothing.
@@ -216,7 +219,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	w := World{Now: now, CityPath: e.CityPath, Env: env, InFlight: p.inflight.view(), Backoff: p.backoff.Snapshot(), Bucket: p.bucket, Paused: p.startsPaused(), SoftReload: p.softReload.Load().view()}
 	var st suspensionstate.State
 	if e.Suspension != nil {
-		st = e.Suspension()
+		st, _ = e.Suspension()
 	}
 	w.CitySuspended, w.SuspendedRigPaths, w.Suspension = effectiveCitySuspended(cfg, st), suspendedRigPathsWithState(cfg, st), st
 	rec := e.Recording()
@@ -398,7 +401,9 @@ func (e gatherEnv) externalReadsEnv() (externalReadsEnv, error) {
 	}
 	var st suspensionstate.State
 	if e.Suspension != nil {
-		st = e.Suspension()
+		// An unreadable file leaves the zero State: K1 reads every rig leg,
+		// as it does when no rig is suspended.
+		st, _ = e.Suspension()
 	}
 	suspended, store, rigs := suspendedRigPathsWithState(env.Cfg, st), e.Sessions(), e.RigStores()
 	legs, err := sessionCensusStoreCandidates(e.CityPath, env.Cfg, store, rigs, suspended)

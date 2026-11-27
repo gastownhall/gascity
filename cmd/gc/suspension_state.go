@@ -1,6 +1,9 @@
 package main
 
 import (
+	"fmt"
+
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
@@ -24,6 +27,22 @@ func updateRigSuspension(fs fsys.FS, cityPath, rigName string, apply func(*suspe
 		return changed
 	})
 	return changed, err
+}
+
+// readSuspensionForWake reads the runtime suspension state for a controller
+// pass that decides starts. A missing file is the zero State with no error. An
+// unreadable or unparseable file returns the zero State with an error naming
+// the file, so the caller holds starts instead of reading "not suspended".
+// The zero State keeps the city unsuspended, so nothing drains on that error.
+func readSuspensionForWake(cityPath string) (suspensionstate.State, error) {
+	if cityPath == "" {
+		return suspensionstate.State{}, nil
+	}
+	st, err := suspensionstate.Load(fsys.OSFS{}, cityPath)
+	if err != nil {
+		return suspensionstate.State{}, fmt.Errorf("reading %s: %w", citylayout.SuspensionStateFile(cityPath), err)
+	}
+	return st, nil
 }
 
 // loadSuspensionStateBestEffort returns the runtime suspension state,

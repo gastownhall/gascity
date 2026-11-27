@@ -2570,6 +2570,7 @@ go_test(
         "supervisor_tmux_sockets_test.go",
         "suspension_state_linux_test.go",
         "suspension_state_test.go",
+        "suspension_wake_test.go",
         "synthetic_cache_verifier_test.go",
         "t7g_autoclose_reference_test.go",
         "t7g_r4_step_reference_test.go",

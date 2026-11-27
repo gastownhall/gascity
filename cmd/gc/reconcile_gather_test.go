@@ -218,7 +218,7 @@ func TestGatherBootStateComputed(t *testing.T) {
 		}},
 		{name: "suspended city, lane-fed leg, no recording", want: bootState{CachePrimed: true, InventoryComplete: true}, arrange: func(t *testing.T, f *gatherFixture) {
 			laneFedRig(t, f)
-			f.env.Suspension = suspended
+			f.env.Suspension = func() (suspensionstate.State, error) { return suspended(), nil }
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -434,7 +434,7 @@ func TestGatherCarriesTheSuspensionState(t *testing.T) {
 	yes := true
 	st := suspensionstate.State{Rigs: map[string]suspensionstate.Override{"rig-a": {Suspended: &yes}}}
 	f := newGatherFixture(t, poolRow("gc-1", "worker", 1, "active"))
-	f.env.Suspension = func() suspensionstate.State { return st }
+	f.env.Suspension = func() (suspensionstate.State, error) { return st, nil }
 	if w := f.gather(t); !reflect.DeepEqual(w.Suspension, st) {
 		t.Fatalf("World.Suspension = %+v, want the reader's %+v", w.Suspension, st)
 	}
