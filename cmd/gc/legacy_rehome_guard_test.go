@@ -345,3 +345,39 @@ func TestCanonicalizeLegacyRehomeOwnLegsKeepMigrationRecovery(t *testing.T) {
 		}
 	}
 }
+
+// AC-6
+
+// TestCanonicalizeLegacyRehomeTwoCitiesSharedRigConverges is the #5846
+// reproduction: cities A and B alternate both re-home arms over one shared rig
+// store, each blind to the other's sessions, and nobody writes.
+func TestCanonicalizeLegacyRehomeTwoCitiesSharedRigConverges(t *testing.T) {
+	cityA, cityB := sharedRigUnboundOmpCity(), sharedRigBoundOmpCity()
+	aRow := workBead("wb-a", sharedRigUnboundOmp, "", "open", 2)
+	bRow := workBead("wb-b", sharedRigBoundOmp, sharedRigBoundOmp, "in_progress", 2)
+	mem := beads.NewMemStoreFrom(0, []beads.Bead{aRow, bRow}, nil)
+	shared := &updateCountingStore{Store: mem}
+
+	for pass := 0; pass < 10; pass++ {
+		cfg := cityA
+		if pass%2 == 1 {
+			cfg = cityB
+		}
+		rows := []beads.Bead{mustGetBead(t, mem, "wb-a"), mustGetBead(t, mem, "wb-b")}
+		stores := []beads.Store{shared, shared}
+		canonicalizeLegacyBoundAssignedWork(cfg, rows, stores, []string{"qcore", "qcore"}, newSessionBeadSnapshot(nil), io.Discard)
+		rows = []beads.Bead{mustGetBead(t, mem, "wb-a"), mustGetBead(t, mem, "wb-b")}
+		canonicalizeLegacyBoundUnassignedRoutedWork(cfg, rows, stores, []string{"rig:qcore", "rig:qcore"}, io.Discard)
+	}
+
+	if shared.updates != 0 {
+		t.Errorf("shared rig store received %d Update calls over 10 alternating passes, want 0", shared.updates)
+	}
+	a, b := mustGetBead(t, mem, "wb-a"), mustGetBead(t, mem, "wb-b")
+	if a.Assignee != "" || a.Metadata[beadmeta.RoutedToMetadataKey] != sharedRigUnboundOmp {
+		t.Errorf("A's row assignee/route = %q/%q, want \"\"/%q", a.Assignee, a.Metadata[beadmeta.RoutedToMetadataKey], sharedRigUnboundOmp)
+	}
+	if b.Assignee != sharedRigBoundOmp || b.Metadata[beadmeta.RoutedToMetadataKey] != sharedRigBoundOmp {
+		t.Errorf("B's row assignee/route = %q/%q, want both %q", b.Assignee, b.Metadata[beadmeta.RoutedToMetadataKey], sharedRigBoundOmp)
+	}
+}
