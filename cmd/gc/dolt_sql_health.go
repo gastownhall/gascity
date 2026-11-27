@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/doltauth"
 	"github.com/gastownhall/gascity/internal/doltpool"
 )
 
@@ -141,7 +142,7 @@ func managedDoltReadOnlyProbeSQLFor(db string) string {
 }
 
 func managedDoltQueryProbe(host, port, user string) error {
-	if managedDoltPassword() != "" {
+	if managedDoltPasswordFor(host, port) != "" {
 		return managedDoltQueryProbeDirectFn(host, port, user)
 	}
 	_, err := runManagedDoltSQL(host, port, user, "-r", "csv", "-q", "SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA")
@@ -162,7 +163,7 @@ func managedDoltReadOnlyState(host, port, user string) (string, error) {
 // or against the first user database on the server when database is empty.
 func managedDoltReadOnlyStateFor(host, port, user, database string) (string, error) {
 	database = strings.TrimSpace(database)
-	if managedDoltPassword() != "" {
+	if managedDoltPasswordFor(host, port) != "" {
 		return managedDoltReadOnlyStateDirectFn(host, port, user, database)
 	}
 	db := database
@@ -487,10 +488,35 @@ func managedDoltPassword() string {
 	return strings.TrimSpace(os.Getenv("GC_DOLT_PASSWORD"))
 }
 
+// managedDoltPasswordFor returns the password for the endpoint host:port. An
+// explicit GC_DOLT_PASSWORD wins, as before. Otherwise it is the password the
+// beads credentials file keys to exactly this host:port (#9402). The file is
+// endpoint-keyed, so no password is lent to another endpoint. The ambient
+// BEADS_DOLT_PASSWORD is deliberately not used here: it has no endpoint.
+func managedDoltPasswordFor(host, port string) string {
+	if pass := managedDoltPassword(); pass != "" {
+		return pass
+	}
+	host = strings.TrimSpace(host)
+	p, err := strconv.Atoi(strings.TrimSpace(port))
+	if host == "" || err != nil || p <= 0 {
+		return ""
+	}
+	path := strings.TrimSpace(os.Getenv("BEADS_CREDENTIALS_FILE"))
+	if path == "" {
+		path = doltauth.DefaultCredentialsPath()
+	}
+	if path == "" {
+		return ""
+	}
+	return doltauth.ReadCredentialsPassword(path, host, p)
+}
+
 // managedDoltOpenDB returns the shared pooled server-level *sql.DB (no
 // database selected) for a managed Dolt endpoint. The handle is owned by
 // internal/doltpool — callers must NOT Close it.
 func managedDoltOpenDB(host, port, user string) (*sql.DB, error) {
+	password := managedDoltPasswordFor(host, port)
 	host = managedDoltConnectHost(host)
 	port = strings.TrimSpace(port)
 	if port == "" {
@@ -500,7 +526,7 @@ func managedDoltOpenDB(host, port, user string) (*sql.DB, error) {
 	if user == "" {
 		user = "root"
 	}
-	return doltpool.Open(host, port, user, managedDoltPassword(), "")
+	return doltpool.Open(host, port, user, password, "")
 }
 
 func managedDoltQueryProbeDirect(host, port, user string) error {
