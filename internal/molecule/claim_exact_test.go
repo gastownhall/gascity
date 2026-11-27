@@ -23,6 +23,7 @@ func mustCreateExactClaimBead(t *testing.T, store *beads.MemStore) beads.Bead {
 		Status: "open",
 		Metadata: map[string]string{
 			beadmeta.RootBeadIDMetadataKey:        "root-77",
+			beadmeta.StepIDMetadataKey:            "build",
 			beadmeta.ContinuationGroupMetadataKey: "cg-42",
 			beadmeta.RoutedToMetadataKey:          "session-alpha",
 		},
@@ -104,8 +105,10 @@ func TestClaimExact_EachPreconditionFieldMismatchesIndependently(t *testing.T) {
 		want ClaimExactPreconditions
 	}{
 		{"status", ClaimExactPreconditions{Status: strp("in_progress")}},
+		{"assignee", ClaimExactPreconditions{Assignee: strp("worker-7")}},
 		{"routed_to", ClaimExactPreconditions{RoutedTo: strp("session-bravo")}},
 		{"root_bead_id", ClaimExactPreconditions{RootBeadID: strp("root-99")}},
+		{"step_id", ClaimExactPreconditions{StepID: strp("test")}},
 		{"continuation_group", ClaimExactPreconditions{ContinuationGroup: strp("cg-99")}},
 	}
 	for _, tc := range cases {
@@ -425,5 +428,583 @@ func TestClaimExact_MaxInt64GenerationFailsClosed(t *testing.T) {
 	}
 	if got.Metadata[beadmeta.ClaimGenerationMetadataKey] != strconv.FormatInt(math.MaxInt64, 10) {
 		t.Fatalf("generation mutated: got %q", got.Metadata[beadmeta.ClaimGenerationMetadataKey])
+	}
+}
+
+// exactReaderFunc adapts a Get function to ClaimExactReader so tests can
+// script reads (and read failures) without a full store.
+type exactReaderFunc func(id string) (beads.Bead, error)
+
+func (f exactReaderFunc) Get(id string) (beads.Bead, error) { return f(id) }
+
+// exactAssignmentWriterStub records the guarded write a claim issued and can
+// simulate the straddle the assignment tier exists for: the guard passes and
+// the write lands while the row's step identity has already moved. When
+// landed and store is set it applies the effects the way a real guarded
+// write would, so the confirmation read observes the claim's own result.
+type exactAssignmentWriterStub struct {
+	landed         bool
+	err            error
+	calls          int
+	expectedStat   string
+	expectedAssign string
+	opts           beads.UpdateOpts
+	store          *beads.MemStore
+	onLanded       func(id string)
+}
+
+func (w *exactAssignmentWriterStub) UpdateIfAssignment(id, expectedStatus, expectedAssignee string, opts beads.UpdateOpts) (bool, error) {
+	w.calls++
+	w.expectedStat = expectedStatus
+	w.expectedAssign = expectedAssignee
+	w.opts = opts
+	if w.err != nil {
+		return false, w.err
+	}
+	if !w.landed {
+		return false, nil
+	}
+	if w.store != nil {
+		if err := w.store.Update(id, opts); err != nil {
+			return false, err
+		}
+	}
+	if w.onLanded != nil {
+		w.onLanded(id)
+	}
+	return true, nil
+}
+
+func exactClaimRequest(id string, want ClaimExactPreconditions, onSuccess beads.UpdateOpts) ClaimExactRequest {
+	return ClaimExactRequest{ID: id, Want: want, OnSuccess: onSuccess}
+}
+
+// TestClaimExactWithWriters_ReadbackFailureAfterCommittedWriteIsClaimed: a
+// write that committed but cannot be re-read is a claimed outcome paired with
+// ErrClaimExactReadback — the caller must stop and reconcile, never drain as
+// if nothing was minted.
+func TestClaimExactWithWriters_ReadbackFailureAfterCommittedWriteIsClaimed(t *testing.T) {
+	store := beads.NewMemStore()
+	b := mustCreateExactClaimBead(t, store)
+	calls := 0
+	reader := exactReaderFunc(func(id string) (beads.Bead, error) {
+		calls++
+		if calls > 1 {
+			return beads.Bead{}, fmt.Errorf("store evaporated")
+		}
+		return store.Get(id)
+	})
+
+	res, err := ClaimExactWithWriters(reader, ClaimExactWriters{Assignment: &exactAssignmentWriterStub{landed: true}}, exactClaimRequest(b.ID,
+		ClaimExactPreconditions{Status: strp("open"), Assignee: strp("")},
+		beads.UpdateOpts{Status: strp("in_progress"), Assignee: strp("worker-9")}))
+	if err == nil {
+		t.Fatal("expected the readback error to surface")
+	}
+	if !errors.Is(err, ErrClaimExactReadback) {
+		t.Fatalf("error = %v, want ErrClaimExactReadback", err)
+	}
+	if res.Outcome != ClaimExactClaimed {
+		t.Fatalf("outcome = %q, want %q (the write committed)", res.Outcome, ClaimExactClaimed)
+	}
+}
+
+// exactRevisionWriterStub records the single UpdateIfMatch a claim issued and
+// answers a scripted error, so the tier's drop-to-assignment behavior can be
+// exercised without a store that actually lacks revision support.
+type exactRevisionWriterStub struct {
+	err        error
+	calls      int
+	revision   int64
+	opts       beads.UpdateOpts
+	appliedIDs []string
+}
+
+func (w *exactRevisionWriterStub) UpdateIfMatch(id string, expectedRevision int64, opts beads.UpdateOpts) error {
+	w.calls++
+	w.revision = expectedRevision
+	w.opts = opts
+	if w.err != nil {
+		return w.err
+	}
+	w.appliedIDs = append(w.appliedIDs, id)
+	return nil
+}
+
+func (w *exactRevisionWriterStub) CloseIfMatch(_ string, _ int64) error {
+	return fmt.Errorf("stub: CloseIfMatch not expected in exact-claim tests")
+}
+
+func (w *exactRevisionWriterStub) DeleteIfMatch(_ string, _ int64) error {
+	return fmt.Errorf("stub: DeleteIfMatch not expected in exact-claim tests")
+}
+
+func (w *exactRevisionWriterStub) CompareAndSetMetadataKey(_, _, _, _ string) (bool, error) {
+	return false, fmt.Errorf("stub: CompareAndSetMetadataKey not expected in exact-claim tests")
+}
+
+// TestClaimExactWithWriters_FencesObservedAssigneeAndStepID pins the two
+// preconditions the hook's exact-claim plan adds over the scheduler launch
+// path: the observed assignee (a pointer to "" requires the bead to be
+// unassigned) and the observed gc.step_id. Either moving before the claim
+// must fail closed with no write on any tier.
+func TestClaimExactWithWriters_FencesObservedAssigneeAndStepID(t *testing.T) {
+	cases := []struct {
+		name string
+		want ClaimExactPreconditions
+	}{
+		{"assignee", ClaimExactPreconditions{Assignee: strp("worker-9")}},
+		{"step_id", ClaimExactPreconditions{StepID: strp("test")}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			b := mustCreateExactClaimBead(t, store)
+
+			res, err := ClaimExactWithWriters(store, ClaimExactWriters{Revision: store}, exactClaimRequest(b.ID, tc.want, beads.UpdateOpts{Assignee: strp("worker-9")}))
+			if err != nil {
+				t.Fatalf("ClaimExactWithWriters: %v", err)
+			}
+			if res.Outcome != ClaimExactPreconditionFailed {
+				t.Fatalf("outcome = %q, want %q", res.Outcome, ClaimExactPreconditionFailed)
+			}
+			if res.Bead.Assignee != "" {
+				t.Fatalf("assignee mutated on precondition failure: %q", res.Bead.Assignee)
+			}
+			if _, ok := res.Bead.Metadata[beadmeta.ClaimGenerationMetadataKey]; ok {
+				t.Fatalf("claim generation written on precondition failure: %q", res.Bead.Metadata[beadmeta.ClaimGenerationMetadataKey])
+			}
+		})
+	}
+}
+
+// TestClaimExactWithWriters_RevisionTierClaimsAndFencesOnRevision covers the
+// writer-injected shape of the original strict claim: a real MemStore reader
+// plus its own conditional writer claims once, reports the revision fence, and
+// folds the generation bump into the same write.
+func TestClaimExactWithWriters_RevisionTierClaimsAndFencesOnRevision(t *testing.T) {
+	store := beads.NewMemStore()
+	b := mustCreateExactClaimBead(t, store)
+
+	res, err := ClaimExactWithWriters(store, ClaimExactWriters{Revision: store}, exactClaimRequest(b.ID, ClaimExactPreconditions{Status: strp("open")}, beads.UpdateOpts{Status: strp("in_progress"), Assignee: strp("worker-9")}))
+	if err != nil {
+		t.Fatalf("ClaimExactWithWriters: %v", err)
+	}
+	if res.Outcome != ClaimExactClaimed {
+		t.Fatalf("outcome = %q, want %q", res.Outcome, ClaimExactClaimed)
+	}
+	if res.Fence != ClaimExactFenceRevision {
+		t.Fatalf("fence = %q, want %q", res.Fence, ClaimExactFenceRevision)
+	}
+	if res.Bead.Status != "in_progress" || res.Bead.Assignee != "worker-9" {
+		t.Fatalf("claimed bead = %s/%q, want in_progress/worker-9", res.Bead.Status, res.Bead.Assignee)
+	}
+	if gen := res.Bead.Metadata[beadmeta.ClaimGenerationMetadataKey]; gen != "1" {
+		t.Fatalf("claim generation = %q, want 1", gen)
+	}
+}
+
+// TestClaimExactWithWriters_NeitherWriterFailsClosed: with no usable tier the
+// claim must fail closed with beads.ErrConditionalWriteUnsupported and write
+// nothing — there is no unconditional fallback, whatever the effects promise.
+func TestClaimExactWithWriters_NeitherWriterFailsClosed(t *testing.T) {
+	store := beads.NewMemStore()
+	b := mustCreateExactClaimBead(t, store)
+
+	res, err := ClaimExactWithWriters(store, ClaimExactWriters{}, exactClaimRequest(b.ID, ClaimExactPreconditions{}, beads.UpdateOpts{Assignee: strp("worker-9")}))
+	if err == nil {
+		t.Fatal("expected an error with no conditional writer")
+	}
+	if !beads.IsConditionalWriteUnsupported(err) {
+		t.Fatalf("error = %v, want IsConditionalWriteUnsupported", err)
+	}
+	if res.Outcome != "" {
+		t.Fatalf("outcome = %q, want empty on error", res.Outcome)
+	}
+	fresh, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if fresh.Assignee != "" || fresh.Metadata[beadmeta.ClaimGenerationMetadataKey] != "" {
+		t.Fatalf("unsupported store wrote anyway: assignee=%q generation=%q", fresh.Assignee, fresh.Metadata[beadmeta.ClaimGenerationMetadataKey])
+	}
+}
+
+// TestClaimExactWithWriters_RevisionUnsupportedDropsToAssignmentTier covers
+// the BdStore-without---if-revision shape: the revision tier reports the
+// capability missing, and the claim re-fences the same observed facts on the
+// status+assignee guard instead of failing or degrading to an unconditional
+// write.
+func TestClaimExactWithWriters_RevisionUnsupportedDropsToAssignmentTier(t *testing.T) {
+	store := beads.NewMemStore()
+	b := mustCreateExactClaimBead(t, store)
+	assignment := &exactAssignmentWriterStub{landed: true, store: store}
+
+	res, err := ClaimExactWithWriters(store, ClaimExactWriters{
+		Revision:   &exactRevisionWriterStub{err: beads.ErrConditionalWriteUnsupported},
+		Assignment: assignment,
+	}, exactClaimRequest(b.ID, ClaimExactPreconditions{Status: strp("open"), Assignee: strp("")}, beads.UpdateOpts{Status: strp("in_progress"), Assignee: strp("worker-9")}))
+	if err != nil {
+		t.Fatalf("ClaimExactWithWriters: %v", err)
+	}
+	if res.Outcome != ClaimExactClaimed {
+		t.Fatalf("outcome = %q, want %q", res.Outcome, ClaimExactClaimed)
+	}
+	if res.Fence != ClaimExactFenceAssignment {
+		t.Fatalf("fence = %q, want %q", res.Fence, ClaimExactFenceAssignment)
+	}
+	if assignment.calls != 1 {
+		t.Fatalf("assignment writer calls = %d, want 1", assignment.calls)
+	}
+	if assignment.expectedStat != "open" || assignment.expectedAssign != "" {
+		t.Fatalf("guard = %q/%q, want open/\"\" (the observed row)", assignment.expectedStat, assignment.expectedAssign)
+	}
+	if gen := assignment.opts.Metadata[beadmeta.ClaimGenerationMetadataKey]; gen != "1" {
+		t.Fatalf("assignment-tier effects generation = %q, want 1", gen)
+	}
+}
+
+// TestClaimExactWithWriters_AssignmentGuardRejectsIsStale: a guard that does
+// not pass (another claimant landed first) is stale with nothing written, the
+// same definitive loss the revision tier reports.
+func TestClaimExactWithWriters_AssignmentGuardRejectsIsStale(t *testing.T) {
+	store := beads.NewMemStore()
+	b := mustCreateExactClaimBead(t, store)
+
+	res, err := ClaimExactWithWriters(store, ClaimExactWriters{
+		Assignment: &exactAssignmentWriterStub{landed: false},
+	}, exactClaimRequest(b.ID, ClaimExactPreconditions{Status: strp("open"), Assignee: strp("")}, beads.UpdateOpts{Status: strp("in_progress"), Assignee: strp("worker-9")}))
+	if err != nil {
+		t.Fatalf("ClaimExactWithWriters: %v", err)
+	}
+	if res.Outcome != ClaimExactStale {
+		t.Fatalf("outcome = %q, want %q", res.Outcome, ClaimExactStale)
+	}
+	if res.Fence != "" {
+		t.Fatalf("fence = %q, want none: a fence is reported only for a claimed outcome", res.Fence)
+	}
+}
+
+// TestClaimExactWithWriters_AssignmentTierReadbackSeesMovedObservation is the
+// straddle the assignment tier cannot fence inside its write: the guard passes
+// and the effects land while the row's step identity has already moved. The
+// readback must catch it and report observation_moved so the caller gives the
+// bead back rather than execute a step it never observed.
+func TestClaimExactWithWriters_AssignmentTierReadbackSeesMovedObservation(t *testing.T) {
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{
+		Title:  "moved step target",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey: "root-77",
+			beadmeta.StepIDMetadataKey:     "build",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create bead: %v", err)
+	}
+	// The guarded write lands, then an unrelated writer moves the step before
+	// the readback — the exact race the outcome exists for.
+	assignment := &exactAssignmentWriterStub{landed: true, store: store, onLanded: func(id string) {
+		if err := store.Update(id, beads.UpdateOpts{Metadata: map[string]string{beadmeta.StepIDMetadataKey: "test"}}); err != nil {
+			t.Errorf("move step: %v", err)
+		}
+	}}
+
+	res, err := ClaimExactWithWriters(store, ClaimExactWriters{Assignment: assignment}, exactClaimRequest(b.ID,
+		ClaimExactPreconditions{Status: strp("open"), Assignee: strp(""), StepID: strp("build"), RootBeadID: strp("root-77")},
+		beads.UpdateOpts{Status: strp("in_progress"), Assignee: strp("worker-9")}))
+	if err != nil {
+		t.Fatalf("ClaimExactWithWriters: %v", err)
+	}
+	if res.Outcome != ClaimExactObservationMoved {
+		t.Fatalf("outcome = %q, want %q", res.Outcome, ClaimExactObservationMoved)
+	}
+	if res.Bead.Metadata[beadmeta.StepIDMetadataKey] != "test" {
+		t.Fatalf("moved readback bead = %q, want the moved snapshot", res.Bead.Metadata[beadmeta.StepIDMetadataKey])
+	}
+}
+
+// claimTier is one of ClaimExactWithWriters' two write tiers, built over the
+// claim's store.
+type claimTier struct {
+	name    string
+	fence   ClaimExactFence
+	writers func(store *beads.MemStore) ClaimExactWriters
+}
+
+// claimTiers are the revision fence (the store's own UpdateIfMatch) and the
+// assignment guard (a guarded write that lands on the store).
+var claimTiers = []claimTier{
+	{"revision", ClaimExactFenceRevision, func(store *beads.MemStore) ClaimExactWriters {
+		return ClaimExactWriters{Revision: store}
+	}},
+	{"assignment", ClaimExactFenceAssignment, func(store *beads.MemStore) ClaimExactWriters {
+		return ClaimExactWriters{Assignment: &exactAssignmentWriterStub{landed: true, store: store}}
+	}},
+}
+
+// exactStepClaimRequest claims the bead mustCreateExactClaimBead made for
+// worker-9, observed open, unassigned and at step build of root-77.
+func exactStepClaimRequest(id string) ClaimExactRequest {
+	return exactClaimRequest(id,
+		ClaimExactPreconditions{Status: strp("open"), Assignee: strp(""), StepID: strp("build"), RootBeadID: strp("root-77")},
+		beads.UpdateOpts{Status: strp("in_progress"), Assignee: strp("worker-9")})
+}
+
+// TestClaimExactWithWriters_ReadbackSeesMovedObservationOnEitherTier: the
+// write lands, then another writer moves the step before the readback. The
+// readback is the snapshot the caller acts on, so both tiers hold it to the
+// observation and report observation_moved: a revision fence proves the
+// observation held when the write ran, not when the readback was taken.
+func TestClaimExactWithWriters_ReadbackSeesMovedObservationOnEitherTier(t *testing.T) {
+	for _, tier := range claimTiers {
+		t.Run(tier.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			b := mustCreateExactClaimBead(t, store)
+			reads := 0
+			reader := exactReaderFunc(func(id string) (beads.Bead, error) {
+				reads++
+				if reads == 2 {
+					if err := store.Update(id, beads.UpdateOpts{Metadata: map[string]string{beadmeta.StepIDMetadataKey: "test"}}); err != nil {
+						return beads.Bead{}, err
+					}
+				}
+				return store.Get(id)
+			})
+
+			res, err := ClaimExactWithWriters(reader, tier.writers(store), exactStepClaimRequest(b.ID))
+			if err != nil {
+				t.Fatalf("ClaimExactWithWriters: %v", err)
+			}
+			if res.Outcome != ClaimExactObservationMoved || res.Fence != tier.fence {
+				t.Fatalf("outcome = %q fence = %q, want %q through %q; step = %q", res.Outcome, res.Fence,
+					ClaimExactObservationMoved, tier.fence, res.Bead.Metadata[beadmeta.StepIDMetadataKey])
+			}
+			if res.Bead.Assignee != "worker-9" || res.Bead.Metadata[beadmeta.StepIDMetadataKey] != "test" {
+				t.Fatalf("readback = assignee %q step %q, want the claimed, moved snapshot", res.Bead.Assignee, res.Bead.Metadata[beadmeta.StepIDMetadataKey])
+			}
+		})
+	}
+}
+
+// TestClaimExactWithWriters_EffectsMayRewriteAnObservedIdentityKey: a claim
+// whose own effects rewrite an identity key it was fenced on is held to the
+// value it wrote, not the one it observed, on either tier. Its own write is
+// not a moved observation.
+func TestClaimExactWithWriters_EffectsMayRewriteAnObservedIdentityKey(t *testing.T) {
+	for _, tier := range claimTiers {
+		t.Run(tier.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			b := mustCreateExactClaimBead(t, store)
+			req := exactStepClaimRequest(b.ID)
+			req.Want.RoutedTo = strp("session-alpha")
+			req.OnSuccess.Metadata = map[string]string{beadmeta.RoutedToMetadataKey: "session-bravo"}
+
+			res, err := ClaimExactWithWriters(store, tier.writers(store), req)
+			if err != nil {
+				t.Fatalf("ClaimExactWithWriters: %v", err)
+			}
+			if res.Outcome != ClaimExactClaimed {
+				t.Fatalf("outcome = %q, want %q: the route moved only by the claim's own write", res.Outcome, ClaimExactClaimed)
+			}
+			if got := res.Bead.Metadata[beadmeta.RoutedToMetadataKey]; got != "session-bravo" {
+				t.Fatalf("route = %q, want the claim's own session-bravo", got)
+			}
+		})
+	}
+}
+
+// errAmbiguousClaimWrite is a transport error that leaves open whether the
+// write it answered committed: bd reports an i/o timeout to its server after
+// a commit as well as before one.
+var errAmbiguousClaimWrite = errors.New("dial tcp 127.0.0.1:3307: i/o timeout")
+
+// ambiguousClaimWriter is both claim tiers over a MemStore, answering every
+// write with errAmbiguousClaimWrite: after applying it (and then running
+// afterCommit, when set) when commit is set, and instead of applying it
+// otherwise.
+type ambiguousClaimWriter struct {
+	*beads.MemStore
+	commit      bool
+	afterCommit func(id string)
+}
+
+func (w *ambiguousClaimWriter) UpdateIfMatch(id string, expectedRevision int64, opts beads.UpdateOpts) error {
+	if w.commit {
+		if err := w.MemStore.UpdateIfMatch(id, expectedRevision, opts); err != nil {
+			return err
+		}
+		w.committed(id)
+	}
+	return errAmbiguousClaimWrite
+}
+
+func (w *ambiguousClaimWriter) UpdateIfAssignment(id, _, _ string, opts beads.UpdateOpts) (bool, error) {
+	if w.commit {
+		if err := w.Update(id, opts); err != nil {
+			return false, err
+		}
+		w.committed(id)
+	}
+	return false, errAmbiguousClaimWrite
+}
+
+func (w *ambiguousClaimWriter) committed(id string) {
+	if w.afterCommit != nil {
+		w.afterCommit(id)
+	}
+}
+
+// TestClaimExactWithWriters_AmbiguousWriteErrorIsSettledByARead: a claim
+// write that answers neither success nor a precondition, such as an i/o
+// timeout that can follow a commit, is decided by one re-read, never by the
+// error alone, on either tier. A row that carries the write is a claim that
+// landed (or moved, when its observation did); a row without it is a write
+// that did not land, whose error stands; and a re-read that fails leaves the
+// claim unsettled rather than reported as a write that landed nothing.
+func TestClaimExactWithWriters_AmbiguousWriteErrorIsSettledByARead(t *testing.T) {
+	cases := []struct {
+		name       string
+		commit     bool // the write lands before it answers the error
+		moveStep   bool // another writer moves the step right after the write lands
+		failReread bool // every read after the claim's first one fails
+		want       ClaimExactOutcome
+		wantErr    []error // the errors the result wraps; none means a nil error
+	}{
+		{name: "write landed", commit: true, want: ClaimExactClaimed},
+		{name: "write landed on a moved observation", commit: true, moveStep: true, want: ClaimExactObservationMoved},
+		{name: "write did not land", wantErr: []error{errAmbiguousClaimWrite}},
+		{name: "re-read failed", commit: true, failReread: true, wantErr: []error{ErrClaimExactUnsettled, errAmbiguousClaimWrite}},
+	}
+	for _, tier := range claimTiers {
+		for _, tc := range cases {
+			t.Run(tier.name+"/"+tc.name, func(t *testing.T) {
+				store := beads.NewMemStore()
+				b := mustCreateExactClaimBead(t, store)
+				writer := &ambiguousClaimWriter{MemStore: store, commit: tc.commit}
+				if tc.moveStep {
+					writer.afterCommit = func(id string) {
+						if err := store.SetMetadata(id, beadmeta.StepIDMetadataKey, "test"); err != nil {
+							t.Errorf("move step: %v", err)
+						}
+					}
+				}
+				writers := ClaimExactWriters{Revision: writer}
+				if tier.fence == ClaimExactFenceAssignment {
+					writers = ClaimExactWriters{Assignment: writer}
+				}
+				reads := 0
+				reader := exactReaderFunc(func(id string) (beads.Bead, error) {
+					reads++
+					if tc.failReread && reads > 1 {
+						return beads.Bead{}, errors.New("bd unreachable")
+					}
+					return store.Get(id)
+				})
+
+				res, err := ClaimExactWithWriters(reader, writers, exactStepClaimRequest(b.ID))
+				for _, want := range tc.wantErr {
+					if !errors.Is(err, want) {
+						t.Fatalf("error = %v, want it to wrap %v", err, want)
+					}
+				}
+				if len(tc.wantErr) == 0 && err != nil {
+					t.Fatalf("ClaimExactWithWriters: %v, want the write settled by its re-read", err)
+				}
+				if unsettled := errors.Is(err, ErrClaimExactUnsettled); unsettled != tc.failReread {
+					t.Fatalf("error = %v: unsettled = %v, want %v", err, unsettled, tc.failReread)
+				}
+				if reads != 2 {
+					t.Fatalf("reads = %d, want the claim's read and exactly one re-read", reads)
+				}
+				wantFence := ClaimExactFence("")
+				if tc.want != "" {
+					wantFence = tier.fence
+				}
+				if res.Outcome != tc.want || res.Fence != wantFence {
+					t.Fatalf("outcome = %q fence = %q, want %q fence %q", res.Outcome, res.Fence, tc.want, wantFence)
+				}
+				if res.Bead.ID != b.ID {
+					t.Fatalf("result bead = %q, want the snapshot of %s the call last held", res.Bead.ID, b.ID)
+				}
+				stored, err := store.Get(b.ID)
+				if err != nil {
+					t.Fatalf("get: %v", err)
+				}
+				if landed := stored.Metadata[beadmeta.ClaimGenerationMetadataKey] == "1"; landed != tc.commit {
+					t.Fatalf("stored generation = %q, want the write landed = %v", stored.Metadata[beadmeta.ClaimGenerationMetadataKey], tc.commit)
+				}
+				if tc.want != "" && (res.Bead.Assignee != "worker-9" || res.Bead.Status != "in_progress") {
+					t.Fatalf("settled claim = %s/%q, want the landed in_progress/worker-9 row", res.Bead.Status, res.Bead.Assignee)
+				}
+			})
+		}
+	}
+}
+
+// TestClaimExactWithWriters_FromGenerationNilAdvancesWhateverIsRead: a nil
+// FromGeneration means "the caller never observed a generation" — the claim
+// still bumps whatever counter the row carries (never resets it) and fences
+// only on the identity preconditions plus the guard.
+func TestClaimExactWithWriters_FromGenerationNilAdvancesWhateverIsRead(t *testing.T) {
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{
+		Title:    "previously claimed target",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{beadmeta.ClaimGenerationMetadataKey: "5"},
+	})
+	if err != nil {
+		t.Fatalf("create bead: %v", err)
+	}
+
+	res, err := ClaimExactWithWriters(store, ClaimExactWriters{Revision: store}, ClaimExactRequest{
+		ID:        b.ID,
+		Want:      ClaimExactPreconditions{Status: strp("open")},
+		OnSuccess: beads.UpdateOpts{Status: strp("in_progress"), Assignee: strp("worker-9")},
+	})
+	if err != nil {
+		t.Fatalf("ClaimExactWithWriters: %v", err)
+	}
+	if res.Outcome != ClaimExactClaimed {
+		t.Fatalf("outcome = %q, want %q", res.Outcome, ClaimExactClaimed)
+	}
+	if gen := res.Bead.Metadata[beadmeta.ClaimGenerationMetadataKey]; gen != "6" {
+		t.Fatalf("claim generation = %q, want 6 (advanced, not reset)", gen)
+	}
+}
+
+// TestClaimExactWithWriters_FromGenerationMismatchIsStale: an explicit
+// FromGeneration that no longer matches the row is stale before any write,
+// on the writer-injected shape exactly as on the strict one.
+func TestClaimExactWithWriters_FromGenerationMismatchIsStale(t *testing.T) {
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{
+		Title:    "raced target",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{beadmeta.ClaimGenerationMetadataKey: "5"},
+	})
+	if err != nil {
+		t.Fatalf("create bead: %v", err)
+	}
+	stale := "4"
+
+	res, err := ClaimExactWithWriters(store, ClaimExactWriters{Revision: store}, ClaimExactRequest{
+		ID:             b.ID,
+		Want:           ClaimExactPreconditions{Status: strp("open")},
+		FromGeneration: &stale,
+		OnSuccess:      beads.UpdateOpts{Status: strp("in_progress"), Assignee: strp("worker-9")},
+	})
+	if err != nil {
+		t.Fatalf("ClaimExactWithWriters: %v", err)
+	}
+	if res.Outcome != ClaimExactStale {
+		t.Fatalf("outcome = %q, want %q", res.Outcome, ClaimExactStale)
+	}
+	if res.Bead.Metadata[beadmeta.ClaimGenerationMetadataKey] != "5" {
+		t.Fatalf("generation = %q, want 5 (no write)", res.Bead.Metadata[beadmeta.ClaimGenerationMetadataKey])
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -261,6 +262,10 @@ func (h *handoffFixture) ops() hookClaimOps {
 					return updated, err == nil, err
 				},
 				h.store.Get)
+		},
+		ClaimExact: func(_ context.Context, _ string, _ []string, actor string, req molecule.ClaimExactRequest) (beads.Bead, hookClaimVerdict, error) {
+			writer, _ := beads.As[beads.ConditionalWriter](h.store)
+			return hookClaimExactThroughStore(h.store, molecule.ClaimExactWriters{Revision: writer}, actor, req)
 		},
 		StampWorkMeta: func(_ context.Context, _ string, _ []string, beadID, _ string, patch map[string]string) error {
 			return h.store.Update(beadID, beads.UpdateOpts{Metadata: patch})

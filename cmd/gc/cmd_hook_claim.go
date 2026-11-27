@@ -246,8 +246,12 @@ func continuationPinAssignee(opts hookClaimOptions) string {
 }
 
 type hookClaimOps struct {
-	Runner             WorkQueryRunner
-	Claim              hookClaimFunc
+	Runner WorkQueryRunner
+	Claim  hookClaimFunc
+	// ClaimExact claims a graph-step candidate only while it still matches
+	// the work query's observation of it (cmd_hook_claim_exact.go). A graph
+	// step is never claimed through Claim.
+	ClaimExact         hookClaimExactFunc
 	ListContinuation   hookListContinuationFunc
 	AssignContinuation hookAssignContinuationFunc
 	DrainAck           hookDrainAckFunc
@@ -677,6 +681,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	if ops.Claim == nil {
 		ops.Claim = hookClaimWithBdStore
 	}
+	if ops.ClaimExact == nil {
+		ops.ClaimExact = hookClaimExactWithBdStore
+	}
 	if ops.ListContinuation == nil {
 		ops.ListContinuation = hookListContinuationWithBdStore
 	}
@@ -979,7 +986,8 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		if hookClaimWorkflowStop(ctx, candidate, claimActor, opts, ops, dir, stderr) {
 			continue
 		}
-		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, claimActor)
+		claimed, verdict, err := claimHookCandidate(ctx, candidate, claimActor, false, false, opts, ops, dir, stderr)
+		ok := verdict == hookClaimVerdictClaimed
 		// The straddle fence asks when the CAS landed; stamp it before the
 		// re-stamp and the workflow re-check below spend any more store time.
 		landedAt := ops.nowOrWallClock()
@@ -1017,6 +1025,12 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 			// This session already owns the bead. Do not skip it and claim
 			// unrelated fresh work after an operational mutation failure.
 			return hookClaimResult{terminal: true, code: 1}
+		}
+		if verdict == hookClaimVerdictMoved {
+			if !releaseMovedHookClaim(claimed, claimActor, opts, ops, dir, stderr) {
+				return hookClaimResult{terminal: true, code: 1}
+			}
+			continue
 		}
 		// Deliberately unlike the err != nil branch above: a rejected claim is a
 		// lost race, not an operational failure. Another claimant genuinely owns
@@ -1134,6 +1148,7 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			continue
 		}
 		reclaimedFrom := ""
+		reclaimed := false
 		// gc.exclude_claimants is checked before the reclaim lane too: an
 		// excluded session must not even revert a stale lease it cannot take.
 		if hookClaimExcludesSession(candidate, opts) {
@@ -1155,14 +1170,15 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			if ctx.Err() != nil {
 				break
 			}
-			reclaimed, previousOwner, err := ops.ReclaimStale(ctx, dir, opts.Env, candidate.ID)
-			if err != nil || !reclaimed {
+			reverted, previousOwner, err := ops.ReclaimStale(ctx, dir, opts.Env, candidate.ID)
+			if err != nil || !reverted {
 				// Best-effort optimization, not a claim path of its own: any
 				// non-reclaim outcome leaves the candidate untouched (FR4) and
 				// the hook moves on to the next candidate.
 				continue
 			}
 			reclaimedFrom = previousOwner
+			reclaimed = true
 		}
 		// F-B. The fresh-claim CAS is the mutation that mints a new obligation,
 		// so it is the one the turn-binding window most directly guards.
@@ -1184,15 +1200,18 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		if hookClaimWorkflowStop(ctx, candidate, opts.Assignee, opts, ops, dir, stderr) {
 			continue
 		}
-		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, opts.Assignee)
+		claimed, verdict, err := claimHookCandidate(ctx, candidate, opts.Assignee, true, reclaimed, opts, ops, dir, stderr)
+		ok := verdict == hookClaimVerdictClaimed
 		// The straddle fence asks when the CAS landed; stamp it before the
 		// workflow re-check below spends any more store time.
 		landedAt := ops.nowOrWallClock()
 		if err != nil {
 			if ok {
-				// The atomic mutation committed, but its canonical readback failed.
-				// Stop immediately: trying another candidate or draining would strand
-				// the assignment while falsely reporting idle work.
+				// The atomic mutation committed (or, for an exact claim whose
+				// re-read could not settle its write, may have), but its canonical
+				// readback failed. Stop immediately: trying another candidate or
+				// draining would strand the assignment while falsely reporting idle
+				// work.
 				fmt.Fprintf(stderr, "gc hook --claim: claimed %s but loading canonical bead failed: %v\n", candidate.ID, err) //nolint:errcheck
 				return hookClaimResult{terminal: true, code: 1}
 			}
@@ -1208,6 +1227,12 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			// guard can withhold a bead from (claim_loop_guard.go).
 			ops.emitClaimFailed(candidate.ID, opts, err)
 			claimsErrored = true
+			continue
+		}
+		if verdict == hookClaimVerdictMoved {
+			if !releaseMovedHookClaim(claimed, opts.Assignee, opts, ops, dir, stderr) {
+				return hookClaimResult{terminal: true, code: 1}
+			}
 			continue
 		}
 		if !ok {

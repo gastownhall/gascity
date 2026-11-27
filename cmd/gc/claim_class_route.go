@@ -145,6 +145,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/storebinding"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
@@ -561,6 +562,21 @@ func (r *hookClaimClassRoute) claim(beadID, assignee string) (beads.Bead, bool, 
 		r.graph.Get)
 }
 
+// claimExact runs a graph step's exact claim against the binding through the
+// same two tiers the work store's exact claim uses. The graph front door is
+// always the revision writer: it forwards the binding's revision CAS, and
+// answers unsupported itself when the engine has none. The status/assignee
+// guard comes from storebinding.AssignmentGuardedUpdaterFor, which resolves it
+// only from the canonical Beads projection's backing store, so an engine with
+// neither fence fails closed with the capability named.
+func (r *hookClaimClassRoute) claimExact(actor string, req molecule.ClaimExactRequest) (beads.Bead, hookClaimVerdict, error) {
+	writers := molecule.ClaimExactWriters{Revision: r.graph}
+	if guard, ok := storebinding.AssignmentGuardedUpdaterFor(r.graph); ok {
+		writers.Assignment = guard
+	}
+	return hookClaimExactThroughStore(r.graph, writers, actor, req)
+}
+
 // listContinuation reads a continuation group out of the binding and records
 // every member as resident, so the per-sibling assignment that follows does not
 // re-probe (or re-fail) one bd subprocess at a time.
@@ -659,6 +675,29 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 			return route.claim(beadID, assignee)
 		default:
 			return claimed, ok, err
+		}
+	}
+
+	ops.ClaimExact = func(ctx context.Context, dir string, env []string, actor string, req molecule.ClaimExactRequest) (beads.Bead, hookClaimVerdict, error) {
+		if route.knownResident(req.ID) {
+			return route.claimExact(actor, req)
+		}
+		// First leg of the escalation. Only an exact claim whose initial read
+		// came back not-found (the zero bead the claim returns for a failed
+		// first read) proves the work leg does not hold the step; a claim that
+		// read the bead answered, whatever its verdict or write error.
+		claimed, verdict, err := base.ClaimExact(ctx, dir, env, actor, req)
+		if verdict != hookClaimVerdictNone || claimed.ID != "" || !hookClaimBeadIsElsewhere(err) {
+			return claimed, verdict, err
+		}
+		routed, probeErr := route.routes(ctx, hookStore{dir: dir, env: env}, req.ID, actor, err)
+		switch {
+		case probeErr != nil:
+			return beads.Bead{}, hookClaimVerdictNone, probeErr
+		case routed:
+			return route.claimExact(actor, req)
+		default:
+			return claimed, verdict, err
 		}
 	}
 
