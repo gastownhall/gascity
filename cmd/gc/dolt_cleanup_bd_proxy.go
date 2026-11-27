@@ -5,6 +5,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 	"github.com/gastownhall/gascity/internal/pidutil"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
 
 // bd's proxy root layout, as written by `bd init --proxied-server`:
@@ -124,4 +125,16 @@ func bdOwnedProxyDoltConfig(configPath string) (int, bool) {
 		return 0, false
 	}
 	return record.PID, true
+}
+
+// bdOwnedProxyDoltServerRoot reports whether pid is a Dolt sql-server whose
+// --config is backed by a live bd-owned proxy. The process-table orphan sweep
+// uses this as a kill-path fence when the SQL child itself has been reparented
+// and carries the closed session's inherited environment.
+func bdOwnedProxyDoltServerRoot(pid int) (int, bool) {
+	argv, err := proctable.ProcessArgv(pid)
+	if err != nil || len(argv) < 2 || argv[1] != "sql-server" {
+		return 0, false
+	}
+	return bdOwnedProxyDoltConfig(extractConfigPath(argv))
 }

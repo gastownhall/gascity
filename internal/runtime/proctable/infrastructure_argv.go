@@ -1,6 +1,7 @@
 package proctable
 
 import (
+	"errors"
 	"path/filepath"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -56,17 +57,25 @@ func IsCityInfrastructureArgv(argv []string) bool {
 // Under `go test` without an injected procfs root it reports false rather than
 // read the host's live process table.
 func IsCityInfrastructureRoot(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	if err := hostScanGuard(); err != nil {
-		return false
-	}
-	argv, err := rootArgv(pid)
+	argv, err := ProcessArgv(pid)
 	if err != nil {
 		return false
 	}
 	return IsCityInfrastructureArgv(argv)
+}
+
+// ProcessArgv reads pid's argument vector from the same process-table root as
+// the scanner. It respects the test-only host-scan guard, so callers cannot
+// accidentally read the host's process table from a unit test without an
+// injected procfs root.
+func ProcessArgv(pid int) ([]string, error) {
+	if pid <= 0 {
+		return nil, errors.New("proctable: process pid must be positive")
+	}
+	if err := hostScanGuard(); err != nil {
+		return nil, err
+	}
+	return rootArgv(pid)
 }
 
 // RootIsCityInfrastructure reports whether a root the scan found is city

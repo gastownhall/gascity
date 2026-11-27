@@ -3969,9 +3969,10 @@ func processRootReapable(live runtime.LiveRuntime, selfPID, subreaperPID int) bo
 }
 
 // processRootFence is why the sweep holds a reapable root's termination:
-// the root is city infrastructure by argv, or a detached foreign systemd
-// user service, reported with its unit, ppid and command name so a root
-// the fence spares can be identified from the log. "" means the root may
+// the root is city infrastructure by argv, a Dolt server whose config is
+// owned by a live bd proxy, or a detached foreign systemd user service,
+// reported with its unit, ppid and command name so a root the fence spares
+// can be identified from the log. "" means the root may
 // be reaped. A root the classifier cannot read (the scan's start identity
 // is missing, or its command line is unreadable) returns the error, and the
 // caller leaves it running: a root that cannot be classified is not
@@ -3984,6 +3985,9 @@ func processRootFence(live runtime.LiveRuntime) (string, error) {
 	}
 	if infrastructure {
 		return "city infrastructure (managed Dolt watchdog, bd proxy or nudge poller)", nil
+	}
+	if proxyPID, owned := bdOwnedProxyDoltServerRoot(live.PID); owned {
+		return fmt.Sprintf("bd-owned proxied Dolt server (live proxy pid %d)", proxyPID), nil
 	}
 	if unit := proctable.DetachedUserServiceUnit(live.PID); unit != "" {
 		return fmt.Sprintf("detached user service %s (ppid=%d name=%q)", unit, live.PPID, live.Name), nil
@@ -4033,6 +4037,8 @@ func (l *scanErrorLog) report(city string, err error, now time.Time) bool {
 // set, is the tick's inventory view; without it, or when its pass is
 // incomplete or stale, rule 2 never holds. Each kill is bound to the root's
 // scanned start identity (TerminateRuntime re-checks it).
+// Production callers omit subreaperOverride; process-sweep tests use it to
+// model reparenting to a known subreaper without depending on the test runner.
 func sweepProcessTableOrphans(
 	sp runtime.Provider,
 	sessionBeads *sessionBeadSnapshot,
@@ -4040,6 +4046,7 @@ func sweepProcessTableOrphans(
 	store beads.Store,
 	cityPath string,
 	stderr io.Writer,
+	subreaperOverride ...int,
 ) int {
 	if sp == nil || store == nil {
 		return 0
@@ -4076,15 +4083,18 @@ func sweepProcessTableOrphans(
 
 	cityPath = normalizePathForCompare(strings.TrimSpace(cityPath))
 	// A fenced root is reported once per process (pid + start time), not on
-	// every patrol: a stamped watchdog, bd proxy or detached user service
-	// stays fenced for its whole life. The set is replaced each sweep, so it
-	// holds only roots that are still present and never grows past one
-	// city's live infrastructure.
+	// every patrol: a stamped watchdog, bd proxy, bd-owned Dolt server or
+	// detached user service stays fenced for its whole life. The set is
+	// replaced each sweep, so it holds only roots that are still present and
+	// never grows past one city's live infrastructure.
 	previouslyFenced := fencedInfrastructureRoots.take(cityPath)
 	fenced := make(map[string]struct{})
 	defer fencedInfrastructureRoots.put(cityPath, fenced)
 	selfPID := os.Getpid()
 	subreaperPID := pidutil.DetectUserSubreaperPID(selfPID)
+	if len(subreaperOverride) > 0 {
+		subreaperPID = subreaperOverride[0]
+	}
 	reaped := 0
 	for _, live := range found {
 		live.SessionID = strings.TrimSpace(live.SessionID)
@@ -4129,7 +4139,9 @@ func sweepProcessTableOrphans(
 		// from an agent shell): terminating one signals its process group
 		// and takes the city's Dolt server down with it (#6316), and the
 		// fence is per-process argv, so it also covers processes stamped
-		// before their spawners began scrubbing session identity. Or it may
+		// before their spawners began scrubbing session identity. It may be a
+		// Dolt server whose config is owned by a live bd proxy: terminating
+		// that child directly takes the city's store down. Or it may
 		// be a detached systemd user service: a foreign unit of its own whose
 		// environment carries the session's identity (inherited from the user
 		// manager's environment, or set with `systemd-run --user --setenv`).

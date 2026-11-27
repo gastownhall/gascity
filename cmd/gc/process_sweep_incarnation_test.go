@@ -469,6 +469,55 @@ func TestProcessSweep_NudgePollerFenced(t *testing.T) {
 	wantPIDs(t, "row stopped", pidsOf(s.sweep(sweepAsleep, sweepAsleep, sweepNoPanes())))
 }
 
+// A bd-owned Dolt child can itself become a process-table root after bd's
+// proxy is reparented. The closed session ID is not ownership: bd owns the
+// proxy pair, while a real orphaned session process must still be reaped.
+func TestProcessSweep_BDProxyAndOwnedDoltServerFenced(t *testing.T) {
+	s := newProcSweep(t)
+	configPath := writeBdProxyRoot(t, s.cityPath, 3200)
+	proxyArgv := bdProxyChildArgv(configPath)
+	stubBdProxyProcesses(t, map[int][]string{3200: proxyArgv})
+
+	const (
+		parentPID = 3199
+		proxyPID  = 3200
+		doltPID   = 3201
+		agentPID  = 3202
+	)
+	writeFakeProcEntry(t, s.root, parentPID, 1, "systemd --user", []string{"PATH=/usr/bin"})
+	s.process(proxyPID, parentPID, "bd", "", sweepLeakAt)
+	writeFakeProcCmdline(t, s.root, proxyPID, proxyArgv...)
+	s.process(doltPID, parentPID, "dolt", "", sweepLeakAt)
+	writeFakeProcCmdline(t, s.root, doltPID, "dolt", "sql-server", "--config", configPath)
+	s.process(agentPID, parentPID, "claude", "", sweepLeakAt)
+	writeFakeProcCmdline(t, s.root, agentPID, "claude", "--resume")
+
+	sp := newProcessTableSweepProvider(
+		runtime.LiveRuntime{SessionID: sweepRowID, City: s.cityPath, PID: proxyPID, PPID: parentPID, StartIdentity: "proxy-start"},
+		runtime.LiveRuntime{SessionID: sweepRowID, City: s.cityPath, PID: doltPID, PPID: parentPID, StartIdentity: "dolt-start"},
+		runtime.LiveRuntime{SessionID: sweepRowID, City: s.cityPath, PID: agentPID, PPID: parentPID, StartIdentity: "agent-start"},
+	)
+	store := beads.NewMemStoreFrom(0, sweepClosed, nil)
+	var stderr bytes.Buffer
+	if got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), nil, store, s.cityPath, &stderr, parentPID); got != 1 {
+		t.Fatalf("sweep reported %d reaped, want 1; terminated=%v; stderr=%q", got, sp.terminated, stderr.String())
+	}
+	got := make([]int, 0, len(sp.terminated))
+	for _, live := range sp.terminated {
+		got = append(got, live.PID)
+	}
+	wantPIDs(t, "closed session row", got, agentPID)
+	log := stderr.String()
+	for _, pid := range []string{"pid=3200", "pid=3201"} {
+		if !strings.Contains(log, "leaving process-table root "+pid) {
+			t.Errorf("stderr %q does not report leaving %s alone", log, pid)
+		}
+	}
+	if !strings.Contains(log, "bd-owned proxied Dolt server (live proxy pid 3200)") {
+		t.Errorf("stderr %q does not identify the bd-owned Dolt server", log)
+	}
+}
+
 // The process guard reaches the sweep: of roots of a closed row, only one
 // reparented to init with a start identity, not the controller, is reaped
 // (the fake scanner reports the fields directly).
