@@ -169,6 +169,11 @@ type AwakeWorkBead struct {
 	// releases the session's scale slot, which can wake a different session
 	// as scaled:demand.
 	Blocked bool
+	// AwaitingFinalize is true when an in_progress workflow root's worker
+	// steps have all run and it waits only on its finalize control (the
+	// controller withheld its readiness in dropAwaitingFinalizeReadiness).
+	// Like Blocked, it removes the bead's wake demand and its scale slot.
+	AwaitingFinalize bool
 }
 
 // AwakeDecision is the output for a single session.
@@ -964,7 +969,7 @@ func sessionHasClaimedInProgressWork(workBeads []AwakeWorkBead, named []AwakeNam
 func workBeadHasAwakeDemand(bead AwakeWorkBead) bool {
 	switch bead.Status {
 	case "in_progress":
-		return !bead.Blocked
+		return !bead.Blocked && !bead.AwaitingFinalize
 	case "open":
 		return bead.Ready
 	default:

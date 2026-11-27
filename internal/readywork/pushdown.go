@@ -18,7 +18,9 @@ import (
 // Without it, every leg returns its WHOLE ready set and the predicates are
 // applied here: on a city with eleven thousand ready beads, a claim tier asking
 // for the one bead assigned to it read all eleven thousand from every store,
-// then kept one. The pushed predicates make each leg's read selective.
+// then kept one. The pushed predicates make each leg's read selective. The
+// --status arms push the same --assignee and --metadata-field predicates into
+// their list reads (statusReadQuery); none of them pushes the limit.
 //
 // # Each pushed predicate is no stricter than the Go filter
 //
@@ -188,15 +190,29 @@ func predicatesPushed(q beads.ReadyQuery) bool {
 // prefix shadows a reserved one: boundedRead counts only the rows mergeKeeps
 // trusts (Co-resident ids above).
 func readNarrowed(ctx context.Context, legs []Leg, c compiled, narrowed, plain legRead) ([]beads.Bead, map[string]int, error) {
+	return readNarrowedKeeping(ctx, legs, c, narrowed, plain, keepAllRows)
+}
+
+// readNarrowedKeeping is readNarrowed for an arm that keeps a subset of the
+// merged rows, chosen after the merge (the open status arm). keep selects it
+// from every merge, the narrowed one before its exactness is judged, so the
+// rows judged are the rows answered: a row keep drops is never probed, and one
+// it keeps is never left unprobed behind a dropped row ahead of the bound.
+func readNarrowedKeeping(ctx context.Context, legs []Leg, c compiled, narrowed, plain legRead, keep func([]beads.Bead, map[string]int) []beads.Bead) ([]beads.Bead, map[string]int, error) {
 	results := readLegs(ctx, legs, narrowed)
 	if err := firstLegError(legs, results); err != nil {
 		return nil, nil, err
 	}
 	items, owners := merge(results)
+	items = keep(items, owners)
 	if narrowedAnswerIsExact(ctx, legs, c, items, owners) {
 		return items, owners, nil
 	}
-	return federate(ctx, legs, plain)
+	items, owners, err := federate(ctx, legs, plain)
+	if err != nil {
+		return nil, nil, err
+	}
+	return keep(items, owners), owners, nil
 }
 
 // boundedRead asks one leg for its first Limit+boundedSlack ready rows in order,

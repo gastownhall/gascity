@@ -15,6 +15,16 @@ keep already-owned workflow anchors available for continuation. Update the
 shell count and Go predicates together; otherwise an unclaimable latch can
 continually wake replacement workers.
 
+An owned workflow root stops being a continuation once its work is done:
+a worker step has closed, and only its finalize control and its scope/spec
+latches are still open. The hook's crash-recovery tier passes over such a
+root and serves the work behind it (`gc_workflow_work_done` in
+`workquery.go`), and the controller stops waking its holder for it
+(`molecule.WorkflowAwaitingFinalize`). The two verdicts are one predicate
+written twice; change them together and keep
+`TestWorkflowWorkDoneMatchesTheControllerVerdict` passing, or the controller
+wakes a session for a root its hook will not serve.
+
 ## Adding agent config fields
 
 When adding a field to `config.Agent`, also add it to `AgentPatch` and

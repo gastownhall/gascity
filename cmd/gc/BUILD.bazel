@@ -1231,6 +1231,7 @@ go_test(
         "beads_scope_suspension_test.go",
         "beads_shared_server_managed_test.go",
         "beads_shared_server_test.go",
+        "build_desired_state_awaiting_finalize_test.go",
         "build_desired_state_blocked_demand_test.go",
         "build_desired_state_deferred_assigned_test.go",
         "build_desired_state_deferred_molecule_test.go",

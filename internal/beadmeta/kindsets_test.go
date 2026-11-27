@@ -57,6 +57,18 @@ func TestKindSetRelationships(t *testing.T) {
 	if dup := firstDuplicate(WorkflowTopologyKinds); dup != "" {
 		t.Errorf("WorkflowTopologyKinds contains duplicate %q", dup)
 	}
+	if dup := firstDuplicate(AwaitingFinalizeInertKinds); dup != "" {
+		t.Errorf("AwaitingFinalizeInertKinds contains duplicate %q", dup)
+	}
+	wantInert := []string{KindWorkflowFinalize}
+	for _, k := range WorkflowTopologyKinds {
+		if k != KindWorkflow {
+			wantInert = append(wantInert, k)
+		}
+	}
+	if !sameKindSet(AwaitingFinalizeInertKinds, wantInert) {
+		t.Errorf("AwaitingFinalizeInertKinds = %v, want (WorkflowTopologyKinds \\ {workflow}) ∪ {workflow-finalize} = %v", AwaitingFinalizeInertKinds, wantInert)
+	}
 	if dup := firstDuplicate(GraphContractMetadataKinds); dup != "" {
 		t.Errorf("GraphContractMetadataKinds contains duplicate %q", dup)
 	}
@@ -162,4 +174,16 @@ func firstDuplicate(set []string) string {
 		seen[k] = struct{}{}
 	}
 	return ""
+}
+
+func sameKindSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for _, k := range a {
+		if !slices.Contains(b, k) {
+			return false
+		}
+	}
+	return true
 }

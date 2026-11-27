@@ -226,24 +226,68 @@ func readCandidates(ctx context.Context, legs []Leg, c compiled, cs *crossStore)
 	case "":
 		return readReadyCandidates(ctx, legs, c, cs)
 	case StatusOpen:
-		return readOpenStatusCandidates(ctx, legs)
-	case StatusInProgress:
-		// The crash-recovery tier, and the one whose rows carry blocked_by. The
-		// assignee is pushed into each leg's list; it is matched exactly on every
-		// backend, and re-applied to the merged set like every predicate.
-		plain := beads.ListQuery{Status: c.status, TierMode: beads.FederatedReadTier}
-		if c.assignee == "" {
-			return federate(ctx, legs, listRead(plain))
-		}
-		narrowed := plain
-		narrowed.Assignee = c.assignee
-		return readNarrowed(ctx, legs, c, listRead(narrowed), listRead(plain))
+		return readOpenStatusCandidates(ctx, legs, c)
 	default:
-		return federate(ctx, legs, listRead(beads.ListQuery{
+		// in_progress is the crash-recovery tier, and the one whose rows carry
+		// blocked_by; blocked and closed list exactly that status.
+		return readStatusCandidates(ctx, legs, c, beads.ListQuery{
 			Status:   c.status,
 			TierMode: beads.FederatedReadTier,
-		}))
+		}, keepAllRows)
 	}
+}
+
+// readStatusCandidates reads a --status arm whose leg query is plain, and keeps
+// the merged rows keep selects.
+//
+// Each leg is asked for plain narrowed by the predicates every backend's list
+// compares exactly as the Go filter does (statusReadQuery). A status read is
+// otherwise a read of every bead in that status, and a closed or open read is
+// most of the city: the member reads of the crash-recovery tier's finished-root
+// gate (config's gc_workflow_work_done) name one workflow root, so they read
+// that workflow's members instead. The pushed predicates are re-applied to the
+// merged set like every predicate, and the answer is read again with plain
+// wherever narrowing could have changed it (readNarrowedKeeping).
+//
+// The limit stays Go-side. A status list has no store-side cut in the answer's
+// order, so a leg asked for its first N rows could leave out rows of the
+// city's top N; with a root or an assignee pushed, each leg reads only that
+// slice anyway.
+func readStatusCandidates(ctx context.Context, legs []Leg, c compiled, plain beads.ListQuery, keep func([]beads.Bead, map[string]int) []beads.Bead) ([]beads.Bead, map[string]int, error) {
+	if narrowed, pushed := statusReadQuery(c, plain); pushed {
+		return readNarrowedKeeping(ctx, legs, c, listRead(narrowed), listRead(plain), keep)
+	}
+	items, owners, err := federate(ctx, legs, listRead(plain))
+	if err != nil {
+		return nil, nil, err
+	}
+	return keep(items, owners), owners, nil
+}
+
+// statusReadQuery is plain narrowed by the predicates a status read can push:
+// the assignee, and every --metadata-field pair pushableMetadata vouches for
+// (see the pushdown package comment). It reports whether anything was pushed.
+func statusReadQuery(c compiled, plain beads.ListQuery) (beads.ListQuery, bool) {
+	narrowed := plain
+	narrowed.Assignee = c.assignee
+	for _, f := range c.metadata {
+		if !pushableMetadata(f) {
+			continue
+		}
+		if narrowed.Metadata == nil {
+			narrowed.Metadata = make(map[string]string, len(c.metadata))
+		}
+		// Two values for one key match nothing in Go; pushing either one still
+		// returns a superset of nothing.
+		narrowed.Metadata[f.key] = f.value
+	}
+	return narrowed, narrowed.Assignee != "" || len(narrowed.Metadata) > 0
+}
+
+// keepAllRows keeps every merged row: the arms whose leg query already selects
+// exactly their status.
+func keepAllRows(items []beads.Bead, _ map[string]int) []beads.Bead {
+	return items
 }
 
 // readOpenStatusCandidates answers `--status open` with Gas City's "open": every
@@ -263,14 +307,20 @@ func readCandidates(ctx context.Context, legs []Leg, c compiled, cs *crossStore)
 // non-closed row and keeping the mapped "open" ones gives the bd-backed store the
 // same answer without widening ListQuery{Status: "open"} for the controller
 // callers whose readiness gates rely on bd's narrower status (ga-3mv5d3).
-func readOpenStatusCandidates(ctx context.Context, legs []Leg) ([]beads.Bead, map[string]int, error) {
-	items, owners, err := federate(ctx, legs, listRead(beads.ListQuery{
+//
+// The open rows are kept after the merge, never per leg: the merge keeps the
+// first leg's copy of an id, and a copy another leg holds in a different status
+// must not stand in for it.
+func readOpenStatusCandidates(ctx context.Context, legs []Leg, c compiled) ([]beads.Bead, map[string]int, error) {
+	return readStatusCandidates(ctx, legs, c, beads.ListQuery{
 		AllowScan: true,
 		TierMode:  beads.FederatedReadTier,
-	}))
-	if err != nil {
-		return nil, nil, err
-	}
+	}, keepOpenStatusRows)
+}
+
+// keepOpenStatusRows keeps the merged rows in Gas City's open status, and
+// forgets which leg served each row it drops.
+func keepOpenStatusRows(items []beads.Bead, owners map[string]int) []beads.Bead {
 	out := items[:0]
 	for _, item := range items {
 		if item.Status == StatusOpen {
@@ -279,7 +329,7 @@ func readOpenStatusCandidates(ctx context.Context, legs []Leg) ([]beads.Bead, ma
 		}
 		delete(owners, item.ID)
 	}
-	return out, owners, nil
+	return out
 }
 
 // legRead reads one leg. Every read goes through the store's LIVE handle: a

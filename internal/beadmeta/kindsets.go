@@ -110,13 +110,28 @@ var StructuralGraphKinds = []string{
 }
 
 // WorkflowTopologyKinds lists kinds that anchor workflow topology (root
-// workflow, scope latch, formula spec). Routing never lands on these; agents
-// must never claim them. graphroute.IsWorkflowTopologyKind derives from this
-// set.
+// workflow, scope latch, formula spec). They are never fresh worker demand:
+// pool demand, controller demand and the routed hook tier skip them. A
+// never-expanded root-only workflow is the exception, because the root itself
+// is the work, and a workflow root already assigned to a session stays that
+// session's continuation anchor. graphroute.IsWorkflowTopologyKind derives
+// from this set.
 var WorkflowTopologyKinds = []string{
 	KindWorkflow,
 	KindScope,
 	KindSpec,
+}
+
+// AwaitingFinalizeInertKinds lists the kinds whose open members do not keep a
+// workflow's work alive: the scope and spec latches, and the workflow-finalize
+// control bead, which closes the root before it closes itself. A workflow root
+// whose worker steps have run and whose only open members are of these kinds
+// is waiting for finalize, not for a worker. Any other open member kind,
+// including a nested workflow, counts as live work.
+var AwaitingFinalizeInertKinds = []string{
+	KindScope,
+	KindSpec,
+	KindWorkflowFinalize,
 }
 
 // GraphContractMetadataKinds lists the gc.kind values that, when HAND-WRITTEN

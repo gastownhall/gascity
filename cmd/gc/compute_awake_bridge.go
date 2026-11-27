@@ -200,8 +200,14 @@ func newAwakeInputFromSnapshot(
 			// not dispatch. Only meaningful for in_progress -- open work's
 			// blocker state is already folded into `ready` above.
 			blocked := wb.Status == "in_progress" && wb.IsBlocked != nil && *wb.IsBlocked
+			// An in_progress workflow root the controller assessed and left
+			// unready is waiting only on its finalize control
+			// (dropAwaitingFinalizeReadiness). Omitted flags keep today's
+			// wake-on-claim behavior.
+			awaitingFinalize := isInProgressWorkflowRoot(wb) && i < len(readyAssignedFlags) && !readyAssignedFlags[i]
 			input.WorkBeads = append(input.WorkBeads, AwakeWorkBead{
 				ID: wb.ID, Assignee: a, Status: wb.Status, Ready: ready, Blocked: blocked,
+				AwaitingFinalize: awaitingFinalize,
 			})
 		}
 	}
