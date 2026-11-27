@@ -1421,3 +1421,62 @@ func TestTrivyIgnoreKeepsReviewedBridgeEntries(t *testing.T) {
 		}
 	}
 }
+
+// TestMakeDockerMailBuildsTheImageTheDeploymentRuns pins the docker-mail target
+// to the image contrib/k8s/mcp-mail-deployment.yaml starts. The target follows
+// docker-agent and docker-controller: a discoverable help line, a .PHONY entry,
+// the check-docker prerequisite, the repository root as build context, and the
+// kind load those targets run when the current context is a kind cluster.
+func TestMakeDockerMailBuildsTheImageTheDeploymentRuns(t *testing.T) {
+	const (
+		target     = "docker-mail"
+		image      = "gc-mcp-mail:latest"
+		dockerfile = "contrib/k8s/Dockerfile.mail"
+	)
+	root := repoRoot(t)
+	makefile := readFile(t, root, "Makefile")
+	lines := strings.Split(makefile, "\n")
+
+	header := slices.Index(lines, target+": check-docker")
+	if header < 0 {
+		t.Fatalf("Makefile has no %q target with the check-docker prerequisite that docker-agent and docker-controller use", target)
+	}
+	if header == 0 || !strings.HasPrefix(lines[header-1], "## "+target+": ") {
+		t.Errorf("Makefile %s needs a `## %s: ...` help line directly above it so `make help` lists it", target, target)
+	}
+	var recipe []string
+	for _, line := range lines[header+1:] {
+		if !strings.HasPrefix(line, "\t") {
+			break
+		}
+		recipe = append(recipe, line)
+	}
+	body := strings.Join(recipe, "\n")
+	for _, want := range []string{
+		"docker build -f " + dockerfile + " -t " + image + " .",
+		`kind load docker-image ` + image + ` --name "$$cluster"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("Makefile %s recipe missing %q:\n%s", target, want, body)
+		}
+	}
+
+	phony := false
+	for _, line := range lines {
+		if strings.HasPrefix(line, ".PHONY: ") && slices.Contains(strings.Fields(line), target) {
+			phony = true
+			break
+		}
+	}
+	if !phony {
+		t.Errorf("Makefile .PHONY list does not name %s", target)
+	}
+
+	deployment := readFile(t, root, "contrib/k8s/mcp-mail-deployment.yaml")
+	if !strings.Contains(deployment, "image: "+image+"\n") {
+		t.Errorf("mcp-mail-deployment.yaml no longer runs %s, so the %s target builds the wrong tag", image, target)
+	}
+	if !strings.Contains(deployment, "make "+target) {
+		t.Errorf("mcp-mail-deployment.yaml build instructions do not name `make %s`", target)
+	}
+}
