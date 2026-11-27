@@ -4007,6 +4007,10 @@ export type SessionDemandClaimDivergencePayload = {
 
 export type SessionDrainAckedWithAssignedWorkPayload = {
     /**
+     * The work bead's assignee at emission time: the identity this session holds it under. It differs from session_id when the session claimed the bead under its alias, configured named identity or session name.
+     */
+    assignee?: string;
+    /**
      * ID of the work bead still holding this session as its assignee.
      */
     bead_id: string;
@@ -4015,7 +4019,7 @@ export type SessionDrainAckedWithAssignedWorkPayload = {
      */
     bead_status?: string;
     /**
-     * Short diagnostic context. Today both emission sites pass 'drain_acked_with_assigned_work'; reserved for finer-grained shape discriminators if later Shape-N variants land.
+     * Shape of the drain-acked stop, in precedence order: 'restart_requested' when the stop completed a restart request; 'started_claim_kept' when the session kept an in_progress claim its started records name (and no dispatch hold); else 'drain_acked_with_assigned_work'.
      */
     reason?: string;
     /**

@@ -320,7 +320,7 @@ runtime:s-gc-1:meta:BEADS_ACTOR resolved
 runtime:s-gc-1:meta:GC_AGENT resolved
 ## 1 wait (+40s)
 @ +20s
-event:session.drain_acked_with_assigned_work worker {"bead_id":"gw-1","bead_status":"in_progress","reason":"drain_acked_with_assigned_work","session_id":"gc-1","template":"worker"} legacy="1" v2="" [drain-stop-lag]
+event:session.drain_acked_with_assigned_work worker {"assignee":"s-gc-1","bead_id":"gw-1","bead_status":"in_progress","reason":"drain_acked_with_assigned_work","session_id":"gc-1","template":"worker"} legacy="1" v2="" [drain-stop-lag]
 event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"} legacy="1" v2="" [drain-stop-lag]
 event:session.stranded gc-1 {"session_id":"gc-1","session_name":"s-gc-1","template":"worker","work_bead_ids":["gw-1"]} legacy="1" v2="" [drain-stop-lag]
 provider:RemoveMeta s-gc-1 legacy="6" v2="" [drain-env-clears]
@@ -338,7 +338,7 @@ row:gc-1:state legacy="asleep" v2="awake" [drain-stop-lag]
 row:gc-1:stranded_event_emitted_at legacy="T+20s" v2="" [drain-stop-lag]
 runtime:s-gc-1 legacy="" v2="id=gc-1 epoch=1 token=tok-gc-1 alive attached=false" [drain-stop-lag]
 @ +30s
-event:session.drain_acked_with_assigned_work worker {"bead_id":"gw-1","bead_status":"in_progress","reason":"drain_acked_with_assigned_work","session_id":"gc-1","template":"worker"} resolved
+event:session.drain_acked_with_assigned_work worker {"assignee":"s-gc-1","bead_id":"gw-1","bead_status":"in_progress","reason":"drain_acked_with_assigned_work","session_id":"gc-1","template":"worker"} resolved
 event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"} resolved
 event:session.stranded gc-1 {"session_id":"gc-1","session_name":"s-gc-1","template":"worker","work_bead_ids":["gw-1"]} resolved
 provider:RemoveMeta s-gc-1 resolved
@@ -348,7 +348,7 @@ row:gc-1:drain_at legacy="T+20s" v2="T+30s" [drain-stop-lag]
 row:gc-1:state legacy="asleep" v2="draining" [drain-stop-lag]
 row:gc-1:state_reason legacy="" v2="drain-ack-stop-pending" [drain-stop-lag]
 @ +40s
-event:session.drain_acked_with_assigned_work worker {"bead_id":"gw-1","bead_status":"in_progress","reason":"drain_acked_with_assigned_work","session_id":"gc-1","template":"worker"} legacy="" v2="1" [drain-stop-lag]
+event:session.drain_acked_with_assigned_work worker {"assignee":"s-gc-1","bead_id":"gw-1","bead_status":"in_progress","reason":"drain_acked_with_assigned_work","session_id":"gc-1","template":"worker"} legacy="" v2="1" [drain-stop-lag]
 event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"} legacy="" v2="1" [drain-stop-lag]
 provider:Stop s-gc-1 legacy="" v2="1" [drain-stop-lag]
 row:gc-1:drain_intent_at resolved
@@ -362,7 +362,7 @@ row:gc-1:state_reason resolved
 runtime:s-gc-1 resolved
 ## 2 the wait turns ready (+1m30s)
 @ +50s
-event:session.drain_acked_with_assigned_work worker {"bead_id":"gw-1","bead_status":"in_progress","reason":"drain_acked_with_assigned_work","session_id":"gc-1","template":"worker"} resolved
+event:session.drain_acked_with_assigned_work worker {"assignee":"s-gc-1","bead_id":"gw-1","bead_status":"in_progress","reason":"drain_acked_with_assigned_work","session_id":"gc-1","template":"worker"} resolved
 event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"} resolved
 provider:Stop s-gc-1 resolved
 row:gc-1:detached_at resolved

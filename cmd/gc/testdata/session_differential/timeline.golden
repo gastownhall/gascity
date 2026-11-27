@@ -352,7 +352,7 @@ work:gw-1:gc.session_name=s-gc-1
 ## 1 suspend (+40s)
 ~ op
 @ +20s
-event:session.drain_acked_with_assigned_work worker {"bead_id":"gw-1","bead_status":"in_progress","reason":"drain_acked_with_assigned_work","session_id":"gc-1","template":"worker"}=1
+event:session.drain_acked_with_assigned_work worker {"assignee":"s-gc-1","bead_id":"gw-1","bead_status":"in_progress","reason":"drain_acked_with_assigned_work","session_id":"gc-1","template":"worker"}=1
 event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"}=1
 provider:RemoveMeta s-gc-1=6
 provider:SetMeta s-gc-1=4
@@ -710,7 +710,7 @@ work:gw-1:gc.session_name=s-gc-1
 ## 1 wait (+40s)
 ~ op
 @ +20s
-event:session.drain_acked_with_assigned_work worker {"bead_id":"gw-1","bead_status":"in_progress","reason":"drain_acked_with_assigned_work","session_id":"gc-1","template":"worker"}=1
+event:session.drain_acked_with_assigned_work worker {"assignee":"s-gc-1","bead_id":"gw-1","bead_status":"in_progress","reason":"drain_acked_with_assigned_work","session_id":"gc-1","template":"worker"}=1
 event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"}=1
 event:session.stranded gc-1 {"session_id":"gc-1","session_name":"s-gc-1","template":"worker","work_bead_ids":["gw-1"]}=1
 provider:RemoveMeta s-gc-1=6
