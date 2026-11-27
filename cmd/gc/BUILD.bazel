@@ -2721,8 +2721,33 @@ go_test(
     # the shard count. At 15 the unit lane's slowest shard ran 40-67 s after
     # the ~90 s compile-and-link chain; 20 brought it to ~33 s. The
     # integration build's shards ran 15-48 s at 20, above the slowest solo
-    # test (~42 s); 24 brings them under it.
-    shard_count = 24,
+    # test (~42 s); 24 brought them under it.
+    #
+    # ci-speed-review-2026-11-20.md §4's BEP shard durations put 24 shards at
+    # 95 s p50 / 134 s p90 in the unit lane -- still gc_test's own tail, over
+    # bd_cli_contract_{prev,current}'s 58-59 s and gc_sim_exec's 70 s (also
+    # §4). 32 shards is the same proportional step as 15 to 20 above (+33 %
+    # shards for roughly -35 to -50 % off the slowest shard there); applied
+    # here to 24 that estimates about 71 s p50 / 101 s p90 (95 s * 24/32,
+    # 134 s * 24/32: an even-split floor, not a measurement). gc_test stays
+    # the unit lane's slowest target either way.
+    #
+    # The integration build keeps 24: that count feeds
+    # integrationPackagesShards' pinned, farm-guard-sensitive two-wave
+    # exception (scripts/bazel_integration_packages_budget_test.go), and
+    # raising it there would grow the integration-packages lane's tail, not
+    # shrink anything (see that file's integrationPackagesTwoWaveExceptionPinned
+    # comment and gascity #7795's before/after). Widening gc_test's own tail
+    # is a unit-lane-only win, so only the unit build's shard count moves.
+    #
+    # The study's dependency-weight budget (rec. 2b, review §10 item 8 and
+    # §11 item 6) -- fewer of unit's 63 re-executed targets per PR, by
+    # scoping gc_test's own deps -- is out of scope here: this change only
+    # narrows gc_test's existing shard tail.
+    shard_count = select({
+        "//:gotags_integration": 24,
+        "//conditions:default": 32,
+    }),
     deps = [
         "//:gascity",
         "//examples/bd",

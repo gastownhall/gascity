@@ -122,9 +122,25 @@ func goTestRule(t *testing.T, build, path, rule string) string {
 	return rest[:end]
 }
 
+// goTestShardCount returns rule's shard_count: a plain literal, or (as
+// cmd/gc:gc_test selects, to keep the unit build's shard tail short without
+// growing the integration-packages budget, see that BUILD.bazel's
+// shard_count comment) a select() on //:gotags_integration -- in which case
+// this returns the integration build's branch, the one every caller here
+// cares about (the integration lane's own shard-separation guard, and the
+// integration-packages budget, whose aquery pins run --define=gotags=integration).
 func goTestShardCount(t *testing.T, rule, path string) int {
 	t.Helper()
 	m := regexp.MustCompile(`(?m)^\s*shard_count = (\d+),`).FindStringSubmatch(rule)
+	if m == nil {
+		if sel := regexp.MustCompile(`(?ms)shard_count = select\(\{\n(.*?)\n\s*\}\),`).FindStringSubmatch(rule); sel != nil {
+			branch := regexp.MustCompile(`"//:gotags_integration":\s*(\d+),`).FindStringSubmatch(sel[1])
+			if branch == nil {
+				branch = regexp.MustCompile(`"//conditions:default":\s*(\d+),`).FindStringSubmatch(sel[1])
+			}
+			m = branch
+		}
+	}
 	if m == nil {
 		return 1
 	}
