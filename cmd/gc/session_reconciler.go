@@ -3001,6 +3001,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						gate = closeFreeSlot
 					}
 					closed, cause := closeSeatFor(store, sw, infoByID[id], closeWhy{reason: reason, gate: gate}, clk.Now().UTC(), stderr)
+					preservedIdentity := ""
 					// An operator's suspend keeps the seat whole: its claims are
 					// not released, nor is it closed through the releasing gate.
 					if !closed && reason == "orphaned" && cause != causeKeepsSlot {
@@ -3025,6 +3026,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						if !closed && onlyStrandedWork(sw, infoByID[id]) {
 							closed = closeSeat(store, sw, infoByID[id], closeWhy{reason: reason, gate: closeReleasing}, clk.Now().UTC(), stderr)
 						}
+						// A canonical singleton seat's alias is its agent's
+						// configured identity, and work claimed under it is that
+						// identity's (#9245): when nothing else holds the seat, it
+						// closes keeping those claims for the next seat.
+						if !closed {
+							if identity, ok := canonicalSingletonSeatIdentity(infoByID[id], cfg); ok {
+								closed = closeSeat(store, sw, infoByID[id], closeWhy{reason: reason, gate: closeReleasing, preserve: []string{identity}}, clk.Now().UTC(), stderr)
+								if closed {
+									preservedIdentity = identity
+								}
+							}
+						}
 					}
 					if closed {
 						// Keep the snapshot's Info.Closed in step with the in-memory
@@ -3047,13 +3060,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							// for as long as the seat stays wedged (ga-jrnou).
 							outcome = TraceOutcomeNoChange
 						}
-						var payload traceRecordPayload
+						payload := traceRecordPayload{}
 						if assignedWorkStoresMisaligned {
-							payload = traceRecordPayload{
-								"assigned_work_stores_misaligned": true,
-								"assigned_work_bead_cnt":          len(assignedWorkBeads),
-								"assigned_work_store_cnt":         len(reconcileOpts.assignedWorkStores),
-							}
+							payload["assigned_work_stores_misaligned"] = true
+							payload["assigned_work_bead_cnt"] = len(assignedWorkBeads)
+							payload["assigned_work_store_cnt"] = len(reconcileOpts.assignedWorkStores)
+						}
+						if preservedIdentity != "" {
+							payload["preserved_identity"] = preservedIdentity
 						}
 						trace.RecordDecision(TraceSiteReconcilerCloseOrphan, TraceReasonCode(reason), outcome, template, name, payload)
 					}
