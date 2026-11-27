@@ -6076,7 +6076,7 @@ gc supervisor
 |------------|-------------|
 | [gc supervisor install](#gc-supervisor-install) | Install the supervisor as a platform service |
 | [gc supervisor logs](#gc-supervisor-logs) | Tail the supervisor log file |
-| [gc supervisor reload](#gc-supervisor-reload) | Trigger immediate reconciliation of all cities |
+| [gc supervisor reload](#gc-supervisor-reload) | Trigger immediate reconciliation of all cities and their bead caches |
 | [gc supervisor run](#gc-supervisor-run) | Run the machine-wide supervisor in the foreground |
 | [gc supervisor start](#gc-supervisor-start) | Start the machine-wide supervisor in the background |
 | [gc supervisor status](#gc-supervisor-status) | Check if the supervisor is running |
@@ -6122,6 +6122,16 @@ Send a reload signal to the running supervisor, causing it to
 immediately re-read the registry and reconcile all cities. Use this
 after killing a child process to force the supervisor to detect the
 change and restart it without waiting for the next patrol tick.
+
+The reload also requests an immediate re-scan of every running city's
+bead caches, which GET /beads and the dashboard serve, so a bead
+written outside gc (for example closed with bd close) shows without
+waiting for the cache's next periodic re-scan. The re-scan runs in the
+background and finishes after the reload replies; a suspended city or
+rig is not re-scanned until it resumes. Every supervisor reload
+requests this re-scan, including the reloads gc sends on its own when
+it registers, starts, stops or unregisters a city, or when a city's
+controller does not answer.
 
 The reload also re-reads write_auth_verify_key from supervisor.toml and
 swaps the write-auth verifying keys in place, so a key can be enrolled,

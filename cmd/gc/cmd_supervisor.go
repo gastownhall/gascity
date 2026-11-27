@@ -1249,15 +1249,49 @@ func printSupervisorSupervisionWarning(stderr io.Writer, warning string) {
 	fmt.Fprintf(stderr, "gc supervisor status: warning: %s\n", warning) //nolint:errcheck
 }
 
+// pokeStartedCitiesOnReload pokes every started city of snap so it
+// reconciles its agents at once (e.g. after a child process was killed), and
+// asks each of its bead caches, which GET /beads serves, for a re-scan, so a
+// write made outside gc (an out-of-process bd close) shows without waiting
+// for the cache's cadence. Every supervisor reload runs it: the operator's
+// (gc supervisor reload, the reload signal) and the bare reload verb that
+// city lifecycle commands and controller pokes send. It waits on no
+// reconcile and no scan.
+func pokeStartedCitiesOnReload(snap *citySnapshot, stderr io.Writer) {
+	for _, v := range snap.all {
+		if !v.Started || v.cs == nil {
+			continue
+		}
+		// A view's state is always its runtime's *controllerState.
+		cs, ok := v.cs.(*controllerState)
+		if !ok || cs == nil {
+			fmt.Fprintf(stderr, "gc supervisor: reload: city '%s': state %T has no controller wake; not poked\n", v.Name, v.cs) //nolint:errcheck // best-effort stderr
+			continue
+		}
+		cs.wakeOf().Enqueue(wakeReasonSupervisor, reconcilekey.Allocator()) // reload: re-plan each city
+		cs.requestBeadCacheRescans()
+	}
+}
+
 func newSupervisorReloadCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "reload",
-		Short: "Trigger immediate reconciliation of all cities",
+		Short: "Trigger immediate reconciliation of all cities and their bead caches",
 		Long: `Send a reload signal to the running supervisor, causing it to
 immediately re-read the registry and reconcile all cities. Use this
 after killing a child process to force the supervisor to detect the
 change and restart it without waiting for the next patrol tick.
+
+The reload also requests an immediate re-scan of every running city's
+bead caches, which GET /beads and the dashboard serve, so a bead
+written outside gc (for example closed with bd close) shows without
+waiting for the cache's next periodic re-scan. The re-scan runs in the
+background and finishes after the reload replies; a suspended city or
+rig is not re-scanned until it resumes. Every supervisor reload
+requests this re-scan, including the reloads gc sends on its own when
+it registers, starts, stops or unregisters a city, or when a city's
+controller does not answer.
 
 The reload also re-reads write_auth_verify_key from supervisor.toml and
 swaps the write-auth verifying keys in place, so a key can be enrolled,
@@ -1873,21 +1907,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 			// sessions are untouched.
 			req.reportWriteAuthKeys(reloadSupervisorWriteAuthKeys(apiMux, stderr))
 			safeReconcile()
-			// Also poke all running cities so they immediately reconcile
-			// their agents (e.g. after a child process was killed).
-			snap := registry.Snapshot()
-			for _, v := range snap.all {
-				if !v.Started || v.cs == nil {
-					continue
-				}
-				// A view's state is always its runtime's *controllerState.
-				cs, ok := v.cs.(*controllerState)
-				if !ok || cs == nil {
-					fmt.Fprintf(stderr, "gc supervisor: reload: city '%s': state %T has no controller wake; not poked\n", v.Name, v.cs) //nolint:errcheck // best-effort stderr
-					continue
-				}
-				cs.wakeOf().Enqueue(wakeReasonSupervisor, reconcilekey.Allocator()) // reload: re-plan each city
-			}
+			pokeStartedCitiesOnReload(registry.Snapshot(), stderr)
 			// Per sd_notify(3) a reload ends with READY=1.
 			notifySdState(stderr, sdnotify.Ready)
 			if req.done != nil {

@@ -297,6 +297,7 @@ go_test(
         "bead_owner_legs_equivalence_test.go",
         "bead_owner_legs_reference_test.go",
         "bead_reopen_lease_test.go",
+        "beads_list_external_close_test.go",
         "beads_ready_cross_store_test.go",
         "blocked_request_wait_test.go",
         "blocking_test.go",
