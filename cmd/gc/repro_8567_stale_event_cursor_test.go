@@ -218,9 +218,20 @@ func TestRepro_8567_StaleLabelHeldThenResumesOnValidRunRecord(t *testing.T) {
 		t.Fatalf("tick 2: cursor = %d, want 4 (the max valid label, not the stale 999999 and not clamped)", cursor)
 	}
 
-	// A genuinely new event after the valid run must fire.
+	// A genuinely new event after the valid run must fire. Tick 3 re-reads the
+	// cursor from the run records after event 5 lands, not the tick-2 value.
 	ep.Record(events.Event{Type: "digest.ready"}) // seq 5
-	result := orders.CheckTriggerWithOptions(a, time.Now(), nil, ep, func(string) uint64 { return cursor }, orders.TriggerOptions{})
+	cursor3, stale3, err := bdCursorAcrossStores(orderName, ep, mem)
+	if err != nil {
+		t.Fatalf("tick 3: bdCursorAcrossStores: %v", err)
+	}
+	if stale3 {
+		t.Fatalf("tick 3: stale = true, want false: seq:4 is still at or below head 5")
+	}
+	if cursor3 != 4 {
+		t.Fatalf("tick 3: cursor = %d, want 4 (the fresh read after event 5)", cursor3)
+	}
+	result := orders.CheckTriggerWithOptions(a, time.Now(), nil, ep, func(string) uint64 { return cursor3 }, orders.TriggerOptions{})
 	if !result.Due {
 		t.Fatalf("tick 3: Due = false (%q), want true: event 5 is new after the valid run", result.Reason)
 	}
