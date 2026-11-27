@@ -134,6 +134,12 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	// so a cached response never pays for the graph-store list.
 	graphWork := s.graphActiveWorkBySession()
 
+	// The per-row active-bead join reads each reached bead store once per
+	// request, not once per identity per row (activeBeadIndex). Built after
+	// the cache-hit return like graphWork: a cached response never pays for
+	// the join either.
+	activeBeads := s.newActiveBeadIndex()
+
 	// Optional batch extensions: providers whose per-session attribute reads
 	// are otherwise expensive (e.g. one subprocess fork per call, per agent)
 	// can implement these to collapse the hot loop below to O(1) execs
@@ -285,7 +291,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 				}
 			}
 
-			resp.ActiveBead = s.findActiveBeadForAssignees(ea.rig, sessionID, sessionName, ea.qualifiedName)
+			resp.ActiveBead = activeBeads.lookup(ea.rig, sessionID, sessionName, ea.qualifiedName)
 			// A relocated-graph wisp names its assignee after the session, not
 			// the work store, so the work-store lookup above misses it. Fall
 			// back to the graph bead and use its timestamp as the activity
