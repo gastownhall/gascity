@@ -1500,7 +1500,7 @@ prefix = "fe"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, false, []string{"rig-digest:rig:frontend"}, &stdout, &stderr)
+	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, 0, false, false, false, false, []string{"rig-digest:rig:frontend"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderSweepTracking = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1566,7 +1566,7 @@ prefix = "fe"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, false, nil, &stdout, &stderr)
+	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, 0, false, false, false, false, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderSweepTracking = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1630,7 +1630,7 @@ prefix = "ct"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, false, nil, &stdout, &stderr)
+	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, 0, false, false, false, false, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderSweepTracking = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1704,7 +1704,7 @@ delete_after_close = "1ns"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderSweepTrackingWithOptions(time.Hour, false, false, false, false, nil, &stdout, &stderr)
+	code := cmdOrderSweepTrackingWithOptions(time.Hour, 0, false, false, false, false, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderSweepTracking = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1787,7 +1787,7 @@ delete_after_close = "1ns"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderSweepTrackingWithOptions(time.Hour, true, false, false, false, nil, &stdout, &stderr)
+	code := cmdOrderSweepTrackingWithOptions(time.Hour, 0, true, false, false, false, nil, &stdout, &stderr)
 	if code == 0 {
 		t.Fatalf("cmdOrderSweepTracking = 0, want failure")
 	}
@@ -1851,7 +1851,7 @@ prefix = "fe"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, false, []string{"cleanup"}, &stdout, &stderr)
+	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, 0, false, false, false, false, []string{"cleanup"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderSweepTracking = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1911,7 +1911,7 @@ prefix = "ct"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, true, false, false, []string{"cleanup"}, &stdout, &stderr)
+	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, 0, false, true, false, false, []string{"cleanup"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderSweepTrackingWithOptions = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1985,7 +1985,7 @@ prefix = "ct"
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, true, false, false, nil, &stdout, &stderr); code != 0 {
+	if code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, 0, false, true, false, false, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdOrderSweepTrackingWithOptions(dry run) = %d, want 0; stderr: %s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "would close 1 stale order-tracking bead") {
@@ -1997,7 +1997,7 @@ prefix = "ct"
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, true, nil, &stdout, &stderr); code != 0 {
+	if code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, 0, false, false, false, true, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdOrderSweepTrackingWithOptions = %d, want 0; stderr: %s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "closed 1 stale order-tracking bead") {
@@ -2041,7 +2041,7 @@ prefix = "fe"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, false, []string{"rig-digest:rig:frontend"}, &stdout, &stderr)
+	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, 0, false, false, false, false, []string{"rig-digest:rig:frontend"}, &stdout, &stderr)
 	if code == 0 {
 		t.Fatalf("cmdOrderSweepTracking = 0, want failure; stdout: %s stderr: %s", stdout.String(), stderr.String())
 	}
@@ -4436,7 +4436,7 @@ prefix = "ct"
 
 	var stdout, stderr bytes.Buffer
 	// confirm=false: should return 1 and print descriptive message.
-	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, false, nil, &stdout, &stderr)
+	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, 0, false, false, false, false, nil, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("cmdOrderSweepTrackingWithOptions (no confirm) = %d, want 1; stderr: %s stdout: %s", code, stderr.String(), stdout.String())
 	}
@@ -4499,7 +4499,7 @@ prefix = "ct"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, false, nil, &stdout, &stderr)
+	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, 0, false, false, false, false, nil, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("cmdOrderSweepTrackingWithOptions (count error) = %d, want 1; stderr: %s stdout: %s", code, stderr.String(), stdout.String())
 	}
@@ -4534,6 +4534,49 @@ func TestPackagedOrderTrackingSweepPassesConfirm(t *testing.T) {
 	// The flag the exec line passes must still exist on the command.
 	if flag := newOrderSweepTrackingCmd(io.Discard, io.Discard).Flags().Lookup("confirm"); flag == nil {
 		t.Fatal("gc order sweep-tracking has no --confirm flag, but the packaged order passes one")
+	}
+}
+
+// TestPackagedOrderTrackingSweepBudgetsItsChecksInsideItsTimeout pins the
+// packaged core sweep order's configured headroom: a --check-budget that,
+// plus one orderTrackingRetentionChunkSpan, is less than the order's own
+// timeout. The budget and span are cooperative limits checked between
+// candidate checks, so this does not guarantee the run finishes in time (an
+// in-flight store read, the final chunk's re-check and delete, stale-close
+// and the confirm count are unbounded); it pins that the configuration leaves
+// room for them. Without the budget, or with one the timeout cuts off, a
+// backlog too large to check in one run is killed on every run instead of
+// ending cleanly and declaring the run partial.
+func TestPackagedOrderTrackingSweepBudgetsItsChecksInsideItsTimeout(t *testing.T) {
+	chdirToRealPackageDir(t)
+	const packOrderPath = "../../internal/bootstrap/packs/core/orders/order-tracking-sweep.toml"
+	data, err := os.ReadFile(packOrderPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packed, err := orders.Parse(data)
+	if err != nil {
+		t.Fatalf("parse %s: %v", packOrderPath, err)
+	}
+	args := strings.Fields(packed.Exec)
+	if len(args) < 3 || !slices.Equal(args[:3], []string{"gc", "order", "sweep-tracking"}) {
+		t.Fatalf("exec = %q, want a gc order sweep-tracking invocation", packed.Exec)
+	}
+	// Parse the exec line's flags with the command's own flag set, so a flag
+	// the command no longer has fails here too.
+	cmd := newOrderSweepTrackingCmd(io.Discard, io.Discard)
+	if err := cmd.ParseFlags(args[3:]); err != nil {
+		t.Fatalf("exec = %q: %v", packed.Exec, err)
+	}
+	budget, err := cmd.Flags().GetDuration("check-budget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if budget <= 0 {
+		t.Fatalf("exec = %q sets no --check-budget, want one inside the order's timeout", packed.Exec)
+	}
+	if timeout := packed.TimeoutOrDefault(); budget+orderTrackingRetentionChunkSpan >= timeout {
+		t.Fatalf("--check-budget %s plus a chunk span of %s leaves no configured headroom under the order's %s timeout", budget, orderTrackingRetentionChunkSpan, timeout)
 	}
 }
 
@@ -4604,7 +4647,7 @@ prefix = "ct"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, true, nil, &stdout, &stderr)
+	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, 0, false, false, false, true, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderSweepTrackingWithOptions (confirm) = %d, want 0; stderr: %s stdout: %s", code, stderr.String(), stdout.String())
 	}
@@ -4632,6 +4675,198 @@ prefix = "ct"
 	}
 	if got.Status != "closed" {
 		t.Fatalf("%s status = %q, want closed — stale-close must run alongside retention", openID, got.Status)
+	}
+}
+
+// seedOrderSweepTrackingRetentionCity seeds a file-store city whose order
+// "sweep-budget" holds its latest minClosedOrderTrackingRetained closed
+// tracking beads plus expired older ones, and returns the city and the
+// expired beads' ids. GC_ORDER_OUTCOME_FILE is cleared, as for a run by hand.
+func seedOrderSweepTrackingRetentionCity(t *testing.T, expired int) (string, []string) {
+	t.Helper()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	t.Setenv(orders.ExecOutcomeFileEnv, "")
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_CITY_ROOT", cityDir)
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	t.Chdir(cityDir)
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+`)
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	// Seeded as JSON: store.Create forces Status="open" and
+	// CreatedAt=time.Now(), which would leave nothing expired.
+	now := time.Now()
+	var seed []beads.Bead
+	var expiredIDs []string
+	for i := range minClosedOrderTrackingRetained + expired {
+		id := fmt.Sprintf("sb-%02d", i)
+		seed = append(seed, beads.Bead{
+			ID:        id,
+			Title:     "order:sweep-budget",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-10*24*time.Hour + time.Duration(i)*time.Minute),
+			Labels:    []string{"order-run:sweep-budget", labelOrderTracking},
+			Ephemeral: true,
+		})
+		if i < expired {
+			expiredIDs = append(expiredIDs, id)
+		}
+	}
+	data, err := json.Marshal(struct {
+		Seq   int          `json:"seq"`
+		Beads []beads.Bead `json:"beads"`
+	}{Seq: len(seed), Beads: seed})
+	if err != nil {
+		t.Fatalf("marshal seed beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".gc", "beads.json"), data, 0o644); err != nil {
+		t.Fatalf("write seed beads.json: %v", err)
+	}
+	return cityDir, expiredIDs
+}
+
+// orderSweepTrackingBeadsLeft counts how many of ids the city's store still
+// holds.
+func orderSweepTrackingBeadsLeft(t *testing.T, cityDir string, ids []string) int {
+	t.Helper()
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity: %v", err)
+	}
+	left := 0
+	for _, id := range ids {
+		_, err := store.Get(id)
+		switch {
+		case err == nil:
+			left++
+		case !errors.Is(err, beads.ErrNotFound):
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+	}
+	return left
+}
+
+// withOrderTrackingRetentionTickingClock makes every read of the retention
+// sweep's wall clock step later than the one before: stranding checks slow
+// enough that a chunk's span, or a check budget of a few steps, runs out
+// after a handful of them.
+func withOrderTrackingRetentionTickingClock(t *testing.T, step time.Duration) {
+	t.Helper()
+	at := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	orig := orderTrackingRetentionNow
+	orderTrackingRetentionNow = func() time.Time {
+		at = at.Add(step)
+		return at
+	}
+	t.Cleanup(func() { orderTrackingRetentionNow = orig })
+}
+
+// emptyOrderOutcomeFile creates the empty outcome file the order runner hands
+// an exec order, and points GC_ORDER_OUTCOME_FILE at it.
+func emptyOrderOutcomeFile(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "outcome.json")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(orders.ExecOutcomeFileEnv, path)
+	return path
+}
+
+// TestOrderSweepTrackingRunsToCompletionWithoutACheckBudget pins the
+// command's documented contract: without --check-budget it checks and
+// deletes every expired run however long the checks take, and declares
+// nothing.
+func TestOrderSweepTrackingRunsToCompletionWithoutACheckBudget(t *testing.T) {
+	cityDir, expired := seedOrderSweepTrackingRetentionCity(t, 5)
+	outcome := emptyOrderOutcomeFile(t)
+	// Each read of the sweep's clock stands for 61s of stranding checks.
+	withOrderTrackingRetentionTickingClock(t, 61*time.Second)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdOrderSweepTrackingWithOptions(time.Hour, 0, false, false, false, true, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("sweep-tracking = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if left := orderSweepTrackingBeadsLeft(t, cityDir, expired); left != 0 {
+		t.Fatalf("%d of %d expired run(s) left, want none: without --check-budget the command runs to completion", left, len(expired))
+	}
+	if got, want := stdout.String(), fmt.Sprintf("deleted %d closed order-tracking bead(s)", len(expired)); !strings.Contains(got, want) {
+		t.Fatalf("stdout = %q, want %q", got, want)
+	}
+	if got := stderr.String(); strings.Contains(got, "check budget") {
+		t.Fatalf("stderr = %q, want no check-budget stop", got)
+	}
+	if got := readFileString(t, outcome); got != "" {
+		t.Fatalf("outcome declaration = %q, want none for a run that finished", got)
+	}
+}
+
+// TestOrderSweepTrackingCheckBudgetStopsAndDeclaresAPartialRun pins
+// --check-budget: once the budget is spent the command stops checking and
+// still exits 0, names on stderr (even with --quiet) the store it did not
+// finish, and, run as an exec order, declares the run partial, so the run is
+// not recorded as a plain success.
+func TestOrderSweepTrackingCheckBudgetStopsAndDeclaresAPartialRun(t *testing.T) {
+	cityDir, expired := seedOrderSweepTrackingRetentionCity(t, 5)
+	outcome := emptyOrderOutcomeFile(t)
+	withOrderTrackingRetentionTickingClock(t, 61*time.Second)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdOrderSweepTrackingWithOptions(time.Hour, 3*time.Minute, false, false, true, true, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("sweep-tracking = %d, want 0 (a budget stop is not a failure); stderr: %s", code, stderr.String())
+	}
+	if left := orderSweepTrackingBeadsLeft(t, cityDir, expired); left == 0 {
+		t.Fatal("every expired run was deleted, want the check budget to stop the sweep first")
+	}
+	if got := stderr.String(); !strings.Contains(got, "the check budget ran out") || !strings.Contains(got, "checked in city") {
+		t.Fatalf("stderr = %q, want the check-budget stop naming the city store", got)
+	}
+	declared, ok, err := orders.DecodeExecOutcome([]byte(readFileString(t, outcome)))
+	if err != nil || !ok {
+		t.Fatalf("outcome declaration = (%+v, %t, %v), want a partial declaration", declared, ok, err)
+	}
+	want := []orders.ExecOutcomeScope{{Scope: "city", Reason: orderTrackingRetentionCutShortReason}}
+	if declared.Outcome != orders.ExecOutcomePartial || !slices.Equal(declared.Scopes, want) {
+		t.Fatalf("outcome declaration = %+v, want partial with scopes %v", declared, want)
+	}
+}
+
+// TestOrderSweepTrackingFailsWhenAPartialRunCannotBeDeclared pins the exit
+// for a budget stop whose declaration cannot be written: the run would
+// otherwise be recorded as a plain success, so it exits 1 and names the file.
+func TestOrderSweepTrackingFailsWhenAPartialRunCannotBeDeclared(t *testing.T) {
+	_, _ = seedOrderSweepTrackingRetentionCity(t, 5)
+	outcome := filepath.Join(t.TempDir(), "missing", "outcome.json")
+	t.Setenv(orders.ExecOutcomeFileEnv, outcome)
+	withOrderTrackingRetentionTickingClock(t, 61*time.Second)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdOrderSweepTrackingWithOptions(time.Hour, 3*time.Minute, false, false, true, true, nil, &stdout, &stderr); code != 1 {
+		t.Fatalf("sweep-tracking = %d, want 1; stderr: %s", code, stderr.String())
+	}
+	if got, want := stderr.String(), "writing exec order outcome declaration to "+outcome; !strings.Contains(got, want) {
+		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+}
+
+// TestOrderSweepTrackingRejectsANegativeCheckBudget pins that a negative
+// --check-budget is a usage error rather than a silent "no limit".
+func TestOrderSweepTrackingRejectsANegativeCheckBudget(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := cmdOrderSweepTrackingWithOptions(time.Hour, -time.Minute, false, false, false, true, nil, &stdout, &stderr); code != 1 {
+		t.Fatalf("sweep-tracking = %d, want 1; stderr: %s", code, stderr.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, "--check-budget must not be negative") {
+		t.Fatalf("stderr = %q, want the negative budget refused", got)
 	}
 }
 

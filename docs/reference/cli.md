@@ -3349,8 +3349,18 @@ older than --stale-after so a fresh in-flight order is not interrupted.
 Closed order-tracking history is deleted after
 [beads.policies.order_tracking].delete_after_close, defaulting to 7d, while
 always retaining at least the latest 10 closed tracking beads per order.
-The manual command runs to completion; controller startup and watchdog sweeps
-use bounded cleanup to avoid spending an unbounded tick on stale work.
+Expired history is deleted a chunk at a time as it clears its checks, so a
+run cut off part way keeps what it already deleted. Without --check-budget
+the command runs to completion; controller startup and watchdog sweeps use
+bounded cleanup to avoid spending an unbounded tick on stale work.
+
+--check-budget bounds how long the retention checks run, for a run that has
+to end inside a timeout; the packaged order-tracking-sweep order sets it.
+Once the budget is spent the command stops checking, deletes what already
+cleared, names on stderr each store it did not finish, and exits 0. Run as
+an exec order, it also declares the run partial (GC_ORDER_OUTCOME_FILE), so
+the run is recorded as order.skipped with outcome partial rather than as a
+plain success. The rest of the backlog waits for the next run.
 
 Use --include-wisps for operator recovery of abandoned order-run wisp
 subtrees whose open descendants are also older than --stale-after. Pass one
@@ -3368,6 +3378,7 @@ gc order sweep-tracking [order ...] [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--check-budget` | duration | `0s` | stop the retention checks after this long and report the run as partial (0 = no limit) |
 | `--confirm` | bool |  | confirm bulk deletion when eligible count &gt; GC_BULK_DELETE_CONFIRM_THRESHOLD (default 20) |
 | `--dry-run` | bool |  | report stale order-tracking and order wisp beads without closing them |
 | `--include-wisps` | bool |  | also close stale order-run wisp subtrees with open descendants |
