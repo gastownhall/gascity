@@ -381,6 +381,12 @@ func TestProbeSessionPathGCVersion(t *testing.T) {
 	// is the PATH search, so each reads as a release build.
 	prevInfo := sessionPathGCBuildInfo
 	t.Cleanup(func() { sessionPathGCBuildInfo = prevInfo })
+	// The platform's system install directories (/opt/homebrew/bin on
+	// darwin) hold whatever gc the host has installed; no platform leaves
+	// only the directories the test controls.
+	prevGOOS := sessionPathGOOS
+	t.Cleanup(func() { sessionPathGOOS = prevGOOS })
+	sessionPathGOOS = ""
 	sessionPathGCBuildInfo = func(string) (*debug.BuildInfo, error) {
 		return &debug.BuildInfo{Main: debug.Module{Version: "(devel)"}}, nil
 	}

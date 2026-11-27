@@ -150,7 +150,7 @@ const minGCVersionProbeTimeout = 5 * time.Second
 // ~/go/bin). path is "" when no gc is on it.
 func probeSessionPathGCVersion(cfg *config.City) (path, version string, err error) {
 	home, _ := os.UserHomeDir()
-	pathList := searchpath.ExpandPath(home, goruntime.GOOS, os.Getenv("PATH"))
+	pathList := searchpath.ExpandPath(home, sessionPathGOOS, os.Getenv("PATH"))
 	if cfg != nil {
 		if configured, ok := expandEnvMap(cfg.Workspace.Env)["PATH"]; ok {
 			pathList = configured
@@ -200,6 +200,11 @@ func probeSessionPathGCVersion(cfg *config.City) (path, version string, err erro
 	}
 	return path, version, nil
 }
+
+// sessionPathGOOS selects the platform's system install directories that
+// searchpath appends to the session PATH (/opt/homebrew/bin on darwin, for
+// one); a test seam, since a test cannot control what is installed there.
+var sessionPathGOOS = goruntime.GOOS
 
 // sessionPathGCBuildInfo reads the build information a gc binary records; a
 // test seam.
