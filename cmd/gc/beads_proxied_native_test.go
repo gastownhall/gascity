@@ -364,16 +364,15 @@ func TestProxiedReopenEscalationLadder(t *testing.T) {
 		}
 	})
 
-	t.Run("the real zombie: bd's own ping exits 1, and the same one-shot open recovers it", func(t *testing.T) {
+	t.Run("the real zombie: bd's own ping exits 1, and the same long-lived open recovers it", func(t *testing.T) {
 		// The shape a real bd produces (round3 review, completeness). The
 		// zombie row above scripts a ping that SUCCEEDS on a silent proxy; a
 		// real `bd ping` against a zombie adopts it, fails its SELECT 1 and
 		// exits 1. That failure is produced here by the PRODUCTION runner
 		// executing a script that exits 1, so the whole chain is real: the
 		// runner keeps the exit status, Ping marks it as bd's answer, and the
-		// ladder spends the recover on it in the same open — the one-shot shape
-		// `gc doctor` takes, whose acceptance row wants [probe recover] and a
-		// native store.
+		// ladder spends the recover on it in the same open. Only a long-lived
+		// open spends it; the one-shot shape is the next row.
 		f := newProxiedScopeFixture(t)
 		ops := &scriptedProviderOps{}
 		recovered := false
@@ -397,7 +396,7 @@ func TestProxiedReopenEscalationLadder(t *testing.T) {
 		}
 		t.Cleanup(func() { providerOwnedScopeLifecycleOp = restore })
 
-		pin, err := opener.admit(context.Background(), false)
+		pin, err := opener.admit(context.Background(), true)
 		if err != nil {
 			t.Fatalf("admit = %v after verbs [%s]: a zombie whose ping bd reported as failed was not recovered",
 				err, strings.Join(ops.spent(), " "))
@@ -407,6 +406,62 @@ func TestProxiedReopenEscalationLadder(t *testing.T) {
 		}
 		if pin.PoolKey().PID != 7004 {
 			t.Fatalf("admitted pid %d, want the generation the recover produced (7004)", pin.PoolKey().PID)
+		}
+	})
+
+	t.Run("the real zombie through a one-shot open: one probe, no recover, and the bd store serves", func(t *testing.T) {
+		// A one-shot command is a fresh process with an empty recover ledger,
+		// so its recover rung would be "once per generation per command" — on
+		// a city running dozens of one-shot gc commands, a `bd dolt stop` of
+		// the same zombie from each. A one-shot spends the probe (what a bd
+		// fork would do to this proxy anyway), never the recover, and the
+		// factory opens the bd front door, whose reads are the answer.
+		t.Setenv("GC_BEADS_FORCE_FALLBACK", "")
+		t.Setenv("GC_BEADS_PROXIED_NATIVE", "1")
+		f := newProxiedScopeFixture(t)
+		ops := &scriptedProviderOps{}
+		fallback := beads.NewMemStore()
+		seeded, err := fallback.Create(beads.Bead{Title: "served by the bd front door"})
+		if err != nil {
+			t.Fatalf("seed the bd store: %v", err)
+		}
+		opener := newOpener(t, f, ops, func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeAcceptedNoGreeting, Err: errors.New("no greeting")}
+		})
+		opener.openBd = func() (beads.Store, error) { return fallback, nil }
+		script := writeExitingProviderScript(t, t.TempDir(), "echo 'Error: ping: invalid connection' >&2; exit 1")
+		restore := providerOwnedScopeLifecycleOp
+		providerOwnedScopeLifecycleOp = func(ctx context.Context, _, _, op string, _ func() error) error {
+			_ = ops.run(op)
+			return runProviderOwnedOpStrict(ctx, 30*time.Second, script, nil, op)
+		}
+		t.Cleanup(func() { providerOwnedScopeLifecycleOp = restore })
+
+		for open := 1; open <= 2; open++ {
+			result, err := beads.OpenStoreAtForCity(context.Background(), beads.StoreOpenOptions{
+				ScopeRoot:        f.scopeRoot,
+				Provider:         "bd",
+				LongLived:        false,
+				OpenBdStore:      opener.openBd,
+				OpenProxiedStore: opener.storeOpener(),
+			})
+			if err != nil {
+				t.Fatalf("one-shot open %d: %v", open, err)
+			}
+			if result.Store != beads.Store(fallback) {
+				t.Fatalf("one-shot open %d served %T, want the bd store", open, result.Store)
+			}
+			if result.Diagnostic.Proxied == nil || result.Diagnostic.Proxied.Verdict != beads.ProxiedVerdictBackendUnreachable {
+				t.Fatalf("one-shot open %d reported %+v, want the non-terminal backend_unreachable verdict",
+					open, result.Diagnostic.Proxied)
+			}
+			got, err := result.Store.Get(seeded.ID)
+			if err != nil || got.Title != seeded.Title {
+				t.Fatalf("one-shot open %d read (%+v, %v), want the seeded bead", open, got, err)
+			}
+		}
+		if spent := strings.Join(ops.spent(), ","); spent != proxiedProviderProbeOp {
+			t.Fatalf("verbs spent = [%s], want exactly [probe]: a one-shot never issues `bd dolt stop`", spent)
 		}
 	})
 
