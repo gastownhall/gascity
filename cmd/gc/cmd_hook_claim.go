@@ -214,6 +214,16 @@ type hookClaimOptions struct {
 	// fence did not read the row, which turns the seat checks of the
 	// fresh-claim tier off (hookClaimSeatLeaves).
 	PoolSeat hookPoolSeat
+	// AdmissionFallbackQuery is the agent's work query built with the
+	// federated reader on, when that differs from the query the claim runs:
+	// its tiers admit before they bound, so the claim re-asks it once when
+	// every candidate it was handed is input-withheld. Empty means no form
+	// differs (a federated or custom query).
+	AdmissionFallbackQuery string
+	// AdmissionBlindQuery reports a custom work_query, which never reads
+	// through input admission: the claim still withholds what it is handed,
+	// and says so.
+	AdmissionBlindQuery bool
 }
 
 // continuationPinAssignee returns the identity a continuation sibling is pinned
@@ -266,6 +276,12 @@ type hookClaimOps struct {
 	// verdict's state says: gc.outcome=skipped for complete input, a hard
 	// failure with gc.failure_reason=input_purged for purged input.
 	RetireWorkflow hookRetireWorkflowFunc
+	// InputAdmission judges which candidates are input-withheld: their
+	// workflow's input is held, blocked, deferred or waiting on a prerequisite
+	// (internal/inputadmission). A withheld candidate is never claimed or
+	// adopted, and a failed judgment fails the claim. Nil judges nothing;
+	// the production claim ops (hookCity.claimOps) install the bd-store judge.
+	InputAdmission hookInputAdmissionFunc
 	// ProveInputAbsent proves workflow input ids absent from every store of
 	// the city. Nil proves nothing, so no input is ever read as purged.
 	ProveInputAbsent workflowInputAbsenceProver
@@ -523,7 +539,6 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		return hookClaimResult{terminal: true, code: 1}
 	}
 	ops.applyDefaults()
-	now := ops.Now
 
 	// F-A. A provider callback is not a turn: its stdout goes to the hook
 	// runner, not to a model, so a claim minted here is parked the instant it is
@@ -600,28 +615,22 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	if err != nil {
 		return hookClaimResult{terminal: true, code: reportClaimWorkQueryFailure(err, stderr)}
 	}
-
-	normalized := normalizeWorkQueryOutput(strings.TrimSpace(output))
-	normalized = filterUnreadyHookCandidates(normalized, now())
-	if !workQueryHasReadyWork(normalized) {
-		return hookClaimResult{}
+	candidates, withheld, failed := screenHookClaimOutput(output, *opts, *ops, dir, stderr)
+	if failed != nil {
+		return *failed
 	}
-	candidates, skipped, err := decodeHookClaimBeads(normalized)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc hook --claim: requires JSON work_query output to identify claim candidates: %v\n", err) //nolint:errcheck
-		return hookClaimResult{terminal: true, code: 1}
+	// A bounded single-store tier stops at rows input admission then
+	// withholds: the seat's --limit=1 head, or a routed window. Its federated
+	// form admits before it bounds, so ask that once.
+	if len(candidates) == 0 && withheld && opts.AdmissionFallbackQuery != "" {
+		output, err := ops.Runner(opts.AdmissionFallbackQuery, dir)
+		if err != nil {
+			return hookClaimResult{terminal: true, code: reportClaimWorkQueryFailure(err, stderr)}
+		}
+		if candidates, _, failed = screenHookClaimOutput(output, *opts, *ops, dir, stderr); failed != nil {
+			return *failed
+		}
 	}
-	for _, skip := range skipped {
-		fmt.Fprintf(stderr, "gc hook --claim: skipping undecodable bead %s: %v\n", skip.ID, skip.Err) //nolint:errcheck
-	}
-	if len(candidates) == 0 {
-		return hookClaimResult{}
-	}
-
-	// Retire, before any tier looks at them, the candidates whose workflow has
-	// nothing left to do because its input convoy work is already terminal or
-	// no longer exists anywhere.
-	candidates = retireDoneWorkflowCandidates(candidates, *opts, *ops, dir, stderr)
 	if len(candidates) == 0 {
 		return hookClaimResult{}
 	}

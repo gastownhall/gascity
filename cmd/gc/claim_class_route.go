@@ -140,11 +140,13 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
+	"github.com/gastownhall/gascity/internal/inputadmission"
 	"github.com/gastownhall/gascity/internal/storebinding"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
@@ -830,6 +832,19 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 		}
 		work := base.WorkflowStore(ctx, dir, env, rootID, "")
 		return workflowInputDoneAcross(ctx, route.class, beads.WorkStore{Store: work}, candidate, identityCandidates, prove)
+	}
+
+	// Input admission reads a graph.v2 root and its steps from the binding and
+	// the input convoy and its members from the work store, so one judge
+	// reads both, the work store first. Ops that judge nothing stay so.
+	if base.InputAdmission != nil {
+		ops.InputAdmission = func(ctx context.Context, dir string, env []string, candidates []beads.Bead) (map[string]inputadmission.Withhold, error) {
+			sources := []inputadmission.Source{
+				{Label: "bd store at " + dir, Reader: base.WorkflowStore(ctx, dir, env, "", "")},
+				{Label: "coordination-class binding", Reader: route.class},
+			}
+			return inputadmission.New(sources, time.Now()).Judge(ctx, 0, candidates)
+		}
 	}
 
 	ops.RetireWorkflow = func(ctx context.Context, dir string, env []string, verdict workflowInputVerdict) error {
