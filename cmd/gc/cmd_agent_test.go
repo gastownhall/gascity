@@ -206,39 +206,55 @@ func TestDoAgentSuspendInlinePreservesConfig(t *testing.T) {
 	}
 }
 
-func TestDoAgentSuspendPackDerivedError(t *testing.T) {
-	fs := packConfigWithFragment(t)
-
-	var stdout, stderr bytes.Buffer
-	code := doAgentSuspend(&fs, "/city", "myrig/pack-worker", &stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("code = %d, want 1 for pack-derived agent", code)
+// effectiveAgentSuspended reloads the composed city config from fs and
+// reports the effective suspended value of the agent with qualified name qn.
+func effectiveAgentSuspended(t *testing.T, fs fsys.FS, tomlPath, qn string) bool {
+	t.Helper()
+	cfg, err := loadCityConfigFS(fs, tomlPath, io.Discard)
+	if err != nil {
+		t.Fatalf("reloading %s: %v", tomlPath, err)
 	}
-	errMsg := stderr.String()
-	if !strings.Contains(errMsg, "defined by a pack") {
-		t.Errorf("stderr should mention pack: %s", errMsg)
+	for _, a := range cfg.Agents {
+		if a.QualifiedName() == qn {
+			return a.Suspended
+		}
 	}
-	if !strings.Contains(errMsg, "[[patches]]") {
-		t.Errorf("stderr should mention patches: %s", errMsg)
-	}
-	// Config must NOT have been modified.
-	assertConfigPreserved(t, &fs, "/city/city.toml")
+	t.Fatalf("agent %q not in reloaded config", qn)
+	return false
 }
 
-func TestDoAgentResumePackDerivedError(t *testing.T) {
+func TestDoAgentSuspendResume_PackDerivedWritesPatch(t *testing.T) {
 	fs := packConfigWithFragment(t)
+	const qn = "myrig/pack-worker"
 
-	var stdout, stderr bytes.Buffer
-	code := doAgentResume(&fs, "/city", "myrig/pack-worker", &stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("code = %d, want 1 for pack-derived agent", code)
-	}
-	errMsg := stderr.String()
-	if !strings.Contains(errMsg, "defined by a pack") {
-		t.Errorf("stderr should mention pack: %s", errMsg)
-	}
-	if !strings.Contains(errMsg, "[[patches]]") {
-		t.Errorf("stderr should mention patches: %s", errMsg)
+	for _, step := range []struct {
+		run       func(fsys.FS, string, string, io.Writer, io.Writer) int
+		wantOut   string
+		suspended bool
+	}{
+		{run: doAgentSuspend, wantOut: "Suspended agent 'myrig/pack-worker'\n", suspended: true},
+		{run: doAgentResume, wantOut: "Resumed agent 'myrig/pack-worker'\n", suspended: false},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code := step.run(&fs, "/city", qn, &stdout, &stderr); code != 0 {
+			t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+		}
+		if stdout.String() != step.wantOut {
+			t.Errorf("stdout = %q, want %q", stdout.String(), step.wantOut)
+		}
+		if got := effectiveAgentSuspended(t, &fs, "/city/city.toml", qn); got != step.suspended {
+			t.Fatalf("reloaded suspended = %v, want %v", got, step.suspended)
+		}
+		data := string(fs.Files["/city/city.toml"])
+		if !strings.Contains(data, `include = ["packs/mypack/agents.toml"]`) {
+			t.Errorf("city.toml lost its include directive:\n%s", data)
+		}
+		if strings.Count(data, "[[agent]]") != 1 {
+			t.Errorf("city.toml expanded the pack agent inline:\n%s", data)
+		}
+		if got := string(fs.Files["/city/packs/mypack/agents.toml"]); got != "[[agent]]\nname = \"pack-worker\"\ndir = \"myrig\"\n" {
+			t.Errorf("pack fragment changed:\n%s", got)
+		}
 	}
 }
 

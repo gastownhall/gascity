@@ -4676,8 +4676,9 @@ func TestControllerStateSuspendRestoresSymlinkedAgentTomlTargetWhenRefreshFails(
 		},
 	}, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 	// The suspend write renames a temp file onto the resolved agent.toml target;
-	// corrupt city.toml at that moment so the post-mutation refresh fails and
-	// the rollback path runs.
+	// corrupt city.toml at that moment so reloading the updated config fails
+	// and the rollback path runs. The editor's own verification reload is the
+	// first to fail, so the editor restores the files it snapshotted.
 	cs.editor = configedit.NewEditor(&corruptCityAfterRenameFS{
 		triggerPath: resolvedAgentTarget,
 		cityToml:    tomlPath,
@@ -4687,10 +4688,12 @@ func TestControllerStateSuspendRestoresSymlinkedAgentTomlTargetWhenRefreshFails(
 
 	err = cs.SuspendAgent("worker")
 	if err == nil {
-		t.Fatal("SuspendAgent should fail when refreshing the updated snapshot fails")
+		t.Fatal("SuspendAgent should fail when reloading the updated config fails")
 	}
-	if !strings.Contains(err.Error(), "refreshing updated city config") {
-		t.Fatalf("SuspendAgent error = %v, want refresh failure after mutation", err)
+	for _, want := range []string{"reloading config after suspension edit", "(the attempted edit was rolled back)"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("SuspendAgent error = %v, want the editor's reload failure and rollback (%q)", err, want)
+		}
 	}
 
 	info, err := os.Lstat(agentLink)
