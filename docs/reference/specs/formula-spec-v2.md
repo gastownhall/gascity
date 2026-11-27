@@ -887,6 +887,18 @@ always runs inside the step's working directory, so a copy found elsewhere still
 cannot start there. A failed start is not held open: it spends an attempt each
 time, and the step closes failed once its attempts run out.
 
+**Store reads from a check.** The orchestrator sets `GC_CITY` and
+`GC_CITY_PATH` in every check's environment, and `gc` resolves the city from
+them before it looks at the working directory. A `gc` or `bd` read inside a
+check therefore still works when the step's working directory is removed
+while the check runs, as it can be when the step's own bead closes. A check
+must not clear its environment (`env -i`) or `cd` elsewhere to find a city.
+When the working directory is removed or replaced while the check runs and
+the check then exits nonzero, the orchestrator appends a line saying so to
+the recorded stderr. The line is added to the record only: the run is still
+graded by its exit status, and the stderr fallback above reads the check's
+own stderr without it.
+
 A `check.path` refused on safety grounds is not in this lane: one that escapes
 the trusted roots, climbs out with `../`, or follows a symlink outside the city
 or store. Such a step is refused and closed failed. A symlink whose target does

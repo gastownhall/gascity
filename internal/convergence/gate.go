@@ -2,6 +2,7 @@ package convergence
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -30,6 +31,40 @@ type GateResult struct {
 	Stderr     string        // captured stderr (truncated to MaxOutputBytes)
 	Duration   time.Duration // wall-clock execution time
 	Truncated  bool          // true if stdout or stderr was truncated
+
+	// Note is a line gc adds about the run itself rather than the script's
+	// output, such as a working directory that vanished while the check ran.
+	// It is kept out of Stderr, which classifiers read, so it can neither
+	// push a marker out of the script's stderr nor add one to it. Record
+	// stderr through RecordedStderr, which joins the two.
+	Note string
+}
+
+// RecordedStderr returns the stderr to record for the run: Stderr with Note
+// on its own line after it, kept within MaxOutputBytes. The script's stderr
+// is cut to make room for the note, and the note itself is cut if it alone
+// exceeds the cap; cut reports whether any of the script's stderr was
+// dropped to fit it. Without a note it returns Stderr unchanged.
+func (r GateResult) RecordedStderr() (stderr string, cut bool) {
+	if r.Note == "" {
+		return r.Stderr, false
+	}
+	line := r.Note + "\n"
+	if len(line) >= MaxOutputBytes {
+		cutLine, _ := TruncateOutput([]byte(line), MaxOutputBytes)
+		return cutLine, r.Stderr != ""
+	}
+	// One byte is reserved for the newline that separates the note from a
+	// stderr that does not end in one.
+	room := MaxOutputBytes - len(line) - 1
+	stderr = r.Stderr
+	if len(stderr) > room {
+		stderr, cut = TruncateOutput([]byte(stderr), room)
+	}
+	if stderr != "" && !strings.HasSuffix(stderr, "\n") {
+		stderr += "\n"
+	}
+	return stderr + line, cut
 }
 
 // GateManualResult returns a GateResult for manual mode (no script execution).

@@ -697,12 +697,15 @@ func parsePositiveRalphTimeout(beadID, key, raw string) (time.Duration, error) {
 // has healed, so the batch is seeded with controlCompletionMetadata, which
 // blanks whichever gc.control_pending_* keys the bead carries. That rides the
 // write every launched run already makes, so every later close is clean.
+// gc.stderr carries the result's note, so gc.truncated also reports stderr
+// the note displaced.
 func persistCheckResult(store beads.GraphStore, bead beads.Bead, result convergence.GateResult) error {
+	stderr, stderrCut := result.RecordedStderr()
 	batch := controlCompletionMetadata(bead, result.Outcome)
 	batch[beadmeta.StdoutMetadataKey] = result.Stdout
-	batch[beadmeta.StderrMetadataKey] = result.Stderr
+	batch[beadmeta.StderrMetadataKey] = stderr
 	batch[beadmeta.DurationMsMetadataKey] = strconv.FormatInt(result.Duration.Milliseconds(), 10)
-	batch[beadmeta.TruncatedMetadataKey] = strconv.FormatBool(result.Truncated)
+	batch[beadmeta.TruncatedMetadataKey] = strconv.FormatBool(result.Truncated || stderrCut)
 	if result.ExitCode != nil {
 		batch[beadmeta.ExitCodeMetadataKey] = strconv.Itoa(*result.ExitCode)
 	} else {

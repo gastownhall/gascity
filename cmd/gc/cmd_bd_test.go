@@ -3549,3 +3549,37 @@ printf '{"id":"gc-1","status":"in_progress"}\n'
 		t.Fatalf("warning = %q, want one line naming ignored BD_BIN %q", msg, stale)
 	}
 }
+
+// Regression guard (#6295): a check whose working directory is removed while
+// it runs still scopes its store reads through the GC_CITY the orchestrator
+// exports, so `gc bd show <id>` resolves the city and its store without the
+// working directory. formula-spec-v2 §3.1 documents this contract.
+func TestBdResolvesCityFromGCCityWhenCwdRemoved(t *testing.T) {
+	clearCityDiscoveryEnv(t)
+	cityDir := filepath.Join(t.TempDir(), "city")
+	mkTestCity(t, cityDir)
+	wantCity := normalizePathForCompare(cityDir)
+	t.Setenv("GC_CITY", cityDir)
+	chdirIntoRemovedDir(t)
+
+	origProbe := bdBeadExists
+	t.Cleanup(func() { bdBeadExists = origProbe })
+	bdBeadExists = func(string, *config.City, execStoreTarget, string) bool { return false }
+
+	cityPath, err := resolveBdCity("")
+	if err != nil {
+		t.Fatalf("resolveBdCity(\"\") error = %v, want the GC_CITY city", err)
+	}
+	if got := normalizePathForCompare(cityPath); got != wantCity {
+		t.Fatalf("resolveBdCity(\"\") = %q, want %q", cityPath, wantCity)
+	}
+
+	cfg := &config.City{Workspace: config.Workspace{Name: "demo", Prefix: "demo"}}
+	target, err := resolveBdScopeTarget(cfg, cityPath, "", []string{"show", "demo-abc"}, false, io.Discard)
+	if err != nil {
+		t.Fatalf("resolveBdScopeTarget() error = %v, want the city store", err)
+	}
+	if target.ScopeKind != "city" || normalizePathForCompare(target.ScopeRoot) != wantCity {
+		t.Fatalf("resolveBdScopeTarget() = %+v, want the city store at %q", target, wantCity)
+	}
+}

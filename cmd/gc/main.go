@@ -860,7 +860,7 @@ func resolveContextFromDir(mode contextResolutionMode) (resolvedContext, error) 
 	}
 
 	// Step 9: Registered rig binding lookup (cwd prefix match).
-	cwd, err := os.Getwd()
+	cwd, err := cityDiscoveryCwd()
 	if err != nil {
 		return resolvedContext{}, err
 	}
@@ -879,7 +879,7 @@ func resolveContextFromDir(mode contextResolutionMode) (resolvedContext, error) 
 				"test binaries; set GC_CITY, GC_CITY_PATH, or GC_CITY_ROOT to an explicit "+
 				"synthetic city)", cwd)
 	}
-	cityPath, err := findCity(cwd)
+	cityPath, err := findCityFromCwd(cwd)
 	if err != nil {
 		return resolvedContext{}, err
 	}
@@ -1015,11 +1015,14 @@ func resolveLocalCityForRigFallback() (string, error) {
 			return gcDirCity, nil
 		}
 	}
-	cwd, err := os.Getwd()
+	cwd, err := cityDiscoveryCwd()
 	if err != nil {
+		if isCityDiscoveryNotFound(err) {
+			return "", nil
+		}
 		return "", err
 	}
-	cityPath, err := findCity(cwd)
+	cityPath, err := findCityFromCwd(cwd)
 	if err != nil {
 		if isCityDiscoveryNotFound(err) {
 			return "", nil

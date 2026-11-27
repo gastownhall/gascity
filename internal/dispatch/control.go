@@ -370,7 +370,8 @@ func evaluateRalphIteration(store beads.GraphStore, bead, iteration beads.Bead, 
 			return attemptEvaluation{}, err
 		}
 	}
-	eval := attemptEvaluation{logOutcome: checkResult.Outcome, logDetail: checkResult.Stderr}
+	stderr, _ := checkResult.RecordedStderr()
+	eval := attemptEvaluation{logOutcome: checkResult.Outcome, logDetail: stderr}
 	if checkResult.Outcome == convergence.GatePass {
 		eval.disposition = attemptPass
 	} else {

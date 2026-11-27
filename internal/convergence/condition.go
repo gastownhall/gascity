@@ -555,6 +555,13 @@ func runOnceNoPreExecRetry(ctx context.Context, scriptPath string, env Condition
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
+	var workDirAtStart os.FileInfo
+	if env.WorkDir != "" {
+		// Recorded only to notice a work dir removed while the check runs;
+		// a work dir already missing here fails at chdir below.
+		workDirAtStart, _ = os.Stat(env.WorkDir)
+	}
+
 	start := time.Now()
 	err := cmd.Run()
 	duration := time.Since(start)
@@ -592,6 +599,10 @@ func runOnceNoPreExecRetry(ctx context.Context, scriptPath string, env Condition
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			code := exitErr.ExitCode()
+			var note string
+			if workDirChangedSince(env.WorkDir, workDirAtStart) {
+				note = workDirChangedNote(env.WorkDir)
+			}
 			return GateResult{
 				Outcome:   GateFail,
 				ExitCode:  &code,
@@ -599,6 +610,7 @@ func runOnceNoPreExecRetry(ctx context.Context, scriptPath string, env Condition
 				Stderr:    errStr,
 				Duration:  duration,
 				Truncated: truncated,
+				Note:      note,
 			}
 		}
 		// Non-exit error (e.g., script not found, permission denied).
@@ -620,4 +632,25 @@ func runOnceNoPreExecRetry(ctx context.Context, scriptPath string, env Condition
 		Duration:  duration,
 		Truncated: truncated,
 	}
+}
+
+// workDirChangedSince reports whether dir, which was start when the check
+// was forked, has since been removed or replaced by a different directory.
+// It reports false when dir was not recorded at fork or when its current
+// state cannot be determined.
+func workDirChangedSince(dir string, start os.FileInfo) bool {
+	if dir == "" || start == nil {
+		return false
+	}
+	now, err := os.Stat(dir)
+	if err != nil {
+		return errors.Is(err, fs.ErrNotExist)
+	}
+	return !os.SameFile(start, now)
+}
+
+// workDirChangedNote is the GateResult.Note of a failed check whose working
+// directory was removed or replaced while the check ran.
+func workDirChangedNote(dir string) string {
+	return "gc: check working directory " + dir + " was removed or replaced while the check ran"
 }

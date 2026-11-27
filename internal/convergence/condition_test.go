@@ -745,6 +745,235 @@ func TestRunConditionUsesWorkDir(t *testing.T) {
 	}
 }
 
+// workDirGateFixture writes script outside a fresh work dir and returns a
+// ConditionEnv whose WorkDir is that work dir.
+func workDirGateFixture(t *testing.T, script string) (string, ConditionEnv) {
+	t.Helper()
+	cityDir := t.TempDir()
+	workDir := filepath.Join(cityDir, "work")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	scriptPath := filepath.Join(cityDir, "check.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\n"+script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return scriptPath, ConditionEnv{
+		BeadID:      "b-workdir",
+		CityPath:    cityDir,
+		WorkDir:     workDir,
+		WispID:      "w-workdir",
+		ArtifactDir: cityDir,
+	}
+}
+
+// workDirChangedNoteFor is the note a failed check gets when env's work dir
+// was removed or replaced while it ran.
+func workDirChangedNoteFor(env ConditionEnv) string {
+	return "gc: check working directory " + env.WorkDir + " was removed or replaced while the check ran"
+}
+
+// Regression (#6295): when the close of a check's bead removes its work dir
+// while the check runs, the failed check's recorded stderr must say so, so the
+// producer can tell a vanished directory from a genuine verdict. The note
+// travels in Note, apart from the script's stderr, and joins it only in
+// RecordedStderr.
+func TestRunConditionNotesWorkDirRemovedDuringRun(t *testing.T) {
+	// fill is recorded stderr of e's cut so the note line ends exactly at
+	// the cap: the e's, the separator newline, the note, its newline.
+	fill := func(note string) string {
+		return strings.Repeat("e", MaxOutputBytes-len(note)-2) + "\n" + note + "\n"
+	}
+	cases := []struct {
+		name string
+		// script runs as a /bin/sh check inside a fresh work dir.
+		script string
+		// wantStderr is the script's own captured stderr, exactly.
+		wantStderr string
+		// wantCaptureTruncated is whether capturing the script's own output
+		// already truncated it.
+		wantCaptureTruncated bool
+		// wantRecorded is the exact recorded stderr for the run's note.
+		wantRecorded func(note string) string
+		// wantCut is whether recording the note dropped script stderr.
+		wantCut bool
+	}{
+		{
+			name:       "removed",
+			script:     "rm -rf \"$GC_WORK_DIR\"\necho 'artifact invalid' >&2\nexit 1\n",
+			wantStderr: "artifact invalid\n",
+			wantRecorded: func(note string) string {
+				return "artifact invalid\n" + note + "\n"
+			},
+		},
+		{
+			// The replacement is created before the original is removed so
+			// it cannot reuse the original's inode.
+			name:       "replaced",
+			script:     "mkdir \"$GC_WORK_DIR.new\"\nrm -rf \"$GC_WORK_DIR\"\nmv \"$GC_WORK_DIR.new\" \"$GC_WORK_DIR\"\necho 'artifact invalid' >&2\nexit 1\n",
+			wantStderr: "artifact invalid\n",
+			wantRecorded: func(note string) string {
+				return "artifact invalid\n" + note + "\n"
+			},
+		},
+		{
+			// Under the cap on its own, so only the note can cut it.
+			name:         "stderr below cap",
+			script:       "head -c 4000 /dev/zero | tr '\\0' 'e' >&2\nrm -rf \"$GC_WORK_DIR\"\nexit 1\n",
+			wantStderr:   strings.Repeat("e", 4000),
+			wantRecorded: fill,
+			wantCut:      true,
+		},
+		{
+			name:                 "stderr at cap",
+			script:               "head -c 8192 /dev/zero | tr '\\0' 'e' >&2\nrm -rf \"$GC_WORK_DIR\"\nexit 1\n",
+			wantStderr:           strings.Repeat("e", MaxOutputBytes),
+			wantCaptureTruncated: true,
+			wantRecorded:         fill,
+			wantCut:              true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			script, env := workDirGateFixture(t, tc.script)
+			note := workDirChangedNoteFor(env)
+			// The record holds this much of the script's stderr beside the
+			// note: the cap less the note, its newline, and a separator.
+			if room := MaxOutputBytes - len(note) - 2; tc.wantCut && len(tc.wantStderr) <= room {
+				t.Fatalf("fixture: %d bytes of stderr fit beside a %d-byte note, so recording cannot cut", len(tc.wantStderr), len(note))
+			}
+
+			result := RunCondition(context.Background(), script, env, 5*time.Second, 0)
+			if result.Outcome != GateFail {
+				t.Fatalf("Outcome = %q, want %q (stderr=%q)", result.Outcome, GateFail, truncateForLog(result.Stderr))
+			}
+			if result.ExitCode == nil || *result.ExitCode != 1 {
+				t.Fatalf("ExitCode = %v, want 1", result.ExitCode)
+			}
+			if result.Note != note {
+				t.Errorf("Note = %q, want %q", result.Note, note)
+			}
+			if result.Stderr != tc.wantStderr {
+				t.Errorf("Stderr = %q, want the script's own stderr %q", truncateForLog(result.Stderr), truncateForLog(tc.wantStderr))
+			}
+			if result.Truncated != tc.wantCaptureTruncated {
+				t.Errorf("Truncated = %v, want %v", result.Truncated, tc.wantCaptureTruncated)
+			}
+			recorded, cut := result.RecordedStderr()
+			if want := tc.wantRecorded(note); recorded != want {
+				t.Errorf("RecordedStderr() = %q, want %q", truncateForLog(recorded), truncateForLog(want))
+			}
+			if len(recorded) > MaxOutputBytes {
+				t.Errorf("len(RecordedStderr()) = %d, want <= %d", len(recorded), MaxOutputBytes)
+			}
+			if cut != tc.wantCut {
+				t.Errorf("RecordedStderr() cut = %v, want %v", cut, tc.wantCut)
+			}
+			if reason, blind := ClassifyInfraBlind(result); blind {
+				t.Errorf("ClassifyInfraBlind() = (%q, true), want the note to leave infra classification unchanged", reason)
+			}
+		})
+	}
+}
+
+// The work-dir note must not hide an infrastructure marker from
+// ClassifyInfraBlind. A blind read whose stderr fits under the cap on its own,
+// with the marker at its tail, still classifies as blind when its work dir
+// also vanished; otherwise its attempt-free re-run becomes a semantic failure.
+func TestRunConditionWorkDirNoteKeepsInfraMarker(t *testing.T) {
+	const marker = "Error 1045: Access denied for user"
+	script, env := workDirGateFixture(t,
+		"head -c 4000 /dev/zero | tr '\\0' x >&2\necho >&2\necho '"+marker+"' >&2\nrm -rf \"$GC_WORK_DIR\"\nexit 1\n")
+	note := workDirChangedNoteFor(env)
+	wantStderr := strings.Repeat("x", 4000) + "\n" + marker + "\n"
+	// The record holds this much of the script's stderr beside the note; the
+	// case means something only when that cannot hold the whole marker.
+	if room, markerEnd := MaxOutputBytes-len(note)-2, strings.Index(wantStderr, marker)+len(marker); room >= markerEnd {
+		t.Fatalf("fixture: a %d-byte note leaves room for the whole marker, so it cannot displace it", len(note))
+	}
+
+	result := RunCondition(context.Background(), script, env, 5*time.Second, 0)
+	if result.Outcome != GateFail {
+		t.Fatalf("Outcome = %q, want %q (stderr=%q)", result.Outcome, GateFail, truncateForLog(result.Stderr))
+	}
+	if reason, blind := ClassifyInfraBlind(result); !blind {
+		t.Fatalf("ClassifyInfraBlind() = (%q, false), want blind: the work-dir note must not push %q out of the classified stderr (stderr=%q)",
+			reason, marker, truncateForLog(result.Stderr))
+	}
+	if result.Stderr != wantStderr {
+		t.Errorf("Stderr = %q, want the script's own stderr %q", truncateForLog(result.Stderr), truncateForLog(wantStderr))
+	}
+	if result.Note != note {
+		t.Errorf("Note = %q, want %q: the vanished work dir is still reported", result.Note, note)
+	}
+	if recorded, _ := result.RecordedStderr(); !strings.HasSuffix(recorded, "\n"+note+"\n") {
+		t.Errorf("RecordedStderr() = %q, want it to end with the note on its own line", truncateForLog(recorded))
+	}
+}
+
+// The work-dir note is added only to a failed check whose work dir changed:
+// an intact work dir, a passing check, and a timed-out check keep the
+// script's stderr exactly.
+func TestRunConditionNoNoteWhenWorkDirIntact(t *testing.T) {
+	cases := []struct {
+		name        string
+		script      string
+		timeout     time.Duration
+		wantOutcome string
+		wantStderr  string
+	}{
+		{
+			name:        "intact",
+			script:      "echo x >&2\nexit 1\n",
+			timeout:     5 * time.Second,
+			wantOutcome: GateFail,
+			wantStderr:  "x\n",
+		},
+		{
+			name:        "removed then pass",
+			script:      "rm -rf \"$GC_WORK_DIR\"\necho x >&2\nexit 0\n",
+			timeout:     5 * time.Second,
+			wantOutcome: GatePass,
+			wantStderr:  "x\n",
+		},
+		{
+			name:        "timeout after removal",
+			script:      "rm -rf \"$GC_WORK_DIR\"\necho x >&2\nexec sleep 30\n",
+			timeout:     500 * time.Millisecond,
+			wantOutcome: GateTimeout,
+			wantStderr:  "x\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			script, env := workDirGateFixture(t, tc.script)
+
+			result := RunCondition(context.Background(), script, env, tc.timeout, 0)
+			if result.Outcome != tc.wantOutcome {
+				t.Fatalf("Outcome = %q, want %q (stderr=%q)", result.Outcome, tc.wantOutcome, result.Stderr)
+			}
+			if result.Stderr != tc.wantStderr {
+				t.Errorf("Stderr = %q, want exactly %q", result.Stderr, tc.wantStderr)
+			}
+			if result.Note != "" {
+				t.Errorf("Note = %q, want empty", result.Note)
+			}
+			if recorded, cut := result.RecordedStderr(); recorded != tc.wantStderr || cut {
+				t.Errorf("RecordedStderr() = (%q, %v), want (%q, false)", recorded, cut, tc.wantStderr)
+			}
+		})
+	}
+}
+
+// truncateForLog keeps a failure message readable when stderr is large.
+func truncateForLog(s string) string {
+	const keep = 200
+	if len(s) <= keep {
+		return s
+	}
+	return "..." + s[len(s)-keep:]
+}
+
 func TestRunConditionUsesStorePathAsDefaultWorkDir(t *testing.T) {
 	cityDir := t.TempDir()
 	storeDir := t.TempDir()

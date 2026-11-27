@@ -525,6 +525,51 @@ func TestConfigureTestscriptEnvDefaultsPreservesOverrides(t *testing.T) {
 
 // --- findCity ---
 
+// Regression (#6295): a discovery miss from a working directory that has
+// been removed must name that directory and say it is gone, so it cannot be
+// mistaken for an unscoped read from an unrelated directory.
+func TestFindCityFromCwdNonexistentDirNamesIt(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GC_CEILING_DIRECTORIES", root)
+	removed := filepath.Join(root, "work")
+
+	_, err := findCityFromCwd(removed)
+	if err == nil {
+		t.Fatalf("findCityFromCwd(%q) = nil error; want a removed-directory error", removed)
+	}
+	msg := err.Error()
+	for _, want := range []string{"not in a city directory", removed, "no longer exists", "GC_CITY"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error = %q, want it to contain %q", msg, want)
+		}
+	}
+	var gone *cwdGoneError
+	if !errors.As(err, &gone) || gone.Dir != removed {
+		t.Errorf("errors.As(%v, *cwdGoneError) = %+v, want Dir %q", err, gone, removed)
+	}
+}
+
+func TestFindCityFromCwdExistingNonCityDirUnchanged(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GC_CEILING_DIRECTORIES", root)
+	dir := filepath.Join(root, "plain")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := findCityFromCwd(dir)
+	if err == nil {
+		t.Fatalf("findCityFromCwd(%q) = nil error; want the no-city error", dir)
+	}
+	if got, want := err.Error(), "not in a city directory (no city.toml or .gc/ found)"; got != want {
+		t.Errorf("error = %q, want %q", got, want)
+	}
+	var gone *cwdGoneError
+	if errors.As(err, &gone) {
+		t.Errorf("errors.As(%v, *cwdGoneError) = true, want the generic miss", err)
+	}
+}
+
 func TestFindCity(t *testing.T) {
 	t.Run("canonical", func(t *testing.T) {
 		dir := t.TempDir()
