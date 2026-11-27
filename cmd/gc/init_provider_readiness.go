@@ -334,13 +334,20 @@ func collectInitProviderTargets(cfg *config.City) ([]initProviderTarget, []strin
 }
 
 func explicitProviderRefs(cfg *config.City) []string {
+	return providerRefsFor(cfg.Workspace.Provider, cfg.Agents)
+}
+
+// providerRefsFor returns the sorted, unique provider names referenced by the
+// workspace provider and by agents that do not override their command with
+// start_command.
+func providerRefsFor(workspaceProvider string, agents []config.Agent) []string {
 	seen := make(map[string]struct{})
 	var refs []string
-	if name := strings.TrimSpace(cfg.Workspace.Provider); name != "" {
+	if name := strings.TrimSpace(workspaceProvider); name != "" {
 		seen[name] = struct{}{}
 		refs = append(refs, name)
 	}
-	for _, agent := range cfg.Agents {
+	for _, agent := range agents {
 		if agent.StartCommand != "" {
 			continue
 		}
@@ -390,6 +397,12 @@ func seedDeferredManagedBeadsBeforeProviderReadiness(cityPath string, cfg *confi
 	return nil
 }
 
+// providerReadinessProbeName returns the readiness probe that gc init's
+// preflight and gc doctor run for a provider reference, or "" when no probe
+// applies. A probe-supported builtin name is its own probe, whatever command
+// its [providers] entry sets. Any other [providers] entry maps by the binary
+// its own path_check or command names, or, when it sets neither, by the
+// command its base chain resolves to.
 func providerReadinessProbeName(ref string, cfg *config.City) string {
 	if api.SupportsProviderReadiness(ref) {
 		return ref
@@ -398,9 +411,19 @@ func providerReadinessProbeName(ref string, cfg *config.City) string {
 	if !ok {
 		return ""
 	}
-	candidate := strings.TrimSpace(spec.PathCheck)
+	if strings.TrimSpace(spec.PathCheck) == "" && strings.TrimSpace(spec.Command) == "" {
+		return inheritedReadinessProbeName(ref, cfg)
+	}
+	return binaryReadinessProbeName(spec.PathCheck, spec.Command)
+}
+
+// binaryReadinessProbeName maps the binary a provider names, its path_check or
+// else a single-word command, to the readiness probe of that binary, or "" when
+// no probe supports it.
+func binaryReadinessProbeName(pathCheck, command string) string {
+	candidate := strings.TrimSpace(pathCheck)
 	if candidate == "" {
-		command := strings.TrimSpace(spec.Command)
+		command = strings.TrimSpace(command)
 		if command != "" && !strings.ContainsAny(command, " \t") {
 			candidate = command
 		}
@@ -410,6 +433,30 @@ func providerReadinessProbeName(ref string, cfg *config.City) string {
 		return candidate
 	}
 	return ""
+}
+
+// inheritedReadinessProbeName maps a provider that sets neither path_check nor
+// command by the command its resolved base chain launches: that command's
+// binary when a probe supports it, else the chain's builtin ancestor while the
+// chain still runs that builtin's own command. A chain that swaps in another
+// command, such as a wrapper, maps to no probe, as does every such provider in
+// a config loaded without its resolved-provider cache. An ancestor's
+// path_check does not count: the runtime's PATH check reads only a provider's
+// own path_check, else its resolved command.
+func inheritedReadinessProbeName(ref string, cfg *config.City) string {
+	resolved, ok := config.ResolvedProviderCached(cfg, ref)
+	if !ok {
+		return ""
+	}
+	if probe := binaryReadinessProbeName("", resolved.Command); probe != "" {
+		return probe
+	}
+	ancestor := resolved.BuiltinAncestor
+	builtin, ok := config.BuiltinProviders()[ancestor]
+	if !ok || builtin.Command != resolved.Command || !api.SupportsProviderReadiness(ancestor) {
+		return ""
+	}
+	return ancestor
 }
 
 func providerStatusSummary(status string) string {

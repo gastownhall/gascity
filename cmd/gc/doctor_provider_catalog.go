@@ -96,32 +96,119 @@ func (c *providerCatalogReadinessAdvisoryCheck) Run(_ *doctor.CheckContext) *doc
 		r.Severity = doctor.SeverityAdvisory
 		return r
 	}
+	referenced := referencedReadinessProviders(cfg)
+	var auth []providerAuthFinding
 	var missing []string
 	for _, name := range names {
 		item, ok := items[name]
-		if !ok || item.Status != api.ProbeStatusConfigured {
-			continue
-		}
-		if _, explicit := cfg.Providers[name]; explicit {
+		if !ok {
 			continue
 		}
 		displayName := strings.TrimSpace(item.DisplayName)
 		if displayName == "" {
 			displayName = name
 		}
-		missing = append(missing, fmt.Sprintf("%s is configured locally but not listed in [providers.%s]", displayName, name))
+		switch item.Status {
+		case api.ProbeStatusNeedsAuth:
+			refs := referenced[name]
+			if len(refs) == 0 {
+				continue
+			}
+			auth = append(auth, providerAuthFinding{
+				probeName:   name,
+				displayName: displayName,
+				refs:        refs,
+				detail:      strings.TrimSpace(item.Detail),
+			})
+		case api.ProbeStatusConfigured:
+			if _, explicit := cfg.Providers[name]; explicit {
+				continue
+			}
+			missing = append(missing, fmt.Sprintf("%s is configured locally but not listed in [providers.%s]", displayName, name))
+		}
 	}
-	if len(missing) == 0 {
+	if len(auth) == 0 && len(missing) == 0 {
 		r.Status = doctor.StatusOK
 		r.Message = "configured local providers are explicit"
 		return r
 	}
 	r.Status = doctor.StatusWarning
 	r.Severity = doctor.SeverityAdvisory
-	r.Message = fmt.Sprintf("%d configured local provider(s) not explicit", len(missing))
-	r.Details = missing
-	r.FixHint = "add provider aliases for local CLIs you want this city to use"
+	var messages, hints []string
+	if len(auth) > 0 {
+		displayNames := make([]string, 0, len(auth))
+		for _, finding := range auth {
+			displayNames = append(displayNames, finding.displayName)
+			r.Details = append(r.Details, finding.detailLine())
+			if hint := finding.fixHint(); hint != "" {
+				hints = append(hints, finding.displayName+": "+hint)
+			}
+		}
+		messages = append(messages, fmt.Sprintf("%d referenced provider(s) need authentication: %s", len(auth), strings.Join(displayNames, ", ")))
+	}
+	if len(missing) > 0 {
+		messages = append(messages, fmt.Sprintf("%d configured local provider(s) not explicit", len(missing)))
+		r.Details = append(r.Details, missing...)
+		hints = append(hints, "add provider aliases for local CLIs you want this city to use")
+	}
+	r.Message = strings.Join(messages, "; ")
+	r.FixHint = strings.Join(hints, "\n")
 	return r
+}
+
+// providerAuthFinding is a provider CLI the city references whose fresh
+// readiness probe reported that it needs authentication.
+type providerAuthFinding struct {
+	probeName   string
+	displayName string
+	refs        []string
+	detail      string
+}
+
+func (f providerAuthFinding) detailLine() string {
+	quoted := make([]string, 0, len(f.refs))
+	for _, ref := range f.refs {
+		quoted = append(quoted, fmt.Sprintf("%q", ref))
+	}
+	noun := "provider"
+	if len(quoted) > 1 {
+		noun = "providers"
+	}
+	line := fmt.Sprintf("%s %s (referenced as %s %s)", f.displayName, providerStatusSummary(api.ProbeStatusNeedsAuth), noun, strings.Join(quoted, ", "))
+	if f.detail != "" {
+		line += ": " + f.detail
+	}
+	return line
+}
+
+func (f providerAuthFinding) fixHint() string {
+	if hint := providerStatusFixHint(f.probeName, api.ProbeStatusNeedsAuth); hint != "" {
+		return hint
+	}
+	return f.detail
+}
+
+// referencedReadinessProviders maps each readiness probe name to the sorted
+// provider keys the city references through it, using gc init's reference
+// rules and probe mapping. Implicit agents, which config loading injects for
+// every [providers.*] entry, do not count as references: listing a provider
+// is not using it. References that no readiness probe can verify are omitted.
+func referencedReadinessProviders(cfg *config.City) map[string][]string {
+	declared := make([]config.Agent, 0, len(cfg.Agents))
+	for _, agent := range cfg.Agents {
+		if !agent.Implicit {
+			declared = append(declared, agent)
+		}
+	}
+	referenced := make(map[string][]string)
+	for _, ref := range providerRefsFor(cfg.Workspace.Provider, declared) {
+		probe := providerReadinessProbeName(ref, cfg)
+		if probe == "" {
+			continue
+		}
+		referenced[probe] = append(referenced[probe], ref)
+	}
+	return referenced
 }
 
 func (c *providerCatalogReadinessAdvisoryCheck) CanFix() bool { return false }
