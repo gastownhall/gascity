@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/inputadmission"
 )
 
 // seedDoneWorkflow builds a store holding a workflow root whose input convoy
@@ -469,6 +470,11 @@ func TestDoHookClaimStillClaimsWhenInputNotDone(t *testing.T) {
 		RetireWorkflow: func(_ context.Context, _ string, _ []string, verdict workflowInputVerdict) error {
 			t.Fatalf("unexpected retirement of %s", verdict.RootID)
 			return nil
+		},
+		// The input is not done but carries no readiness fact: admissible,
+		// judged over the stubbed store seams (#8832).
+		InputAdmission: func(context.Context, string, []string, []beads.Bead) (map[string]inputadmission.Withhold, error) {
+			return nil, nil
 		},
 		ListContinuation: func(_ context.Context, _ string, _ []string, _, _ string) ([]beads.Bead, error) {
 			return nil, nil

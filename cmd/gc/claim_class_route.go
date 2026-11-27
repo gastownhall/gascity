@@ -140,11 +140,13 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
+	"github.com/gastownhall/gascity/internal/inputadmission"
 	"github.com/gastownhall/gascity/internal/storebinding"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
@@ -844,6 +846,21 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 			return failPurgedWorkflow(ctx, route.class, verdict.RootID)
 		}
 		return skipDoneWorkflow(route.class, verdict.RootID)
+	}
+
+	// Input admission (#8832): the same rule the ready arm and the demand pass
+	// apply, read across the two legs a split city holds — a row's root and
+	// stop ancestry from whichever leg holds it, the input convoy and its
+	// members from every leg — so the hook refuses the rows the controller
+	// counts as withheld. The work leg serves first (the work query is where
+	// the candidates came from); the judge probes every source anyway.
+	ops.InputAdmission = func(ctx context.Context, dir string, env []string, candidates []beads.Bead) (map[string]inputadmission.Withhold, error) {
+		work := base.WorkflowStore(ctx, dir, env, "", "")
+		adm := inputadmission.New([]inputadmission.Source{
+			{Label: "work", Live: beads.LiveFor(work), Work: beads.WorkStore{Store: work}},
+			{Label: "graph", Live: beads.LiveFor(route.class), Work: beads.WorkStore{Store: route.class}},
+		}, time.Now())
+		return adm.Judge(ctx, 0, candidates)
 	}
 
 	// A stale-lease reclaim of a binding-resident bead belongs to the binding.

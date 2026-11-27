@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/inputadmission"
 )
 
 func TestHookClaimWithBdStoreReloadsCanonicalBeadAfterPartialMutation(t *testing.T) {
@@ -145,6 +146,11 @@ func TestDoHookClaimUsesSelectedStoreContextForMutationAndContinuation(t *testin
 		},
 		DrainAck:                 func(io.Writer) error { return nil },
 		EnqueueContinuationNudge: func(string, string, io.Writer) {},
+		// Every store seam is stubbed here, so input admission answers over
+		// nothing: every candidate admissible (#8832).
+		InputAdmission: func(context.Context, string, []string, []beads.Bead) (map[string]inputadmission.Withhold, error) {
+			return nil, nil
+		},
 	}
 
 	var stdout, stderr bytes.Buffer

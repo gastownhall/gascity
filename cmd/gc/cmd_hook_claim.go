@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/inputadmission"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/pathutil"
@@ -269,6 +270,13 @@ type hookClaimOps struct {
 	// ProveInputAbsent proves workflow input ids absent from every store of
 	// the city. Nil proves nothing, so no input is ever read as purged.
 	ProveInputAbsent workflowInputAbsenceProver
+	// InputAdmission judges claim candidates for current input readiness
+	// (#8832) and returns the rows it withholds: the same typed verdict the
+	// ready arm and the controller's demand pass apply, so a candidate whose
+	// workflow input is held, blocked, deferred or waiting on an unsatisfied
+	// prerequisite is refused by every door that could hand it to an agent,
+	// whatever query served it. A failed judgment fails the claim.
+	InputAdmission hookInputAdmissionFunc
 	// EmitClaimRejected publishes a bead.claim_rejected event when a claim is
 	// lost to a different live claimant (ADR-0009). Best-effort.
 	EmitClaimRejected hookEmitClaimRejectedFunc
@@ -408,13 +416,19 @@ type hookClaimOps struct {
 }
 
 type (
-	hookClaimFunc                 func(context.Context, string, []string, string, string) (beads.Bead, bool, error)
-	hookListContinuationFunc      func(context.Context, string, []string, string, string) ([]beads.Bead, error)
-	hookAssignContinuationFunc    func(context.Context, string, []string, string, string) error
-	hookDrainAckFunc              func(io.Writer) error
-	hookDrainPendingFunc          func(sessionID string) (bool, error)
-	hookInputVerdictFunc          func(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string, prove workflowInputAbsenceProver) (workflowInputVerdict, error)
-	hookRetireWorkflowFunc        func(ctx context.Context, dir string, env []string, verdict workflowInputVerdict) error
+	hookClaimFunc              func(context.Context, string, []string, string, string) (beads.Bead, bool, error)
+	hookListContinuationFunc   func(context.Context, string, []string, string, string) ([]beads.Bead, error)
+	hookAssignContinuationFunc func(context.Context, string, []string, string, string) error
+	hookDrainAckFunc           func(io.Writer) error
+	hookDrainPendingFunc       func(sessionID string) (bool, error)
+	hookInputVerdictFunc       func(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string, prove workflowInputAbsenceProver) (workflowInputVerdict, error)
+	hookRetireWorkflowFunc     func(ctx context.Context, dir string, env []string, verdict workflowInputVerdict) error
+	// hookInputAdmissionFunc judges claim candidates for current input
+	// readiness (#8832) over the stores the claim reads, returning the rows
+	// input admission withholds, keyed by row id with their verdicts. A row
+	// with no entry is admissible; a failed judgment is an error the claim
+	// fails on rather than serving a row it could not audit.
+	hookInputAdmissionFunc        func(ctx context.Context, dir string, env []string, candidates []beads.Bead) (map[string]inputadmission.Withhold, error)
 	hookEmitClaimRejectedFunc     func(beadID, existingClaimant, attemptedClaimant string)
 	hookResolveWorkBranchFunc     func(tree hookClaimWorkTree) string
 	hookResolveSessionWorkDirFunc func(sessionID string) string
@@ -626,6 +640,19 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		return hookClaimResult{}
 	}
 
+	// #8832: refuse, still before any tier claims, the candidates input
+	// admission withholds — the same rule the ready arm and the controller's
+	// demand pass apply, judged through the same typed verdict. The gate
+	// writes nothing; a judgment that fails fails the claim.
+	kept, err := withholdInputGatedCandidates(candidates, *opts, *ops, dir, stderr)
+	if err != nil {
+		return hookClaimResult{terminal: true, code: 1}
+	}
+	if len(kept) == 0 {
+		return hookClaimResult{}
+	}
+	candidates = kept
+
 	if result, bead, ok := hookClaimExistingAssignment(candidates, *opts); ok {
 		// Adoption mints no CAS, so until now it minted its receipt on the word
 		// of the work query alone — and a stale caching-store row survives long
@@ -691,6 +718,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	}
 	if ops.InputVerdict == nil {
 		ops.InputVerdict = hookInputDoneWithBdStore
+	}
+	if ops.InputAdmission == nil {
+		ops.InputAdmission = hookInputAdmissionWithBdStore
 	}
 	if ops.RetireWorkflow == nil {
 		ops.RetireWorkflow = hookRetireWorkflowWithBdStore
@@ -2342,6 +2372,41 @@ func retireDoneWorkflowCandidates(candidates []beads.Bead, opts hookClaimOptions
 	return kept
 }
 
+// withholdInputGatedCandidates drops the candidates input admission withholds
+// (#8832): a row whose workflow input is held, blocked, deferred or waiting on
+// an unsatisfied prerequisite is refused by the ready arm and the controller's
+// demand pass, and the hook — the third door that could hand it to an agent —
+// refuses it too, whatever query served it (a work_query is admission-blind;
+// a custom query's rows are post-filtered here). Each refusal names the
+// verdict's facts on stderr. Unlike retirement this gate writes nothing: the
+// row is simply not claimable yet. A failed judgment fails the claim — a row
+// served unaudited is how the doors disagree.
+func withholdInputGatedCandidates(candidates []beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) ([]beads.Bead, error) {
+	if ops.InputAdmission == nil {
+		return candidates, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
+	defer cancel()
+	withheld, err := ops.InputAdmission(ctx, dir, opts.Env, candidates)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: checking input admission: %v\n", err) //nolint:errcheck
+		return nil, err
+	}
+	if len(withheld) == 0 {
+		return candidates, nil
+	}
+	kept := candidates[:0:0]
+	for _, candidate := range candidates {
+		w, held := withheld[candidate.ID]
+		if !held {
+			kept = append(kept, candidate)
+			continue
+		}
+		fmt.Fprintf(stderr, "gc hook --claim: skipped %s: %s (root %s, input convoy %s)\n", candidate.ID, w, w.RootID, w.ConvoyID) //nolint:errcheck
+	}
+	return kept, nil
+}
+
 // hookRetireIfInputSettled reports whether candidate belongs to a workflow
 // whose input convoy work is already terminal, or proven to exist in no store,
 // and, if so, retires that workflow (root + open steps closed as skipped, or
@@ -2546,6 +2611,20 @@ const hookSkipDoneWorkflowCloseReason = "hook --claim: input convoy work already
 // over the bd store at dir.
 func hookInputDoneWithBdStore(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string, prove workflowInputAbsenceProver) (workflowInputVerdict, error) {
 	return workflowInputDone(ctx, beads.WorkStore{Store: hookClaimBdStoreContext(ctx, dir, env, "")}, candidate, identityCandidates, prove)
+}
+
+// hookInputAdmissionWithBdStore is the default InputAdmission seam: the
+// input-admission judge (#8832) over the bd store at dir — the same rule the
+// ready arm and the controller's demand pass apply, read live from the one
+// store a unified city holds.
+func hookInputAdmissionWithBdStore(ctx context.Context, dir string, env []string, candidates []beads.Bead) (map[string]inputadmission.Withhold, error) {
+	store := hookClaimBdStoreContext(ctx, dir, env, "")
+	adm := inputadmission.New([]inputadmission.Source{{
+		Label: "city",
+		Live:  beads.LiveFor(store),
+		Work:  beads.WorkStore{Store: store},
+	}}, time.Now())
+	return adm.Judge(ctx, 0, candidates)
 }
 
 func hookClaimWithBdStore(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {

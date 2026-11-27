@@ -321,7 +321,7 @@ cmd/gc/city_status_snapshot.go	openCityStatusStore	raw-result	1
 cmd/gc/claim_class_route.go	claimRouteTopology	raw-param	1
 cmd/gc/claim_class_route.go	claimRouteTopology	raw-result	1
 cmd/gc/claim_class_route.go	classRoutedHookClaimOps	cap-assert	1
-cmd/gc/claim_class_route.go	classRoutedHookClaimOps	mint	1
+cmd/gc/claim_class_route.go	classRoutedHookClaimOps	mint	3
 cmd/gc/claim_class_route.go	classRoutedHookClaimOps	raw-result	1
 cmd/gc/claim_class_route.go	hookClaimClassRoute	raw-field	2
 cmd/gc/claim_class_route.go	hookClaimClassRoute.emitExecutionStepStarted	mint	1
@@ -579,6 +579,7 @@ cmd/gc/cmd_hook_claim.go	emitExecutionStepStarted	mint	1
 cmd/gc/cmd_hook_claim.go	hookClaimBdStore	raw-result	1
 cmd/gc/cmd_hook_claim.go	hookClaimBdStoreContext	raw-result	1
 cmd/gc/cmd_hook_claim.go	hookClaimWorkflowStop	mint	1
+cmd/gc/cmd_hook_claim.go	hookInputAdmissionWithBdStore	mint	1
 cmd/gc/cmd_hook_claim.go	hookInputDoneWithBdStore	mint	1
 cmd/gc/cmd_hook_claim.go	hookWorkflowStoreFunc	raw-type	1
 cmd/gc/cmd_hook_claim.go	hookWorkflowStoreWithBdStore	raw-result	1

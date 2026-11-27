@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/inputadmission"
 )
 
 // setHookRunExecutableForTest stubs the re-exec target of `gc hook run` to the
@@ -400,6 +401,11 @@ func TestDoHookClaimPromotesReadyAssignment(t *testing.T) {
 		ListContinuation: func(context.Context, string, []string, string, string) ([]beads.Bead, error) {
 			return nil, nil
 		},
+		// Every store seam is stubbed here, so input admission answers over
+		// nothing: every candidate admissible (#8832).
+		InputAdmission: func(context.Context, string, []string, []beads.Bead) (map[string]inputadmission.Withhold, error) {
+			return nil, nil
+		},
 	}
 	opts := hookClaimOptions{
 		Assignee:           "worker-canonical",
@@ -631,6 +637,11 @@ func TestDoHookClaimClaimsRoutedUnassignedWork(t *testing.T) {
 			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
 		},
 		ListContinuation: func(context.Context, string, []string, string, string) ([]beads.Bead, error) {
+			return nil, nil
+		},
+		// Every store seam is stubbed here, so input admission answers over
+		// nothing: every candidate admissible (#8832).
+		InputAdmission: func(context.Context, string, []string, []beads.Bead) (map[string]inputadmission.Withhold, error) {
 			return nil, nil
 		},
 	}
@@ -1282,6 +1293,11 @@ func TestDoHookClaimPreassignsContinuationGroupSiblings(t *testing.T) {
 		AssignContinuation: func(_ context.Context, _ string, _ []string, beadID, assignee string) error {
 			assigned = append(assigned, beadID+"="+assignee)
 			return nil
+		},
+		// Every store seam is stubbed here, so input admission answers over
+		// nothing: every candidate admissible (#8832).
+		InputAdmission: func(context.Context, string, []string, []beads.Bead) (map[string]inputadmission.Withhold, error) {
+			return nil, nil
 		},
 	}
 	opts := hookClaimOptions{

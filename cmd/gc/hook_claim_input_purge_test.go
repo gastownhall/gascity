@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/inputadmission"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
@@ -227,7 +228,14 @@ func purgeClaimOps(t *testing.T, cityDir string, cfg *config.City, store beads.S
 			return skipDoneWorkflow(store, verdict.RootID)
 		},
 		ProveInputAbsent: city.claimOps().ProveInputAbsent,
-		DrainAck:         func(io.Writer) error { return nil },
+		// This family tests the retire and absence-proof path over placeholder
+		// inputs a judge cannot resolve, so input admission answers
+		// admissible (#8832); a row the retirement skips reaches the gate and
+		// is kept, exactly what these tests assert.
+		InputAdmission: func(context.Context, string, []string, []beads.Bead) (map[string]inputadmission.Withhold, error) {
+			return nil, nil
+		},
+		DrainAck: func(io.Writer) error { return nil },
 		ListContinuation: func(_ context.Context, _ string, _ []string, _, _ string) ([]beads.Bead, error) {
 			return nil, nil
 		},

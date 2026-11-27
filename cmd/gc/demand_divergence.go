@@ -142,7 +142,19 @@ func classifyDemandTrigger(triggerID, dir string, opts hookClaimOptions, ops hoo
 	if status != "open" || !demandRowServable(bead) || !hookClaimMatchesRoute(bead, opts.RouteTargets) {
 		return status, events.DemandClaimBenign
 	}
-	switch classifyDemandRowClaimability(bead, ops.nowOrWallClock(), false) {
+	// #8832: a withheld trigger is the same proof a held row is — the hook
+	// refuses it on every path — judged through the claim path's own seam. A
+	// failed judgment is a failed read of the trigger: it classifies unknown
+	// rather than manufacturing either verdict.
+	withheld := false
+	if ops.InputAdmission != nil {
+		verdicts, err := ops.InputAdmission(ctx, dir, opts.Env, []beads.Bead{bead})
+		if err != nil {
+			return demandTriggerUnreadable, events.DemandClaimUnknown
+		}
+		_, withheld = verdicts[triggerID]
+	}
+	switch classifyDemandRowClaimability(bead, ops.nowOrWallClock(), withheld) {
 	case demandRowClaimable:
 		// Open, servable, route-matching, and claimable right now — the agreement
 		// invariant breaking.

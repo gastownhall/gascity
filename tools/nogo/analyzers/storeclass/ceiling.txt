@@ -5,7 +5,7 @@
 # coordinator decision, made by hand, and visible in review.
 cmd/gc	cache-peel	20
 cmd/gc	cap-assert	98
-cmd/gc	mint	164
+cmd/gc	mint	167
 cmd/gc	raw-field	177
 cmd/gc	raw-param	1076
 cmd/gc	raw-result	268
