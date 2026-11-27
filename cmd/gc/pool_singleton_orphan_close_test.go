@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"slices"
 	"testing"
 	"time"
 
@@ -433,6 +434,55 @@ func TestCanonicalSingletonOrphanCloseSkipsTransientAndNamedRows(t *testing.T) {
 		info.ConfiguredNamedSession = true
 		if identity, ok := canonicalSingletonSeatIdentity(info, e.cfg); ok {
 			t.Fatalf("named session row reports canonical singleton identity %q", identity)
+		}
+	})
+}
+
+// AC-7: the v2 allocator's close of AC-1's seat lands as legacy's does: the
+// row closes over claims under its alias, which keep it, and a claim under
+// the row's own bead ID still refuses the close (AC-3's rule).
+func TestV2CloseOrphanedCanonicalSingletonKeepsIdentityClaims(t *testing.T) {
+	seat := func(t *testing.T) *closeCase {
+		c := newCloseCase(t, livenessGone, desireDrain,
+			"template", "rig/claude", "agent_name", "rig/claude", "alias", "rig/claude",
+			"state", "asleep", "sleep_reason", string(session.SleepReasonIdle), "pool_slot", "")
+		c.entry().DrainReason, c.entry().Template = drainOrphaned, "rig/claude"
+		c.cfg.Agents = append(c.cfg.Agents, singletonOrphanAgent())
+		c.w.Env = &reconcileEnv{Cfg: c.cfg}
+		return c
+	}
+	t.Run("claims under the alias are kept", func(t *testing.T) {
+		c := seat(t)
+		kept := createWork(t, c.store, "open", "rig/claude", nil)
+		it := c.decide()
+		if it.Reason != decideCloseOrphan || it.Closing.Phantom || !slices.Equal(it.Closing.Preserve, []string{"rig/claude"}) {
+			t.Fatalf("decideRow = %q closing %+v, want an orphan close keeping rig/claude", it.Reason, it.Closing)
+		}
+		if s := c.run(t, gone().tmux()); s.Outcome != settledLanded || !s.Closed {
+			t.Fatalf("settlement %+v, want the close landed over the identity's claim", s)
+		}
+		if b := c.row(t); b.Status != "closed" {
+			t.Fatalf("row status = %q, want closed", b.Status)
+		}
+		if got, _ := c.store.Get(kept.ID); got.Assignee != "rig/claude" || got.Status != "open" {
+			t.Fatalf("alias claim assignee=%q status=%q, want kept on rig/claude and open", got.Assignee, got.Status)
+		}
+	})
+	t.Run("a claim the row owns still refuses the close", func(t *testing.T) {
+		c := seat(t)
+		kept := createWork(t, c.store, "open", "rig/claude", nil)
+		own := c.work(t, "in_progress", nil)
+		if s := c.run(t, gone().tmux()); s.Outcome != settledRefused || s.Cause != causeHasWork {
+			t.Fatalf("settlement %+v, want refused has-work", s)
+		}
+		if b := c.row(t); b.Status == "closed" {
+			t.Fatal("row closed over a claim under its own bead ID")
+		}
+		if got, _ := c.store.Get(own.ID); got.Assignee != c.k.ID || got.Status != "in_progress" {
+			t.Fatalf("row-owned claim assignee=%q status=%q, want kept", got.Assignee, got.Status)
+		}
+		if got, _ := c.store.Get(kept.ID); got.Assignee != "rig/claude" {
+			t.Fatalf("alias claim assignee = %q, want kept", got.Assignee)
 		}
 	})
 }

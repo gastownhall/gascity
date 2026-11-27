@@ -409,7 +409,7 @@ func closeWorthRunning(a aroundCaps) bool {
 		return false // L5 cannot read: the effect could only refuse
 	}
 	cfg := a.release.cfg
-	scope := releaseScope(c.Row, cfg)
+	scope := releaseScope(c.Row, cfg).except(assigneePreserveSet(c.Preserve))
 	hits, err := seatWorkFor(a.reads.legs, scope).match(seatWorkQuery{scope: scope, statuses: seatWorkStatuses}, false)
 	if err != nil || len(hits) == 0 {
 		return true

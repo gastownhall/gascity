@@ -118,12 +118,27 @@ func armClose(r *rowFacts) (intent, bool) {
 		if keep, ok := r.w.Phantoms[r.k]; ok {
 			// Both forms a claim on the configured identity can carry.
 			it.Closing.Phantom, it.Closing.Preserve = true, keep
+		} else if identity, ok := r.canonicalSingletonOrphan(e.DrainReason); ok {
+			// A canonical singleton seat's alias claims are its configured
+			// identity's (#9245): L5 reads the row's work without them, and
+			// the cascade keeps them for the next seat.
+			it.Closing.Preserve = []string{identity}
 		}
 	default:
 		return intent{}, false
 	}
 	it.Closing.Row = info
 	return it, true
+}
+
+// canonicalSingletonOrphan is the identity an orphaned canonical singleton
+// pool seat's close keeps (canonicalSingletonSeatIdentity), as legacy's
+// orphan close keeps it; any other drain reports false.
+func (r *rowFacts) canonicalSingletonOrphan(reason string) (string, bool) {
+	if reason != drainOrphaned || r.w.Env == nil {
+		return "", false
+	}
+	return canonicalSingletonSeatIdentity(r.row.Info, r.w.Env.Cfg)
 }
 
 // freshClosable reports that nothing live can hold the row's runtime, for
