@@ -174,3 +174,46 @@ func holdQueueLockForTest(t *testing.T, cityPath string) func() {
 		lockFile.Close() //nolint:errcheck
 	}
 }
+
+// TestItemWakeIfNeededRoundTrips: an item's declared wake intent survives a
+// save and a load of the queue, and a state.json written before the field
+// existed decodes with no wake intent.
+func TestItemWakeIfNeededRoundTrips(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := WithState(cityPath, func(state *State) error {
+		state.Pending = append(state.Pending,
+			Item{ID: "notice", Agent: "worker", Source: "mail", WakeIfNeeded: true},
+			Item{ID: "plain", Agent: "worker", Source: "session"},
+		)
+		return nil
+	}); err != nil {
+		t.Fatalf("WithState: %v", err)
+	}
+	state, err := LoadState(cityPath)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	got := map[string]bool{}
+	for _, item := range state.Pending {
+		got[item.ID] = item.WakeIfNeeded
+	}
+	if want := map[string]bool{"notice": true, "plain": false}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("WakeIfNeeded by id = %v, want %v", got, want)
+	}
+
+	legacyCity := t.TempDir()
+	if err := os.MkdirAll(filepath.Dir(StatePath(legacyCity)), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	legacy := `{"pending":[{"id":"old","agent":"worker","source":"mail","message":"You have mail from human","created_at":"2026-01-01T00:00:00Z","deliver_after":"2026-01-01T00:00:00Z","expires_at":"2026-01-02T00:00:00Z"}]}`
+	if err := os.WriteFile(StatePath(legacyCity), []byte(legacy), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	state, err = LoadState(legacyCity)
+	if err != nil {
+		t.Fatalf("LoadState(legacy): %v", err)
+	}
+	if len(state.Pending) != 1 || state.Pending[0].WakeIfNeeded {
+		t.Fatalf("legacy pending = %+v, want one item with no wake intent", state.Pending)
+	}
+}

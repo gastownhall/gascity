@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -9423,5 +9425,177 @@ func TestResolveNudgeTargetInStoreAnswersAZeroStoreByCaller(t *testing.T) {
 				t.Fatalf("err = %v, want session.ErrSessionNotFound for a caller that is not observe-only", err)
 			}
 		})
+	}
+}
+
+// queuedNoticeCity is a managed city on the default (legacy) dispatcher, its
+// controller probe and poke stubbed, whose one session was running when a
+// mail notice missed its live wait-idle leg, so the notice sits queued with no
+// wake.
+type queuedNoticeCity struct {
+	dir     string
+	store   beads.Store
+	fake    *runtime.Fake
+	target  nudgeTarget
+	id      string
+	mp      mail.Provider
+	msgID   string
+	pokes   atomic.Int32
+	running atomic.Bool
+	observe atomic.Int32
+}
+
+const queuedNoticeSessionName = "worker-session"
+
+func newQueuedNoticeCity(t *testing.T) *queuedNoticeCity {
+	t.Helper()
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	markNudgePollCityRunningForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+	c := &queuedNoticeCity{dir: t.TempDir(), fake: runtime.NewFake()}
+	writeNamedSessionCityTOML(t, c.dir)
+	t.Setenv("GC_CITY", c.dir)
+	store, err := openCityStoreAt(c.dir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	c.store = store
+	created, err := store.Create(beads.Bead{
+		Title:  "Session: worker",
+		Type:   session.BeadType,
+		Status: "open",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": queuedNoticeSessionName,
+			"agent_name":   "worker",
+			"template":     "worker",
+			"state":        string(session.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create session: %v", err)
+	}
+	c.id = created.ID
+	if err := c.fake.Start(context.Background(), queuedNoticeSessionName, runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	c.running.Store(true)
+	// The live wait-idle leg misses: the runtime cannot report an idle
+	// boundary, so the notice is queued.
+	c.fake.WaitForIdleErrors[queuedNoticeSessionName] = runtime.ErrInteractionUnsupported
+	prevPoller, prevManaged, prevPoke, prevWarn, prevObserve := startNudgePoller, nudgeCityUsesManagedReconciler, nudgePokeController, nudgeWarningWriter, nudgeObserveTarget
+	startNudgePoller = func(string, string, string) error { return nil }
+	nudgeCityUsesManagedReconciler = func(cityPath string) bool { return cityPath == c.dir }
+	nudgePokeController = func(string, reconcilekey.Key) error { c.pokes.Add(1); return nil }
+	nudgeWarningWriter = io.Discard
+	nudgeObserveTarget = func(nudgeTarget, beads.Store, runtime.Provider) (worker.LiveObservation, error) {
+		c.observe.Add(1)
+		return worker.LiveObservation{Running: c.running.Load()}, nil
+	}
+	t.Cleanup(func() {
+		startNudgePoller, nudgeCityUsesManagedReconciler, nudgePokeController, nudgeWarningWriter, nudgeObserveTarget = prevPoller, prevManaged, prevPoke, prevWarn, prevObserve
+	})
+	c.target, err = resolveNudgeTarget(c.id)
+	if err != nil {
+		t.Fatalf("resolveNudgeTarget: %v", err)
+	}
+	c.mp = newMailProviderWithSessionStore(cliMailStore(store, c.target.cfg, c.dir).Store, store)
+	msg, err := c.mp.Send("human", "worker", "status", "the deploy finished")
+	if err != nil {
+		t.Fatalf("mail Send: %v", err)
+	}
+	c.msgID = msg.ID
+	if err := sendMailNotifyWithWorker(c.target, store, c.fake, c.msgID); err != nil {
+		t.Fatalf("sendMailNotifyWithWorker: %v", err)
+	}
+	return c
+}
+
+// stop ends the session's runtime; the row keeps whatever state it had.
+func (c *queuedNoticeCity) stop(t *testing.T) {
+	t.Helper()
+	if err := c.fake.Stop(queuedNoticeSessionName); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	c.running.Store(false)
+}
+
+func (c *queuedNoticeCity) wakeRequest(t *testing.T) string {
+	t.Helper()
+	got, err := c.store.Get(c.id)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", c.id, err)
+	}
+	return got.Metadata["wake_request"]
+}
+
+func (c *queuedNoticeCity) pending(t *testing.T) []queuedNudge {
+	t.Helper()
+	pending, _, _, err := listQueuedNudgesForTarget(c.dir, c.target, time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudgesForTarget: %v", err)
+	}
+	return pending
+}
+
+// runPoller runs the session's nudge poller on a goroutine until cond holds
+// (or 5s pass), then empties the queue so the poller exits, and returns its
+// stderr.
+func (c *queuedNoticeCity) runPoller(t *testing.T, cond func() bool) string {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- cmdNudgePoll([]string{c.id}, queuedNoticeSessionName, time.Millisecond, 0, true, &stdout, &stderr)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	met := false
+	for time.Now().Before(deadline) {
+		if met = cond(); met {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := nudgequeue.WithState(c.dir, func(state *nudgequeue.State) error {
+		state.Pending, state.InFlight = nil, nil
+		return nil
+	}); err != nil {
+		t.Fatalf("emptying the queue: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cmdNudgePoll did not exit within 5s of its queue emptying")
+	}
+	if !met {
+		t.Fatalf("poller never met the condition within 5s; stderr: %s", stderr.String())
+	}
+	return stderr.String()
+}
+
+// TestMailNotifyQueuedForBusyRecipientWakesItOnceAsleep: a mail notice that
+// missed a running recipient's live leg is queued with no wake; once the
+// recipient's runtime stops and its row is asleep and unheld with the notice
+// pending and its mail unread, the recipient's nudge poller records the
+// managed wake the notice declared and pokes the controller exactly once.
+func TestMailNotifyQueuedForBusyRecipientWakesItOnceAsleep(t *testing.T) {
+	c := newQueuedNoticeCity(t)
+	if n := len(c.pending(t)); n != 1 {
+		t.Fatalf("pending = %d after the send, want the notice queued", n)
+	}
+	if got := c.wakeRequest(t); got != "" || c.pokes.Load() != 0 {
+		t.Fatalf("after the send: wake_request = %q, pokes = %d; want neither for a running recipient", got, c.pokes.Load())
+	}
+	c.stop(t)
+	sleepUnheld(t, c.store, c.id)
+	c.runPoller(t, func() bool {
+		// Let the poller tick past the recorded wake, so a second poke
+		// within the same dormant spell would show.
+		return c.wakeRequest(t) == string(session.WakeCauseExplicit) && c.observe.Load() > 20
+	})
+	if got := c.pokes.Load(); got != 1 {
+		t.Fatalf("pokes = %d, want exactly 1", got)
 	}
 }
