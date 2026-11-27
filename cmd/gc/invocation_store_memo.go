@@ -43,7 +43,9 @@ import (
 // the step reminder's per-identity listings (stepResolution.rootViaRoutedBridge)
 // and the storage routes resolved alongside the city store open
 // (prewarmCLIStorageRoutes) — each call stands alone, so a single-connection
-// store runs them one after another.
+// store runs them one after another. `gc mail inbox` reaches the city store
+// sequentially for its mail provider and target resolution, without holding a
+// transaction or connection-scoped operation between the calls.
 //
 // The memo is opt-in per command. run() enables it only for the one-shot verbs
 // in invocationStoreMemoCommands; long-lived entry points (the supervisor and
@@ -51,15 +53,16 @@ import (
 // close and reopen is really closed and reopened.
 
 // invocationStoreMemoCommands are the command paths run() opens the memo for:
-// the session-side hook verbs and `gc mail count`, each of which runs once and
-// exits. `gc mail count` looks its target up locally before it asks the
-// supervisor, and its local path opens the city store for the mail provider
-// and for the target again.
+// the session-side hook verbs and one-shot mail verbs whose call paths share
+// a scope. `gc mail count` looks its target up locally before it asks the
+// supervisor; `gc mail inbox` opens the city store for its mail provider and
+// again to resolve its target, without holding a transaction between calls.
 var invocationStoreMemoCommands = map[string]bool{
 	"gc handoff":     true,
 	"gc hook":        true,
 	"gc mail check":  true,
 	"gc mail count":  true,
+	"gc mail inbox":  true,
 	"gc mail send":   true,
 	"gc nudge drain": true,
 	"gc prime":       true,
