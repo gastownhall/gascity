@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/poolplan"
 	"github.com/gastownhall/gascity/internal/readywork"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -1967,6 +1968,10 @@ func collectAssignedWorkBeadsWithStores(
 					appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, readyIDs, inProgress, seen, source.store, source.ref)
 				}
 			}
+			listMembers := func(q beads.ListQuery) ([]beads.Bead, error) {
+				return listBothTiersForControllerDemand(source.store, q)
+			}
+			dropAwaitingFinalizeReadiness(listMembers, readyIDs, inProgress, pass, read("list_workflow_members", demandReadTierCached))
 			// Open assigned molecule roots that count as wake demand. Whether an
 			// open assigned root is demand must be decided from the bead's RAW
 			// status, not the collapsed Bead.Status: mapBdStatus folds bd's
@@ -3615,6 +3620,38 @@ func appendOpenAssignedMoleculeWorkUnique(dst *[]beads.Bead, stores *[]beads.Sto
 		}
 		if appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef) {
 			markReadyAssigned(readyIDs, b)
+		}
+	}
+}
+
+// dropAwaitingFinalizeReadiness withdraws wake readiness from each in_progress
+// workflow root of inProgress that is waiting only on its finalize control
+// (molecule.WorkflowAwaitingFinalize): its worker steps have run, so its
+// assignee has nothing to do and the hook passes over it. Like held open work
+// in markReadyAssigned, the root stays in the assigned-work snapshot (orphan
+// release, pool accounting and crash recovery still see the claim); it only
+// stops being wake demand. A failed member read keeps the root's readiness,
+// the same fail-open verdict the hook's crash-recovery gate gives it.
+// listMembers reads the leg the in_progress rows came from.
+func dropAwaitingFinalizeReadiness(listMembers func(beads.ListQuery) ([]beads.Bead, error), readyIDs map[string]bool, inProgress []beads.Bead, pass *demandPassTrace, read demandStoreRead) {
+	for _, root := range inProgress {
+		if !readyIDs[root.ID] || strings.TrimSpace(root.Assignee) == "" ||
+			strings.TrimSpace(root.Metadata[beadmeta.KindMetadataKey]) != beadmeta.KindWorkflow {
+			continue
+		}
+		start := pass.now()
+		members, err := listMembers(beads.ListQuery{
+			Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
+			IncludeClosed: true,
+			TierMode:      beads.TierBoth,
+		})
+		pass.read(read, start, len(members), err)
+		if err != nil {
+			log.Printf("collectAssignedWorkBeads: workflow member read for %s failed; keeping its wake readiness: %v", root.ID, err)
+			continue
+		}
+		if molecule.WorkflowAwaitingFinalize(root, members) {
+			delete(readyIDs, root.ID)
 		}
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -200,8 +201,15 @@ func newAwakeInputFromSnapshot(
 			// not dispatch. Only meaningful for in_progress -- open work's
 			// blocker state is already folded into `ready` above.
 			blocked := wb.Status == "in_progress" && wb.IsBlocked != nil && *wb.IsBlocked
+			// An in_progress workflow root the controller assessed and left
+			// unready is waiting only on its finalize control
+			// (dropAwaitingFinalizeReadiness). Omitted flags keep today's
+			// wake-on-claim behavior.
+			awaitingFinalize := wb.Status == "in_progress" && i < len(readyAssignedFlags) && !readyAssignedFlags[i] &&
+				strings.TrimSpace(wb.Metadata[beadmeta.KindMetadataKey]) == beadmeta.KindWorkflow
 			input.WorkBeads = append(input.WorkBeads, AwakeWorkBead{
 				ID: wb.ID, Assignee: a, Status: wb.Status, Ready: ready, Blocked: blocked,
+				AwaitingFinalize: awaitingFinalize,
 			})
 		}
 	}
