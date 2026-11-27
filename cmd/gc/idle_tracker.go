@@ -29,7 +29,8 @@ type idleTracker interface {
 	// checkIdle returns true if the agent has been idle longer than its
 	// configured timeout. template is the agent's qualified template name and
 	// is used as a fallback lookup when the session name is not registered
-	// directly (pool sessions). provider and transport identify the runtime so
+	// directly (pool sessions). provider (the builtin family, as
+	// sessionProviderFamily resolves it) and transport identify the runtime so
 	// the tracker can pick the right idle measurement: every session is
 	// measured by sp.GetLastActivity(), and interactive TUIs whose coarse
 	// pane-activity clock cannot see idleness (the Claude Code TUI over a
@@ -214,7 +215,9 @@ func (m *memoryIdleTracker) checkIdleByContent(sessionName string, snap runtime.
 // repainting interactive composer, so their activity clock reflects real
 // idleness on its own. This mirrors the identical gate on the nudge path — the
 // wait-idle short-circuit in cmd_nudge.go restricts itself to the claude,
-// non-ACP transport for the same reason (gco-90ui).
-func idleTrackerContentClockApplies(provider, transport string) bool {
-	return transport != "acp" && provider == "claude"
+// non-ACP transport for the same reason (gco-90ui). family is the session's
+// builtin provider family (sessionProviderFamily), so a custom provider with
+// base = "builtin:claude" takes the content clock too.
+func idleTrackerContentClockApplies(family, transport string) bool {
+	return transport != "acp" && family == "claude"
 }

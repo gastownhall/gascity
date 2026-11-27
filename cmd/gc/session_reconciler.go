@@ -4482,7 +4482,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 		if it != nil && alive {
 			facts := sessionpkg.TimerFacts{
-				Triggered: it.checkIdleUnder(name, lifecycleName, tp.TemplateName, infoByID[id].Provider, infoByID[id].Transport, sp, clk.Now()),
+				Triggered: it.checkIdleUnder(name, lifecycleName, tp.TemplateName, sessionProviderFamily(infoByID[id]), infoByID[id].Transport, sp, clk.Now()),
 			}
 			if facts.Triggered {
 				facts.Blocker = lifecycleTimerBlockerInfo(infoByID[id], clk.Now())

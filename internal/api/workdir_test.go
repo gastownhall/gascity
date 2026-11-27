@@ -130,3 +130,23 @@ func TestResolveSessionTemplateUsesQualifiedNameForWorkDirTemplates(t *testing.T
 		t.Fatalf("resolveSessionTemplate() workDir = %q, want %q", workDir, want)
 	}
 }
+
+// A provider with base = "builtin:claude" writes Claude session files, so two
+// such agents in one work dir make attribution ambiguous (gascity#9054).
+func TestCanAttributeSessionCountsClaudeDerivedProviders(t *testing.T) {
+	cityPath := t.TempDir()
+	base := "builtin:claude"
+	cfg := &config.City{
+		Workspace: config.Workspace{Provider: "claude-light"},
+		Providers: map[string]config.ProviderSpec{"claude-light": {Base: &base}},
+		Rigs:      []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}},
+		Agents: []config.Agent{
+			{Name: "builder", Dir: "demo", MaxActiveSessions: intPtr(1)},
+			{Name: "checker", Dir: "demo", MaxActiveSessions: intPtr(1)},
+		},
+	}
+
+	if canAttributeSession(cfg.Agents[0], "demo/builder", cfg, cityPath) {
+		t.Fatal("canAttributeSession() = true, want false when two claude-derived agents share a work dir")
+	}
+}

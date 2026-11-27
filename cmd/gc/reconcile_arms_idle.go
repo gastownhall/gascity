@@ -169,7 +169,7 @@ func (r *rowFacts) idleTriggered(timeout time.Duration) bool {
 // contentRead is the lane's content read of the row's pane, for a row on
 // the content clock.
 func (r *rowFacts) contentRead() contentState {
-	if !idleTrackerContentClockApplies(r.row.Info.Provider, r.row.Info.Transport) {
+	if !idleTrackerContentClockApplies(sessionProviderFamily(r.row.Info), r.row.Info.Transport) {
 		return contentUnread
 	}
 	obs, _ := r.observation()
@@ -405,7 +405,7 @@ func (m *idleMemory) updateRow(w *World, a *allocDecision, row censusRow, patrol
 	if !ok {
 		return rowTrace{}, false
 	}
-	if idleTrackerContentClockApplies(row.Info.Provider, row.Info.Transport) {
+	if idleTrackerContentClockApplies(sessionProviderFamily(row.Info), row.Info.Transport) {
 		want[strings.TrimSpace(row.Info.SessionName)] = true
 		obs, _ := r.observation()
 		ki := idleIncarnation{row.Key, cmp.Or(obs.Incarnation, "token:"+strings.TrimSpace(row.Info.InstanceToken))}
