@@ -282,3 +282,74 @@ func TestHookDiscoveryRunnerReselectReadsEachStoreOnce(t *testing.T) {
 		t.Fatalf("reads = %v, want each store read once", reads)
 	}
 }
+
+// The answer set changes how often stores are read, never what the claim
+// decides. These rows pin the edges of that: a single leg is read once with
+// no re-read, the primary's own in-progress row still ends selection before
+// the later stores are read, a secondary whose claim-time re-read fails is
+// read afresh and claimed from that read, and a failed read (here a rig whose
+// managed Dolt runtime is down) is never reused: the next selection runs it
+// again.
+func TestClaimHookWorkAnswerReuseKeepsClaimContract(t *testing.T) {
+	t.Run("single leg reads once", func(t *testing.T) {
+		withFastClaimRetries(t)
+		stores := answerReuseStores()[:1]
+		h := newFailureHookHarness()
+		h.script("/city", hookRunnerAnswer{out: routedRowJSON("pc-1")})
+
+		result, code, stderr := runAnswerReuseClaim(t, h, stores, h.ops())
+
+		if code != 0 || result.BeadID != "pc-1" {
+			t.Fatalf("result = %+v code = %d, want pc-1 claimed; stderr=%s", result, code, stderr)
+		}
+		assertStoreReads(t, h, map[string]int{"/city": 1})
+	})
+	t.Run("primary resume row leaves later stores unread", func(t *testing.T) {
+		withFastClaimRetries(t)
+		stores := answerReuseStores()[:3]
+		h := newFailureHookHarness()
+		h.script("/city", hookRunnerAnswer{out: inProgressRowJSON("pc-1")})
+		h.script("/riga", hookRunnerAnswer{out: routedRowJSON("ra-1")})
+
+		result, code, stderr := runAnswerReuseClaim(t, h, stores, h.ops())
+
+		if code != 0 || result.BeadID != "pc-1" {
+			t.Fatalf("result = %+v code = %d, want the resume row pc-1; stderr=%s", result, code, stderr)
+		}
+		assertStoreReads(t, h, map[string]int{"/city": 2, "/riga": 0, "/rigb": 0})
+	})
+	t.Run("secondary re-read failure is read afresh", func(t *testing.T) {
+		withFastClaimRetries(t)
+		stores := answerReuseStores()[:3]
+		h := newFailureHookHarness()
+		h.script("/riga",
+			hookRunnerAnswer{out: routedRowJSON("ra-1")},
+			hookRunnerAnswer{err: errors.New("bd ready: exit status 1")},
+			hookRunnerAnswer{out: routedRowJSON("ra-3")},
+		)
+
+		result, code, stderr := runAnswerReuseClaim(t, h, stores, h.ops())
+
+		if code != 0 || result.BeadID != "ra-3" {
+			t.Fatalf("result = %+v code = %d, want ra-3 from riga's fresh read; stderr=%s", result, code, stderr)
+		}
+		assertStoreReads(t, h, map[string]int{"/city": 1, "/riga": 3, "/rigb": 1})
+	})
+	t.Run("a failed read is run again by the next selection", func(t *testing.T) {
+		withFastClaimRetries(t)
+		stores := answerReuseStores()
+		h := newFailureHookHarness()
+		h.script("/riga", hookRunnerAnswer{err: fmt.Errorf("%w: %w", errHookRigRuntimeUnavailable, errors.New("dial tcp: connection refused"))})
+		h.script("/rigb", hookRunnerAnswer{out: routedRowWithPriorityJSON("rb-1", 1)})
+		h.script("/rigc", hookRunnerAnswer{out: routedRowWithPriorityJSON("rc-1", 2)})
+		var won []string
+		ops := losingClaimOps(h, map[string]bool{"rb-1": true}, &won)
+
+		result, code, stderr := runAnswerReuseClaim(t, h, stores, ops)
+
+		if code != 0 || result.BeadID != "rc-1" {
+			t.Fatalf("result = %+v code = %d, want rc-1 after rigb's lost race; stderr=%s", result, code, stderr)
+		}
+		assertStoreReads(t, h, map[string]int{"/city": 1, "/riga": 2, "/rigb": 2, "/rigc": 2})
+	})
+}
