@@ -223,7 +223,7 @@ func infraUnitName() string {
 // otherwise argv unchanged and "".
 func infraArgv(description string, argv []string) ([]string, string) {
 	slice, _ := infraSlice()
-	if slice == "" || strings.TrimSpace(os.Getenv(infraSessionIdentityEnv)) == "" {
+	if slice == "" {
 		return argv, ""
 	}
 	scope := userscope.Scope{Slice: slice, Unit: infraUnitName(), Description: description}
