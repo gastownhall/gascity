@@ -1116,7 +1116,7 @@ func TestBuildResumeCommandIncludesWrappedCodexResumeDefaults(t *testing.T) {
 	}
 
 	cmd, _ := buildResumeCommand(cityDir, cfg, info, "", nil, io.Discard)
-	want := "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex resume -c model_reasoning_effort=medium abc-123"
+	want := "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex resume -c model_reasoning_effort=medium --no-daemon abc-123"
 	if cmd != want {
 		t.Fatalf("resume command = %q, want %q", cmd, want)
 	}

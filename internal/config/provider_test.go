@@ -960,6 +960,41 @@ func TestCopilotAskUserOption(t *testing.T) {
 	}
 }
 
+// TestCodexDaemonOption pins the codex daemon option: sessions launch with
+// --no-daemon by default, so each one runs its tools and hooks with its own
+// environment instead of the shared app-server daemon's, and a codex older
+// than 0.169 opts back out through option_defaults.
+func TestCodexDaemonOption(t *testing.T) {
+	providers := BuiltinProviders()
+	for _, tc := range []struct {
+		name     string
+		defaults map[string]string
+		want     string
+	}{
+		{"default", nil, "codex --dangerously-bypass-approvals-and-sandbox --no-daemon"},
+		{"off", map[string]string{"daemon": "off"}, "codex --dangerously-bypass-approvals-and-sandbox --no-daemon"},
+		{"on", map[string]string{"daemon": "on"}, "codex --dangerously-bypass-approvals-and-sandbox"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := &Agent{Name: "worker", Provider: "codex", OptionDefaults: tc.defaults}
+			resolved, err := ResolveProvider(agent, nil, providers, func(s string) (string, error) { return s, nil })
+			if err != nil {
+				t.Fatalf("ResolveProvider: %v", err)
+			}
+			if pins := resolved.UnhonoredOptionPins(); len(pins) != 0 {
+				t.Fatalf("UnhonoredOptionPins() = %+v, want none", pins)
+			}
+			launch, err := ProviderTemplateCommand(resolved, "", nil, providers)
+			if err != nil {
+				t.Fatalf("ProviderTemplateCommand: %v", err)
+			}
+			if launch != tc.want {
+				t.Errorf("launch = %q, want %q", launch, tc.want)
+			}
+		})
+	}
+}
+
 // TestProviderSessionCreateTransportBuiltinGolden pins every builtin's
 // default transport and template launch command to the values recorded
 // before ACPOmittedArgs existed, so the omitted-args transport rule moves
@@ -971,7 +1006,7 @@ func TestProviderSessionCreateTransportBuiltinGolden(t *testing.T) {
 		"auggie":      {"", "auggie --allow-indexing"},
 		"cerebras":    {"acp", "opencode acp --model cerebras/gpt-oss-120b"},
 		"claude":      {"", "claude --dangerously-skip-permissions --effort max"},
-		"codex":       {"", "codex --dangerously-bypass-approvals-and-sandbox"},
+		"codex":       {"", "codex --dangerously-bypass-approvals-and-sandbox --no-daemon"},
 		"copilot":     {"", "copilot --yolo --no-ask-user"},
 		"cursor":      {"", "cursor-agent -f --trust"},
 		"gemini":      {"", "gemini --approval-mode yolo"},
