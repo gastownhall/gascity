@@ -66,3 +66,14 @@ unregistered field.
 `InjectImplicitAgents` leaves `PromptTemplate` empty. The startup prompt of an
 implicit agent's session is chosen in `cmd/gc` by `startupPromptTemplate`
 through `primeBuiltinPromptFile`; do not stamp a core-pack asset path in config.
+
+## Default lifecycle recovery
+
+`on_death` reopens assigned in-progress work. Existing `gc.run_target` and
+`gc.routed_to` values survive unchanged, and routed work is unassigned for
+reclaim. When both route fields are absent, only an expanded pool member
+(`Agent.PoolName != ""`) may backfill `gc.run_target` with its pool name and
+release ownership. A singleton keeps its assignee on reopened work so its
+stable identity can reclaim it through the assigned-ready query. Never
+invent a pool route from a singleton's qualified name. This applies to both
+durable and ephemeral work.

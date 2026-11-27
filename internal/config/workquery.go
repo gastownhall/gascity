@@ -1615,9 +1615,9 @@ func (a *Agent) OnDeathIsGenerated() bool {
 }
 
 func buildOnDeath(a *Agent, topo QueryTopology) string {
-	route := a.QualifiedName()
+	reopenUnrouted := `bd update "$id" --status open`
 	if a.PoolName != "" {
-		route = a.PoolName
+		reopenUnrouted = `bd update "$id" --assignee "" --status open --set-metadata ` + shellquote.Quote(beadmeta.RunTargetMetadataKey+"="+a.PoolName)
 	}
 	_ = topo
 	listRead := recoveryReadShell("on_death", "list",
@@ -1626,12 +1626,11 @@ func buildOnDeath(a *Agent, topo QueryTopology) string {
 	ephemeralRead := recoveryReadShell("on_death", "query",
 		bdQueryEphemeralStatusShell("in_progress"),
 		`jq -r --arg assignee `+shellquote.Quote(a.QualifiedName())+` '.[] | select((.assignee // "") == $assignee) | [.id, `+jqMeta(beadmeta.RunTargetMetadataKey)+`, `+jqMeta(beadmeta.RoutedToMetadataKey)+`] | @tsv'`)
-	// Reset both assignee and status: clearing assignee alone leaves the bead
-	// invisible to every work_query tier (Tier 1 needs assignee match, Tiers
-	// 2/3 only match "ready" status). The next worker re-claims via Tier 3.
-	// If routed metadata is missing entirely, backfill the canonical
-	// gc.run_target route so reopened direct-assigned work does not stay
-	// invisible.
+	// Routed work returns to its route with both assignee and status reset.
+	// Unrouted pool work gets the canonical pool run_target before release.
+	// Unrouted singleton work keeps its stable assignee so the respawned
+	// singleton can reclaim it through the assigned-ready tier; its own name
+	// is not a pool route.
 	return `exec 3>&1; { ` +
 		listRead +
 		ephemeralRead +
@@ -1640,7 +1639,7 @@ func buildOnDeath(a *Agent, topo QueryTopology) string {
 		`[ -z "$id" ] && continue; ` +
 		`if [ -n "$run_target" ] || [ -n "$routed_to" ]; then ` +
 		`if ! err=$(bd update "$id" --assignee "" --status open 2>&1 >/dev/null); then printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$err"; fi; ` +
-		`else if ! err=$(bd update "$id" --assignee "" --status open --set-metadata ` + shellquote.Quote(beadmeta.RunTargetMetadataKey+"="+route) + ` 2>&1 >/dev/null); then printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$err"; fi; ` +
+		`else if ! err=$(` + reopenUnrouted + ` 2>&1 >/dev/null); then printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$err"; fi; ` +
 		`fi; ` +
 		`done`
 }
