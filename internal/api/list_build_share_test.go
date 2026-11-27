@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,8 +10,10 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -32,6 +35,8 @@ type heldActiveStore struct {
 	reads      int
 	running    int
 	maxRunning int
+	// panics is how many of the next held calls panic once released.
+	panics int
 }
 
 func newHeldActiveStore(store beads.Store) *heldActiveStore {
@@ -55,7 +60,23 @@ func (s *heldActiveStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	rows, err := s.Store.List(query)
 	s.entered <- struct{}{}
 	<-s.release
+	s.mu.Lock()
+	panics := s.panics > 0
+	if panics {
+		s.panics--
+	}
+	s.mu.Unlock()
+	if panics {
+		panic("held store: List failed")
+	}
 	return rows, err
+}
+
+// panicNext makes the next n held calls panic once released.
+func (s *heldActiveStore) panicNext(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.panics = n
 }
 
 // open lets every held call, and every later one, through.
@@ -194,8 +215,13 @@ func newSessionListShareFixture(t *testing.T) *listShareFixture {
 
 // get serves one GET of url through f's handler.
 func (f *listShareFixture) get(url string) *httptest.ResponseRecorder {
+	return f.getContext(context.Background(), url)
+}
+
+// getContext serves one GET of url, under ctx, through f's handler.
+func (f *listShareFixture) getContext(ctx context.Context, url string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
-	f.h.ServeHTTP(rec, httptest.NewRequest("GET", url, nil))
+	f.h.ServeHTTP(rec, httptest.NewRequest("GET", url, nil).WithContext(ctx))
 	return rec
 }
 
@@ -488,4 +514,105 @@ func TestListBuildSharingIsolation(t *testing.T) {
 			t.Errorf("one waiter's changes reached another's list: %+v", *outs[1])
 		}
 	})
+}
+
+// TestListBuildSharingFailure: a waiter whose request ends while it waits
+// gets a 503 at once, and the other waiters of its build get the list. A
+// build that panics, running or queued, is logged and answers each of its
+// waiters a 500, its slot moves on and is removed, and the next reader gets
+// the list.
+func TestListBuildSharingFailure(t *testing.T) {
+	for _, fx := range listShareFixtures {
+		t.Run(fx.name+"/cancel", func(t *testing.T) {
+			f := fx.new(t)
+			joins := make(chan bool, 16)
+			f.joined(func(_ string, started bool) { joins <- started })
+			var mu sync.Mutex
+			recs := map[string]*httptest.ResponseRecorder{}
+			var wg sync.WaitGroup
+			read := func(ctx context.Context, reader string) {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					rec := f.getContext(ctx, f.url)
+					mu.Lock()
+					recs[reader] = rec
+					mu.Unlock()
+				}()
+			}
+			read(context.Background(), "A")
+			<-joins
+			<-f.held.entered
+			read(context.Background(), "C")
+			<-joins
+			ctx, cancel := context.WithCancel(context.Background())
+			canceled := make(chan *httptest.ResponseRecorder, 1)
+			go func() { canceled <- f.getContext(ctx, f.url) }()
+			<-joins
+			cancel()
+			select {
+			case rec := <-canceled:
+				if rec.Code != http.StatusServiceUnavailable {
+					t.Errorf("canceled waiter: status %d, want 503: %s", rec.Code, rec.Body.String())
+				}
+			case <-time.After(10 * time.Second):
+				t.Error("a canceled waiter still waited on a held build")
+			}
+
+			f.held.open()
+			wg.Wait()
+			f.srv.waitForBackground()
+			for _, reader := range []string{"A", "C"} {
+				f.checkRows(t, recs[reader], f.want)
+			}
+			if reads, _ := f.held.stats(); reads != 2 {
+				t.Errorf("%d builds read the store, want 2", reads)
+			}
+			if n := f.slots(); n != 0 {
+				t.Errorf("%d build slots left once the builds ended, want 0", n)
+			}
+		})
+	}
+	for _, fx := range listShareFixtures {
+		t.Run(fx.name+"/panic", func(t *testing.T) {
+			f := fx.new(t)
+			var logs bytes.Buffer
+			t.Cleanup(captureLog(t, &logs))
+			joins := make(chan bool, 16)
+			f.joined(func(_ string, started bool) { joins <- started })
+			f.held.panicNext(2)
+			recs := make([]*httptest.ResponseRecorder, 3)
+			var wg sync.WaitGroup
+			read := func(i int) {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					recs[i] = f.get(f.url)
+				}()
+			}
+			read(0)
+			<-joins
+			<-f.held.entered
+			read(1)
+			<-joins
+			read(2)
+			<-joins
+			f.held.open()
+			wg.Wait()
+			f.srv.waitForBackground()
+
+			for i, rec := range recs {
+				if rec.Code != http.StatusInternalServerError {
+					t.Errorf("reader %d of a panicking build: status %d, want 500: %s", i, rec.Code, rec.Body.String())
+				}
+			}
+			if got := strings.Count(logs.String(), "panic in shared list build"); got != 2 {
+				t.Errorf("logged %d build panics, want 2 (running and queued):\n%s", got, logs.String())
+			}
+			if n := f.slots(); n != 0 {
+				t.Errorf("%d build slots left once the builds panicked, want 0", n)
+			}
+			f.checkRows(t, f.get(f.url), f.want)
+		})
+	}
 }
