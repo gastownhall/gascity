@@ -182,7 +182,9 @@ scope_bd_each_chunk() {
         applied=$(printf '%s' "$out" | jq -r 'if type == "array" then .[].id // empty elif type == "object" then .id // empty else empty end' 2>/dev/null || true)
         missing=""
         for id in "${chunk[@]}"; do
-            if printf '%s\n' "$applied" | grep -qxF -- "$id"; then
+            # Avoid a pipe: grep -q can exit on an early match and give the
+            # producer SIGPIPE, which pipefail would treat as a failed match.
+            if grep -qxF -- "$id" <<< "$applied"; then
                 SCOPE_CHUNK_OK=$((SCOPE_CHUNK_OK + 1))
             else
                 SCOPE_CHUNK_FAILED=$((SCOPE_CHUNK_FAILED + 1))
