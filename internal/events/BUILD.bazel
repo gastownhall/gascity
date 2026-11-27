@@ -19,6 +19,7 @@ go_library(
         "order_payloads.go",
         "payload.go",
         "payloads.go",
+        "pool_spawn_churn_payloads.go",
         "program_status_payloads.go",
         "query.go",
         "reader.go",

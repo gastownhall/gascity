@@ -49,6 +49,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"sort"
@@ -366,6 +367,26 @@ func (g *poolSpawnChurnGuard) tripLocked(template string, t *poolSpawnChurnTempl
 	}
 	fmt.Fprintf(g.stderr, "pool spawn-churn guard: %s: %d blind seats in a row woke, closed with no claim and drained since %s; withholding its blind demand until %s\n", //nolint:errcheck // best-effort stderr
 		template, seats, since.UTC().Format(time.RFC3339), t.episode.until.UTC().Format(time.RFC3339))
+	if g.record != nil {
+		until := t.episode.until
+		payload, _ := json.Marshal(events.PoolSpawnChurnPayload{ //nolint:errchkjson // a struct of strings, ints and times always marshals
+			Template: template,
+			Episode:  t.episode.id,
+			Cause:    events.PoolSpawnChurnCauseTripped,
+			Seats:    seats,
+			Since:    since.UTC(),
+			Until:    &until,
+		})
+		g.record(events.Event{
+			Type:    events.SessionPoolSpawnChurnCoolingDown,
+			Ts:      claimStallLater(at, g.now()).UTC(),
+			Actor:   "controller",
+			Subject: template,
+			Message: fmt.Sprintf("Pool %s closed %d blind seats in a row — each woke, found no claim and drained — since %s. No unnamed scale_check seats spawn for it until %s, then one probe seat; a claim ends the hold.",
+				template, seats, since.UTC().Format(time.RFC3339), until.UTC().Format(time.RFC3339)),
+			Payload: payload,
+		})
+	}
 }
 
 // probeFailedLocked ends the probe as failed: the hold doubles, up to

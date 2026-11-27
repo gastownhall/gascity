@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -19,11 +20,12 @@ import (
 // tighter, or older does not.
 
 type poolSpawnChurnHarness struct {
-	t      *testing.T
-	guard  *poolSpawnChurnGuard
-	now    time.Time
-	stderr *bytes.Buffer
-	seats  int
+	t        *testing.T
+	guard    *poolSpawnChurnGuard
+	now      time.Time
+	stderr   *bytes.Buffer
+	seats    int
+	recorded []events.Event
 }
 
 func newPoolSpawnChurnHarness(t *testing.T) *poolSpawnChurnHarness {
@@ -33,7 +35,7 @@ func newPoolSpawnChurnHarness(t *testing.T) *poolSpawnChurnHarness {
 		now:    time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC),
 		stderr: &bytes.Buffer{},
 	}
-	h.guard = newPoolSpawnChurnGuard(func(events.Event) {}, h.stderr)
+	h.guard = newPoolSpawnChurnGuard(func(e events.Event) { h.recorded = append(h.recorded, e) }, h.stderr)
 	h.guard.now = func() time.Time { return h.now }
 	return h
 }
@@ -250,5 +252,43 @@ func TestPoolSpawnChurnGuardSeatFirstSeenMidLifeDoesNotCount(t *testing.T) {
 	}
 	if allow := h.guard.allowance(); len(allow) != 0 {
 		t.Fatalf("a seat first seen mid-life counted: %v", allow)
+	}
+}
+
+// AC-5 (ga-s5l1ms): a trip records exactly one cooling-down event with the
+// template, the episode, the cause, the seats, and the hold's since and
+// until; repeated demand passes within the hold record nothing more.
+func TestPoolSpawnChurnGuardRecordsCoolingDownOncePerEpisode(t *testing.T) {
+	h := newPoolSpawnChurnHarness(t)
+	base := h.now
+	since := h.now
+	for i := 0; i < 3; i++ {
+		h.now = base.Add(time.Duration(i) * 3 * time.Minute)
+		h.churnBlindSeat()
+	}
+	for i := 0; i < 3; i++ {
+		h.guard.allowance() // repeated passes within the hold
+	}
+	var cooling []events.Event
+	for _, e := range h.recorded {
+		if e.Type == events.SessionPoolSpawnChurnCoolingDown {
+			cooling = append(cooling, e)
+		}
+	}
+	if len(cooling) != 1 {
+		t.Fatalf("recorded %d cooling-down events, want exactly 1: %+v", len(cooling), h.recorded)
+	}
+	e := cooling[0]
+	if e.Subject != "claude" || e.Actor != "controller" {
+		t.Fatalf("event subject %q actor %q, want claude/controller", e.Subject, e.Actor)
+	}
+	var p events.PoolSpawnChurnPayload
+	if err := json.Unmarshal(e.Payload, &p); err != nil {
+		t.Fatalf("decoding payload: %v", err)
+	}
+	wantUntil := base.Add(6 * time.Minute).Add(5 * time.Minute)
+	if p.Template != "claude" || p.Cause != events.PoolSpawnChurnCauseTripped || p.Seats != 3 ||
+		!p.Since.Equal(since) || p.Until == nil || !p.Until.Equal(wantUntil) || p.Episode == "" {
+		t.Fatalf("payload = %+v, want claude/tripped/3 seats/since %s/until %s", p, since, wantUntil)
 	}
 }
