@@ -3,6 +3,7 @@ package k8s
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"sort"
 	"strconv"
@@ -489,5 +490,62 @@ func TestPodSnapshotDoesNotCacheListErrors(t *testing.T) {
 	}
 	if n := ops.listCount(); n != 5 {
 		t.Fatalf("LISTs after recovery = %d, want 5 (one fresh listing serves both reads)", n)
+	}
+}
+
+// TestPodSnapshotCoalescesConcurrentRefresh: reads for different sessions
+// that arrive while the snapshot LIST is in flight wait for it instead of
+// listing for themselves, so 16 concurrent readers cost one LIST in total,
+// and each still answers from its own session's pod and tmux state.
+func TestPodSnapshotCoalescesConcurrentRefresh(t *testing.T) {
+	const readers = 16
+	sessions := make([]probeSession, readers)
+	for i := range sessions {
+		s := probeSession{name: fmt.Sprintf("s%02d", i), activity: 1709300000}
+		switch i % 4 {
+		case 0: // live, attached
+			s.pod, s.tmux, s.attached = true, true, "1"
+		case 1: // live, detached
+			s.pod, s.tmux, s.attached = true, true, "0"
+		case 2: // Running pod, tmux down
+			s.pod = true
+		case 3: // no pod
+		}
+		sessions[i] = s
+	}
+	ops := newProbeOps(sessions)
+	ops.started = make(chan int, readers)
+	release := ops.gate(0)
+	p, _ := newSnapshotProvider(ops)
+
+	type result struct{ running, attached bool }
+	results := make([]result, readers)
+	begin := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range sessions {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-begin
+			name := sessions[i].name
+			results[i] = result{running: p.IsRunning(name), attached: p.IsAttached(name)}
+		}(i)
+	}
+	close(begin)
+	if idx := <-ops.started; idx != 0 {
+		t.Fatalf("first LIST index = %d, want 0", idx)
+	}
+	close(release)
+	wg.Wait()
+
+	if lists := ops.listCalls(); len(lists) != 1 || lists[0] != (listCall{selector: "app=gc-agent"}) {
+		t.Errorf("LISTs = %+v, want exactly one {selector: app=gc-agent} for %d concurrent readers", lists, readers)
+	}
+	for i, s := range sessions {
+		wantRunning := s.pod && s.tmux
+		want := result{running: wantRunning, attached: wantRunning && s.attached == "1"}
+		if results[i] != want {
+			t.Errorf("%s: (running, attached) = %+v, want %+v", s.name, results[i], want)
+		}
 	}
 }

@@ -29,6 +29,7 @@ go_library(
         "@io_k8s_client_go//tools/clientcmd",
         "@io_k8s_client_go//tools/remotecommand",
         "@io_k8s_client_go//util/exec",
+        "@org_golang_x_sync//singleflight",
     ],
 )
 

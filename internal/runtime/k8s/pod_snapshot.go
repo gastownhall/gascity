@@ -3,9 +3,11 @@ package k8s
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -23,8 +25,9 @@ const podSnapshotFetchTimeout = 10 * time.Second
 // podSnapshot shares one gc-agent pod listing among the provider's
 // observation reads for a short TTL, so a session-list request costs one
 // apiserver LIST instead of several per session. A listing is taken lazily by
-// the first read that finds none fresh; there is no watch, timer or goroutine.
-// A failed LIST is returned to its readers and never cached. Start, Stop and
+// the first read that finds none fresh, and reads that arrive while it is in
+// flight wait for it rather than listing again (singleflight per generation).
+// There is no watch, timer or goroutine. A failed LIST is returned to its readers and never cached. Start, Stop and
 // Relaunch invalidate the snapshot, so this process's own pod changes are seen
 // by the next read.
 type podSnapshot struct {
@@ -37,6 +40,8 @@ type podSnapshot struct {
 	// that started it.
 	generation uint64
 	listing    *podListing // the published listing; nil before the first success
+
+	flights singleflight.Group // one LIST in flight per generation
 }
 
 // podListing is one snapshot LIST, projected to what the observation reads
@@ -86,24 +91,51 @@ func projectPod(pod *corev1.Pod) snapshotPod {
 // missing, expired or from an earlier generation.
 func (p *Provider) podListing() (*podListing, error) {
 	s := p.snapshot
-	s.mu.Lock()
-	gen := s.generation
-	if l := s.listing; l != nil && l.generation == gen && p.clock().Sub(l.startedAt) < s.ttl {
-		s.mu.Unlock()
+	l, gen := s.servable(p.clock())
+	if l != nil {
 		return l, nil
 	}
-	s.mu.Unlock()
-
-	l, err := p.listAgentPods(gen)
+	v, err, _ := s.flights.Do(strconv.FormatUint(gen, 10), func() (any, error) {
+		// A flight for gen may have published while this reader queued.
+		if l, current := s.servable(p.clock()); l != nil && current == gen {
+			return l, nil
+		}
+		l, err := p.listAgentPods(gen)
+		if err != nil {
+			return nil, err
+		}
+		s.publish(l)
+		return l, nil
+	})
 	if err != nil {
 		return nil, err
 	}
+	l, ok := v.(*podListing)
+	if !ok {
+		return nil, fmt.Errorf("k8s pod snapshot: flight returned %T, want *podListing", v)
+	}
+	return l, nil
+}
+
+// servable returns the published listing when it is of the current generation
+// and younger than the TTL at now (else nil), and the current generation.
+func (s *podSnapshot) servable(now time.Time) (*podListing, uint64) {
 	s.mu.Lock()
-	if s.generation == gen {
+	defer s.mu.Unlock()
+	if l := s.listing; l != nil && l.generation == s.generation && now.Sub(l.startedAt) < s.ttl {
+		return l, s.generation
+	}
+	return nil, s.generation
+}
+
+// publish makes l the served listing unless an invalidation superseded the
+// generation its LIST started in.
+func (s *podSnapshot) publish(l *podListing) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if l.generation == s.generation {
 		s.listing = l
 	}
-	s.mu.Unlock()
-	return l, nil
 }
 
 // listAgentPods takes one listing of every gc-agent pod, in any phase (the
