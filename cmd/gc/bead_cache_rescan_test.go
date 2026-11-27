@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,6 +23,25 @@ func rescanTestClock() time.Time { return rescanTestNow }
 // in order.
 func reloadSnapshot(views ...*cityView) *citySnapshot {
 	return &citySnapshot{all: views}
+}
+
+// rescanListStore counts the backing List calls a cache makes and, while
+// armed, blocks each one until release is closed.
+type rescanListStore struct {
+	beads.Store
+	lists   atomic.Int32
+	armed   atomic.Bool
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *rescanListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.lists.Add(1)
+	if s.armed.CompareAndSwap(true, false) {
+		close(s.entered)
+		<-s.release
+	}
+	return s.Store.List(query)
 }
 
 // closedEvents records the bead.closed notifications a cache emits.
@@ -163,5 +183,55 @@ func TestSupervisorReloadRequestsEveryCityCacheRescan(t *testing.T) {
 	case <-stopped.pokeCh:
 		t.Error("a city that is not started was woken")
 	default:
+	}
+}
+
+// TestSupervisorReloadRescanWaitsForAClosedGate: a reload does not read a
+// quiescent city's or a suspended rig's store (#6561). The request waits for
+// the gate, and the first loop step after it reopens runs one scan.
+func TestSupervisorReloadRescanWaitsForAClosedGate(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		close func(cs *controllerState)
+		open  func(cs *controllerState)
+	}{
+		{
+			name:  "quiescent city",
+			close: func(cs *controllerState) { cs.beadsQuiescent.Store(true) },
+			open:  func(cs *controllerState) { cs.beadsQuiescent.Store(false) },
+		},
+		{
+			name:  "suspended rig",
+			close: func(cs *controllerState) { cs.suspendedRigs.Store(&map[string]bool{"r": true}) },
+			open:  func(cs *controllerState) { cs.suspendedRigs.Store(&map[string]bool{}) },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cs := &controllerState{beadsQuiescent: new(atomic.Bool), pokeCh: make(chan struct{}, 1)}
+			backing := &rescanListStore{Store: beads.NewMemStore()}
+			cache, id := primedRescanCache(t, backing, nil, cs.rigReconcileGate("r"))
+			cs.beadStores = map[string]beads.Store{"r": cache}
+			tc.close(cs)
+			lists := backing.lists.Load()
+
+			pokeStartedCitiesOnReload(reloadSnapshot(startedCity("city", cs)), io.Discard)
+			cache.ReconcileIfDueForTest()
+			if got := backing.lists.Load() - lists; got != 0 {
+				t.Fatalf("closed gate: backing listed %d times, want 0", got)
+			}
+			if !cachedOpenIDs(t, cache)[id] {
+				t.Fatalf("closed gate: %s left the cache with no scan", id)
+			}
+
+			tc.open(cs)
+			cache.ReconcileIfDueForTest()
+			cache.ReconcileIfDueForTest()
+			if got := backing.lists.Load() - lists; got != 1 {
+				t.Fatalf("reopened gate: backing listed %d times over two loop steps, want 1", got)
+			}
+			if cachedOpenIDs(t, cache)[id] {
+				t.Fatalf("reopened gate: cache still lists %s open", id)
+			}
+		})
 	}
 }
