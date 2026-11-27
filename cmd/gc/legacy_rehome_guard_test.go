@@ -408,3 +408,69 @@ func TestCanonicalizeLegacyAssignedRehomeDegradedSnapshotWritesNothing(t *testin
 		})
 	}
 }
+
+// TestCanonicalizeLegacyRoutedWorkRehomesOwnMintedBindingOnSharedRigLeg is
+// AC-4: the guard's allowance is not just the city-wide import table. A binding
+// minted on the leg's rig through any source the pool orphan sweeper counts —
+// the city-wide imports, that rig's own import table, or a configured agent
+// bound to it that runs on the rig — is this city's own legacy spelling, so the
+// strip rewrite goes through on a shared leg and converges after one write.
+func TestCanonicalizeLegacyRoutedWorkRehomesOwnMintedBindingOnSharedRigLeg(t *testing.T) {
+	unboundOmp := poolAgent("omp", "qcore", intPtr(3), 0)
+	boundOther := poolAgent("other", "qcore", intPtr(3), 0)
+	boundOther.BindingName = "pool"
+	cases := []struct {
+		name string
+		cfg  *config.City
+	}{
+		{
+			name: "city-wide import",
+			cfg: &config.City{
+				Imports: map[string]config.Import{"pool": {Source: "./packs/pool"}},
+				Agents:  []config.Agent{unboundOmp},
+			},
+		},
+		{
+			name: "the leg rig's own import",
+			cfg: &config.City{
+				Rigs: []config.Rig{{
+					Name:    "qcore",
+					Imports: map[string]config.Import{"pool": {Source: "./packs/pool"}},
+				}},
+				Agents: []config.Agent{unboundOmp},
+			},
+		},
+		{
+			name: "a bound agent that runs on the rig",
+			cfg: &config.City{
+				Agents: []config.Agent{unboundOmp, boundOther},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			wb := workBead("wb-mint", "qcore/pool.omp", "", "open", 2)
+			mem := beads.NewMemStoreFrom(0, []beads.Bead{wb}, nil)
+			store := &updateCountingStore{Store: mem}
+
+			report := canonicalizeLegacyBoundUnassignedRoutedWork(tc.cfg, []beads.Bead{wb}, []beads.Store{store}, []string{"rig:qcore"}, io.Discard)
+
+			if store.updates != 1 {
+				t.Fatalf("%s: wrote %d time(s), want the one canonicalizing write", tc.name, store.updates)
+			}
+			if len(report.Rehomed) != 1 || report.Rehomed[0].To != "qcore/omp" {
+				t.Errorf("%s: rehomed %+v, want the strip to qcore/omp", tc.name, report.Rehomed)
+			}
+			if len(report.Refused) != 0 {
+				t.Errorf("%s: refused %+v, want none (this city mints the binding)", tc.name, report.Refused)
+			}
+			// Second pass: the row is canonical, the pass is silent.
+			cur, _ := mem.Get("wb-mint")
+			store.updates = 0
+			canonicalizeLegacyBoundUnassignedRoutedWork(tc.cfg, []beads.Bead{cur}, []beads.Store{store}, []string{"rig:qcore"}, io.Discard)
+			if store.updates != 0 {
+				t.Errorf("%s: second pass wrote %d time(s), want a converged no-write pass", tc.name, store.updates)
+			}
+		})
+	}
+}
