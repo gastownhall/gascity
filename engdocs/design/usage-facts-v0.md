@@ -254,9 +254,17 @@ yet settled.
   payload's `RunID` is wired today, resolved through the shared
   `beadmeta.ResolveRunID` that the compute-fact emitter also uses so a run's model
   and compute facts group together.
-- **Model-fact coverage is per transcript family: claude, codex, opencode.**
-  Families outside `invocationUsageSpecs` are skipped before any transcript
-  discovery. OpenCode mirrors a session as one JSON export named for its
+- **Model-fact coverage is per transcript family: claude, codex, opencode,
+  copilot.** Families outside `invocationUsageSpecs` are skipped before any
+  transcript discovery. Copilot CLI writes one `session.usage_record` event per
+  model call to `~/.copilot/session-state/<id>/events.jsonl`; its `inputTokens`
+  is the whole prompt, so the cached read and write tokens are subtracted to
+  get uncached input. Its `cost` field is a premium-request multiplier, not
+  dollars, so Copilot facts are priced from the registry or flagged `Unpriced`.
+  gc does not learn Copilot's session id, so a keyless session's log is the one
+  whose cwd is the work dir and whose `session.start` falls within 90s of the
+  wake. Pool seats reuse a work dir, so a wider window would see the seat's
+  next session too; two matches are refused as ambiguous. OpenCode mirrors a session as one JSON export named for its
   `session_key` (`<root>/<session_key>.json`), so it is resolved by that key,
   never by workdir (sessions sharing a workdir would be attributed each other's
   export), and the whole export is parsed rather than tail-windowed. The
