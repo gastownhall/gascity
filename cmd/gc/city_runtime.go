@@ -5626,6 +5626,7 @@ func (cr *CityRuntime) adoptConfigRevision(rev string) {
 	if rev != cr.configRev {
 		cr.claimLoopGuardOf().configChanged()
 		cr.claimStallGuardOf().configure(cr.cfg)
+		cr.poolSpawnChurnGuardOf().configure(cr.cfg)
 	}
 	cr.configRev = rev
 }

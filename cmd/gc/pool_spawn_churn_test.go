@@ -392,3 +392,226 @@ func TestPoolSpawnChurnIgnoresClosesThatAreNotBlindChurn(t *testing.T) {
 		})
 	}
 }
+
+// resumes are the session.pool_spawn_churn_resumed records so far.
+func (h *spawnChurnHarness) resumes() []events.PoolSpawnChurnPayload {
+	h.t.Helper()
+	var out []events.PoolSpawnChurnPayload
+	for _, e := range h.recorded {
+		if e.Type != events.SessionPoolSpawnChurnResumed {
+			continue
+		}
+		var p events.PoolSpawnChurnPayload
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			h.t.Fatal(err)
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// trip churns three blind seats of template a minute apart and returns when
+// the hold ends.
+func (h *spawnChurnHarness) trip(template string) time.Time {
+	h.t.Helper()
+	for i := 0; i < 3; i++ {
+		if i > 0 {
+			h.advance(time.Minute)
+		}
+		h.churn(template)
+	}
+	got := h.coolingDowns()
+	if len(got) == 0 || got[len(got)-1].Until == nil {
+		h.t.Fatalf("%s did not trip: %+v", template, got)
+	}
+	return *got[len(got)-1].Until
+}
+
+// claim feeds a work_started cell naming a claim at now for seat id.
+func (h *spawnChurnHarness) claim(id, template string, created time.Time) {
+	h.t.Helper()
+	h.seatEvent(events.BeadUpdated, id, template, created, with(awake(blindSeat(), created), session.WorkStartedKey, claimedCell(h.now)))
+}
+
+// When the hold ends, one blind seat is admitted: the merge counts the named
+// beads plus one, and the planner emits exactly one blind request.
+func TestPoolSpawnChurnAdmitsOneProbeSeatWhenTheHoldEnds(t *testing.T) {
+	h := newSpawnChurnHarness(t)
+	h.now = h.trip("churny")
+	if got := h.guard.allowance(); got["churny"] != 1 {
+		t.Fatalf("allowance = %v, want churny 1 after the hold", got)
+	}
+	cfg := blindSpawnDemandCity()
+	in := blindSpawnCollected()
+	in.BlindSpawnAllowance = h.guard.allowance()
+	merged := mergeCollectedDemand(cfg, in)
+	states := computePoolDesiredStatesParkedAt(cfg, nil, nil, nil, merged.ScaleCheckCounts, merged.ScaleCheckDemand, h.now, nil, nil)
+	if blind, bound := blindAndBoundNewRequests(states, "churny"); blind != 1 || bound != 1 {
+		t.Fatalf("churny new requests: blind=%d bound=%d, want blind=1 bound=1", blind, bound)
+	}
+}
+
+// A probe seat (created at or after the hold's end) that churns doubles the
+// hold, up to 30 min, and records the cooling-down event again in the same
+// episode with cause probe_failed.
+func TestPoolSpawnChurnFailedProbeDoublesTheHoldToTheCap(t *testing.T) {
+	h := newSpawnChurnHarness(t)
+	h.now = h.trip("churny")
+	episode := h.coolingDowns()[0].Episode
+	for i, want := range []time.Duration{10 * time.Minute, 20 * time.Minute, 30 * time.Minute, 30 * time.Minute} {
+		h.advance(time.Minute)
+		h.churn("churny")
+		got := h.coolingDowns()
+		if len(got) != i+2 {
+			t.Fatalf("probe %d: cooling-down events = %d, want %d", i+1, len(got), i+2)
+		}
+		p := got[len(got)-1]
+		if p.Cause != events.PoolSpawnChurnCauseProbeFailed || p.Episode != episode || p.Seats != 4+i {
+			t.Fatalf("probe %d: payload = %+v, want probe_failed in episode %s with %d seats", i+1, p, episode, 4+i)
+		}
+		if p.Until == nil || !p.Until.Equal(h.now.Add(want)) {
+			t.Fatalf("probe %d: until = %v, want %s", i+1, p.Until, h.now.Add(want))
+		}
+		if !h.held("churny") {
+			t.Fatalf("probe %d: not held after it failed", i+1)
+		}
+		h.now = *p.Until
+	}
+}
+
+// A seat created before the hold ended is not the probe: its churned close,
+// however late, changes nothing.
+func TestPoolSpawnChurnIgnoresStragglersCreatedBeforeTheHoldEnded(t *testing.T) {
+	h := newSpawnChurnHarness(t)
+	until := h.trip("straggly")
+	h.advance(time.Minute)
+	id, created := h.spawn("straggly", blindSeat())
+	h.seatEvent(events.BeadUpdated, id, "straggly", created, awake(blindSeat(), h.now))
+	h.now = until.Add(time.Minute)
+	h.seatEvent(events.BeadClosed, id, "straggly", created, awake(blindSeat(), created))
+	if got := h.coolingDowns(); len(got) != 1 {
+		t.Fatalf("cooling-down events = %d, want only the trip's", len(got))
+	}
+	if got := h.guard.allowance(); got["straggly"] != 1 {
+		t.Fatalf("allowance = %v, want the probe still admitted", got)
+	}
+}
+
+// The first claim by a counted seat ends the episode: the resumed event is
+// recorded, cause claimed, and the template's full blind count returns.
+func TestPoolSpawnChurnResumesOnTheFirstClaim(t *testing.T) {
+	h := newSpawnChurnHarness(t)
+	h.now = h.trip("churny")
+	id, created := h.spawn("churny", blindSeat())
+	h.advance(time.Minute)
+	h.claim(id, "churny", created)
+	if got := h.guard.allowance(); got != nil {
+		t.Fatalf("allowance = %v, want none after a claim", got)
+	}
+	got := h.resumes()
+	if len(got) != 1 || got[0].Template != "churny" || got[0].Cause != events.PoolSpawnChurnCauseClaimed || got[0].Episode != h.coolingDowns()[0].Episode {
+		t.Fatalf("resumed events = %+v, want one, cause claimed, in the trip's episode", got)
+	}
+	h.claim(id, "churny", created)
+	if len(h.resumes()) != 1 {
+		t.Fatal("a repeat claim recorded another resumed event")
+	}
+}
+
+// A seat's first claim clears the streak; the same long-lived seat claiming
+// again does not.
+func TestPoolSpawnChurnRepeatClaimByALongLivedSeatDoesNotReset(t *testing.T) {
+	h := newSpawnChurnHarness(t)
+	h.churn("longlived")
+	h.advance(time.Minute)
+	h.churn("longlived")
+	id, created := h.spawn("longlived", blindSeat())
+	h.claim(id, "longlived", created)
+	h.advance(time.Minute)
+	h.churn("longlived")
+	h.advance(time.Minute)
+	h.churn("longlived")
+	if h.held("longlived") {
+		t.Fatal("held: the first claim did not clear the streak")
+	}
+	h.advance(time.Minute)
+	h.claim(id, "longlived", created)
+	h.advance(time.Minute)
+	h.churn("longlived")
+	if !h.held("longlived") {
+		t.Fatal("not held: a repeat claim by the same seat cleared the streak")
+	}
+}
+
+// spawnChurnConfig is "churny" and a sibling, each with a custom scale_check.
+func spawnChurnConfig() *config.City {
+	return &config.City{Agents: []config.Agent{
+		{Name: "churny", Provider: "claude", ScaleCheck: "echo 3"},
+		{Name: "steady", Provider: "claude", ScaleCheck: "echo 3"},
+	}}
+}
+
+// A config change to how a template's demand is counted or how its seats run
+// ends its episode (resumed, cause config_changed) and starts it afresh:
+// seats created before the change count for nothing. An unchanged config
+// leaves the hold standing; a template removed from the config is forgotten.
+func TestPoolSpawnChurnConfigChangeResetsTheTemplate(t *testing.T) {
+	h := newSpawnChurnHarness(t)
+	h.guard.configure(spawnChurnConfig())
+	h.trip("churny")
+	h.guard.configure(spawnChurnConfig())
+	if !h.held("churny") {
+		t.Fatal("an unchanged config ended the hold")
+	}
+	// Two seats from before the change, still alive.
+	var old []string
+	var oldCreated []time.Time
+	for i := 0; i < 2; i++ {
+		id, created := h.spawn("churny", blindSeat())
+		h.seatEvent(events.BeadUpdated, id, "churny", created, awake(blindSeat(), h.now))
+		old, oldCreated = append(old, id), append(oldCreated, created)
+	}
+	h.advance(time.Second)
+	for _, mutate := range []func(*config.City){
+		func(c *config.City) { c.Agents[0].ScaleCheck = "echo 1" },
+		func(c *config.City) { c.Agents[0].WorkQuery = "bd ready" },
+		func(c *config.City) { c.Agents[0].ScaleCheckAuthoritative = true },
+		func(c *config.City) { c.Agents[0].Provider = "codex" },
+	} {
+		cfg := spawnChurnConfig()
+		mutate(cfg)
+		h.recorded = nil
+		h.guard.configure(spawnChurnConfig())
+		if !h.held("churny") {
+			h.trip("churny")
+		}
+		h.recorded = nil
+		h.advance(time.Second)
+		h.guard.configure(cfg)
+		if got := h.guard.allowance(); got != nil {
+			t.Fatalf("allowance = %v after a config change, want none", got)
+		}
+		if got := h.resumes(); len(got) != 1 || got[0].Cause != events.PoolSpawnChurnCauseConfigChanged || got[0].Template != "churny" {
+			t.Fatalf("resumed events = %+v, want one, cause config_changed", got)
+		}
+		h.advance(time.Minute)
+	}
+	// The pre-change seats churn now, with one new one: no trip.
+	for i, id := range old {
+		h.seatEvent(events.BeadClosed, id, "churny", oldCreated[i], awake(blindSeat(), oldCreated[i]))
+		h.advance(time.Minute)
+	}
+	h.churn("churny")
+	if h.held("churny") {
+		t.Fatal("seats created before the config change counted")
+	}
+	h.recorded = nil
+	h.guard.configure(&config.City{Agents: []config.Agent{{Name: "steady", Provider: "claude", ScaleCheck: "echo 3"}}})
+	h.advance(time.Minute)
+	h.churn("churny")
+	h.advance(time.Minute)
+	h.churn("churny")
+	if h.held("churny") {
+		t.Fatal("a removed template kept its streak")
+	}
+}

@@ -26,6 +26,16 @@ package main
 //     protected seats and floors are unaffected (clampBlindSpawnDemand).
 //     session.pool_spawn_churn_cooling_down names the template, the streak
 //     and the hold's end.
+//   - Probe: when the hold ends, one blind seat is admitted. A counted seat
+//     created at or after the hold's end that churns is that probe failing:
+//     the hold doubles, up to poolSpawnChurnHoldMax, and the cooling-down
+//     event is recorded again in the episode. A seat created before the hold
+//     ended is a straggler, and its close is ignored.
+//   - Resume: the first claim by a counted seat clears the streak and ends
+//     the episode (session.pool_spawn_churn_resumed); a seat claiming again
+//     does not. A config change to the template's scale_check, work_query,
+//     scale_check_authoritative or provider resets it the same way, and
+//     seats created before the change count for nothing.
 //
 // It holds no judgment: the thresholds are constants, the comparisons are
 // counts and times, and it never touches a bead; only the controller's spawn
@@ -58,8 +68,10 @@ const (
 	poolSpawnChurnMinSpan = 2 * time.Minute
 	// poolSpawnChurnWindow is how long a churned close stays in the streak.
 	poolSpawnChurnWindow = 30 * time.Minute
-	// poolSpawnChurnHoldBase is the first hold of an episode.
+	// poolSpawnChurnHoldBase is the first hold of an episode; each failed
+	// probe doubles it, up to poolSpawnChurnHoldMax.
 	poolSpawnChurnHoldBase = 5 * time.Minute
+	poolSpawnChurnHoldMax  = 30 * time.Minute
 	// poolSpawnChurnForgetAfter is how long a seat the journal is silent
 	// about is remembered.
 	poolSpawnChurnForgetAfter = 6 * time.Hour
@@ -87,22 +99,34 @@ type poolSpawnChurnTemplate struct {
 	episode *poolSpawnChurnEpisode
 }
 
+// poolSpawnChurnSignature is what of a template's config decides its blind
+// demand and how its seats run: a change to it may be the fix.
+type poolSpawnChurnSignature struct {
+	scaleCheck, workQuery, provider string
+	authoritative                   bool
+}
+
 // poolSpawnChurnEpisode is one run of churn, from its trip to what ends it.
 type poolSpawnChurnEpisode struct {
 	id    string
 	since time.Time // the first churned close of the streak that tripped it
 	seats int       // churned seats in all
+	holds int
 	until time.Time // blind demand is withheld until this time
 }
 
 // poolSpawnChurnGuard is one city's guard. Its methods are safe for concurrent
-// use: observe runs on the journal feed's goroutine and allowance on the demand
-// pass's.
+// use: observe runs on the journal feed's goroutine, allowance on the demand
+// pass's and configure on the reload's.
 type poolSpawnChurnGuard struct {
-	mu        sync.Mutex
-	now       func() time.Time
-	record    func(events.Event)
-	stderr    io.Writer
+	mu         sync.Mutex
+	now        func() time.Time
+	record     func(events.Event)
+	stderr     io.Writer
+	signatures map[string]poolSpawnChurnSignature // nil until configured
+	// epochs are when each template's config last changed: seats created
+	// before count for nothing.
+	epochs    map[string]time.Time
 	templates map[string]*poolSpawnChurnTemplate
 	seats     map[string]*poolSpawnChurnSeat
 }
@@ -115,9 +139,63 @@ func newPoolSpawnChurnGuard(record func(events.Event), stderr io.Writer) *poolSp
 		now:       time.Now,
 		record:    record,
 		stderr:    stderr,
+		epochs:    map[string]time.Time{},
 		templates: map[string]*poolSpawnChurnTemplate{},
 		seats:     map[string]*poolSpawnChurnSeat{},
 	}
+}
+
+// configure adopts cfg's templates. A template whose signature changed, or
+// that is gone, ends its episode (resumed, cause config_changed) and drops its
+// streak; a changed one starts a new epoch.
+func (g *poolSpawnChurnGuard) configure(cfg *config.City) {
+	if g == nil {
+		return
+	}
+	providers := claimStallProviders(cfg)
+	signatures := map[string]poolSpawnChurnSignature{}
+	if cfg != nil {
+		for i := range cfg.Agents {
+			a := &cfg.Agents[i]
+			name := a.QualifiedName()
+			signatures[name] = poolSpawnChurnSignature{
+				scaleCheck:    strings.TrimSpace(a.ScaleCheck),
+				workQuery:     strings.TrimSpace(a.WorkQuery),
+				provider:      providers[name],
+				authoritative: a.ScaleCheckAuthoritative,
+			}
+		}
+	}
+	now := g.now()
+	var alerts []events.Event
+	g.mu.Lock()
+	previous := g.signatures
+	g.signatures = signatures
+	if previous != nil {
+		for name, sig := range signatures {
+			if old, ok := previous[name]; ok && old != sig {
+				g.epochs[name] = now
+			}
+		}
+	}
+	for name, t := range g.templates {
+		sig, ok := signatures[name]
+		if ok && (previous == nil || previous[name] == sig) {
+			continue
+		}
+		if ep := t.episode; ep != nil {
+			fmt.Fprintf(g.stderr, "pool spawn-churn guard: %s's hold ends with a config change\n", name) //nolint:errcheck // best-effort stderr
+			alerts = append(alerts, g.resumedEvent(name, ep, events.PoolSpawnChurnCauseConfigChanged, now))
+		}
+		delete(g.templates, name)
+	}
+	for name := range g.epochs {
+		if _, ok := signatures[name]; !ok {
+			delete(g.epochs, name)
+		}
+	}
+	g.mu.Unlock()
+	g.emit(alerts)
 }
 
 // observe folds one journal event into the guard.
@@ -202,26 +280,61 @@ func (g *poolSpawnChurnGuard) observeSeat(b beads.Bead, kind string, at time.Tim
 	if strings.TrimSpace(b.Metadata["creation_complete_at"]) != "" {
 		seat.awake = true
 	}
-	if _, claimed := claimStallNewestClaim(b.Metadata[session.WorkStartedKey]); claimed {
+	var alerts []events.Event
+	if _, claimed := claimStallNewestClaim(b.Metadata[session.WorkStartedKey]); claimed && !seat.claimed {
 		seat.claimed = true
+		if g.countsLocked(seat) {
+			alerts = g.claimedLocked(seat, at)
+		}
 	}
 	if kind != events.BeadClosed || seat.closed {
-		return nil
+		return alerts
 	}
 	seat.closed = true
 	failedCreate := strings.TrimSpace(b.Metadata["state"]) == "failed-create"
-	if !seat.observed || !seat.pool || seat.bound || seat.excluded || !seat.awake || seat.claimed || seat.errored || failedCreate {
+	if !g.countsLocked(seat) || !seat.awake || seat.claimed || seat.errored || failedCreate {
+		return alerts
+	}
+	return append(alerts, g.churnedLocked(seat, at)...)
+}
+
+// countsLocked reports whether seat counts toward its template: a blind pool
+// seat whose creation the guard saw, since the template's config last
+// changed. A store may keep a creation time to the second only, so the
+// change's is compared to the second too. Caller holds g.mu.
+func (g *poolSpawnChurnGuard) countsLocked(seat *poolSpawnChurnSeat) bool {
+	if !seat.observed || !seat.pool || seat.bound || seat.excluded {
+		return false
+	}
+	epoch, ok := g.epochs[seat.template]
+	return !ok || !seat.created.Before(epoch.Truncate(time.Second))
+}
+
+// claimedLocked counts a counted seat's first claim: the template's streak
+// clears and its episode ends. Caller holds g.mu.
+func (g *poolSpawnChurnGuard) claimedLocked(seat *poolSpawnChurnSeat, at time.Time) []events.Event {
+	t := g.templates[seat.template]
+	if t == nil {
 		return nil
 	}
-	return g.churnedLocked(seat, at)
+	t.streak = nil
+	ep := t.episode
+	if ep == nil {
+		return nil
+	}
+	t.episode = nil
+	fmt.Fprintf(g.stderr, "pool spawn-churn guard: a seat of %s claimed work; its blind demand counts again\n", seat.template) //nolint:errcheck // best-effort stderr
+	return []events.Event{g.resumedEvent(seat.template, ep, events.PoolSpawnChurnCauseClaimed, at)}
 }
 
 // churnedLocked counts seat's churned close at at. Caller holds g.mu.
 func (g *poolSpawnChurnGuard) churnedLocked(seat *poolSpawnChurnSeat, at time.Time) []events.Event {
 	t := g.templateFor(seat.template)
-	if t.episode != nil {
-		t.episode.seats++
-		return nil
+	if ep := t.episode; ep != nil {
+		if seat.created.Before(ep.until.Truncate(time.Second)) {
+			return nil
+		}
+		return g.probeFailedLocked(seat.template, ep, at)
 	}
 	streak := t.streak[:0]
 	for _, c := range t.streak {
@@ -255,12 +368,58 @@ func (g *poolSpawnChurnGuard) tripLocked(template string, t *poolSpawnChurnTempl
 		id:    fmt.Sprintf("%s@%s", template, since.UTC().Format(time.RFC3339)),
 		since: since,
 		seats: seats,
-		until: claimStallLater(at, g.now()).Add(poolSpawnChurnHoldBase),
+		holds: 1,
+		until: claimStallLater(at, g.now()).Add(poolSpawnChurnHold(1)),
 	}
 	t.episode, t.streak = ep, nil
 	fmt.Fprintf(g.stderr, "pool spawn-churn guard: %d seats of %s in a row woke and closed without claiming work since %s; spawning no blind seat for it until %s\n", //nolint:errcheck // best-effort stderr
 		seats, template, since.UTC().Format(time.RFC3339), ep.until.UTC().Format(time.RFC3339))
 	return []events.Event{g.coolingDownEvent(template, ep, events.PoolSpawnChurnCauseTripped, at)}
+}
+
+// probeFailedLocked counts ep's probe seat churning: the hold doubles, up to
+// poolSpawnChurnHoldMax, and the cooling-down event is recorded again. Caller
+// holds g.mu.
+func (g *poolSpawnChurnGuard) probeFailedLocked(template string, ep *poolSpawnChurnEpisode, at time.Time) []events.Event {
+	ep.seats++
+	ep.holds++
+	ep.until = claimStallLater(at, g.now()).Add(poolSpawnChurnHold(ep.holds))
+	fmt.Fprintf(g.stderr, "pool spawn-churn guard: the probe seat of %s woke and closed without claiming work (%d seats in all); spawning no blind seat for it until %s\n", //nolint:errcheck // best-effort stderr
+		template, ep.seats, ep.until.UTC().Format(time.RFC3339))
+	return []events.Event{g.coolingDownEvent(template, ep, events.PoolSpawnChurnCauseProbeFailed, at)}
+}
+
+// poolSpawnChurnHold is how long the holds-th hold of an episode lasts.
+func poolSpawnChurnHold(holds int) time.Duration {
+	hold := poolSpawnChurnHoldBase
+	for i := 1; i < holds && hold < poolSpawnChurnHoldMax; i++ {
+		hold *= 2
+	}
+	return min(hold, poolSpawnChurnHoldMax)
+}
+
+// resumedEvent is the session.pool_spawn_churn_resumed record that ends ep.
+func (g *poolSpawnChurnGuard) resumedEvent(template string, ep *poolSpawnChurnEpisode, cause string, at time.Time) events.Event {
+	payload, _ := json.Marshal(events.PoolSpawnChurnPayload{ //nolint:errchkjson // a struct of strings, ints and times always marshals
+		Template: template,
+		Episode:  ep.id,
+		Cause:    cause,
+		Seats:    ep.seats,
+		Since:    ep.since.UTC(),
+	})
+	how := "a seat claimed work"
+	if cause == events.PoolSpawnChurnCauseConfigChanged {
+		how = "its config changed"
+	}
+	return events.Event{
+		Type:    events.SessionPoolSpawnChurnResumed,
+		Ts:      claimStallLater(at, g.now()).UTC(),
+		Actor:   "controller",
+		Subject: template,
+		Message: fmt.Sprintf("Pool %s: %s; the spawn churn that began %s (%d seats) is over and its full blind demand counts again.",
+			template, how, ep.since.UTC().Format(time.RFC3339), ep.seats),
+		Payload: payload,
+	}
 }
 
 // coolingDownEvent is the session.pool_spawn_churn_cooling_down record of ep.
@@ -294,9 +453,10 @@ func (g *poolSpawnChurnGuard) sweep(now time.Time) {
 	}
 }
 
-// allowance is, for each template under a hold, how many seats beyond its
-// named work beads the demand merge may count: none while the hold stands.
-// A template with no hold is absent; a nil guard allows everything.
+// allowance is, for each template with an open episode, how many seats beyond
+// its named work beads the demand merge may count: none while the hold
+// stands, one (the probe) once it has ended. A template with no episode is
+// absent; a nil guard allows everything.
 func (g *poolSpawnChurnGuard) allowance() map[string]int {
 	if g == nil {
 		return nil
@@ -306,13 +466,16 @@ func (g *poolSpawnChurnGuard) allowance() map[string]int {
 	defer g.mu.Unlock()
 	var out map[string]int
 	for name, t := range g.templates {
-		if t.episode == nil || !now.Before(t.episode.until) {
+		if t.episode == nil {
 			continue
 		}
 		if out == nil {
 			out = map[string]int{}
 		}
 		out[name] = 0
+		if !now.Before(t.episode.until) {
+			out[name] = 1
+		}
 	}
 	return out
 }

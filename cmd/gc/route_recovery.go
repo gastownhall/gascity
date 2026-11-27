@@ -107,7 +107,8 @@ func (cr *CityRuntime) claimStallGuardOf() *claimStallGuard {
 }
 
 // poolSpawnChurnGuardOf is the runtime's pool spawn-churn guard, created on
-// first use. Its records go to the runtime's recorder and stderr.
+// first use and configured from the runtime's config. Its records go to the
+// runtime's recorder and stderr.
 func (cr *CityRuntime) poolSpawnChurnGuardOf() *poolSpawnChurnGuard {
 	cr.poolSpawnChurnOnce.Do(func() {
 		record := func(e events.Event) {
@@ -116,6 +117,7 @@ func (cr *CityRuntime) poolSpawnChurnGuardOf() *poolSpawnChurnGuard {
 			}
 		}
 		cr.poolSpawnChurn = newPoolSpawnChurnGuard(record, cr.stderr)
+		cr.poolSpawnChurn.configure(cr.cfg)
 	})
 	return cr.poolSpawnChurn
 }
