@@ -1584,6 +1584,14 @@ type Config struct {
 	// Empty means no overlay. Highest priority — overwrites pack overlays.
 	OverlayDir string
 
+	// SkipStackedHookPaths lists work-dir-relative, slash-separated project
+	// hook files that host-side session-start overlay staging must not write:
+	// files of a provider that stacks user and project hooks whose user layer
+	// already loads every gc hook they would carry (cmd/gc decides; see
+	// internal/hooks StackedProjectHookPath). Pod staging ignores it. Empty
+	// stages every overlay file.
+	SkipStackedHookPaths []string
+
 	// CopyFiles lists files/directories to stage before the command runs.
 	// Provider.Start handles the copy atomically: for local providers,
 	// files are copied to workDir; for remote providers, files are

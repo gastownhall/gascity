@@ -7794,13 +7794,13 @@ func materializeProviderOverlaysBeforeFingerprint(
 	//
 	// "Sole writer" is scoped to the tick on purpose. For a persistent
 	// (non-task) agent the home dir is also the session workDir, and
-	// session-start staging writes these same files through the NON-skipping
-	// path — internal/runtime/tmux.stageStartFiles and
-	// runtime.StageSessionWorkDir (subprocess/acp) both call
-	// StageProviderOverlayDir with a nil skip. So a hybrid document can
-	// reappear at session start; the next tick converges it. That turns the
-	// permanent drift this fix targets into a transient one, which is the
-	// actual invariant — not that nothing else ever writes these paths.
+	// session-start staging writes these same files without the installer
+	// skip — internal/runtime/tmux.stageStartFiles and
+	// runtime.StageSessionWorkDir (subprocess/acp) withhold no mergeable file
+	// but those in Config.SkipStackedHookPaths. So a hybrid document can
+	// reappear at session start; the next tick converges it. That turns the permanent
+	// drift this fix targets into a transient one, which is the actual
+	// invariant — not that nothing else ever writes these paths.
 	//
 	// Versioned hook files are also excluded, via hooks.PreserveManagedFile.
 	// Staging has no version check and writes no backup, so without this it
@@ -7812,17 +7812,28 @@ func materializeProviderOverlaysBeforeFingerprint(
 	// itself wrote overridable by a later overlay layer (last-writer-wins).
 	preserveManaged := runtime.WithPreserve(hooks.PreserveManagedFile)
 	installed := hooks.InstalledWorkDirPaths(installHooks, func(name string) string { return config.BuiltinFamily(name, bp.providers) })
-	installerOwns := func(relPath string) bool { return installed[relPath] }
+	// A stacking provider's project hook file whose gc hooks the session's
+	// user layer already loads is withheld too, and the copy a previous tick
+	// or session start staged is retired (stacked_project_hooks.go, #5872).
+	stackedSkips := bp.stackedHookSkips(cfgAgent, resolved, qualifiedName, workDir, stderr)
+	skipMergeable := func(relPath string) bool {
+		if installed[relPath] {
+			return true
+		}
+		_, skip := stackedSkips[relPath]
+		return skip
+	}
 	for _, od := range packDirs {
-		if err := runtime.StageProviderOverlayDirSkippingInstalledMergeable(od, workDir, overlayProviders, installerOwns, stderr, preserveManaged); err != nil {
+		if err := runtime.StageProviderOverlayDirSkippingInstalledMergeable(od, workDir, overlayProviders, skipMergeable, stderr, preserveManaged); err != nil {
 			fmt.Fprintf(stderr, "agent %q: pack overlay %q: %v\n", qualifiedName, od, err) //nolint:errcheck
 		}
 	}
 	if overlayDir != "" {
-		if err := runtime.StageProviderOverlayDirSkippingInstalledMergeable(overlayDir, workDir, overlayProviders, installerOwns, stderr, preserveManaged); err != nil {
+		if err := runtime.StageProviderOverlayDirSkippingInstalledMergeable(overlayDir, workDir, overlayProviders, skipMergeable, stderr, preserveManaged); err != nil {
 			fmt.Fprintf(stderr, "agent %q: overlay %q: %v\n", qualifiedName, overlayDir, err) //nolint:errcheck
 		}
 	}
+	retireStackedProjectHooks(workDir, bp.cityPath, qualifiedName, stackedSkips, stderr)
 }
 
 func resolveTemplatePrepared(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, fpExtra map[string]string) (TemplateParams, error) {

@@ -80,6 +80,7 @@ func TestStartupHintsToRuntimeConfigCopiesValues(t *testing.T) {
 		ProviderName:           "claude",
 		ProviderOverlayName:    "claude-custom",
 		InstallAgentHooks:      []string{"gemini"},
+		SkipStackedHookPaths:   []string{".codex/hooks.json"},
 		PackOverlayDirs:        []string{"/pack/overlay"},
 		OverlayDir:             "/agent/overlay",
 		CopyFiles:              make([]runtime.CopyEntry, 1),
@@ -131,6 +132,9 @@ func TestStartupHintsToRuntimeConfigCopiesValues(t *testing.T) {
 	}
 	if len(cfg.InstallAgentHooks) != 1 || cfg.InstallAgentHooks[0] != "gemini" {
 		t.Errorf("InstallAgentHooks = %v", cfg.InstallAgentHooks)
+	}
+	if len(cfg.SkipStackedHookPaths) != 1 || cfg.SkipStackedHookPaths[0] != ".codex/hooks.json" {
+		t.Errorf("SkipStackedHookPaths = %v", cfg.SkipStackedHookPaths)
 	}
 	if len(cfg.PackOverlayDirs) != 1 || cfg.PackOverlayDirs[0] != "/pack/overlay" {
 		t.Errorf("PackOverlayDirs = %v", cfg.PackOverlayDirs)

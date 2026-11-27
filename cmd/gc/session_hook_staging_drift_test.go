@@ -70,6 +70,11 @@ func onlyDesiredSession(t *testing.T, state map[string]TemplateParams) (string, 
 // the reconciler must not drain the session for it.
 func TestConfigDrift_SessionStartHookStagingIsNotDrift(t *testing.T) {
 	cityPath, cfg := codexHookStagingCity(t)
+	// Pin the user-level codex hooks the #5872 stack-aware decision probes:
+	// these tests exercise the fallback (staging) arm and must not depend on
+	// what the test runner's machine has under $HOME/.codex.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CODEX_HOME", "")
 
 	first := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), nil, io.Discard)
 	sessionName, firstTP := onlyDesiredSession(t, first.State)
@@ -128,6 +133,11 @@ func TestConfigDrift_SessionStartHookStagingIsNotDrift(t *testing.T) {
 // its content is still a real config change.
 func TestConfigDrift_RealHookContentChangeStillDrifts(t *testing.T) {
 	cityPath, cfg := codexHookStagingCity(t)
+	// Pin the user-level codex hooks the #5872 stack-aware decision probes:
+	// these tests exercise the fallback (staging) arm and must not depend on
+	// what the test runner's machine has under $HOME/.codex.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CODEX_HOME", "")
 
 	first := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), nil, io.Discard)
 	sessionName, firstTP := onlyDesiredSession(t, first.State)

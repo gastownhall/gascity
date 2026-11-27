@@ -1136,3 +1136,37 @@ func TestStreamArchiveConsumerPanicReleasesProducer(t *testing.T) {
 		t.Fatal("producer remained blocked after consumer panic")
 	}
 }
+
+// TestStageFilesStagesStackedHookPathsEvenWhenSkipSet guards the #5872 remote
+// contract: k8s sessions never read the controller host's user-level hooks
+// file, so the staged project-level copy is their only source of the hooks.
+// A runtime.Config carrying SkipStackedHookPaths (decided for a host-local
+// session of the same agent) must not change what the pod receives.
+func TestStageFilesStagesStackedHookPathsEvenWhenSkipSet(t *testing.T) {
+	workDir := t.TempDir()
+	packOverlay := t.TempDir()
+
+	codexHooks := filepath.Join(packOverlay, "per-provider", "codex", ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(codexHooks), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", filepath.Dir(codexHooks), err)
+	}
+	if err := os.WriteFile(codexHooks, []byte(`{"hooks":{"SessionStart":[]}}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", codexHooks, err)
+	}
+
+	ops := newCapturingStageOps()
+	_, err := stageFiles(context.Background(), ops, "gc-codex", runtime.Config{
+		WorkDir:              workDir,
+		ProviderName:         "codex",
+		ProviderOverlayName:  "codex",
+		PackOverlayDirs:      []string{packOverlay},
+		SkipStackedHookPaths: []string{".codex/hooks.json"},
+	}, "", io.Discard)
+	if err != nil {
+		t.Fatalf("stageFiles: %v", err)
+	}
+
+	if _, ok := ops.files["/workspace/.codex/hooks.json"]; !ok {
+		t.Fatalf("pod did not receive the stacked codex hooks file a host-local skip would withhold (files=%v); k8s sessions have no user-level layer, so the staged copy is their only hook source", ops.files)
+	}
+}

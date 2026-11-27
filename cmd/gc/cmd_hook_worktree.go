@@ -73,12 +73,14 @@ func newHookClaimWorktreeProvisioner(cityPath, cityName string, cfg *config.City
 	if resolved != nil {
 		providerOverlayName = strings.TrimSpace(resolved.Name)
 	}
+	packDirs := effectiveOverlayDirs(cfg.PackOverlayDirs, cfg.RigOverlayDirs, rigName)
 	runtimeConfig := runtime.Config{
-		ProviderName:        resolvedProviderLaunchFamily(resolved),
-		ProviderOverlayName: providerOverlayName,
-		InstallAgentHooks:   installHooks,
-		PackOverlayDirs:     effectiveOverlayDirs(cfg.PackOverlayDirs, cfg.RigOverlayDirs, rigName),
-		OverlayDir:          overlayDir,
+		ProviderName:         resolvedProviderLaunchFamily(resolved),
+		ProviderOverlayName:  providerOverlayName,
+		InstallAgentHooks:    installHooks,
+		PackOverlayDirs:      packDirs,
+		OverlayDir:           overlayDir,
+		SkipStackedHookPaths: cityStackedHookSkipPaths(cfg, cityPath, cityName, cfgAgent, resolved, qualifiedName, packDirs, overlayDir),
 	}
 	provisioner := hookClaimWorktreeProvisioner{
 		cityPath:      cityPath,

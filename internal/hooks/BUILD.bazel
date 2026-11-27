@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "hooks.go",
         "preserve.go",
+        "stacking.go",
     ],
     embedsrcs = [
         "config/README.md",
@@ -34,6 +35,7 @@ go_test(
         "plugin_node_test.go",
         "preserve_test.go",
         "preserve_windows_test.go",
+        "stacking_test.go",
         "testenv_import_test.go",
     ],
     data = [

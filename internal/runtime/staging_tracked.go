@@ -169,3 +169,16 @@ func warnTrackedOverlaySkip(dstDir, relPath string, status overlayTrackedStatus,
 	}
 	fmt.Fprintf(warnings, "overlay: skipping provider overlay %q: %s\n", relPath, reason) //nolint:errcheck
 }
+
+// OverlayPathMayBeTracked reports whether relPath under dstDir is tracked by,
+// or cannot be proven untracked in, the git worktree that holds dstDir. A
+// dstDir outside any git worktree reports false. Callers that remove a staged
+// overlay file use it to leave a user-owned, committed copy alone.
+func OverlayPathMayBeTracked(dstDir, relPath string) bool {
+	clean := cleanOverlayRelPath(relPath)
+	statuses, enabled := probeOverlayTrackedStatuses(dstDir, []string{clean})
+	if !enabled {
+		return false
+	}
+	return statuses[clean] != overlayTrackedNo
+}

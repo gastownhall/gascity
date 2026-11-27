@@ -199,8 +199,10 @@ func applyWorkerOverlayHints(hints *runtime.Config, cfg *config.City, cityPath, 
 		return
 	}
 	hints.InstallAgentHooks = config.ResolveInstallHooks(agentCfg, &cfg.Workspace)
-	rigName := sessionSetupContextForAgent(cityPath, cfg.EffectiveCityName(), firstNonEmptyGCString(agentCfg.QualifiedName(), template), agentCfg, cfg.Rigs).Rig
+	qualifiedName := firstNonEmptyGCString(agentCfg.QualifiedName(), template)
+	rigName := sessionSetupContextForAgent(cityPath, cfg.EffectiveCityName(), qualifiedName, agentCfg, cfg.Rigs).Rig
 	hints.PackOverlayDirs = effectiveOverlayDirs(cfg.PackOverlayDirs, cfg.RigOverlayDirs, rigName)
+	hints.SkipStackedHookPaths = cityStackedHookSkipPaths(cfg, cityPath, cfg.EffectiveCityName(), agentCfg, resolved, qualifiedName, hints.PackOverlayDirs, resolveOverlayDir(agentCfg.OverlayDir, cityPath))
 }
 
 func resolvedRuntimeMCPServersWithConfig(

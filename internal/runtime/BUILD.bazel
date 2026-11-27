@@ -162,6 +162,7 @@ go_test(
         "staging_hash_test.go",
         "staging_preserve_test.go",
         "staging_skip_mergeable_test.go",
+        "staging_skip_stacked_test.go",
         "staging_test.go",
         "staging_tracked_windows_test.go",
         "steer_test.go",

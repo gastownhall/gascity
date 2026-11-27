@@ -1335,6 +1335,13 @@ func isManagedGCCommandEnvKey(key string) bool {
 }
 
 func parseManagedGCCommand(command string) (string, string, map[string]string, []string, bool) {
+	prefix, gcToken, env, args, _, ok := parseManagedGCCommandWithCity(command)
+	return prefix, gcToken, env, args, ok
+}
+
+// parseManagedGCCommandWithCity is parseManagedGCCommand that also reports the
+// value of a leading --city flag ("" when the command carries none).
+func parseManagedGCCommandWithCity(command string) (string, string, map[string]string, []string, string, bool) {
 	prefix := ""
 	body := command
 	switch {
@@ -1347,7 +1354,7 @@ func parseManagedGCCommand(command string) (string, string, map[string]string, [
 	}
 	tokens := shellquote.Split(body)
 	if len(tokens) == 0 {
-		return "", "", nil, nil, false
+		return "", "", nil, nil, "", false
 	}
 	env := map[string]string{}
 	var envTokens []string
@@ -1375,21 +1382,24 @@ func parseManagedGCCommand(command string) (string, string, map[string]string, [
 	case i < len(tokens) && tokens[i] == managedGCBinToken:
 		gcToken = managedGCBinInvocation
 	default:
-		return "", "", nil, nil, false
+		return "", "", nil, nil, "", false
 	}
 	if len(envTokens) > 0 && prefix == "" && !hasManagedEnv {
-		return "", "", nil, nil, false
+		return "", "", nil, nil, "", false
 	}
 	if len(extraEnvTokens) > 0 {
 		prefix += shellquote.Join(extraEnvTokens) + " "
 	}
 	args := tokens[i+1:]
+	city := ""
 	if len(args) >= 2 && args[0] == "--city" {
+		city = args[1]
 		args = args[2:]
 	} else if len(args) >= 1 && strings.HasPrefix(args[0], "--city=") {
+		city = strings.TrimPrefix(args[0], "--city=")
 		args = args[1:]
 	}
-	return prefix, gcToken, env, args, true
+	return prefix, gcToken, env, args, city, true
 }
 
 func codexSessionStartArgsMatch(env map[string]string, args []string) bool {

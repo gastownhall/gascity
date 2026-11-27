@@ -168,17 +168,20 @@ func stageStartFiles(cfg runtime.Config, warnings io.Writer) error {
 	// V2 per-provider overlay support: StageProviderOverlayDir copies universal
 	// files then flattened per-provider/<provider>/ slots for ProviderOverlayName
 	// with ProviderName fallback, plus any InstallAgentHooks entries.
+	// SkipStackedHookPaths withholds project hook files the session's user
+	// layer already loads.
 	overlayProviders := runtime.EffectiveOverlayProviderNames(cfg)
+	skip := runtime.SkipStackedHookPathFunc(cfg.SkipStackedHookPaths)
 	if cfg.WorkDir != "" {
 		for _, od := range cfg.PackOverlayDirs {
-			if err := runtime.StageProviderOverlayDir(od, cfg.WorkDir, overlayProviders, warnings); err != nil {
+			if err := runtime.StageProviderOverlayDirSkippingInstalledMergeable(od, cfg.WorkDir, overlayProviders, skip, warnings); err != nil {
 				return fmt.Errorf("copying pack overlay %s: %w", od, err)
 			}
 		}
 	}
 	// Agent-level overlay (highest priority; merges known settings files, overwrites others).
 	if cfg.OverlayDir != "" && cfg.WorkDir != "" {
-		if err := runtime.StageProviderOverlayDir(cfg.OverlayDir, cfg.WorkDir, overlayProviders, warnings); err != nil {
+		if err := runtime.StageProviderOverlayDirSkippingInstalledMergeable(cfg.OverlayDir, cfg.WorkDir, overlayProviders, skip, warnings); err != nil {
 			return fmt.Errorf("copying overlay %s: %w", cfg.OverlayDir, err)
 		}
 	}

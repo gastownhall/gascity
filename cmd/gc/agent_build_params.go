@@ -134,6 +134,12 @@ type agentBuildParams struct {
 	// which never latches.
 	gitLatch *gitProbeLatch
 
+	// stackedHooks caches the stacked project-hook decision inputs for this
+	// build (stacked_project_hooks.go). It is a pointer so every copy of the
+	// build params shares it; newAgentBuildParams sets it, and params built
+	// as literals leave it nil, which computes without caching.
+	stackedHooks *stackedHookTickState
+
 	// gitProbeDeadline bounds one default-branch probe. Zero means
 	// defaultGitProbeTimeout; tests set it small.
 	gitProbeDeadline time.Duration
@@ -220,6 +226,7 @@ func (p *agentBuildParams) now() time.Time {
 func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime.Provider, beaconTime time.Time, store beads.Store, stderr io.Writer) *agentBuildParams {
 	params := baseAgentBuildParams(cityName, cityPath, cfg, sp, beaconTime, store, stderr)
 	params.gitLatch = &gitProbeLatch{}
+	params.stackedHooks = newStackedHookTickState()
 	if store != nil {
 		params.poolSessionCreateBudget = poolplan.NewCreateBudget(cfg.Daemon.MaxWakesPerTickOrDefault())
 	}
