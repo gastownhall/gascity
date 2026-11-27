@@ -232,3 +232,27 @@ func TestCanonicalSingletonOrphanCloseKeepsRowOwnedClaimsGated(t *testing.T) {
 		})
 	}
 }
+
+// AC-4: an operator's suspend keeps the seat whole: the row stays open and
+// its claims keep their assignee.
+func TestCanonicalSingletonOrphanCloseHonorsOperatorHold(t *testing.T) {
+	e := newSingletonOrphanEnv(t, singletonOrphanAgent())
+	if err := e.store.SetMetadata(e.seat.ID, "sleep_intent", string(session.SleepReasonUserHold)); err != nil {
+		t.Fatalf("hold seat: %v", err)
+	}
+	if identity, ok := canonicalSingletonSeatIdentity(sessionInfoFromBead(e.get(t, e.seat.ID)), e.cfg); ok {
+		t.Fatalf("a held seat reports canonical singleton identity %q; an operator's suspend keeps its slot", identity)
+	}
+
+	records := e.tick(t)
+
+	if len(records) != 1 || records[0].OutcomeCode != TraceOutcomeNoChange {
+		t.Fatalf("close_orphan outcomes = %v, want [no_change]", closeOrphanOutcomes(records))
+	}
+	if got := e.get(t, e.seat.ID).Status; got == "closed" {
+		t.Fatal("seat under an operator suspend closed")
+	}
+	if got := e.get(t, e.claim.ID); got.Assignee != e.cfg.Agents[0].QualifiedName() || got.Status != "open" {
+		t.Fatalf("claim assignee=%q status=%q, want kept on the alias and open", got.Assignee, got.Status)
+	}
+}
