@@ -161,6 +161,24 @@ func TestSessionGetPeekStrictReportsAFailedPeek(t *testing.T) {
 	}
 }
 
+// A resolved, open session whose pane the runtime reports gone (an asleep seat)
+// peeks as no output, so gc session peek can name it with its state.
+func TestSessionGetPeekStrictAnswersAGonePaneWithNoOutput(t *testing.T) {
+	fs := newSessionFakeState(t)
+	probe := newSessionPeekProbe(fs.sp)
+	fs.sessionProvider = probe
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Asleep")
+	sessionPeekSetState(t, fs, info.ID, "asleep")
+	probe.fail[info.SessionName] = runtime.ErrSessionNotFound
+
+	rec := sessionPeekGet(t, fs, info.ID, "peek_strict=true")
+	wantStatus(t, "strict peek", rec, http.StatusOK)
+	got := decodeInto[sessionResponse](t, rec)
+	if got.LastOutput != "" || got.State != "asleep" {
+		t.Fatalf("last_output = %q state = %q, want no output and state asleep", got.LastOutput, got.State)
+	}
+}
+
 func TestSessionGetPeekStrictFindsAClosedSessionOnlyByID(t *testing.T) {
 	fs := newSessionFakeState(t)
 	fs.sessionProvider = newSessionPeekProbe(fs.sp)

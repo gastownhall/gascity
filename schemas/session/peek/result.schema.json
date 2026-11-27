@@ -33,6 +33,10 @@
     },
     "output": {
       "type": "string"
+    },
+    "state": {
+      "type": "string",
+      "description": "The session's lifecycle state, so an empty output from a seat that is not running (asleep) is not read as a live seat with a blank screen."
     }
   },
   "additionalProperties": true
