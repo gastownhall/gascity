@@ -282,3 +282,81 @@ func sortMembers(items []beads.Bead) {
 		return left.CreatedAt.Before(right.CreatedAt)
 	})
 }
+
+// HeldMember is one convoy member read by MembersAcross, with the index of the
+// reader whose store holds it: that store also holds the member's own edges.
+// A member no reader resolved is an unresolved placeholder whose Reader is the
+// first reader that recorded its edge.
+type HeldMember struct {
+	beads.Bead
+	Reader int
+}
+
+// MembersAcross is the union of a convoy's membership as each of readers
+// records it, every member resolved in the store whose edge names it. Each
+// reader is read live (beads.LiveFor). A store that never saw the convoy, or
+// holds an edgeless copy of it, contributes nothing, and no store's silence
+// subtracts a member another store records; a member seen as an unresolved
+// placeholder in one store and as a real bead in another keeps the real bead
+// (UnionMembers). A reader that fails fails the answer, naming it by its index
+// in labels.
+func MembersAcross(readers []beads.StoreReader, labels []string, convoyID string, includeClosed bool) ([]HeldMember, error) {
+	lists := make([][]beads.Bead, len(readers))
+	for i, r := range readers {
+		if r == nil {
+			continue
+		}
+		live := beads.LiveFor(r)
+		members, err := membersFrom(live, convoyID, includeClosed, live.Get)
+		if err != nil {
+			label := fmt.Sprintf("reader %d", i)
+			if i < len(labels) && labels[i] != "" {
+				label = labels[i]
+			}
+			return nil, fmt.Errorf("%s store: %w", label, err)
+		}
+		lists[i] = members
+	}
+	return unionHeld(lists), nil
+}
+
+// UnionMembers merges convoy member lists read from several stores, in list
+// order: each id once, the first list to record it winning, except that an
+// unresolved placeholder yields to a real bead a later list records. The
+// result is in the order MembersIn returns within one store.
+func UnionMembers(lists ...[]beads.Bead) []beads.Bead {
+	held := unionHeld(lists)
+	out := make([]beads.Bead, len(held))
+	for i, m := range held {
+		out[i] = m.Bead
+	}
+	return out
+}
+
+// unionHeld is UnionMembers keeping, for each member, the index of the list
+// that supplied the kept copy.
+func unionHeld(lists [][]beads.Bead) []HeldMember {
+	var merged []HeldMember
+	at := make(map[string]int)
+	for li, list := range lists {
+		for _, member := range list {
+			i, seen := at[member.ID]
+			if !seen {
+				at[member.ID] = len(merged)
+				merged = append(merged, HeldMember{Bead: member, Reader: li})
+				continue
+			}
+			if IsUnresolvedTrackedItem(merged[i].Bead) && !IsUnresolvedTrackedItem(member) {
+				merged[i] = HeldMember{Bead: member, Reader: li}
+			}
+		}
+	}
+	sort.SliceStable(merged, func(i, j int) bool {
+		left, right := merged[i], merged[j]
+		if left.CreatedAt.Equal(right.CreatedAt) {
+			return left.ID < right.ID
+		}
+		return left.CreatedAt.Before(right.CreatedAt)
+	})
+	return merged
+}

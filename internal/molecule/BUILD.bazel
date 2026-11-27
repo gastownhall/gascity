@@ -22,6 +22,7 @@ go_library(
         "//internal/formula",
         "//internal/fsys",
         "//internal/pathutil",
+        "//internal/workflowstop",
     ],
 )
 

@@ -873,6 +873,30 @@ func DependencySatisfied(depStatus, depWorkOutcome string) bool {
 	return depWorkOutcome != beadmeta.WorkOutcomeBlocked
 }
 
+// DependencyCopySatisfied reports whether one store's copy of a blocking
+// dependency releases its dependents: DependencySatisfied over its status and
+// its ReadinessWorkOutcome.
+func DependencyCopySatisfied(dep Bead) bool {
+	return DependencySatisfied(dep.Status, ReadinessWorkOutcome(dep.Metadata))
+}
+
+// DependencySatisfiedByCopies reports whether a blocking dependency releases
+// its dependents when it is judged from every copy the stores of a city hold:
+// at least one store holds it, and every copy releases (DependencyCopySatisfied).
+// A dependency no store holds releases nothing, and a closed copy in one store
+// does not hide an open copy in another.
+func DependencySatisfiedByCopies(copies []Bead) bool {
+	if len(copies) == 0 {
+		return false
+	}
+	for _, c := range copies {
+		if !DependencyCopySatisfied(c) {
+			return false
+		}
+	}
+	return true
+}
+
 // ReadinessWorkOutcome is the gc.work_outcome value readiness should judge a
 // closed dependency by. gc.outcome is the control-plane step result that
 // internal/dispatch sequences a workflow on, and gc.work_outcome the worker's
