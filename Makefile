@@ -201,9 +201,10 @@ install: check-self-contained
 	fi
 	@echo "Installed $(BINARY) and $(COMPANION) to $(INSTALL_DIR)"
 
-## generate: regenerate JSON schemas and reference docs
+## generate: regenerate JSON schemas, reference docs and the agent seat digest
 generate:
 	go run ./cmd/genschema
+	go run ./cmd/gen-seat-digest
 
 ## check-schema: verify generated docs are up to date
 check-schema: generate
