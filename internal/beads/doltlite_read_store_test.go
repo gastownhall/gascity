@@ -77,6 +77,28 @@ func TestDoltliteReadStoreHydratesParent(t *testing.T) {
 	}
 }
 
+func TestDoltliteReadStoreRejectsNonStringClaimantExclusions(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+	writer := openTestDoltliteWriter(t, store.db)
+	if _, err := writer.Exec(`UPDATE issues SET metadata = ? WHERE id = 'gc-child'`, `{"gc.exclude_claimants":["review.author"]}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Get("gc-child"); err == nil || !strings.Contains(err.Error(), "gc.exclude_claimants") {
+		t.Fatalf("Get accepted a non-string exclusion: %v", err)
+	}
+	if _, err := writer.Exec(`UPDATE issues SET metadata = ? WHERE id = 'gc-child'`, `{"gc.exclude_claimants":"review.author"}`); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Get("gc-child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["gc.exclude_claimants"] != "review.author" {
+		t.Fatalf("Get lost string exclusions: %v", got.Metadata)
+	}
+}
+
 func TestDoltliteReadStoreTypeFallbackCanSkipLabels(t *testing.T) {
 	store, closeStore := newTestDoltliteReadStore(t)
 	defer closeStore()
@@ -2337,6 +2359,9 @@ func TestDoltliteDependencySnapshotCompletenessIsGuarded(t *testing.T) {
 // MetadataReadings, so a caller judging a row under every reading gc's stores
 // give it covers this store too.
 func TestDoltliteParseMetadataIsTheBdCLIReading(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+	writer := openTestDoltliteWriter(t, store.db)
 	for _, raw := range []string{
 		`{}`,
 		` {"gc.root_bead_id":"gc-1","note":"x"} `,
@@ -2347,8 +2372,15 @@ func TestDoltliteParseMetadataIsTheBdCLIReading(t *testing.T) {
 		if err != nil {
 			t.Fatalf("MetadataReadings(%s): %v", raw, err)
 		}
-		if got := parseMetadata(raw); !maps.Equal(got, readings[0]) {
-			t.Errorf("%s: DoltLite reads %q, want the bd CLI's reading %q", raw, got, readings[0])
+		if _, err := writer.Exec(`UPDATE issues SET metadata = ? WHERE id = 'gc-child'`, raw); err != nil {
+			t.Fatal(err)
+		}
+		got, err := store.Get("gc-child")
+		if err != nil {
+			t.Fatalf("Get with metadata %s: %v", raw, err)
+		}
+		if !maps.Equal(got.Metadata, readings[0]) {
+			t.Errorf("%s: DoltLite reads %q, want the bd CLI's reading %q", raw, got.Metadata, readings[0])
 		}
 	}
 }

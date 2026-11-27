@@ -23,6 +23,19 @@ import (
 	"github.com/gastownhall/gascity/internal/molecule"
 )
 
+func TestStampDrainItemRecipeInheritsExcludedClaimants(t *testing.T) {
+	recipe := &formula.Recipe{Steps: []formula.RecipeStep{{IsRoot: true, Metadata: map[string]string{beadmeta.ExcludeClaimantsMetadataKey: "review.local"}}}}
+	control := beads.Bead{ID: "drain", Metadata: map[string]string{beadmeta.ExcludeClaimantsMetadataKey: "review.author"}}
+	unit := beads.Bead{ID: "unit", Metadata: map[string]string{beadmeta.ExcludeClaimantsMetadataKey: "review.unit"}}
+	member := beads.Bead{ID: "report", Metadata: map[string]string{beadmeta.ExcludeClaimantsMetadataKey: "review.member"}}
+	stampDrainItemRecipe(recipe, control, unit, member, 1, &drainManifestRow{ItemRootKey: "item"}, "review", nil)
+	for _, who := range []string{"review.author", "review.unit", "review.member", "review.local"} {
+		if !beadmeta.ExcludesClaimant(recipe.Steps[0].Metadata, who) {
+			t.Errorf("drain item root missing exclusion for %s: %v", who, recipe.Steps[0].Metadata)
+		}
+	}
+}
+
 func TestProcessDrainSeparateExpandsConvoyIntoUnitRoots(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
 	dir := t.TempDir()

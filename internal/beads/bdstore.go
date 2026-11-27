@@ -977,6 +977,7 @@ func mergeEnv(environ []string, overrides map[string]string) []string {
 // (booleans, numbers) by coercing them to their string representation.
 // This prevents bd CLI's type-inference from breaking metadata deserialization
 // (e.g., bd stores "true" as JSON boolean true, "42" as JSON number 42).
+// gc.exclude_claimants must be a JSON string; other types fail decoding.
 type StringMap map[string]string
 
 // UnmarshalJSON implements json.Unmarshaler for StringMap.
@@ -987,6 +988,9 @@ func (m *StringMap) UnmarshalJSON(data []byte) error {
 	}
 	result := make(map[string]string, len(raw))
 	for k, v := range raw {
+		if k == beadmeta.ExcludeClaimantsMetadataKey && (len(v) == 0 || v[0] != '"') {
+			return fmt.Errorf("metadata %s must be a string", k)
+		}
 		var s string
 		if err := json.Unmarshal(v, &s); err == nil {
 			result[k] = s

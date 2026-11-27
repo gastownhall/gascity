@@ -8,8 +8,7 @@ provides only infrastructure. The core principle: **ZERO hardcoded roles.**
 The SDK has no built-in Mayor, Deacon, Polecat, or any other role. If a
 line of Go references a specific role name, it's a bug.
 
-You can build Gas Town in Gas City, or Ralph, or Claude Code Agent Teams,
-or any other orchestration pack — via specific configurations.
+Gas Town, Ralph, and Claude Code Agent Teams are configurations.
 
 **Why Gas City exists:** Gas Town proved multi-agent orchestration works,
 but all its roles are hardwired in Go code. Steve realized the way work is
@@ -27,6 +26,7 @@ next to that code; read the matching file before changing it.
 | Asked to run or try Gas City, not change it | README "Get it running" (no build) |
 | `internal/api/`, `internal/events/`, `internal/extmsg/`, CLI code that constructs events or calls the API client, the OpenAPI spec, or the dashboard | `internal/api/AGENTS.md` |
 | `internal/config/` (agent or rig config fields) | `internal/config/AGENTS.md` |
+| `internal/sling/` or claimant exclusions on workflow graphs | `internal/sling/AGENTS.md` |
 | `internal/session/` | `internal/session/AGENTS.md` |
 | `internal/sessionlog/` | `internal/sessionlog/AGENTS.md` |
 | `internal/runtime/acp/` | `internal/runtime/acp/AGENTS.md` |

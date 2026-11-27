@@ -1566,7 +1566,11 @@ func scanBead(rows interface{ Scan(...any) error }) (Bead, error) {
 	b.CloseReason = bdCloseReason(b.Status, closeReason)
 	b.CreatedAt = parseDBTime(createdRaw).Truncate(time.Second)
 	b.UpdatedAt = parseDBTime(updatedRaw).Truncate(time.Second)
-	b.Metadata = parseMetadata(metadataRaw)
+	if strings.TrimSpace(metadataRaw) != "" {
+		if err := json.Unmarshal([]byte(metadataRaw), &b.Metadata); err != nil {
+			return b, fmt.Errorf("reading bead %s metadata: %w", b.ID, err)
+		}
+	}
 	b.Ephemeral = ephemeral != 0
 	b.NoHistory = noHistory != 0
 	if b.From == "" {
@@ -1602,27 +1606,6 @@ func parseTimeString(s string) time.Time {
 		}
 	}
 	return time.Time{}
-}
-
-func parseMetadata(raw string) map[string]string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" || raw == "{}" {
-		return nil
-	}
-	var decoded map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
-		return nil
-	}
-	out := make(map[string]string, len(decoded))
-	for k, v := range decoded {
-		var s string
-		if err := json.Unmarshal(v, &s); err == nil {
-			out[k] = s
-		} else {
-			out[k] = strings.TrimSpace(string(v))
-		}
-	}
-	return out
 }
 
 func (s *DoltliteReadStore) tableExists(name string) bool {
