@@ -196,16 +196,6 @@ func newCrossStore(legs []Leg) *crossStore {
 	}
 }
 
-// legIndex returns the index of the leg serving store, or -1.
-func (cs *crossStore) legIndex(store beads.Store) int {
-	for i, leg := range cs.legs {
-		if leg.Store == store {
-			return i
-		}
-	}
-	return -1
-}
-
 // strands reports whether a leg's store reads an absent target as a blocker,
 // and so judged its own copy of every target of every row its Ready served.
 func strands(leg Leg) bool {
@@ -618,12 +608,13 @@ func blockerStatuses(ctx context.Context, cs *crossStore, legs []Leg, own int, t
 	return out, nil
 }
 
-// LegGate applies the split-city cross-store rule to ready rows read one leg
-// at a time (pool demand, the API's cached ready read): to the rows one leg
-// served from its own Ready it adds the rows that leg strands behind an absent
-// blocker (its query selects them as Ready would), and it drops every row a
-// blocker holds. A nil *LegGate is a city with no binding, and returns every
-// row as read, so such a city's answer is the store's own.
+// LegGate applies the ready reader's row gate to ready rows read one leg at a
+// time (pool demand, the API's cached ready read). On a split city, to the rows
+// one leg served from its own Ready it adds the rows that leg strands behind an
+// absent blocker (its query selects them as Ready would), and it drops every
+// row a blocker holds. On every city it drops every row native input admission
+// withholds (internal/inputadmission). A nil *LegGate returns every row as
+// read.
 //
 // It is the same rule `gc ready` applies, through the same code, so the
 // controller's demand and the worker's serve cannot disagree about a row.
@@ -634,6 +625,7 @@ func blockerStatuses(ctx context.Context, cs *crossStore, legs []Leg, own int, t
 // cached snapshot of each store) so reads each of them once, not once per
 // snapshot. Build one for each pass.
 type LegGate struct {
+	legs []Leg
 	cs   *crossStore
 	rows *rowGate
 	q    beads.ReadyQuery
@@ -648,20 +640,17 @@ type legListing struct {
 	res  legResult
 }
 
-// NewLegGate returns the gate over legs, whose stranded rows are listed as
-// Ready would select them for q, or nil when legs are not a split city's.
+// NewLegGate returns the gate over legs, whose stranded rows, on a split city,
+// are listed as Ready would select them for q.
 func NewLegGate(legs []Leg, q beads.ReadyQuery) *LegGate {
 	cs := newCrossStore(legs)
-	if cs == nil {
-		return nil
-	}
-	return &LegGate{cs: cs, rows: newRowGate(legs, cs, time.Now()), q: q, listings: make(map[int]*legListing)}
+	return &LegGate{legs: legs, cs: cs, rows: newRowGate(legs, cs, time.Now()), q: q, listings: make(map[int]*legListing)}
 }
 
 // Gate gates rows, which legs[own] served from its own Ready. An own outside
 // the legs returns rows as they are.
 func (g *LegGate) Gate(ctx context.Context, own int, rows []beads.Bead) ([]beads.Bead, error) {
-	if g == nil || own < 0 || own >= len(g.cs.legs) {
+	if g == nil || own < 0 || own >= len(g.legs) {
 		return rows, nil
 	}
 	if err := ctx.Err(); err != nil {
@@ -676,11 +665,13 @@ func (g *LegGate) Gate(ctx context.Context, own int, rows []beads.Bead) ([]beads
 		owners[b.ID] = own
 		items = append(items, b)
 	}
-	listed := g.listing(ctx, own)
-	if listed.err != nil {
-		return nil, fmt.Errorf("%s store: %w", g.cs.legs[own].Label, listed.err)
+	if g.cs != nil {
+		listed := g.listing(ctx, own)
+		if listed.err != nil {
+			return nil, fmt.Errorf("%s store: %w", g.legs[own].Label, listed.err)
+		}
+		items = g.cs.mergeStranded(own, listed.rows, items, owners)
 	}
-	items = g.cs.mergeStranded(own, listed.rows, items, owners)
 	return g.rows.gate(ctx, owners, items, 0)
 }
 
@@ -693,6 +684,6 @@ func (g *LegGate) listing(ctx context.Context, own int) legResult {
 		g.listings[own] = l
 	}
 	g.mu.Unlock()
-	l.once.Do(func() { l.res = listStranded(ctx, g.cs.legs[own], g.q) })
+	l.once.Do(func() { l.res = listStranded(ctx, g.legs[own], g.q) })
 	return l.res
 }

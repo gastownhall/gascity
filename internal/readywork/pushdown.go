@@ -151,13 +151,13 @@ func readyRead(q beads.ReadyQuery) legRead {
 
 // readReadyCandidates reads the ready arm: each leg asked with the pushed
 // predicates and, where it is exact, a pushed limit.
-func readReadyCandidates(ctx context.Context, legs []Leg, c compiled, cs *crossStore) ([]beads.Bead, map[string]int, error) {
+func readReadyCandidates(ctx context.Context, legs []Leg, c compiled, gate *rowGate) ([]beads.Bead, map[string]int, error) {
 	plain := readyRead(beads.ReadyQuery{TierMode: beads.FederatedReadTier})
 	q := readyReadQuery(c)
 	order, bounded := boundedOrder(c)
 	switch {
 	case bounded:
-		return readNarrowed(ctx, legs, c, boundedRead(c, q, order, cs), plain)
+		return readNarrowed(ctx, legs, c, boundedRead(c, q, order, gate), plain)
 	case predicatesPushed(q):
 		return readNarrowed(ctx, legs, c, readyRead(q), plain)
 	default:
@@ -207,11 +207,12 @@ func readNarrowed(ctx context.Context, legs []Leg, c compiled, narrowed, plain l
 // its own the answer needs. A store that cannot cut in order returns its whole
 // set.
 //
-// On a split city a row a cross-store blocker holds is not a row in hand either
-// (crossstore.go), so it does not count toward the limit: a leg whose top rows
-// are held widens its own cut, step by step, until enough of its rows can be
-// served, and no leg's whole ready set is re-read for it.
-func boundedRead(c compiled, q beads.ReadyQuery, order beads.ReadyOrder, cs *crossStore) legRead {
+// A row the read's gate holds back (a cross-store blocker on a split city,
+// crossstore.go, or native input admission on any city, admission.go) is not a
+// row in hand either, so it does not count toward the limit: a leg whose top
+// rows are held widens its own cut, step by step, until enough of its rows can
+// be served, and no leg's whole ready set is re-read for it.
+func boundedRead(c compiled, q beads.ReadyQuery, order beads.ReadyOrder, gate *rowGate) legRead {
 	limit := c.query.Limit
 	return func(ctx context.Context, leg Leg) legResult {
 		want := limit + boundedSlack
@@ -232,13 +233,13 @@ func boundedRead(c compiled, q beads.ReadyQuery, order beads.ReadyOrder, cs *cro
 				}
 			}
 			kept := len(usable)
-			if cs != nil && kept >= limit {
-				blocked, err := cs.blockedRows(ctx, cs.legIndex(leg.Store), usable)
+			if kept >= limit {
+				held, err := gate.heldRows(ctx, gate.legIndex(leg.Store), usable)
 				if err != nil {
 					return legResult{err: err}
 				}
 				for _, b := range usable {
-					if blocked[b.ID] {
+					if held[b.ID] {
 						kept--
 					}
 				}

@@ -142,7 +142,7 @@ func CutUntilUnblocked(rows []ReadyBead) []ReadyBead {
 func readCompiled(ctx context.Context, legs []Leg, c compiled, untilUnblocked bool) ([]ReadyBead, error) {
 	cs := newCrossStore(legs)
 	gate := newRowGate(legs, cs, time.Now())
-	items, owners, err := readCandidates(ctx, legs, c, cs)
+	items, owners, err := readCandidates(ctx, legs, c, gate)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return nil, ctxErr
 	}
@@ -223,10 +223,10 @@ func readyAnswer(ctx context.Context, cs *crossStore, gate *rowGate, c compiled,
 // recorded at MERGE time rather than re-probed afterwards: the merge is
 // first-leg-wins, and a co-resident bead that is open in one leg and in_progress
 // in another would resolve to the wrong store under a fresh probe.
-func readCandidates(ctx context.Context, legs []Leg, c compiled, cs *crossStore) ([]beads.Bead, map[string]int, error) {
+func readCandidates(ctx context.Context, legs []Leg, c compiled, gate *rowGate) ([]beads.Bead, map[string]int, error) {
 	switch c.status {
 	case "":
-		return readReadyCandidates(ctx, legs, c, cs)
+		return readReadyCandidates(ctx, legs, c, gate)
 	case StatusOpen:
 		return readOpenStatusCandidates(ctx, legs)
 	case StatusInProgress:
