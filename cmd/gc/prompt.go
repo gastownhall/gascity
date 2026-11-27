@@ -35,10 +35,10 @@ type PromptContext struct {
 	IssuePrefix             string
 	Branch                  string
 	DefaultBranch           string // e.g. "main" — from git symbolic-ref origin/HEAD; empty when the build's probe did not complete
-	WorkQuery               string // command to find available work (from Agent.EffectiveWorkQuery)
-	AssignedInProgressQuery string // command to find assigned in-progress work (from Agent.EffectiveAssignedInProgressQuery)
-	AssignedReadyQuery      string // command to find pre-assigned ready work (from Agent.EffectiveAssignedReadyQuery)
-	RoutedPoolQuery         string // command to find unassigned routed pool work (from Agent.EffectiveRoutedPoolQuery)
+	WorkQuery               string // compact hook command or custom work_query
+	AssignedInProgressQuery string // command to find assigned in-progress work
+	AssignedReadyQuery      string // command to find pre-assigned ready work
+	RoutedPoolQuery         string // command to find unassigned routed pool work
 	SlingQuery              string // command template to route work to this agent (from Agent.EffectiveSlingQuery)
 	// ProviderKey is the resolved provider name for this agent (e.g. "claude",
 	// "codex", or a custom provider name from the city's [providers] section).
@@ -552,4 +552,15 @@ func providerDisplayNameFor(name string, cityProviders map[string]config.Provide
 		}
 	}
 	return name
+}
+
+// promptHookQuery keeps generated routing policy in the CLI rather than in
+// provider-delivered prompts. Custom commands remain caller-owned and are
+// expanded by the renderer as before. Runtime identity is resolved by gc hook,
+// so a pool template must not be passed as an explicit agent argument.
+func promptHookQuery(a *config.Agent, kind string) string {
+	if a.WorkQuery != "" {
+		return a.WorkQuery
+	}
+	return "gc hook query " + kind
 }

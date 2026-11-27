@@ -15,6 +15,14 @@ keep already-owned workflow anchors available for continuation. Update the
 shell count and Go predicates together; otherwise an unclaimable latch can
 continually wake replacement workers.
 
+## Generated prompt queries stay compact
+
+Prompt renderers emit `gc hook query <tier>` for generated work queries; routing
+policy stays in the shared query builders behind that command. Custom
+`work_query` commands remain caller-owned. Query discovery is read-only;
+`gc hook --claim --json` owns atomic acquisition. Keep prime, startup and lint
+rendering aligned.
+
 ## Adding agent config fields
 
 When adding a field to `config.Agent`, also add it to `AgentPatch` and

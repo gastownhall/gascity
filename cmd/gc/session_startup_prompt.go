@@ -96,8 +96,7 @@ func (c startupPromptCity) promptFor(a *config.Agent, info session.Info) string 
 		Dir:   info.WorkDir,
 	}
 	cityName := loadedCityName(c.cfg, c.path)
-	ctx := buildPrimeContextWithIdentity(c.path, cityName, a, c.cfg.Rigs,
-		config.QueryTopology{Beads: c.cfg.Beads}, identity, c.stderr)
+	ctx := buildPrimeContextWithIdentity(c.path, cityName, a, c.cfg.Rigs, identity, c.stderr)
 	ctx.ProviderKey, ctx.ProviderDisplayName = providerInfoForAgent(a, &c.cfg.Workspace, c.cfg.Providers)
 	ctx.InstructionsFile = instructionsFileForAgent(a, &c.cfg.Workspace, c.cfg.Providers)
 	// Render a view of the agent that carries the template: an implicit
