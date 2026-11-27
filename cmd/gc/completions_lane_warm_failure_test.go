@@ -29,8 +29,7 @@ func TestCompletionsLaneBacksOffAfterWarmFailure(t *testing.T) {
 	// A forced sweep survives the backoff: the debt is kept, only the retry is
 	// paced. This lane has never completed a sweep, so the debt is owed as
 	// STARTUP, not cursor-gap: startup precedes forced until the first traversal
-	// finishes (so a pre-first-sweep gap cannot suppress VisitStamped), and a
-	// startup sweep subsumes the gap by visiting stamped roots too.
+	// finishes, and the reason only labels the sweep.
 	lane.force()
 	lane.noteSweepFailure(now)
 	if _, due := lane.sweepDue(now.Add(time.Second)); due {
