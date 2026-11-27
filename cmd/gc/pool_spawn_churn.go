@@ -12,9 +12,12 @@ package main
 //
 //   - Input, off the city's event journal (the delta lanes' feed). A seat
 //     COUNTS when the guard saw its session bead created, it is pool managed,
-//     and it was never stamped with gc.trigger_bead_id (no demand named work
-//     for it). A counted seat CHURNS when it closes after it woke without
-//     having claimed any work.
+//     it was never stamped with gc.trigger_bead_id (no demand named work for
+//     it, at any point of its life), and it is neither a named nor a manual
+//     session. A counted seat CHURNS when it closes after it woke without
+//     having claimed any work, unless it closed failed-create or its hook
+//     reported a failed claim write (bead.claim_failed: it drains
+//     claims_errored, a store fault the claim-loop guard watches, not churn).
 //   - Trip: poolSpawnChurnTrip churned closes of a template's seats, within
 //     poolSpawnChurnWindow, the first and the last at least
 //     poolSpawnChurnMinSpan apart: one pass's burst cannot trip it alone.
@@ -68,8 +71,11 @@ type poolSpawnChurnSeat struct {
 	observed bool // the guard saw its creation
 	created  time.Time
 	pool     bool // pool_managed
+	bound    bool // stamped gc.trigger_bead_id at some point
+	excluded bool // a named or manual session
 	awake    bool // creation_complete_at set
 	claimed  bool
+	errored  bool // its hook reported a failed claim write
 	closed   bool
 	seen     time.Time
 }
@@ -121,6 +127,9 @@ func (g *poolSpawnChurnGuard) observe(evt events.Event) {
 	}
 	switch evt.Type {
 	case events.BeadCreated, events.BeadUpdated, events.BeadClosed:
+	case events.BeadClaimFailed:
+		g.observeClaimFailed(evt)
+		return
 	default:
 		return
 	}
@@ -136,6 +145,21 @@ func (g *poolSpawnChurnGuard) observe(evt events.Event) {
 		at = g.now()
 	}
 	g.emit(g.observeSeat(b, evt.Type, at))
+}
+
+// observeClaimFailed marks the seat whose claim write failed: unless it
+// claims after all, it closes claims_errored, which is not churn.
+func (g *poolSpawnChurnGuard) observeClaimFailed(evt events.Event) {
+	var p events.BeadClaimFailedPayload
+	if err := json.Unmarshal(evt.Payload, &p); err != nil {
+		return
+	}
+	id := strings.TrimSpace(firstNonEmpty(p.SessionID, evt.SessionID))
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if seat := g.seats[id]; seat != nil {
+		seat.errored = true
+	}
 }
 
 // emit records alerts outside the lock.
@@ -169,6 +193,12 @@ func (g *poolSpawnChurnGuard) observeSeat(b beads.Bead, kind string, at time.Tim
 	if strings.TrimSpace(b.Metadata["pool_managed"]) == "true" {
 		seat.pool = true
 	}
+	if strings.TrimSpace(b.Metadata[beadmeta.TriggerBeadIDMetadataKey]) != "" {
+		seat.bound = true
+	}
+	if session.IsNamedSessionBead(b) || isManualSessionBead(b) {
+		seat.excluded = true
+	}
 	if strings.TrimSpace(b.Metadata["creation_complete_at"]) != "" {
 		seat.awake = true
 	}
@@ -179,8 +209,8 @@ func (g *poolSpawnChurnGuard) observeSeat(b beads.Bead, kind string, at time.Tim
 		return nil
 	}
 	seat.closed = true
-	bound := strings.TrimSpace(b.Metadata[beadmeta.TriggerBeadIDMetadataKey]) != ""
-	if !seat.observed || !seat.pool || bound || !seat.awake || seat.claimed {
+	failedCreate := strings.TrimSpace(b.Metadata["state"]) == "failed-create"
+	if !seat.observed || !seat.pool || seat.bound || seat.excluded || !seat.awake || seat.claimed || seat.errored || failedCreate {
 		return nil
 	}
 	return g.churnedLocked(seat, at)
