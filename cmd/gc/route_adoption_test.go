@@ -312,3 +312,54 @@ func TestRouteAdoptionLosesToAWriteAfterItsLiveRead(t *testing.T) {
 		}
 	}
 }
+
+// TestRouteAdoptionAdoptedBeadIsServedClaimedAndDemanded is AC-6's Go half: a
+// bead the lane adopted carries exactly the route the unchanged claim and
+// demand predicates accept for a session of the target pool. The shell half
+// (Tier 3 query and count-form) is internal/config
+// TestEffectiveWorkQueryAndCountFormServeAnAdoptedRoute, which pins the same
+// route value.
+func TestRouteAdoptionAdoptedBeadIsServedClaimedAndDemanded(t *testing.T) {
+	const adoptedRoute = "hello-world/researcher"
+	cfg := adoptionRigConfig(t, adoptedRoute)
+	cr, _, rigStore := adoptionRigRuntime(t, cfg, nil, []beads.Bead{plainCreatedBead("hw-7")})
+	agent := cfg.Agents[0]
+	routeTargets := hookClaimRouteTargets(hookClaimPrimaryRouteTarget(&agent), agent.QualifiedName()+"-1")
+	template := agent.QualifiedName()
+
+	// Control: before adoption the same bead is refused by both predicates.
+	if hookClaimMatchesRoute(plainCreatedBead("hw-7"), routeTargets) {
+		t.Fatal("hookClaimMatchesRoute(unrouted bead) = true, want false before adoption")
+	}
+	if _, ok := demandServableForTemplates(cfg, plainCreatedBead("hw-7"), map[string]struct{}{template: {}}); ok {
+		t.Fatal("demandServableForTemplates(unrouted bead) = true, want false before adoption")
+	}
+
+	if report := cr.runRouteRecoveryBackstop(backstopReasonCadence); report.adopted != 1 {
+		t.Fatalf("backstop adopted %d, want 1", report.adopted)
+	}
+	bead, err := rigStore.Get("hw-7")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := bead.Metadata[beadmeta.RoutedToMetadataKey]; got != adoptedRoute {
+		t.Fatalf("adopted gc.routed_to = %q, want %q", got, adoptedRoute)
+	}
+
+	if !hookClaimMatchesRoute(bead, routeTargets) {
+		t.Fatalf("hookClaimMatchesRoute(adopted bead, %v) = false, want true", routeTargets)
+	}
+	// Per-pool isolation holds for adopted routes too: a foreign target
+	// neither claims nor demands the adopted bead.
+	const foreignTarget = "hello-world/other"
+	if hookClaimMatchesRoute(bead, []string{foreignTarget}) {
+		t.Fatalf("hookClaimMatchesRoute(adopted bead, %q) = true, want false for a foreign target", foreignTarget)
+	}
+	if _, ok := demandServableForTemplates(cfg, bead, map[string]struct{}{foreignTarget: {}}); ok {
+		t.Fatalf("demandServableForTemplates(adopted bead, %q) = true, want false for a foreign template", foreignTarget)
+	}
+	got, ok := demandServableForTemplates(cfg, bead, map[string]struct{}{template: {}})
+	if !ok || got != template {
+		t.Fatalf("demandServableForTemplates(adopted bead) = %q, %v; want %q, true", got, ok, template)
+	}
+}

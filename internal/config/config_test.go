@@ -8761,3 +8761,30 @@ func TestOrdersConfig_EffectiveMaxDispatchesPerTick(t *testing.T) {
 		t.Fatalf("DefaultMaxOrderDispatchesPerTick = %d, want 4", DefaultMaxOrderDispatchesPerTick)
 	}
 }
+
+// TestEffectiveWorkQueryAndCountFormServeAnAdoptedRoute is AC-6's shell half:
+// once route adoption stamps gc.routed_to with the value built-in sling writes
+// for a rig pool ("hello-world/researcher", pinned on the adoption side by
+// cmd/gc TestRouteAdoptionAdoptedBeadIsServedClaimedAndDemanded), the pool's
+// unchanged Tier 3 work query serves the bead and the reconciler count-form
+// counts it.
+func TestEffectiveWorkQueryAndCountFormServeAnAdoptedRoute(t *testing.T) {
+	a := Agent{Name: "researcher", Dir: "hello-world", MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(3)}
+	bdScript := `#!/bin/sh
+set -eu
+case "$*" in
+  *--assignee*|*"--status in_progress"*) printf '[]' ;;
+  ready*"gc.routed_to=hello-world/researcher"*)
+    printf '[{"id":"hw-adopted","issue_type":"task","status":"open","metadata":{"gc.routed_to":"hello-world/researcher"}}]' ;;
+  *) printf '[]' ;;
+esac
+`
+	out := runEffectiveWorkQuery(t, a, map[string]string{"GC_SESSION_ORIGIN": "ephemeral"}, bdScript)
+	if !strings.Contains(out, "hw-adopted") {
+		t.Fatalf("EffectiveWorkQuery() = %q, want the adopted bead served", out)
+	}
+	demand := strings.TrimSpace(runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), nil, bdScript))
+	if demand != "1" {
+		t.Fatalf("EffectivePoolDemandQuery() = %q, want the adopted bead counted once", demand)
+	}
+}
