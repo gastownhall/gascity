@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"sync"
@@ -547,5 +550,72 @@ func TestPodSnapshotCoalescesConcurrentRefresh(t *testing.T) {
 		if results[i] != want {
 			t.Errorf("%s: (running, attached) = %+v, want %+v", s.name, results[i], want)
 		}
+	}
+}
+
+// TestObservationSnapshotLeavesOtherLookupsFresh: only the observation reads
+// use the pod snapshot. With a populated snapshot, every other operation
+// (lifecycle, exec, the carrier verbs, staging, meta, the reconciler's
+// listing, and the seam adapter's Runtime.Open / Transport.Open gate in front
+// of a Nudge) issues exactly the pod LISTs it issues with no snapshot.
+func TestObservationSnapshotLeavesOtherLookupsFresh(t *testing.T) {
+	ctx := context.Background()
+	cfg := runtime.Config{Command: "sleep infinity"}
+	src := filepath.Join(t.TempDir(), "payload.txt")
+	if err := os.WriteFile(src, []byte("payload"), 0o600); err != nil {
+		t.Fatalf("writing copy source: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		op   func(*Provider) error
+	}{
+		{"Stop", func(p *Provider) error { return p.Stop("s") }},
+		{"Start existing-pod probe", func(p *Provider) error {
+			if err := p.Start(ctx, "s", cfg); !errors.Is(err, runtime.ErrSessionExists) {
+				return fmt.Errorf("Start = %w, want ErrSessionExists", err)
+			}
+			return nil
+		}},
+		{"Relaunch", func(p *Provider) error { return p.Relaunch(ctx, "s", cfg) }},
+		{"Exec", func(p *Provider) error {
+			_, _, err := p.Exec(ctx, "s", []string{"true"})
+			return err
+		}},
+		{"Nudge", func(p *Provider) error { return p.Nudge("s", runtime.TextContent("hello")) }},
+		{"CopyTo", func(p *Provider) error { return p.CopyTo("s", src, "payload.txt") }},
+		{"SetMeta", func(p *Provider) error { return p.SetMeta("s", "k", "v") }},
+		{"ListRunning", func(p *Provider) error {
+			_, err := p.ListRunning("")
+			return err
+		}},
+		{"seam-path Nudge", func(p *Provider) error {
+			return runtime.NewProviderFromSeams(p.Seams()).Nudge("s", runtime.TextContent("hello"))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			refOps := newCountingOps()
+			addRunningPod(refOps.inner, "s", "s")
+			if err := tc.op(newProviderWithOps(refOps)); err != nil {
+				t.Fatalf("op without a snapshot: %v", err)
+			}
+			want := refOps.listCalls()
+			if len(want) == 0 {
+				t.Fatal("precondition: the op issues no pod LIST without a snapshot")
+			}
+
+			ops := newCountingOps()
+			addRunningPod(ops.inner, "s", "s")
+			p, _ := newSnapshotProvider(ops)
+			if !p.IsRunning("s") { // populate the snapshot
+				t.Fatal("precondition: IsRunning(s) = false")
+			}
+			ops.reset()
+			if err := tc.op(p); err != nil {
+				t.Fatalf("op with a populated snapshot: %v", err)
+			}
+			if got := ops.listCalls(); !reflect.DeepEqual(got, want) {
+				t.Errorf("pod LISTs with a populated snapshot = %+v, want the snapshot-free %+v", got, want)
+			}
+		})
 	}
 }

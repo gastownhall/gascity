@@ -513,6 +513,18 @@ func (p *Provider) IsRunning(name string) bool {
 	return p.tmuxSessionAlive(ctx, podName)
 }
 
+// isRunningFresh is IsRunning over a fresh per-session pod LIST, for the
+// seam adapter's attach gate in front of the driving verbs (Nudge,
+// Interrupt, ...): a stale snapshot miss there would silently drop the input.
+func (p *Provider) isRunningFresh(name string) bool {
+	ctx := context.Background()
+	podName, err := p.findRunningPod(ctx, name)
+	if err != nil {
+		return false
+	}
+	return p.tmuxSessionAlive(ctx, podName)
+}
+
 // tmuxSessionAlive reports whether the in-pod tmux session answers.
 func (p *Provider) tmuxSessionAlive(ctx context.Context, podName string) bool {
 	_, err := p.ops.execInPod(ctx, podName, "agent",
