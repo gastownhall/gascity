@@ -3302,12 +3302,22 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						continue
 					}
 					ackReason, reconcilerOwnedAck := reconcilerDrainAckMatchesSessionInfo(infoByID[id], sp, name)
-					// A user-hold ack whose row no longer carries the hold is
-					// stale: an operator's resume consumed the hold after the
-					// drain began. Clear it and leave the runtime up.
-					if reconcilerOwnedAck && userHoldDrainReleased(ackReason, infoByID[id]) {
-						_ = clearReconcilerDrainAckMetadata(sp, name)
-						_ = dops.clearDrain(name)
+					// A released ack is stale: a user-hold ack whose row no
+					// longer carries the hold (an operator's resume consumed it
+					// after the drain began), or a suspended ack on a live row
+					// no operator suspend covers any longer (a resume voids a
+					// suspended drain, CONTRACT v5 §12.2 #3 ruling 4). Clear it
+					// and leave the runtime up; a failed clear retries next tick.
+					// The clearDrain backstop runs only after a clean clear: it
+					// removes the ack's source even when it cannot remove the
+					// flag, and a bare flag reads as the agent's own ack.
+					if reconcilerOwnedAck && (userHoldDrainReleased(ackReason, infoByID[id]) ||
+						(alive && ackReason == drainSuspended && suspendDrainReleased(ackReason, operatorSuspendCause(cfg, cityPath, infoByID[id], suspState)))) {
+						if err := clearReconcilerDrainAckMetadata(sp, name); err != nil {
+							fmt.Fprintf(stderr, "session reconciler: clearing released %s drain ack for %s: %v\n", ackReason, name, err) //nolint:errcheck
+						} else {
+							_ = dops.clearDrain(name)
+						}
 						if dt != nil {
 							dt.clearIdleProbe(id)
 							dt.remove(id)
@@ -4631,6 +4641,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// fairness (#2574-class). A NEW writer added between one of those writers and
 		// this append would NOT be reflected in this value-typed snapshot; keep any
 		// such writer's fold ahead of the append (or refresh the twin) if one is added.
+		// A resume voids a suspended drain (CONTRACT v5 §12.2 #3 ruling 4):
+		// once no operator suspend covers the row, cancel its tracked drain
+		// before the wake pass, so the drain neither stops the resumed
+		// runtime nor clobbers its replacement start.
+		if dt != nil {
+			if ds := dt.get(id); ds != nil && ds.reason == drainSuspended && suspendDrainReleased(ds.reason, operatorSuspendCause(cfg, cityPath, infoByID[id], suspState)) {
+				cancelReleasedDrain(dt, sp, ds, infoByID[id], cfg, trace)
+			}
+		}
 		wakeTargets = append(wakeTargets, wakeTarget{info: infoByID[id], tp: tp, alive: alive})
 	}
 	recordPhase(TraceSiteSessionReconcileForwardPass, "session_reconcile.forward_pass", phaseStart, map[string]any{
@@ -5359,9 +5378,6 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		info, ok := infoByID[id]
 		return info, ok
 	}
-	// Planned starts already ran. Drop suspend drains that the resume made
-	// stale before the scan can arm GC_DRAIN_ACK on the replacement process.
-	cancelResumedSuspendDrains(dt, sp, infoLookup, wakeEvals, cfg, citySuspendedWithState(cfg, suspState), trace)
 	advanceSessionDrainsWithSessionsTraced(cityPath, dt, sp, store, infoLookup, wakeEvals, cfg, clk, trace)
 	clearMissingIdleProbes(dt, infoByID)
 	// Drain-skip lines print on transition (session_drain_skip_log.go); a

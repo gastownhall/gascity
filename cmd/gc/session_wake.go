@@ -349,67 +349,6 @@ func drainReasonCancelable(reason string) bool {
 		reason != executionStalledDrainReason && reason != idleRespawnDrainReason
 }
 
-// suspendDrainResumeWakeReason reports whether a wake evaluation is config
-// demand that ends an in-flight suspend drain after city suspension lifts.
-// Only reasons that city suspension itself suppresses qualify. Assigned work,
-// on-demand queue demand, pending interaction, and attach must not abort a
-// suspend drain: those are exactly the signals a scaled-out session is
-// required to ignore.
-func suspendDrainResumeWakeReason(eval wakeEvaluation) bool {
-	if len(eval.Reasons) == 0 {
-		return false
-	}
-	switch eval.Reason {
-	case "named-always", "explicit-wake", "min-active":
-		return true
-	default:
-		return strings.HasPrefix(eval.Reason, "scaled:")
-	}
-}
-
-// cancelResumedSuspendDrains cancels in-flight suspend drains once the city
-// is no longer suspended and config demand wants the session up. Suspend
-// drains stay non-cancelable in drainReasonCancelable so assigned work,
-// pending interaction, and a still-suspended city cannot abort them.
-// executePlannedStarts runs before the drain scan, so without this cancel a
-// replacement started on the resume tick is observed as still running and
-// armed with GC_DRAIN_ACK; the next tick then stops it. Call this after
-// planned starts and before advanceSessionDrainsWithSessionsTraced.
-func cancelResumedSuspendDrains(
-	dt *drainTracker,
-	sp runtime.Provider,
-	infoLookup func(id string) (sessions.Info, bool),
-	wakeEvals map[string]wakeEvaluation,
-	cfg *config.City,
-	citySuspended bool,
-	trace *sessionReconcilerTraceCycle,
-) {
-	if dt == nil || citySuspended {
-		return
-	}
-	for id, ds := range dt.all() {
-		if ds == nil || ds.reason != "suspended" {
-			continue
-		}
-		eval, ok := wakeEvals[id]
-		if !ok || !suspendDrainResumeWakeReason(eval) {
-			continue
-		}
-		info, ok := infoLookup(id)
-		if !ok {
-			continue
-		}
-		if !cancelSessionDrainIfInfo(info, sp, dt, func(reason string) bool {
-			return reason == "suspended"
-		}) {
-			continue
-		}
-		if trace != nil {
-			trace.RecordDecision(TraceSiteDrainCancel, TraceReasonCode(ds.reason), TraceOutcomeCancel, normalizedSessionTemplateInfo(info, cfg), info.SessionNameMetadata, nil)
-		}
-	}
-}
-
 func pendingDrainReasonCancelable(reason string) bool {
 	return reason != "orphaned" && reason != "suspended" && reason != executionStalledDrainReason
 }
@@ -498,6 +437,12 @@ func setReconcilerDrainAckMetadata(sp runtime.Provider, name string, ds *drainSt
 	return nil
 }
 
+// clearReconcilerDrainAckMetadata removes name's GC_DRAIN_ACK and then its
+// provenance (source, requester stamp, reason, generation). When the flag's
+// removal is refused it returns before touching the provenance. A flag that
+// outlives its source reads as the agent's own ack, which the next tick
+// honors with a stop. A whole ack stays attributed to its writer, so the
+// caller's next pass decides it again and retries the clear.
 func clearReconcilerDrainAckMetadata(sp runtime.Provider, name string) error {
 	if sp == nil {
 		return fmt.Errorf("session provider is nil")
@@ -519,6 +464,9 @@ func clearReconcilerDrainAckMetadata(sp runtime.Provider, name string) error {
 			// lags, and the log above reports that.
 			if !runtime.OnlyMetadataNotMirrored(err) {
 				errs = append(errs, fmt.Errorf("removing %s: %w", key, err))
+				if key == "GC_DRAIN_ACK" {
+					break // the flag is still set: keep its provenance with it
+				}
 			}
 		}
 	}
@@ -798,6 +746,31 @@ func userHoldDrainReleased(reason string, info sessions.Info) bool {
 	return reason == string(sessions.SleepReasonUserHold) && !sessions.DispositionOfInfo(info).KeepsSlot()
 }
 
+// suspendDrainReleased reports whether a suspended drain lost its premise: no
+// operator suspend (city, rig, agent, or session hold) covers the row this
+// tick, so suspendCause, operatorSuspendCause's verdict for the row, is empty.
+// A resume voids the drain (CONTRACT v5 §12.2 #3 ruling 4).
+func suspendDrainReleased(reason, suspendCause string) bool {
+	return reason == drainSuspended && suspendCause == ""
+}
+
+// cancelReleasedDrain cancels a tracked drain whose premise an operator's
+// resume released: it clears the drain's ack (when one was set) and its idle
+// probe, untracks it, and records the cancel. It writes no row state, so the
+// resumed row keeps whatever this tick's wake decision gives it.
+func cancelReleasedDrain(dt *drainTracker, sp runtime.Provider, ds *drainState, info sessions.Info, cfg *config.City, trace *sessionReconcilerTraceCycle) {
+	name := info.SessionNameMetadata
+	dt.clearIdleProbe(info.ID)
+	if ds.ackSet {
+		_ = clearReconcilerDrainAckMetadata(sp, name)
+	}
+	dt.remove(info.ID)
+	telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "cancel")
+	if trace != nil {
+		trace.RecordDecision(TraceSiteDrainCancel, TraceReasonCode(ds.reason), TraceOutcomeCancel, normalizedSessionTemplateInfo(info, cfg), name, nil)
+	}
+}
+
 func advanceSessionDrainsWithSessionsTraced(
 	cityPath string,
 	dt *drainTracker,
@@ -854,15 +827,7 @@ func advanceSessionDrainsWithSessionsTraced(
 		// An operator's resume consumed the hold this drain was for: cancel
 		// it, so neither its ack nor its completion acts on the resumed row.
 		if userHoldDrainReleased(ds.reason, info) {
-			dt.clearIdleProbe(id)
-			if ds.ackSet {
-				_ = clearReconcilerDrainAckMetadata(sp, name)
-			}
-			dt.remove(id)
-			telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "cancel")
-			if trace != nil {
-				trace.RecordDecision(TraceSiteDrainCancel, TraceReasonCode(ds.reason), TraceOutcomeCancel, normalizedSessionTemplateInfo(info, cfg), name, nil)
-			}
+			cancelReleasedDrain(dt, sp, ds, info, cfg, trace)
 			continue
 		}
 
@@ -941,8 +906,9 @@ func advanceSessionDrainsWithSessionsTraced(
 
 		// Cancellation check: if wake reasons reappeared, cancel the in-memory
 		// drain. Orphaned, suspended, and ordinary config-drift drains are not
-		// canceled here. A suspend drain whose city suspension has already
-		// lifted is canceled by cancelResumedSuspendDrains before this scan.
+		// canceled here. A suspend drain whose premise a resume consumed is
+		// released on the row's forward pass, or by the armed-ack release,
+		// before this scan.
 		if drainReasonCancelable(ds.reason) {
 			if eval, ok := wakeEvals[info.ID]; ok && len(eval.Reasons) > 0 {
 				dt.clearIdleProbe(id)

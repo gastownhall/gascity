@@ -8,6 +8,7 @@ import (
 	"log"
 	"maps"
 	"os"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -927,6 +928,45 @@ func TestCancelSessionDrain_ClearsAck(t *testing.T) {
 	ack, _ := sp.GetMeta("test-session", "GC_DRAIN_ACK")
 	if ack != "" {
 		t.Errorf("GC_DRAIN_ACK = %q, want empty (should be cleared on cancel)", ack)
+	}
+}
+
+// A refused GC_DRAIN_ACK removal leaves the ack whole: stripped of its
+// provenance the flag would read as the agent's own ack, which the next tick
+// honors with a stop. Once the flag is gone, a refused provenance key keeps
+// only itself.
+func TestClearReconcilerDrainAckMetadataKeepsTheAckWholeWhileTheFlagStays(t *testing.T) {
+	keys := []string{
+		"GC_DRAIN_ACK",
+		reconcilerDrainAckSourceKey,
+		drainAckRequesterInstanceTokenKey,
+		reconcilerDrainAckReasonKey,
+		reconcilerDrainAckGenerationKey,
+	}
+	for _, tc := range []struct {
+		refused string
+		kept    []string
+	}{
+		{refused: "GC_DRAIN_ACK", kept: keys},
+		{refused: reconcilerDrainAckReasonKey, kept: []string{reconcilerDrainAckReasonKey}},
+	} {
+		t.Run(tc.refused, func(t *testing.T) {
+			sp := runtime.NewFake()
+			for _, key := range keys {
+				mustSetMeta(t, sp, "worker", key, "v")
+			}
+			sp.RemoveMetaErrors["worker"] = map[string]error{tc.refused: errors.New("remove denied")}
+
+			if err := clearReconcilerDrainAckMetadata(sp, "worker"); err == nil {
+				t.Fatal("clearReconcilerDrainAckMetadata = nil, want the refused removal reported")
+			}
+			for _, key := range keys {
+				got, _ := sp.GetMeta("worker", key)
+				if kept, want := got != "", slices.Contains(tc.kept, key); kept != want {
+					t.Errorf("%s = %q after the clear: kept %v, want kept %v", key, got, kept, want)
+				}
+			}
+		})
 	}
 }
 
@@ -1884,79 +1924,4 @@ func beginDrainForTest(t *testing.T, store beads.Store, dt *drainTracker, id, re
 		t.Fatalf("a drain of %s was already tracked", id)
 	}
 	return dt.get(id)
-}
-
-// TestCancelResumedSuspendDrains pins the guards on the resume-time suspend
-// drain cancel: only a "suspended" drain on a resumed city whose session has
-// config demand at the drain's generation is canceled. Assigned work, an empty
-// wake set, other drain reasons, a still-suspended city, and a generation
-// mismatch all leave the drain in place.
-func TestCancelResumedSuspendDrains(t *testing.T) {
-	const (
-		beadID      = "gc-1"
-		sessionName = "test-city--worker"
-	)
-	configWake := []WakeReason{WakeConfig}
-	tests := []struct {
-		name          string
-		drainReason   string
-		infoGen       string
-		eval          wakeEvaluation
-		citySuspended bool
-		wantCancel    bool
-	}{
-		{name: "named-always cancels", drainReason: "suspended", infoGen: "3", eval: wakeEvaluation{Reasons: configWake, Reason: "named-always"}, wantCancel: true},
-		{name: "explicit-wake cancels", drainReason: "suspended", infoGen: "3", eval: wakeEvaluation{Reasons: configWake, Reason: "explicit-wake"}, wantCancel: true},
-		{name: "min-active cancels", drainReason: "suspended", infoGen: "3", eval: wakeEvaluation{Reasons: configWake, Reason: "min-active"}, wantCancel: true},
-		{name: "scaled demand cancels", drainReason: "suspended", infoGen: "3", eval: wakeEvaluation{Reasons: configWake, Reason: "scaled:demand"}, wantCancel: true},
-		{name: "city still suspended", drainReason: "suspended", infoGen: "3", eval: wakeEvaluation{Reasons: configWake, Reason: "named-always"}, citySuspended: true},
-		{name: "assigned work only", drainReason: "suspended", infoGen: "3", eval: wakeEvaluation{Reasons: []WakeReason{WakeWork}, Reason: "assigned-work", HasAssignedWork: true}},
-		{name: "empty reasons", drainReason: "suspended", infoGen: "3", eval: wakeEvaluation{Reason: "named-always"}},
-		{name: "config-drift drain", drainReason: "config-drift", infoGen: "3", eval: wakeEvaluation{Reasons: configWake, Reason: "named-always"}},
-		{name: "generation mismatch", drainReason: "suspended", infoGen: "4", eval: wakeEvaluation{Reasons: configWake, Reason: "named-always"}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			sp := runtime.NewFake()
-			if err := sp.Start(context.Background(), sessionName, runtime.Config{Command: "test-cmd"}); err != nil {
-				t.Fatalf("Start: %v", err)
-			}
-			if err := sp.SetMeta(sessionName, "GC_DRAIN_ACK", "1"); err != nil {
-				t.Fatalf("SetMeta GC_DRAIN_ACK: %v", err)
-			}
-			dt := newDrainTracker()
-			dt.set(beadID, &drainState{reason: tt.drainReason, generation: 3, ackSet: true})
-			info := sessionpkg.Info{ID: beadID, Generation: tt.infoGen, SessionNameMetadata: sessionName}
-			infoLookup := func(id string) (sessionpkg.Info, bool) {
-				if id == beadID {
-					return info, true
-				}
-				return sessionpkg.Info{}, false
-			}
-			wakeEvals := map[string]wakeEvaluation{beadID: tt.eval}
-
-			cancelResumedSuspendDrains(dt, sp, infoLookup, wakeEvals, &config.City{}, tt.citySuspended, nil)
-
-			ack, err := sp.GetMeta(sessionName, "GC_DRAIN_ACK")
-			if err != nil {
-				t.Fatalf("GetMeta GC_DRAIN_ACK: %v", err)
-			}
-			if tt.wantCancel {
-				if ds := dt.get(beadID); ds != nil {
-					t.Fatalf("drain = %+v, want canceled", *ds)
-				}
-				if ack == "1" {
-					t.Fatal("GC_DRAIN_ACK still armed after cancel")
-				}
-				return
-			}
-			ds := dt.get(beadID)
-			if ds == nil || ds.reason != tt.drainReason {
-				t.Fatalf("drain = %+v, want reason %q kept", ds, tt.drainReason)
-			}
-			if ack != "1" {
-				t.Fatalf("GC_DRAIN_ACK = %q, want untouched %q", ack, "1")
-			}
-		})
-	}
 }
