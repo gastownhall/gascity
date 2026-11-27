@@ -1505,16 +1505,20 @@ func (c *Client) RestartService(name string) error {
 }
 
 // SuspendCity suspends the city via PATCH /v0/city.
-func (c *Client) SuspendCity() error { return c.patchCity(true) }
+func (c *Client) SuspendCity() error { return c.patchCity(context.Background(), true) }
+
+// SuspendCityContext is SuspendCity bounded by ctx: a request ctx ends is a
+// connection error, which a local client falls back from.
+func (c *Client) SuspendCityContext(ctx context.Context) error { return c.patchCity(ctx, true) }
 
 // ResumeCity resumes the city via PATCH /v0/city.
-func (c *Client) ResumeCity() error { return c.patchCity(false) }
+func (c *Client) ResumeCity() error { return c.patchCity(context.Background(), false) }
 
-func (c *Client) patchCity(suspend bool) error {
+func (c *Client) patchCity(ctx context.Context, suspend bool) error {
 	if err := c.requireCityScope(); err != nil {
 		return err
 	}
-	resp, err := c.cw.PatchV0CityByCityNameWithResponse(context.Background(), c.cityName, nil, genclient.PatchV0CityByCityNameJSONRequestBody{Suspended: &suspend})
+	resp, err := c.cw.PatchV0CityByCityNameWithResponse(ctx, c.cityName, nil, genclient.PatchV0CityByCityNameJSONRequestBody{Suspended: &suspend})
 	return checkMutation(resp, err)
 }
 

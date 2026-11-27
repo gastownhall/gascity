@@ -2745,30 +2745,67 @@ func (cs *controllerState) ResumeRig(name string) error {
 	})
 }
 
-// SuspendCity sets workspace.suspended = true.
+// SuspendCity records an explicit city suspend in the runtime suspension
+// state, over a file that does not parse too (configedit.Editor.SuspendCity),
+// so `gc suspend` repairs a malformed file through the API as it does without
+// one. A replaced file is logged and named in the city.suspended event. It
+// suspends a city whose city.toml does not parse too (writeCitySuspension).
 func (cs *controllerState) SuspendCity() error {
-	if err := cs.mutateAndPoke(func() error {
-		return cs.editor.SuspendCity()
+	var discarded error
+	if err := cs.writeCitySuspension(func() error {
+		var err error
+		discarded, err = cs.editor.SuspendCity()
+		return err
 	}); err != nil {
 		return err
 	}
-	if cs.eventProv != nil {
-		cs.eventProv.Record(events.Event{Type: events.CitySuspended, Actor: "gc"})
+	var note string
+	if discarded != nil {
+		note = replacedSuspensionNote(cs.cityPath, discarded)
+		log.Printf("api: city suspend: %s", note)
 	}
+	cs.citySuspensionChanged(events.CitySuspended, note)
 	return nil
 }
 
-// ResumeCity sets workspace.suspended = false.
+// ResumeCity records an explicit city resume in the runtime suspension state.
+// Resume is not the brake: it refuses, writing nothing, while the city's
+// config does not load as a reload loads it, so an error never leaves the
+// city resumed behind it.
 func (cs *controllerState) ResumeCity() error {
-	if err := cs.mutateAndPoke(func() error {
+	if err := cs.writeCitySuspension(func() error {
+		if cs.cityPath != "" {
+			if _, _, err := cs.loadCurrentConfigSnapshot(); err != nil {
+				return fmt.Errorf("loading city config: %w", err)
+			}
+		}
 		return cs.editor.ResumeCity()
 	}); err != nil {
 		return err
 	}
-	if cs.eventProv != nil {
-		cs.eventProv.Record(events.Event{Type: events.CityResumed, Actor: "gc"})
-	}
+	cs.citySuspensionChanged(events.CityResumed, "")
 	return nil
+}
+
+// writeCitySuspension runs an API city suspend's or resume's write of the
+// runtime suspension state. The suspension file is runtime state, not config,
+// so the write is no config mutation (mutateAndPoke): nothing reloads or
+// validates city.toml after it. It holds the publication lock, which the write
+// keeps while it waits on the suspension fence.
+func (cs *controllerState) writeCitySuspension(write func() error) error {
+	cs.publishMu.Lock()
+	defer cs.publishMu.Unlock()
+	return write()
+}
+
+// citySuspensionChanged wakes the controller for a pass, which re-reads the
+// suspension file, as `gc suspend`'s socket poke does, then records the
+// change's event.
+func (cs *controllerState) citySuspensionChanged(eventType, message string) {
+	cs.Enqueue()
+	if cs.eventProv != nil {
+		cs.eventProv.Record(events.Event{Type: eventType, Actor: "gc", Message: message})
+	}
 }
 
 // CreateAgent adds a new agent to city.toml.

@@ -502,3 +502,64 @@ func TestSuspendedRigNames(t *testing.T) {
 		t.Error("delta should not be in suspended names (no preference)")
 	}
 }
+
+// AC-3: ForceCitySuspended replaces a suspension file that does not parse
+// with an explicit city suspend, under the fence, and returns the discarded
+// parse error; over a readable file it records the suspend and keeps the
+// rest.
+func TestForceCitySuspended(t *testing.T) {
+	for _, tc := range []struct{ name, raw, discarded string }{
+		{name: "truncated", raw: `{"city":{"susp`, discarded: "unexpected end of JSON input"},
+		{name: "empty", raw: "", discarded: "unexpected end of JSON input"},
+		{name: "a field of the wrong type", raw: `{"city":{"suspended":"yes"}}`, discarded: "cannot unmarshal"},
+		{name: "an updated_at that is not a time", raw: `{"city":{"suspended":false},"updated_at":"yesterday"}`, discarded: `parsing time "yesterday"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			p := citylayout.SuspensionStateFile(dir)
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte(tc.raw), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			discarded, err := ForceCitySuspended(fsys.OSFS{}, dir)
+			if err != nil {
+				t.Fatalf("ForceCitySuspended: %v", err)
+			}
+			if discarded == nil || !strings.Contains(discarded.Error(), tc.discarded) {
+				t.Fatalf("discarded = %v, want the file's decode error naming %q", discarded, tc.discarded)
+			}
+			st, err := Load(fsys.OSFS{}, dir)
+			if err != nil || !IsCitySuspended(st) {
+				t.Fatalf("after ForceCitySuspended: state %+v err %v, want the city suspended", st, err)
+			}
+		})
+	}
+	t.Run("readable file keeps its rigs", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := Save(fsys.OSFS{}, dir, State{City: Override{Suspended: boolPtr(false)}, Rigs: map[string]Override{"a": {Suspended: boolPtr(true)}}}); err != nil {
+			t.Fatal(err)
+		}
+		discarded, err := ForceCitySuspended(fsys.OSFS{}, dir)
+		if err != nil || discarded != nil {
+			t.Fatalf("ForceCitySuspended = (%v, %v), want (nil, nil)", discarded, err)
+		}
+		st, err := Load(fsys.OSFS{}, dir)
+		if err != nil || !IsCitySuspended(st) || !IsRigSuspended(st, "a") {
+			t.Fatalf("state %+v err %v, want the city suspended and rig a kept", st, err)
+		}
+	})
+	t.Run("a file that cannot be read is an error, not discarded", func(t *testing.T) {
+		dir := t.TempDir()
+		// A directory where the file belongs reads with an error that is not
+		// the file's absence.
+		if err := os.MkdirAll(citylayout.SuspensionStateFile(dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		discarded, err := ForceCitySuspended(fsys.OSFS{}, dir)
+		if err == nil || discarded != nil {
+			t.Fatalf("ForceCitySuspended = (%v, %v), want the read error and nothing discarded", discarded, err)
+		}
+	})
+}

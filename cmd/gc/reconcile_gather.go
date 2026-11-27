@@ -60,7 +60,13 @@ type gatherEnv struct {
 	Capacity     func() *endpointCapacityGuard
 	Health       func() *providerHealthSnapshot
 	Episodes     func() (map[string]session.StartupHealthEpisode, error)
-	Suspension   func() suspensionstate.State
+	// Suspension is the controller's wake read of the suspension file
+	// (readSuspensionForWake): an unreadable file is an error, not "not
+	// suspended".
+	Suspension func() (suspensionstate.State, error)
+	// HostPressure reads host CPU pressure for the pass's start hold; nil
+	// reads no pressure.
+	HostPressure func() hostPressure
 	// Templates builds env's template resolver, at now. Gather calls it once
 	// per env generation, when the memo is rebuilt, and memoizes what it
 	// resolves (templateMemo). Nil resolves nothing.
@@ -116,9 +122,16 @@ type World struct {
 	TransportRefused  map[string]string                     // by qualified name
 	ReadyWaits        map[string]bool                       // I10, by session bead ID
 	Templates         *templateMemo
-	// Suspension is the suspension state the pass read, for the live-claim
-	// veto's scope (liveClaimVetoApplies, the orphaned signal's L5).
+	// Suspension is the suspension state the pass decides from
+	// (suspensionForPass), for the live-claim veto's scope
+	// (liveClaimVetoApplies, the orphaned signal's L5).
 	Suspension suspensionstate.State
+	// SuspensionErr is the wake read's error when the suspension file exists
+	// but does not parse; Suspension then suspends nothing, so nothing drains
+	// on it, and the pass holds its starts (decideStartHold).
+	SuspensionErr error
+	// HostPressure is the pass's host CPU pressure reading.
+	HostPressure hostPressure
 	// ExecutionStalled are the execution backstop's drain requests by row
 	// ID, for arm A16 (C7b1).
 	ExecutionStalled map[string]executionStalledRequest
@@ -215,9 +228,13 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	}
 	w := World{Now: now, CityPath: e.CityPath, Env: env, InFlight: p.inflight.view(), Backoff: p.backoff.Snapshot(), Bucket: p.bucket, Paused: p.startsPaused(), SoftReload: p.softReload.Load().view()}
 	var st suspensionstate.State
-	if e.Suspension != nil {
-		st = e.Suspension()
+	if e.HostPressure != nil {
+		w.HostPressure = e.HostPressure()
 	}
+	if e.Suspension != nil {
+		st, w.SuspensionErr = e.Suspension()
+	}
+	st = suspensionForPass(cfg, st, w.SuspensionErr)
 	w.CitySuspended, w.SuspendedRigPaths, w.Suspension = effectiveCitySuspended(cfg, st), suspendedRigPathsWithState(cfg, st), st
 	rec := e.Recording()
 	if e.Observations != nil {
@@ -398,7 +415,11 @@ func (e gatherEnv) externalReadsEnv() (externalReadsEnv, error) {
 	}
 	var st suspensionstate.State
 	if e.Suspension != nil {
-		st = e.Suspension()
+		// An unreadable file suspends no rig (suspensionForPass): K1 reads
+		// every rig leg, as gather's census does.
+		var err error
+		st, err = e.Suspension()
+		st = suspensionForPass(env.Cfg, st, err)
 	}
 	suspended, store, rigs := suspendedRigPathsWithState(env.Cfg, st), e.Sessions(), e.RigStores()
 	legs, err := sessionCensusStoreCandidates(e.CityPath, env.Cfg, store, rigs, suspended)

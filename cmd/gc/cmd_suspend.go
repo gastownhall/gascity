@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -70,24 +73,85 @@ individual agents, or "gc rig resume" for rigs.`,
 
 // cmdSuspend is the CLI entry point for suspending the city.
 func cmdSuspend(args []string, jsonOut bool, stdout, stderr io.Writer) int {
+	// The brake must work when the API is wedged, so everything before the
+	// direct write shares one deadline from here: resolving the city, its API
+	// route and the request.
+	ctx, cancel := context.WithTimeout(context.Background(), suspendAPITimeout)
+	defer cancel()
 	cityPath, err := resolveSuspendDir(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if c := apiClient(cityPath); c != nil {
-		err := c.SuspendCity()
-		if err == nil {
-			return writeCitySuspensionSuccess(stdout, stderr, cityPath, true, jsonOut)
+	select {
+	case a := <-suspendThroughAPIHook(ctx, cityPath):
+		if a.client != nil {
+			if a.err == nil {
+				return writeCitySuspensionSuccess(stdout, stderr, cityPath, true, jsonOut)
+			}
+			if !api.ShouldFallback(a.client, a.err) {
+				fmt.Fprintf(stderr, "gc suspend: %v\n", a.err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
 		}
-		if !api.ShouldFallback(c, err) {
-			fmt.Fprintf(stderr, "gc suspend: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		// Connection error — fall through to direct mutation.
+		// No API serves the city, or a connection error: write directly.
+	case <-ctx.Done():
+		// The route or the request did not answer in time, which is a
+		// connection error too.
 	}
-	return doSuspendCity(fsys.OSFS{}, cityPath, true, jsonOut, stdout, stderr)
+	code := doSuspendCity(fsys.OSFS{}, cityPath, true, jsonOut, stdout, stderr)
+	if code == 0 {
+		// Best effort: a running controller re-reads the file on its next
+		// pass anyway; the poke only makes that pass come now.
+		_, _ = sendControllerCommandWithTimeouts(cityPath, "poke", suspendPokeTimeout, suspendPokeTimeout, suspendPokeTimeout)
+	}
+	return code
 }
+
+// suspendAPITimeout bounds everything `gc suspend` does before it writes the
+// suspension file itself: resolving the city and its API route, and the API
+// request.
+const suspendAPITimeout = 3 * time.Second
+
+// suspendAPIAnswer is how gc suspend's attempt through the city's API ended:
+// client is nil when no API serves the city, and err is the request's error.
+type suspendAPIAnswer struct {
+	client *api.Client
+	err    error
+}
+
+// suspendThroughAPIHook starts gc suspend's attempt through the city's API.
+// Indirected for tests, which keep the answer channel to wait out an attempt
+// the command stopped waiting for.
+var suspendThroughAPIHook = suspendThroughAPI
+
+// suspendThroughAPI starts suspending the city through its API, when one
+// serves it, and returns the channel its answer arrives on. Resolving the
+// route (apiClient) takes no context: it probes the controller socket and,
+// for a supervisor-hosted city, asks the supervisor which cities it runs, and
+// either can hang as long as the request. So the attempt runs on its own
+// goroutine and the caller stops waiting at ctx's deadline, which also ends
+// the request. The channel holds the one answer and is then closed: the
+// attempt never blocks on a caller that stopped waiting, and a receive after
+// the caller took the answer returns once the attempt has ended. The CLI
+// exits with an attempt it stopped waiting for still running.
+func suspendThroughAPI(ctx context.Context, cityPath string) <-chan suspendAPIAnswer {
+	answer := make(chan suspendAPIAnswer, 1)
+	go func() {
+		defer close(answer)
+		c := apiClient(cityPath)
+		if c == nil {
+			answer <- suspendAPIAnswer{}
+			return
+		}
+		answer <- suspendAPIAnswer{client: c, err: c.SuspendCityContext(ctx)}
+	}()
+	return answer
+}
+
+// suspendPokeTimeout bounds each step of `gc suspend`'s controller poke after
+// a direct write.
+const suspendPokeTimeout = time.Second
 
 // cmdResume is the CLI entry point for resuming the city.
 func cmdResume(args []string, jsonOut bool, stdout, stderr io.Writer) int {
@@ -127,38 +191,63 @@ func doSuspendCity(fs fsys.FS, cityPath string, suspend bool, jsonOut bool, stdo
 		cmd = "gc resume"
 	}
 	// Validate city.toml parses so an unrelated config error surfaces
-	// clearly instead of being masked by the runtime-state write.
+	// clearly instead of being masked by the runtime-state write. Suspend is
+	// the brake, so a broken config only warns there.
 	if _, err := loadCityConfigForEditFS(fs, tomlPath); err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", cmd, err) //nolint:errcheck // best-effort stderr
-		return 1
+		if !suspend {
+			fmt.Fprintf(stderr, "%s: %v (fix city.toml, then run %s again)\n", cmd, err, cmd) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		fmt.Fprintf(stderr, "%s: warning: %v; suspending anyway\n", cmd, err) //nolint:errcheck // best-effort stderr
 	}
 
-	want := suspend
-	if err := suspensionstate.SetCitySuspended(fs, cityPath, &want); err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", cmd, err) //nolint:errcheck // best-effort stderr
-		return 1
+	stateFile := citylayout.SuspensionStateFile(cityPath)
+	if !suspend {
+		want := false
+		if err := suspensionstate.SetCitySuspended(fs, cityPath, &want); err != nil {
+			fmt.Fprintf(stderr, "%s: %s: %v (fix the JSON or remove the file, then run %s again)\n", cmd, stateFile, err, cmd) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		recordCitySuspension(cityPath, events.CityResumed, "", stderr)
+		return writeCitySuspensionSuccess(stdout, stderr, cityPath, false, jsonOut)
 	}
 
-	// Record against the city whose state actually changed, not the
-	// ambient one. openCityRecorder re-resolves the city from cwd/env,
-	// which is not cityPath whenever the target was named explicitly
-	// (`gc suspend <dir>`) from inside a different, live city — that
-	// leaked city.suspended/city.resumed into an unrelated event log
-	// (ga-41g9gr).
-	rec := openCityRecorderAt(cityPath, stderr)
-	if suspend {
-		retireSuspendedScopesWithoutController(cityPath, nil, true, stderr)
-		rec.Record(events.Event{
-			Type:  events.CitySuspended,
-			Actor: eventActor(),
-		})
-	} else {
-		rec.Record(events.Event{
-			Type:  events.CityResumed,
-			Actor: eventActor(),
-		})
+	discarded, err := suspensionstate.ForceCitySuspended(fs, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: writing %s: %v\n", cmd, stateFile, err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
-	return writeCitySuspensionSuccess(stdout, stderr, cityPath, suspend, jsonOut)
+	var note string
+	if discarded != nil {
+		note = replacedSuspensionNote(cityPath, discarded)
+		fmt.Fprintf(stderr, "%s: %s\n", cmd, note) //nolint:errcheck // best-effort stderr
+	}
+	// The brake is recorded: report it before the steps below, which wait on
+	// the city's event log and stores, not on the brake.
+	code := writeCitySuspensionSuccess(stdout, stderr, cityPath, true, jsonOut)
+	recordCitySuspension(cityPath, events.CitySuspended, note, stderr)
+	retireSuspendedScopesWithoutController(cityPath, nil, true, stderr)
+	return code
+}
+
+// recordCitySuspension records a city.suspended or city.resumed event in the
+// city whose state changed, not the ambient one. openCityRecorder re-resolves
+// the city from cwd/env, which is not cityPath whenever the target was named
+// explicitly (`gc suspend <dir>`) from inside a different, live city — that
+// leaked city.suspended/city.resumed into an unrelated event log (ga-41g9gr).
+func recordCitySuspension(cityPath, eventType, message string, stderr io.Writer) {
+	openCityRecorderAt(cityPath, stderr).Record(events.Event{
+		Type:    eventType,
+		Actor:   eventActor(),
+		Message: message,
+	})
+}
+
+// replacedSuspensionNote reports a city suspend that replaced the city's
+// suspension file because its content did not decode: the file and the
+// discarded error.
+func replacedSuspensionNote(cityPath string, discarded error) string {
+	return fmt.Sprintf("replaced unreadable %s (%v)", citylayout.SuspensionStateFile(cityPath), discarded)
 }
 
 func writeCitySuspensionSuccess(stdout, stderr io.Writer, cityPath string, suspend bool, jsonOut bool) int {

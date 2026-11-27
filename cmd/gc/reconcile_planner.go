@@ -147,6 +147,8 @@ type planner struct {
 	backoff  *backoffTable
 	bucket   bucketState
 	fairSeed uint64 // admission's fair-share rotation (P4)
+	// pressure is the start hold's CPU-pressure episode.
+	pressure hostPressureEpisode
 	boot     bootState
 	last     passRecord
 	rowTrace map[rowKey]string // each row's last traced (reason, outcome)

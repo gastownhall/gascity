@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -1220,8 +1221,8 @@ func TestSuspendCity(t *testing.T) {
 	path := writeTOML(t, dir, minimalCity())
 	ed := configedit.NewEditor(fsys.OSFS{}, path)
 
-	if err := ed.SuspendCity(); err != nil {
-		t.Fatalf("SuspendCity: %v", err)
+	if discarded, err := ed.SuspendCity(); err != nil || discarded != nil {
+		t.Fatalf("SuspendCity = (%v, %v), want (nil, nil)", discarded, err)
 	}
 
 	// city.toml must remain untouched — suspension lives in runtime state.
@@ -1238,6 +1239,47 @@ func TestSuspendCity(t *testing.T) {
 	}
 	if !suspensionstate.IsCitySuspended(st) {
 		t.Error("expected city to be suspended in runtime state")
+	}
+}
+
+// The brake works over a suspension file that does not parse: SuspendCity
+// replaces it, reports its decode error as discarded, and ResumeCity still
+// refuses such a file, leaving it as it was.
+func TestSuspendCityReplacesAnUnparseableFileAndResumeRefusesIt(t *testing.T) {
+	const malformed = `{"city":{"susp`
+	writeMalformed := func(t *testing.T, dir string) string {
+		t.Helper()
+		p := citylayout.SuspensionStateFile(dir)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(malformed), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	dir := t.TempDir()
+	ed := configedit.NewEditor(fsys.OSFS{}, writeTOML(t, dir, minimalCity()))
+	writeMalformed(t, dir)
+	discarded, err := ed.SuspendCity()
+	if err != nil {
+		t.Fatalf("SuspendCity over a malformed file: %v", err)
+	}
+	if discarded == nil || !strings.Contains(discarded.Error(), "unexpected end of JSON input") {
+		t.Fatalf("discarded = %v, want the replaced file's decode error", discarded)
+	}
+	st, err := suspensionstate.Load(fsys.OSFS{}, dir)
+	if err != nil || !suspensionstate.IsCitySuspended(st) {
+		t.Fatalf("after SuspendCity: state %+v err %v, want the city suspended", st, err)
+	}
+
+	p := writeMalformed(t, dir)
+	if err := ed.ResumeCity(); err == nil {
+		t.Fatal("ResumeCity over a malformed file succeeded, want a refusal")
+	}
+	if got, err := os.ReadFile(p); err != nil || string(got) != malformed {
+		t.Fatalf("suspension file after the refused resume = %q (%v), want it left as %q", got, err, malformed)
 	}
 }
 

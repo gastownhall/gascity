@@ -17,6 +17,7 @@ const WATCH_EVENT_TYPES = new Set<string>([
   'events.rotated',
   'session.quarantined',
   'session.suspended',
+  'supervisor.cpu_pressure.held_starts',
   'supervisor.fs_pressure.skipped_tick',
 ]);
 

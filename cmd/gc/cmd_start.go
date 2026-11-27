@@ -1217,6 +1217,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	}
 	mergeNamedSessionDemand(poolDesired, dsResult.NamedSessionDemand, cfg)
 	awakeAssignedWorkBeads, awakeAssignedStoreRefs, awakeAssignedStores := filterAssignedWorkBeadsForSessionWakeWithStores(cfg, cityPath, oneShotStore, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs, dsResult.AssignedWorkStores)
+	hold := oneShotStartHold(cityPath, stderr)
 	reconcileSessionBeadsAtPathWithNamedDemand(
 		sigCtx, cityPath, sessionBeads.OpenForReconcile(), sessionBeads, ds, cfgNames, cfg, sp, sessStore, newSeatWork(legs),
 		nil, awakeAssignedWorkBeads, rigStores, nil, dt, nil, poolDesired,
@@ -1229,6 +1230,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(dsResult.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
 		withParkedSeats(parked),
 		withAssignedWorkStores(awakeAssignedStores),
+		withStartHold(hold),
 	)
 
 	// Post-reconcile sync: update bead state to reflect post-start reality.

@@ -2113,6 +2113,11 @@ const supervisorLaunchdTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 
 const supervisorSystemdTemplate = `[Unit]
 Description=Gas City machine supervisor
+# To keep a city from starting sessions while this service runs, use
+# 'gc suspend <city>' (and 'gc resume <city>' to lift it), not a stop of
+# this unit. With no gc command available, suspend a city by hand by writing
+#   {"city":{"suspended":true}}
+# to <city>/.gc/runtime/suspension-state.json.
 
 [Service]
 Type=simple

@@ -407,15 +407,18 @@ func withoutSuspendedRigs(cityPath string, cfg *config.City, stores map[string]b
 // bd-owned proxy and Dolt when no controller is running for the city. With a
 // controller running, the controller does it once the scope's sessions have
 // drained (tickRetireSuspendedRigScopes, enterBeadsQuiescenceIfDue); without
-// one nothing runs in the city, so there is nothing to wait for. city stops
-// every provider-owned scope of the city, as gc stop's last step does;
-// otherwise each of roots is stopped, except a rig that shares the city's
-// proxy root, whose pair also serves the city. Unlike the controller's stop
-// (stopStillSuspendedScope), it neither takes the suspension fence nor
-// re-reads the state, so a resume that lands before the stop can still lose
-// its pair; ga-qxvv6s tracks giving it the same fence and re-check.
+// one nothing runs in the city, so there is nothing to wait for. A controller
+// too busy to answer still runs the city's sessions, so only a control socket
+// nothing accepts a connection on counts as no controller
+// (controllerSocketAccepts). city stops every provider-owned scope of the
+// city, as gc stop's last step does; otherwise each of roots is stopped,
+// except a rig that shares the city's proxy root, whose pair also serves the
+// city. Unlike the controller's stop (stopStillSuspendedScope), it neither
+// takes the suspension fence nor re-reads the state, so a resume that lands
+// before the stop can still lose its pair; ga-qxvv6s tracks giving it the
+// same fence and re-check.
 func retireSuspendedScopesWithoutController(cityPath string, roots []string, city bool, stderr io.Writer) {
-	if controllerAlive(cityPath) != 0 {
+	if controllerSocketAccepts(cityPath) {
 		return
 	}
 	if city {

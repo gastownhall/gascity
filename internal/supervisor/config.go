@@ -67,6 +67,11 @@ type Section struct {
 	// but leaves the read-auth keys as they were.
 	ReadAuthVerifyKey string `toml:"read_auth_verify_key,omitempty"`
 	ReadAuthRequired  bool   `toml:"read_auth_required,omitempty"`
+	// HoldCitiesAfterUncleanExit records every registered city as suspended
+	// before the first city reconcile when the previous supervisor instance
+	// crashed or its exit cannot be classified, so no agent session starts
+	// until an operator runs `gc resume <city>`.
+	HoldCitiesAfterUncleanExit bool `toml:"hold_cities_after_unclean_exit,omitempty"`
 }
 
 // PublicationConfig holds machine-wide publication policy for workspace

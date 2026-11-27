@@ -342,6 +342,17 @@ type CityRuntime struct {
 	fsPressureConsecutiveSkips int
 	fsPressureEpisodeLogged    bool
 
+	// suspensionWakeLogged is the last unreadable-suspension-file error the
+	// wake read printed (wakeSuspension), so each distinct error prints once;
+	// a clean read clears it. Guarded by suspensionWakeMu: the planner, the
+	// tick and the orders lane all read.
+	suspensionWakeMu     sync.Mutex
+	suspensionWakeLogged string
+	// hostPressure is the main tick's CPU-pressure episode
+	// (tickStartHold), under hostPressureMu.
+	hostPressureMu sync.Mutex
+	hostPressure   hostPressureEpisode
+
 	// reapSkips carries worktree-reaper skip history between ticks so an
 	// unchanged skip is reported once instead of on every sweep. Owned by the
 	// serial tick, like the other per-tick state above.
@@ -3610,6 +3621,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 	if result.PoolDesiredCounts != nil {
 		parked = parkSeatsForResult(cr.cfg, openInfos, result, time.Now().UTC())
 	}
+	tickHold, tickHoldForced := cr.tickStartHold(time.Now())
 	reconcileStartOptions := []startExecutionOption{
 		withAsyncStartExecution(),
 		withAsyncStartFollowUp(cr.requestAsyncStartFollowUpTick),
@@ -3622,6 +3634,8 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 		withStartDeferralMemo(cr.ensureStartDeferralMemo()),
 		withOnDeathGate(cr.onDeathGate()),
 		withPrepareBudget(defaultStartPrepareBudget),
+		withStartHold(tickHold),
+		withStartHoldForced(tickHoldForced),
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(result.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
 		// The park verdicts over the build's whole assigned-work read (not the
 		// wake-filtered view), as the pool counts above decide them.
@@ -4477,6 +4491,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		poolDesired = make(map[string]int)
 	}
 	mergeNamedSessionDemand(poolDesired, wfcResult.NamedSessionDemand, filteredCfg)
+	dispatchHold, dispatchHoldForced := cr.tickStartHold(time.Now())
 	reconcileSessionBeadsAtPathWithNamedDemand(
 		ctx,
 		cr.cityPath,
@@ -4517,6 +4532,10 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		// its lease; it rolls back as it did before the memo.
 		withOnDeathGate(cr.onDeathGate()),
 		withPrepareBudget(defaultStartPrepareBudget),
+		// The dispatcher shares the main tick's CPU-pressure episode, so a
+		// sustained hold trickles its starts too.
+		withStartHold(dispatchHold),
+		withStartHoldForced(dispatchHoldForced),
 		withParkedSeats(parked),
 	)
 	cr.requestDeferredDrainFollowUpTick()

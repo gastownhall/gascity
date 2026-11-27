@@ -30,6 +30,7 @@ go_library(
 go_test(
     name = "supervisor_test",
     srcs = [
+        "config_hold_test.go",
         "config_test.go",
         "export_gate_test.go",
         "home_fallback_test.go",

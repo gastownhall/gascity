@@ -178,6 +178,13 @@ func configureFSPressureForTests() {
 		}
 		return []byte("some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"), nil
 	}
+	hostPressurePath = "/test/pressure/cpu"
+	hostPressureReadFile = func(path string) ([]byte, error) {
+		if path != hostPressurePath {
+			return nil, fmt.Errorf("unexpected CPU pressure path %q", path)
+		}
+		return []byte("some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"), nil
+	}
 }
 
 // testTempRootAliveSentinel pins the alive-sentinel flock on this process's

@@ -16,6 +16,22 @@ type SupervisorFSPressureSkippedTickPayload struct {
 // events.Payload variant.
 func (SupervisorFSPressureSkippedTickPayload) IsEventPayload() {}
 
+// SupervisorCPUPressureHeldStartsPayload is emitted when Linux PSI reports
+// host CPU pressure above the threshold and the controller holds starts and
+// creates: at the episode's start, at each start forced through the hold, and
+// when the pressure returns to or below the threshold.
+type SupervisorCPUPressureHeldStartsPayload struct {
+	Avg10            float64 `json:"avg10" doc:"The Linux PSI some avg10 value observed for CPU pressure."`
+	Threshold        float64 `json:"threshold" doc:"The configured avg10 threshold above which starts are held."`
+	MaxHoldIntervals int     `json:"max_hold_intervals" doc:"Patrol intervals a hold lasts before one start or create is forced through."`
+	Outcome          string  `json:"outcome" doc:"held when the hold begins, forced when a start or create is forced through it, released when the pressure ends."`
+}
+
+// IsEventPayload marks SupervisorCPUPressureHeldStartsPayload as an
+// events.Payload variant.
+func (SupervisorCPUPressureHeldStartsPayload) IsEventPayload() {}
+
 func init() {
 	RegisterPayload(SupervisorFSPressureSkippedTick, SupervisorFSPressureSkippedTickPayload{})
+	RegisterPayload(SupervisorCPUPressureHeldStarts, SupervisorCPUPressureHeldStartsPayload{})
 }

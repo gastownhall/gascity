@@ -632,6 +632,22 @@ func controllerAlive(cityPath string) int {
 	return pid
 }
 
+// controllerSocketDialTimeout bounds controllerSocketAccepts's dial.
+const controllerSocketDialTimeout = 500 * time.Millisecond
+
+// controllerSocketAccepts reports whether anything accepts a connection on
+// the city's controller socket. It sends no command and waits for no reply,
+// so a controller too busy to answer (controllerAlive reads it as 0) still
+// counts: only a socket nothing listens on means no controller runs.
+func controllerSocketAccepts(cityPath string) bool {
+	conn, err := localsocket.Dial(controllerSocketPath(cityPath), controllerSocketDialTimeout)
+	if err != nil {
+		return false
+	}
+	conn.Close() //nolint:errcheck // probe connection, nothing was sent
+	return true
+}
+
 // probeControllerIdentity asks the serving controller process how it is
 // hosted. The separate command keeps the legacy numeric ping response stable
 // for older gc clients. When talking to an older controller that does not

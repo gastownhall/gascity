@@ -90,6 +90,13 @@ func Load(fs fsys.FS, cityPath string) (State, error) {
 		}
 		return State{}, err
 	}
+	return decode(data)
+}
+
+// decode decodes a suspension file's bytes. Its error is always the
+// content's: malformed JSON, or a field that does not decode, such as an
+// updated_at that is not a time.
+func decode(data []byte) (State, error) {
 	var st State
 	if err := json.Unmarshal(data, &st); err != nil {
 		return State{}, err
@@ -206,6 +213,40 @@ func SetCitySuspended(fs fsys.FS, cityPath string, suspended *bool) error {
 		SetCity(st, suspended)
 		return true
 	})
+}
+
+// ForceCitySuspended records an explicit city suspend even over a suspension
+// file that does not parse. On the OS filesystem it holds the suspension
+// [Fence] from the read through the write. A readable file keeps its other
+// overrides and is left untouched when the city is already suspended. A file
+// whose content does not decode, whatever the reason, is replaced by one
+// holding only the city suspend, and its decode error is returned as
+// discarded so the caller can report what was thrown away. err is a failure
+// to read the file (other than its absence) or to write it; on err nothing
+// was recorded.
+func ForceCitySuspended(fs fsys.FS, cityPath string) (discarded, err error) {
+	release, err := fenceFor(fs, cityPath)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	var st State
+	data, err := fs.ReadFile(citylayout.SuspensionStateFile(cityPath))
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+	case err != nil:
+		return nil, err
+	default:
+		if st, discarded = decode(data); discarded == nil && IsCitySuspended(st) {
+			return nil, nil
+		}
+	}
+	yes := true
+	SetCity(&st, &yes)
+	if err := write(fs, cityPath, st); err != nil {
+		return nil, err
+	}
+	return discarded, nil
 }
 
 // ----- Rig helpers -----

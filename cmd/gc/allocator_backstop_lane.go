@@ -339,8 +339,8 @@ type externalReadsEnv struct {
 	// detector reads; the zero WorkLegs detects nothing.
 	WorkLegs WorkLegs
 	// CitySuspended is effectiveCitySuspended, judged once per pass by
-	// passEnv so the pass's sources and its steps agree. Like legacy, an
-	// unreadable suspension file reads as the zero state.
+	// passEnv so the pass's sources and its steps agree. As in gather, an
+	// unreadable suspension file suspends nothing (suspensionForPass).
 	CitySuspended bool
 }
 
@@ -577,7 +577,7 @@ func (l *externalReadsLane) passEnv(ctx context.Context) (externalReadsEnv, bool
 		fmt.Fprintf(l.stderr, "external reads: %v\n", err) //nolint:errcheck
 		return externalReadsEnv{}, false
 	}
-	env.CitySuspended = effectiveCitySuspended(env.Cfg, loadSuspensionStateBestEffort(env.CityPath))
+	env.CitySuspended = effectiveCitySuspended(env.Cfg, loadSuspensionStateForPass(env.Cfg, env.CityPath))
 	return env, true
 }
 

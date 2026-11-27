@@ -2029,8 +2029,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// Load runtime suspension state once per tick, mirroring phSnap above:
 	// the wake-arm's no-wake-reason fallback (Phase 2) checks city suspension
 	// per session and must not re-read .gc/runtime/suspension-state.json
-	// from disk on every one of them.
-	suspState := loadSuspensionStateBestEffort(cityPath)
+	// from disk on every one of them. An unreadable file suspends nothing
+	// here, as in the desired-state build (loadSuspensionStateForPass).
+	suspState := loadSuspensionStateForPass(cfg, cityPath)
 	reconcileOpts := startExecutionOptions{}
 	for _, apply := range startOptions {
 		if apply != nil {

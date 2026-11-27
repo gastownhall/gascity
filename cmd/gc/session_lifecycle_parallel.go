@@ -486,6 +486,12 @@ type startExecutionOptions struct {
 	// onDeathGate holds names whose on_death hook is queued or running;
 	// their starts wait. Nil holds nothing.
 	onDeathGate *onDeathGate
+	// hold is the pass's controller-wide start hold (decideStartHold). The
+	// zero hold holds nothing.
+	hold startHold
+	// holdForced is told when a trickling hold's one forced candidate
+	// clears every later gate and is prepared to start.
+	holdForced func()
 }
 
 type startExecutionOption func(*startExecutionOptions)
@@ -604,6 +610,19 @@ func withEndpointCapacityGuard(guard *endpointCapacityGuard) startExecutionOptio
 func withOnDeathGate(gate *onDeathGate) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.onDeathGate = gate
+	}
+}
+
+// withStartHoldForced reports the one candidate a trickling start hold
+// forces through, once it is prepared to start, to forced.
+func withStartHoldForced(forced func()) startExecutionOption {
+	return func(opts *startExecutionOptions) { opts.holdForced = forced }
+}
+
+// withStartHold holds the planner call's starts under the pass's start hold.
+func withStartHold(h startHold) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.hold = h
 	}
 }
 
@@ -4846,6 +4865,49 @@ func (m *prepareMeter) deferIfSpent(stderr io.Writer, trace *sessionReconcilerTr
 	return true
 }
 
+// startHoldOutcome is the deferral outcome of a start hold's cause: host
+// pressure, or else the unreadable suspension file.
+func startHoldOutcome(cause string) TraceOutcomeCode {
+	if cause == causeHostPressure {
+		return TraceOutcomeDeferredByHostPressure
+	}
+	return TraceOutcomeDeferredBySuspensionUnreadable
+}
+
+// deferIfHeld defers a start candidate the pass's start hold holds: it logs
+// and traces the deferral before any slot, lease, ticket, breaker accounting
+// or write. Until trickleSpent, a trickling hold lets candidates through to
+// the later gates instead; the first one prepared to start spends the
+// trickle (spendTrickle).
+func (h startHold) deferIfHeld(stderr io.Writer, trace *sessionReconcilerTraceCycle, wave int, candidate startCandidate, cfg *config.City, trickleSpent bool) bool {
+	if !h.held() {
+		return false
+	}
+	if h.Trickle && !trickleSpent {
+		return false
+	}
+	outcome := startHoldOutcome(h.Cause)
+	logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), string(outcome), time.Time{}, time.Time{}, nil)
+	if trace != nil {
+		trace.RecordDecision(TraceSiteLifecycleStartRun, TraceReasonStartHold, outcome, candidate.tp.TemplateName, candidate.name(), traceRecordPayload{"cause": h.Cause})
+	}
+	return true
+}
+
+// spendTrickle reports whether a prepared candidate spends the trickle of a
+// trickling hold that is not yet spent, telling forced when it does. A
+// candidate a later gate deferred never reaches it, so the trickle stays for
+// the next candidate and the window does not restart.
+func (h startHold) spendTrickle(trickleSpent bool, forced func()) bool {
+	if !h.held() || !h.Trickle || trickleSpent {
+		return false
+	}
+	if forced != nil {
+		forced()
+	}
+	return true
+}
+
 func executePlannedStartsTraced(
 	ctx context.Context,
 	candidates []startCandidate,
@@ -4937,6 +4999,8 @@ func executePlannedStartsTraced(
 	}()
 	wakeCount := 0
 	prepareSpend := &prepareMeter{limit: startOpts.prepareBudget, clk: clk}
+	// trickleSpent marks the trickling hold's one forced start as prepared.
+	trickleSpent := false
 	for wave := 0; wave <= maxWave; wave++ {
 		if ctx != nil && ctx.Err() != nil {
 			return wakeCount
@@ -5014,6 +5078,12 @@ func executePlannedStartsTraced(
 				// A planner call that has spent its prepare budget defers the
 				// rest before any slot, lease, ticket, breaker accounting or write.
 				if prepareSpend.deferIfSpent(stderr, trace, wave, candidate, cfg) {
+					deferrals.noteGateDeferred(candidate.info.ID)
+					continue
+				}
+				// A pass the controller holds (an unreadable suspension file)
+				// defers every start before any slot, lease, ticket or write.
+				if startOpts.hold.deferIfHeld(stderr, trace, wave, candidate, cfg, trickleSpent) {
 					deferrals.noteGateDeferred(candidate.info.ID)
 					continue
 				}
@@ -5179,6 +5249,9 @@ func executePlannedStartsTraced(
 				item.capacityTicket = ticket
 				if ticket != nil && ticket.probe {
 					probed[endpoint] = true
+				}
+				if startOpts.hold.spendTrickle(trickleSpent, startOpts.holdForced) {
+					trickleSpent = true
 				}
 				if startOpts.async {
 					asyncPrepared = append(asyncPrepared, asyncPreparedStart{item: *item, release: slotRelease, done: done, tracker: startOpts.asyncTracker})

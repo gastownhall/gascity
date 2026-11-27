@@ -208,6 +208,9 @@ type admitInput struct {
 	// Paused is a provider swap in progress (P7); BootOpen the boot gate (P2).
 	Paused   bool
 	BootOpen bool
+	// Hold is the pass's controller-wide start hold (decideStartHold): it
+	// defers every start and create with its cause.
+	Hold startHold
 }
 
 // admitResult is admit's output: the intents to submit, the rest with their
@@ -222,6 +225,8 @@ type admitResult struct {
 	FairSeed    uint64
 	NextToken   time.Time
 	NextBackoff time.Time
+	// Forced is that a trickling hold let one start or create through.
+	Forced bool
 }
 
 // admission is one admit's working state.
@@ -234,6 +239,7 @@ type admission struct {
 	bucket   bucketState
 	seen     map[rowKey]bool // rows with an intent this pass
 	starved  bool            // a start waited for a token
+	trickled bool            // a trickling hold let a start or create through
 	// nextBackoff is the earliest expiry of a row backoff that deferred an
 	// intent.
 	nextBackoff time.Time
@@ -308,7 +314,7 @@ func admit(in admitInput, intents []intent) admitResult {
 		}
 		res.Admitted = append(res.Admitted, it)
 	}
-	res.Bucket, res.FairSeed, res.NextBackoff = a.bucket, in.FairSeed, a.nextBackoff
+	res.Bucket, res.FairSeed, res.NextBackoff, res.Forced = a.bucket, in.FairSeed, a.nextBackoff, a.trickled
 	if a.starved {
 		res.NextToken = a.bucket.nextToken(a.capacity, a.interval)
 	}
@@ -402,6 +408,8 @@ func (a *admission) admitOne(it *intent) string {
 		return causeRowBackoff
 	case a.in.Paused && (spec.class == capStarts || spec.class == capCreates):
 		return causeSwapPause
+	case a.holds(spec.class):
+		return a.in.Hold.Cause
 	}
 	switch spec.class {
 	case capStarts:
@@ -425,10 +433,23 @@ func (a *admission) admitOne(it *intent) string {
 			return causeRowWriteCap
 		}
 	}
+	if a.in.Hold.held() && (spec.class == capStarts || spec.class == capCreates) {
+		a.trickled = true // it passed holds as the trickle
+	}
 	a.bucket.Tokens -= spec.tokens
 	a.running[spec.class]++
 	it.Deadline = a.in.Now.Add(spec.deadline(a.startup))
 	return ""
+}
+
+// holds reports whether the pass's start hold defers an intent of class: it
+// holds every start and create, except that a trickling hold lets the first
+// of them that clears the remaining gates through.
+func (a *admission) holds(class capClass) bool {
+	if !a.in.Hold.held() || (class != capStarts && class != capCreates) {
+		return false
+	}
+	return !a.in.Hold.Trickle || a.trickled
 }
 
 // healInstead is the heal a deferred start carries (intent.Heal), admitted
