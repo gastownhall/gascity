@@ -243,6 +243,30 @@ func (p *Parser) ParseTOML(data []byte) (*Formula, error) {
 // Resolve fully resolves a formula, processing extends and expansions.
 // Returns a new formula with all inheritance applied.
 func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
+	resolved, err := p.resolve(formula)
+	if err != nil {
+		return nil, err
+	}
+	// Scope declarations resolve against the final step list, so only the
+	// outermost call stamps: a parent's stamps would otherwise outlive a child
+	// declaration that replaces its own.
+	stamped, err := applyScopeDecls(resolved)
+	if err != nil {
+		return nil, err
+	}
+	// A formula with declarations is checked for dangling scope refs only once
+	// stamped, since a declared body becomes a scope body only then.
+	if len(stamped.Scopes) > 0 {
+		if err := validateScopeMembership(stamped); err != nil {
+			return nil, err
+		}
+	}
+	return stamped, nil
+}
+
+// resolve merges a formula with its parents, recursively, without stamping
+// formula-level scope declarations.
+func (p *Parser) resolve(formula *Formula) (*Formula, error) {
 	// Check for cycles
 	if p.resolvingSet[formula.Formula] {
 		// Build the cycle chain for a clear error message
@@ -281,6 +305,7 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 		Pour:        formula.Pour,
 		Vars:        make(map[string]*VarDef),
 		Steps:       nil,
+		Scopes:      cloneScopeDecls(formula.Scopes),
 		Template:    nil,
 		Compose:     nil,
 	}
@@ -293,7 +318,7 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 		}
 
 		// Resolve parent recursively
-		parent, err = p.Resolve(parent)
+		parent, err = p.resolve(parent)
 		if err != nil {
 			return nil, fmt.Errorf("resolve parent %s: %w", parentName, err)
 		}
@@ -340,6 +365,10 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 		// Merge parent steps (append, child steps come after)
 		merged.Steps = append(merged.Steps, parent.Steps...)
 
+		// Inherit parent scope declarations the child does not redeclare by
+		// name; a redeclared name replaces the parent's whole.
+		merged.Scopes = inheritScopeDecls(merged.Scopes, parent.Scopes)
+
 		// Parent templates append in declaration order. Only the child gets
 		// override semantics so parent-parent conflicts still surface later.
 		merged.Template = append(merged.Template, parent.Template...)
@@ -373,7 +402,7 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 	if err := merged.Validate(); err != nil {
 		return nil, err
 	}
-	if err := validateScopeMembership(merged); err != nil {
+	if err := validateUnstampedScopeMembership(merged); err != nil {
 		return nil, err
 	}
 	if err := validateResolvedGraphV2DescriptionFiles(merged); err != nil {
@@ -908,7 +937,7 @@ func (p *Parser) resolveDescriptionFiles(steps []*Step, baseDir string, strict b
 				}
 			} else {
 				if len(data) > descriptionFileInlineMaxBytes {
-					step.Description = descriptionFileReferenceDescription(step.DescriptionFile, path, len(data), vars)
+					step.Description = descriptionFileReferenceDescription(step.DescriptionFile, path, len(data), vars, data)
 					// Record the resolved path out-of-band so a later
 					// substitution pass over Description (expansion
 					// templates, loop bodies) can recognize this stub and
@@ -1070,7 +1099,18 @@ func descriptionAssetRelPath(rawPath string) (string, bool) {
 	return rel, true
 }
 
-func descriptionFileReferenceDescription(rawPath, resolvedPath string, size int, vars map[string]*VarDef) string {
+// descriptionFileReferenceDescription builds the "External Prompt Required"
+// stub that replaces an oversized description_file's content. content is the
+// prompt file's own bytes (nil when unavailable, e.g. from a caller that only
+// has reconstructed metadata, not the original file) — its {{name}}
+// references are unioned with the formula's declared vars so the stub's
+// variable block carries a placeholder for every name the prompt text
+// actually uses, not only the ones the formula declared. A later
+// substitution pass (molecule.substituteStepDescription) fills in real
+// values, declared or not, from whatever {{name}} placeholders survive in
+// this generated text — a name missing from this block can never be filled
+// in even when a real runtime value for it exists (gastownhall/gascity#8311).
+func descriptionFileReferenceDescription(rawPath, resolvedPath string, size int, vars map[string]*VarDef, content []byte) string {
 	var b strings.Builder
 	b.WriteString("# External Prompt Required\n\n")
 	b.WriteString("This bead still follows the normal runtime and lifecycle protocol from your startup prompt and current agent prompt, including claiming work, honoring result contracts, checking for follow-on work, and draining only when appropriate.\n\n")
@@ -1082,8 +1122,17 @@ func descriptionFileReferenceDescription(rawPath, resolvedPath string, size int,
 	b.WriteString("Treat the file contents as the authoritative task prompt for this bead. It augments the startup/runtime protocol; it does not replace the startup prompt, the current agent prompt, or any bead lifecycle/result-contract instructions already given to you.\n")
 	b.WriteString("Follow the section matching this bead's `gc.step_id` metadata and title, plus any result, closure, lifecycle, or post-close contract sections in that file.\n")
 
-	keys := make([]string, 0, len(vars))
+	names := make(map[string]struct{}, len(vars))
 	for name := range vars {
+		names[name] = struct{}{}
+	}
+	if len(content) > 0 {
+		for _, match := range varPattern.FindAllStringSubmatch(string(content), -1) {
+			names[match[1]] = struct{}{}
+		}
+	}
+	keys := make([]string, 0, len(names))
+	for name := range names {
 		keys = append(keys, name)
 	}
 	slices.Sort(keys)

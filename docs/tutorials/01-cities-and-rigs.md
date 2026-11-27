@@ -131,6 +131,19 @@ ready_delay_ms = 0
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity/roles"
 version = "sha:<pinned commit>"
 
+[storage]
+[storage.classes]               # where each kind of state lives
+work = "work"
+graph = "infra"
+sessions = "infra"
+messaging = "infra"
+orders = "infra"
+nudges = "infra"
+[storage.bindings]
+[storage.bindings.infra]
+provider = "sqlite-beads"
+path = ".gc/store"
+
 # [mail]                        # commented-out mail retention settings follow
 # ...
 ```
@@ -161,7 +174,10 @@ mode = "always"
 The `[workspace]` section in `city.toml` sets shared runtime defaults such as
 the provider. The `[providers.claude]` table registers your chosen provider
 against the builtin `claude` preset. The `[defaults.rig.imports]` table lists
-packs that every rig you add imports automatically. The v2 formula compiler is
+packs that every rig you add imports automatically. The `[storage]` section
+keeps your work in the city's bead store and puts everything the city runs on
+(sessions, mail, workflow steps, orders, and queued nudges) in a separate local
+store under `.gc/store`, created the first time the city starts. The v2 formula compiler is
 on by default, so nothing is written for it (you'll meet formulas in
 [Tutorial 05](/tutorials/05-formulas)). The `[imports]` entries
 in `pack.toml` are explicit pack composition, not hidden load-time behavior.
@@ -185,9 +201,10 @@ overrides.
 Gas City also derives a worker template for each provider declared in
 `city.toml`'s `[providers]` table — so `claude` is available as a template
 name (and, once you add a rig, `<rig>/claude`) even though it is not a
-hardcoded role. Provider-derived workers use the core pack's stock
-pool-worker prompt and get `mol-do-work` as their default sling formula —
-more on that in a moment. (The `mol-` prefix is v1 naming carried by the
+hardcoded role. Provider-derived workers carry no prompt of their own: they
+start with the core pack's stock worker prompt, chosen by `formula_v2` like
+any agent without a `prompt_template`, and get `mol-do-work` as their default
+sling formula — more on that in a moment. (The `mol-` prefix is v1 naming carried by the
 formula's name; it doesn't change what the formula is — a reusable method.)
 
 To check on the status of your city, use `gc status`:
@@ -316,7 +333,7 @@ $ cd ~/my-project
 ~/my-project
 $ gc sling my-project/claude "Write hello world in python to the file hello.py"
 Created mp-ff9 — "Write hello world in python to the file hello.py"
-Attached workflow mp-6yh (formula "mol-do-work") to mp-ff9
+Attached workflow gcg-1025 (formula "mol-do-work") to mp-ff9
 ```
 
 One command set the whole loop in motion: sling created a work bead, attached

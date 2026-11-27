@@ -8,9 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -3100,6 +3103,11 @@ func TestBdStorePurge(t *testing.T) {
 	if strings.Contains(args, "--dry-run") {
 		t.Errorf("args = %q, should not contain --dry-run", args)
 	}
+	// A real purge must confirm with --force: unforced bd purge only
+	// previews and exits non-zero when anything matches.
+	if !slices.Contains(gotArgs, "--force") {
+		t.Errorf("args = %q, want --force for a non-dry-run purge", args)
+	}
 	// Dir should be parent of beads dir.
 	if gotDir != "/city/rigs/fe" {
 		t.Errorf("dir = %q, want %q", gotDir, "/city/rigs/fe")
@@ -3128,8 +3136,12 @@ func TestBdStorePurgeDryRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := strings.Join(gotArgs, " ")
-	if !strings.Contains(args, "--dry-run") {
+	if !slices.Contains(gotArgs, "--dry-run") {
 		t.Errorf("args = %q, want --dry-run", args)
+	}
+	// A preview must never confirm the deletion.
+	if slices.Contains(gotArgs, "--force") {
+		t.Errorf("args = %q, dry-run must not contain --force", args)
 	}
 }
 
@@ -3429,24 +3441,171 @@ func TestBdStoreListForcesUnboundedForIDs(t *testing.T) {
 	}
 }
 
-// TestBdStoreListPushesCallerLimitForSortCreatedDesc pins that a bare
-// SortCreatedDesc issues-tier query (no SeekAfter/Metadata/etc.) pushes the
-// caller's real Limit to bd list. Only paginated (SeekAfter-bearing) reads
-// need the unbounded fetch — see TestSeekGatesForceClientSideLimit, which
-// pins the same baseline at the gate-function level.
+// TestBdStoreListPushesCallerLimitForSortCreatedDesc preserves the bounded
+// issues-tier fast path for callers that explicitly accept backing-order ties.
 func TestBdStoreListPushesCallerLimitForSortCreatedDesc(t *testing.T) {
-	runner := fakeRunner(map[string]struct {
-		out []byte
-		err error
+	assertBdStoreCreatedPage(t, mixedPriorityCreatedRows(), beads.ListQuery{
+		Label:                    "bounded-caller",
+		IncludeClosed:            true,
+		Limit:                    2,
+		Sort:                     beads.SortCreatedDesc,
+		AllowBackingCreatedLimit: true,
+	}, []string{"bd-new-low", "bd-middle"}, 2)
+}
+
+// TestBdStoreListCreatedDescSelectsNewestPopulation checks membership after
+// the backing has ordered and truncated a mixed-priority population (#9415).
+func TestBdStoreListCreatedDescSelectsNewestPopulation(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		q    beads.ListQuery
 	}{
-		`bd list --json --label=bounded-caller --include-infra --include-gates --limit 3`: {
-			out: []byte(`[{"id":"bd-a","title":"a","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","labels":["bounded-caller"]}]`),
-		},
-	})
-	s := beads.NewBdStore("/city", runner)
-	_, err := s.List(beads.ListQuery{Label: "bounded-caller", Limit: 3, Sort: beads.SortCreatedDesc})
+		{"closed_report", beads.ListQuery{Status: "closed", IncludeClosed: true}},
+		{"label_filtered", beads.ListQuery{Label: "bounded-caller", IncludeClosed: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.q.Sort = beads.SortCreatedDesc
+			tc.q.Limit = 2
+			assertBdStoreCreatedPage(t, mixedPriorityCreatedRows(), tc.q,
+				[]string{"bd-new-low", "bd-middle"}, -1)
+		})
+	}
+}
+
+func TestBdStoreListCreatedDescKeepsLargestIDsAtBoundary(t *testing.T) {
+	var rows []beads.Bead
+	for _, id := range []string{"bd-a", "bd-m", "bd-z"} {
+		row := mixedPriorityCreatedRows()[2]
+		row.ID = id
+		rows = append(rows, row)
+	}
+	for _, tc := range []struct {
+		name       string
+		backing    bool
+		want       []string
+		fetchLimit int
+	}{
+		{"exact", false, []string{"bd-z", "bd-m"}, -1},
+		{"backing_ties_opt_in", true, []string{"bd-m", "bd-a"}, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertBdStoreCreatedPage(t, rows, beads.ListQuery{
+				Label:                    "bounded-caller",
+				IncludeClosed:            true,
+				Sort:                     beads.SortCreatedDesc,
+				Limit:                    2,
+				AllowBackingCreatedLimit: tc.backing,
+			}, tc.want, tc.fetchLimit)
+		})
+	}
+}
+
+func TestBdStoreListCreatedPopulationControls(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		q    beads.ListQuery
+		want []string
+	}{
+		{"unlimited", beads.ListQuery{Sort: beads.SortCreatedDesc}, []string{"bd-new-low", "bd-middle", "bd-old-high"}},
+		{"default_bounded", beads.ListQuery{Limit: 2}, []string{"bd-old-high", "bd-middle"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.q.Status = "closed"
+			tc.q.IncludeClosed = true
+			assertBdStoreCreatedPage(t, mixedPriorityCreatedRows(), tc.q, tc.want, tc.q.Limit)
+		})
+	}
+}
+
+func mixedPriorityCreatedRows() []beads.Bead {
+	base := time.Date(2026, 11, 22, 0, 0, 0, 0, time.UTC)
+	rows := make([]beads.Bead, 0, 4)
+	for i, id := range []string{"bd-old-high", "bd-middle", "bd-new-low", "bd-unrelated"} {
+		priority := i * 2
+		if priority > 4 {
+			priority = 0
+		}
+		row := beads.Bead{
+			ID: id, Title: id, Type: "task", Status: "closed", Priority: &priority,
+			CreatedAt: base.Add(time.Duration(i) * time.Hour), Labels: []string{"bounded-caller"},
+		}
+		if id == "bd-unrelated" {
+			row.Status = "open"
+			row.Labels = []string{"other-label"}
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+// assertBdStoreCreatedPage models bd's default priority ASC, created_at DESC,
+// id ASC order and its --sort created variant (created_at DESC, id ASC). It
+// filters and limits that population BEFORE returning JSON to the store, so
+// client-side sorting cannot repair a prematurely truncated page.
+// wantBackingLimit=-1 leaves the exact-read fetching strategy unconstrained.
+func assertBdStoreCreatedPage(t *testing.T, rows []beads.Bead, q beads.ListQuery, want []string, wantBackingLimit int) {
+	t.Helper()
+	var calls []string
+	backingLimit := -1
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		calls = append(calls, name+" "+strings.Join(args, " "))
+		if name != "bd" || len(args) == 0 || args[0] != "list" {
+			return nil, fmt.Errorf("unexpected command: %s %v", name, args)
+		}
+		value := func(flag string) string {
+			for i, arg := range args {
+				if arg == flag && i+1 < len(args) {
+					return args[i+1]
+				}
+				if strings.HasPrefix(arg, flag+"=") {
+					return strings.TrimPrefix(arg, flag+"=")
+				}
+			}
+			return ""
+		}
+		if _, err := fmt.Sscan(value("--limit"), &backingLimit); err != nil {
+			return nil, fmt.Errorf("reading backing limit: %w", err)
+		}
+		page := make([]beads.Bead, 0, len(rows))
+		for _, row := range rows {
+			if label := value("--label"); label != "" && !slices.Contains(row.Labels, label) {
+				continue
+			}
+			if status := value("--status"); status != "" && row.Status != status {
+				continue
+			}
+			if !slices.Contains(args, "--all") && row.Status == "closed" {
+				continue
+			}
+			page = append(page, row)
+		}
+		slices.SortFunc(page, func(a, b beads.Bead) int {
+			if value("--sort") != "created" && *a.Priority != *b.Priority {
+				return *a.Priority - *b.Priority
+			}
+			if cmp := b.CreatedAt.Compare(a.CreatedAt); cmp != 0 {
+				return cmp
+			}
+			return strings.Compare(a.ID, b.ID)
+		})
+		if backingLimit > 0 && len(page) > backingLimit {
+			page = page[:backingLimit]
+		}
+		return json.Marshal(page)
+	}
+	got, err := beads.NewBdStore("/city", runner).List(q)
 	if err != nil {
 		t.Fatalf("List: %v", err)
+	}
+	ids := make([]string, len(got))
+	for i, row := range got {
+		ids[i] = row.ID
+	}
+	if !slices.Equal(ids, want) {
+		t.Errorf("List returned IDs %v, want %v (backing calls: %v)", ids, want, calls)
+	}
+	if wantBackingLimit >= 0 && backingLimit != wantBackingLimit {
+		t.Errorf("backing limit = %d, want %d to preserve the bounded/unlimited contract; calls: %v", backingLimit, wantBackingLimit, calls)
 	}
 }
 
@@ -3863,12 +4022,14 @@ esac
 
 // --- ListByLabel ---
 
+// ListByLabel is an exact created-desc read: bd list --limit would keep
+// priority-ordered rows, so the limit is applied Go-side (--limit 0, #9415).
 func TestBdStoreListByLabel(t *testing.T) {
 	runner := fakeRunner(map[string]struct {
 		out []byte
 		err error
 	}{
-		`bd list --json --label=order-run:digest --include-infra --include-gates --limit 5`: {
+		`bd list --json --label=order-run:digest --include-infra --include-gates --limit 0`: {
 			out: []byte(`[{"id":"bd-aaa","title":"digest wisp","status":"open","issue_type":"task","created_at":"2026-02-27T10:00:00Z","labels":["order-run:digest"]}]`),
 		},
 	})
@@ -3921,7 +4082,7 @@ func TestBdStoreListByLabelEmpty(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd list --json --label=order-run:none --include-infra --include-gates --limit 1`: {out: []byte(`[]`)},
+		`bd list --json --label=order-run:none --include-infra --include-gates --limit 0`: {out: []byte(`[]`)},
 	})
 	s := beads.NewBdStore("/city", runner)
 	got, err := s.ListByLabel("order-run:none", 1)
@@ -4881,30 +5042,39 @@ func TestBdStoreListAssigneesSingleUsesAssigneeFlag(t *testing.T) {
 // route-b's row is newer than route-a's, so it must win the cut even though
 // route-a is read first.
 func TestBdStoreListAssigneesMultipleFansOutPerAssignee(t *testing.T) {
-	var calls []string
+	// The fanned-out reads run concurrently, so the runner records under a
+	// lock and reports a bad command as an error (t.Fatalf must not run off
+	// the test goroutine).
+	var (
+		callsMu sync.Mutex
+		calls   []string
+	)
 	rows := map[string]string{
 		"route-a": `{"id":"bd-route-a","title":"message","status":"open","issue_type":"message","assignee":"route-a","created_at":"2026-05-01T00:00:01Z"}`,
 		"route-b": `{"id":"bd-route-b","title":"message","status":"open","issue_type":"message","assignee":"route-b","created_at":"2026-05-01T00:00:02Z"}`,
 	}
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		gotCmd := name + " " + strings.Join(args, " ")
+		callsMu.Lock()
 		calls = append(calls, gotCmd)
+		callsMu.Unlock()
 		if strings.Contains(gotCmd, "assignee=route-c") {
-			t.Fatalf("cmd = %q, a route not asked for must not be queried", gotCmd)
+			t.Errorf("cmd = %q, a route not asked for must not be queried", gotCmd)
+			return nil, fmt.Errorf("unexpected route-c read: %s", gotCmd)
 		}
 		if !strings.Contains(gotCmd, "--limit 0") {
-			t.Fatalf("cmd = %q, want each fanned-out read unlimited before the combined client limit", gotCmd)
+			t.Errorf("cmd = %q, want each fanned-out read unlimited before the combined client limit", gotCmd)
 		}
 		if !strings.Contains(gotCmd, "--status=open") || !strings.Contains(gotCmd, "--type=message") {
-			t.Fatalf("cmd = %q, want each fanned-out read to keep the query's --status and --type", gotCmd)
+			t.Errorf("cmd = %q, want each fanned-out read to keep the query's --status and --type", gotCmd)
 		}
 		for route, row := range rows {
 			if strings.Contains(gotCmd, "--assignee="+route) {
 				return []byte("[" + row + "]"), nil
 			}
 		}
-		t.Fatalf("cmd = %q, want exactly one --assignee=<route> per Assignees value", gotCmd)
-		return nil, nil
+		t.Errorf("cmd = %q, want exactly one --assignee=<route> per Assignees value", gotCmd)
+		return nil, fmt.Errorf("unexpected command: %s", gotCmd)
 	}
 	s := beads.NewBdStore("/city", runner)
 	got, err := s.List(beads.ListQuery{
@@ -5086,15 +5256,198 @@ func TestBdStoreListAssigneesFanOutReturnsPartialResults(t *testing.T) {
 	})
 }
 
+// fanOutHoldRunner answers `bd list --assignee=<route>` for routes, one row
+// per route, and holds every such read until release is closed. inFlight
+// counts the reads holding now and peak the most that ever held at once.
+func fanOutHoldRunner(routes []string, release <-chan struct{}, inFlight, peak *atomic.Int32) beads.CommandRunner {
+	return func(_, name string, args ...string) ([]byte, error) {
+		cmd := name + " " + strings.Join(args, " ")
+		route := ""
+		for _, r := range routes {
+			if strings.Contains(cmd, "--assignee="+r+" ") {
+				route = r
+				break
+			}
+		}
+		if route == "" {
+			return nil, fmt.Errorf("unexpected command: %s", cmd)
+		}
+		now := inFlight.Add(1)
+		defer inFlight.Add(-1)
+		for {
+			old := peak.Load()
+			if now <= old || peak.CompareAndSwap(old, now) {
+				break
+			}
+		}
+		<-release
+		return []byte(`[{"id":"bd-` + route + `","title":"message","status":"open","issue_type":"message","assignee":"` + route + `","created_at":"2026-05-01T00:00:00Z"}]`), nil
+	}
+}
+
+// listWithHeldReads runs query against a store whose per-assignee reads all
+// hold, waits until every goroutine of the bubble is blocked, and reports how
+// many reads were in flight then; it then releases them and returns the List's
+// result and the peak number of reads that held at once. It must run inside a
+// synctest bubble.
+func listWithHeldReads(t *testing.T, query beads.ListQuery) (inFlightWhileHeld int32, peak int32, got []beads.Bead, err error) {
+	t.Helper()
+	var inFlight, peakReads atomic.Int32
+	release := make(chan struct{})
+	s := beads.NewBdStore("/city", fanOutHoldRunner(query.Assignees, release, &inFlight, &peakReads))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		got, err = s.List(query)
+	}()
+	synctest.Wait()
+	inFlightWhileHeld = inFlight.Load()
+	close(release)
+	<-done
+	return inFlightWhileHeld, peakReads.Load(), got, err
+}
+
+// TestBdStoreListAssigneesFanOutReadsConcurrently pins that the per-assignee
+// bd list reads of a fanned-out List run at once, not one after another. Each
+// read is its own bd subprocess round trip, and a session's own inbox reads
+// three routes (id, alias, session name) on every `gc mail check --inject` and
+// `gc prime --hook`: read in series they put two extra round trips on each
+// hook's critical path (ga-59slarrd). With every read held, all three must be
+// in flight before any returns.
+func TestBdStoreListAssigneesFanOutReadsConcurrently(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		routes := []string{"route-a", "route-b", "route-c"}
+		inFlight, _, got, err := listWithHeldReads(t, beads.ListQuery{Assignees: routes, Type: "message", Status: "open", Sort: beads.SortCreatedAsc})
+		if inFlight != int32(len(routes)) {
+			t.Errorf("with every read held, %d of the %d per-assignee bd list reads were in flight; want all of them: the fan-out must not wait for one read before it starts the next", inFlight, len(routes))
+		}
+		if err != nil {
+			t.Fatalf("List() error = %v", err)
+		}
+		if ids := beadIDs(got); !reflect.DeepEqual(ids, []string{"bd-route-a", "bd-route-b", "bd-route-c"}) {
+			t.Fatalf("got ids %v, want one row per route [bd-route-a bd-route-b bd-route-c]", ids)
+		}
+	})
+}
+
+// TestBdStoreListAssigneesFanOutBoundsConcurrentReads pins the bound on that
+// concurrency: a mailbox with a long alias history reads more routes than
+// BdListAssigneeFanOutLimitForTest, and exactly that many of its bd list reads
+// are in flight while they hold — not one more, so one read cannot fork a bd
+// subprocess per route, and not one fewer — and the rest still run once slots
+// free.
+func TestBdStoreListAssigneesFanOutBoundsConcurrentReads(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		limit := int32(beads.BdListAssigneeFanOutLimitForTest)
+		routes := make([]string, limit+2)
+		for i := range routes {
+			routes[i] = fmt.Sprintf("route-%d", i)
+		}
+		inFlight, peak, got, err := listWithHeldReads(t, beads.ListQuery{Assignees: routes, Type: "message", Status: "open"})
+		if inFlight != limit {
+			t.Errorf("with every read held, %d bd list reads were in flight; want exactly the limit %d", inFlight, limit)
+		}
+		if peak != limit {
+			t.Errorf("peak concurrent bd list reads = %d, want exactly the limit %d", peak, limit)
+		}
+		if err != nil {
+			t.Fatalf("List() error = %v", err)
+		}
+		if len(got) != len(routes) {
+			t.Fatalf("got %d rows, want one per route (%d)", len(got), len(routes))
+		}
+	})
+}
+
+// TestBdStoreListAssigneesFanOutCombinesInAssigneeOrder pins that the
+// concurrent reads are combined in Assignees order, not in the order they
+// finish: route-a's read returns only after route-b's has, and still the union
+// keeps route-a's copy of a bead both returned, and of two failed reads the
+// List reports route-a's error.
+func TestBdStoreListAssigneesFanOutCombinesInAssigneeOrder(t *testing.T) {
+	// runner answers route-b at once and route-a only after route-b's answer
+	// is out. The 10s fallback lets a fan-out that reads one assignee at a
+	// time return too; in the synctest bubble it costs no wall time.
+	runner := func(answer func(route string) ([]byte, error)) beads.CommandRunner {
+		bDone := make(chan struct{})
+		var bOnce sync.Once
+		return func(_, name string, args ...string) ([]byte, error) {
+			cmd := name + " " + strings.Join(args, " ")
+			switch {
+			case strings.Contains(cmd, "--assignee=route-b"):
+				defer bOnce.Do(func() { close(bDone) })
+				return answer("route-b")
+			case strings.Contains(cmd, "--assignee=route-a"):
+				select {
+				case <-bDone:
+				case <-time.After(10 * time.Second):
+				}
+				return answer("route-a")
+			}
+			return nil, fmt.Errorf("unexpected command: %s", cmd)
+		}
+	}
+	query := beads.ListQuery{Assignees: []string{"route-a", "route-b"}, Type: "message", Status: "open"}
+
+	t.Run("union keeps the first assignee's copy", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			s := beads.NewBdStore("/city", runner(func(route string) ([]byte, error) {
+				return []byte(`[{"id":"bd-moved","title":"message","status":"open","issue_type":"message","assignee":"` + route + `","created_at":"2026-05-01T00:00:01Z"}]`), nil
+			}))
+			got, err := s.List(query)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 1 || got[0].ID != "bd-moved" || got[0].Assignee != "route-a" {
+				t.Fatalf("got = %+v, want bd-moved once, as the route-a read returned it although it finished last", got)
+			}
+		})
+	})
+
+	t.Run("first assignee's error wins", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			s := beads.NewBdStore("/city", runner(func(route string) ([]byte, error) {
+				return nil, fmt.Errorf("%s read failed", route)
+			}))
+			got, err := s.List(query)
+			if err == nil || !strings.Contains(err.Error(), "route-a read failed") {
+				t.Fatalf("List() = %+v, %v; want route-a's error, the first in Assignees order", got, err)
+			}
+		})
+	})
+
+	t.Run("a later assignee's error still fails the List", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			s := beads.NewBdStore("/city", runner(func(route string) ([]byte, error) {
+				if route == "route-b" {
+					return nil, fmt.Errorf("route-b read failed")
+				}
+				return []byte(`[{"id":"bd-a","title":"message","status":"open","issue_type":"message","assignee":"route-a","created_at":"2026-05-01T00:00:01Z"}]`), nil
+			}))
+			got, err := s.List(query)
+			if err == nil || !strings.Contains(err.Error(), "route-b read failed") || got != nil {
+				t.Fatalf("List() = %+v, %v; want no rows and route-b's error: a hard error from any one read fails the whole List", got, err)
+			}
+		})
+	})
+}
+
 // TestBdStoreListBothTiersAssigneesMultipleFansOutTheListLegOnly pins both
 // legs of a multi-assignee TierBoth read, the shape of a multi-route mail
 // inbox. The bd list leg fans out to one --assignee read per route; the
 // listEphemeral bd query leg still carries no assignee clause and reads every
 // open ephemeral message, the part of GH#7794 the fan-out does not fix.
 func TestBdStoreListBothTiersAssigneesMultipleFansOutTheListLegOnly(t *testing.T) {
-	var listCalls, queryCalls []string
+	// Both legs, and the bd list leg's per-route reads, run concurrently: the
+	// runner records under a lock, and the reads are compared in sorted order.
+	var (
+		callsMu               sync.Mutex
+		listCalls, queryCalls []string
+	)
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		cmd := name + " " + strings.Join(args, " ")
+		callsMu.Lock()
+		defer callsMu.Unlock()
 		switch {
 		case strings.HasPrefix(cmd, "bd list "):
 			listCalls = append(listCalls, cmd)
@@ -5121,6 +5474,7 @@ func TestBdStoreListBothTiersAssigneesMultipleFansOutTheListLegOnly(t *testing.T
 	if len(listCalls) != 2 {
 		t.Fatalf("bd list calls = %v, want one per route", listCalls)
 	}
+	slices.Sort(listCalls)
 	for i, route := range []string{"route-a", "route-b"} {
 		if !strings.Contains(listCalls[i], "--assignee="+route) || !strings.Contains(listCalls[i], "--status=open") || !strings.Contains(listCalls[i], "--type=message") {
 			t.Fatalf("bd list call %d = %q, want --assignee=%s with the query's --status and --type", i, listCalls[i], route)
@@ -5419,6 +5773,30 @@ func TestBdStoreReadyRetryBoundedReturnsErrorAfterExhaustion(t *testing.T) {
 	}
 	if calls < 2 {
 		t.Fatalf("calls = %d, want >= 2 (retry must be attempted)", calls)
+	}
+}
+
+// TestIsIssueTypeRefused pins the classifier for a store refusing a type its
+// registry does not define, however the store wrapped bd's answer.
+func TestIsIssueTypeRefused(t *testing.T) {
+	refusal := errors.New(`Error: invalid issue type "session" (valid: bug, feature, task, epic, chore, decision)`)
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"bd's answer", refusal, true},
+		{"both tiers, hard", fmt.Errorf("bd list both tiers: bd list: %w", refusal), true},
+		{"both tiers, partial", &beads.PartialResultError{Op: "bd list both tiers", Err: fmt.Errorf("bd list: %w", refusal)}, true},
+		{"a failed read is not a refusal", errors.New("bd list: dial tcp 127.0.0.1:3307: connect: connection refused"), false},
+		{"a timeout is not a refusal", errors.New("timed out after 30s"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := beads.IsIssueTypeRefused(tc.err); got != tc.want {
+				t.Fatalf("IsIssueTypeRefused(%v) = %t, want %t", tc.err, got, tc.want)
+			}
+		})
 	}
 }
 

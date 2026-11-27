@@ -24,6 +24,7 @@ legacy-suspended-field
 daemon-session-reconciler
 fleet-start-breaker
 beads-ledger-feed
+city-suspension
 rollout:beads.conditional_writes
 rollout:beads.guarded_release
 rollout:daemon.formula_v2
@@ -109,6 +110,7 @@ dolt-journal-size
 dolt-log-size
 dolt-config
 dolt-version
+bd-schema
 events-log
 events-log-size
 bd-backup-size

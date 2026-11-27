@@ -98,12 +98,15 @@ func humaStoreError(err error) error {
 	if errors.Is(err, beads.ErrNotFound) {
 		return apierr.SessionNotFound.Msg("not_found: " + err.Error())
 	}
-	// A store write that lost a serialization race and exhausted the store's
-	// bounded retry is transient, not a server fault: the transaction never
-	// committed and the same request succeeds on a retry. Surfacing it as 500
+	// A store write that lost a serialization race, or ran its metadata
+	// compare-and-set out of attempts, and exhausted the store's bounded retry
+	// is transient, not a server fault: the transaction never committed and
+	// the same request succeeds on a retry (beads.IsRetryableConflict names
+	// exactly that class; ambiguous connection failures are not in it, because
+	// the write may have landed). Surfacing it as 500
 	// both misreports the cause and is undeclared on these routes, which
 	// declare 503 (internal/api/supervisor_city_routes.go).
-	if isRetryableStoreConflict(err) {
+	if beads.IsRetryableConflict(err) {
 		return apierr.StoreUnavailable.Msg("store_conflict: " + err.Error())
 	}
 	// A write the store committed but could not read back in time is not a

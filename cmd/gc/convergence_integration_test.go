@@ -1106,16 +1106,21 @@ func TestConvergenceStore_CloseOpenDescendants(t *testing.T) {
 		t.Fatalf("closing step b: %v", err)
 	}
 
-	// The adapter's Children hides closed beads, so a walk over it could
-	// never reach step b1 under the closed step b.
+	// The adapter's Children lists closed beads too (gascity#8505).
+	// CloseOpenDescendants does not depend on it: it walks the molecule
+	// subtree primitive, which reaches step b1 under the closed step b.
 	visible, err := adapter.Children(wisp.ID)
 	if err != nil {
 		t.Fatalf("Children: %v", err)
 	}
+	listsStepB := false
 	for _, child := range visible {
 		if child.ID == stepB.ID {
-			t.Fatalf("adapter.Children(%s) lists closed step %s", wisp.ID, stepB.ID)
+			listsStepB = true
 		}
+	}
+	if !listsStepB {
+		t.Fatalf("adapter.Children(%s) omits closed step %s", wisp.ID, stepB.ID)
 	}
 
 	if err := adapter.CloseOpenDescendants(wisp.ID, reason); err != nil {

@@ -82,6 +82,7 @@ var optionalInterfaces = map[string]reflect.Type{
 	"StartupNudgeHandbackProvider":    reflect.TypeFor[runtime.StartupNudgeHandbackProvider](),
 	"StateCacheStalenessProvider":     reflect.TypeFor[runtime.StateCacheStalenessProvider](),
 	"SteerCapabilityProvider":         reflect.TypeFor[runtime.SteerCapabilityProvider](),
+	"TmuxSubtreeFence":                reflect.TypeFor[runtime.TmuxSubtreeFence](),
 	"TransportCapabilityProvider":     reflect.TypeFor[runtime.TransportCapabilityProvider](),
 	"TurnEventProvider":               reflect.TypeFor[runtime.TurnEventProvider](),
 	"TurnFenceProvider":               reflect.TypeFor[runtime.TurnFenceProvider](),

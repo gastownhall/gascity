@@ -90,6 +90,14 @@ when the context ends. Take the bound from the caller's own context.
   `CurrentTurn`'s failure direction, an idle reading it did not get leaving
   the turn open.
 
+The worker operation event names its session from the persisted record only
+(`sessionRecordPersisted`), never `sessionRecordViaManager`: the live overlay
+(`Manager.EnrichInfo`) makes provider calls that cannot be canceled, and the
+event is named before and after every operation, so a wedged provider would hold
+a kill on the reconciler tick or a start on its async slot before the operation
+ran (`SESSION-RUNTIME-034`). Do not add a provider call to
+`populateOperationEventIdentity`.
+
 ## Turn sources
 
 A session's turns come from the routed runtime's protocol, else from the
@@ -170,6 +178,17 @@ receipt on a nudge. A lookup that cannot tell fails the request wrapping
 `runtime.ErrNudgeNotSent`, with nothing sent. A request without `Redelivery`
 looks nothing up.
 
+The key also tells the queue's own delivery of a session's startup turn
+apart. A `RuntimeHandle` built for a session row
+(`Factory.SessionRuntimeHandle`: cmd/gc's nudge targets and the
+conversation lane's runtime handle) holds every nudge to the running
+session behind a startup turn the session's queue still holds, pending or
+in flight (`RuntimeHandleConfig.StartupTurnHolds`, reading
+`session.Manager.StartupTurnQueued`), as the session manager's own sends
+do: the nudge is undelivered and types nothing. Only a nudge under the key
+of the batch the claim pinned the turn to, the queue's delivery of that
+turn, passes it. The rule lives in `internal/session`; the handle only asks.
+
 ## Codex activity
 
 Codex activity comes from matching native turn lifecycle events, not assistant
@@ -200,6 +219,31 @@ hook must not make an unchanged transcript appear to be a different stream.
 The one exception is a provider with a session-id flag whose start the Manager
 launched without its key: its identity takes the key once one is written,
 normally by the provider's hook.
+
+## Fresh-cycle kill guard
+
+The legacy reconciler cycles a live `wake_mode=fresh` session whose assigned
+bead changed (`cycleAliveSessionForFreshReassign`, `cmd/gc/session_reconciler.go`)
+from a tick snapshot that can be minutes old, so the kill is gated on live
+reads first. Keep every gate before the kill or the stamp:
+
+- Q1: no in-progress claim still assigned to the session
+  (`sessionHasFreshInProgressClaim`). An unreadable store defers the cycle.
+- Q2: the anchor, read once and uncached (`freshAnchorBeadTerminal`), is not
+  closed and is still owned by the session. An unassigned anchor (a blank or
+  whitespace assignee included) or one assigned outside
+  `sessionAssignmentIdentifiersForConfigInfo`, which excludes pool-slot
+  aliases, `alias_history` and pool templates, was released or handed off, so
+  the session is not cycled onto it. Status and assignee come from that one
+  row: a second read, or the owner probe's row, can disagree with it.
+- Q3: the cycle is deferred while the previous bead is still open and owned by
+  the session, or when it closed before this incarnation started
+  (`awake_started_at` is after its `closed_at`, so the session is already
+  fresh). A previous bead handed to another owner, or closed since this
+  incarnation woke, does not defer it.
+
+A failed anchor read is "could not tell", and the cycle proceeds, since Q1
+already ruled out a claim a kill could cost. Do not turn that into a skip.
 
 ## Worker sites
 

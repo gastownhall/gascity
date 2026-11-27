@@ -81,7 +81,7 @@ func resolveSessionRuntimeTargetInCity(cityPath string, cfg *config.City, identi
 	if store.Store == nil {
 		return sessionRuntimeTarget{}, fmt.Errorf("opening the city store at %q: no store", cityPath)
 	}
-	target, err := resolveNudgeTargetInStore(cityPath, cfg, store, identifier, false, stderr)
+	target, err := resolveNudgeTargetInStore(cityPath, cfg, store, identifier, false, false, stderr)
 	if err != nil {
 		return sessionRuntimeTarget{}, err
 	}

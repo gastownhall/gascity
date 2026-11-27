@@ -251,7 +251,7 @@ func TestWorkArmHonoursItsDeadlineAndCtx(t *testing.T) {
 		cancel()
 		enforcedLane(t, func() {
 			withCloseAbandonedTTL(t, 5*time.Minute, func() {
-				_, _ = newWorkMoleculeGC().pass(ctx, legs, e.graphStore(), time.Hour, time.Now().Add(2*time.Hour))
+				_, _ = newWorkMoleculeGC().pass(ctx, testWispGCRoots(e.graphStore(), legs), legs, e.graphStore(), time.Hour, time.Now().Add(2*time.Hour))
 			})
 		})
 		if n := count(inner); n != 0 || *lists != 0 {
@@ -293,7 +293,7 @@ func TestWispGCMemoPruning(t *testing.T) {
 		})
 		wg := newWispGC(5*time.Minute, time.Hour, 0).(*memoryWispGC)
 		runOnce := func() {
-			if _, err := wg.runGC(nil, beads.GraphStore{Store: store}, beads.SessionStore{}, beads.MailStore{Store: store}, time.Now()); err != nil {
+			if _, err := wg.runGC(testWispGCRoots(store, nil), nil, beads.GraphStore{Store: store}, beads.SessionStore{}, beads.MailStore{Store: store}, time.Now()); err != nil {
 				t.Fatal(err)
 			}
 		}

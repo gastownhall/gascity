@@ -857,3 +857,118 @@ func markCachedPackDirty(t *testing.T, source, commit string) {
 		t.Fatalf("WriteFile(.packman-test-dirty): %v", err)
 	}
 }
+
+func TestCheckInstalledAcceptsCleanCacheUnderGitTrace(t *testing.T) {
+	useNeutralGitTestEnv(t)
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	const source = "https://example.com/tools.git"
+
+	seeded := filepath.Join(t.TempDir(), "seed")
+	head := seedCacheRepo(t, seeded)
+	cachePath, err := RepoCachePath(source, head)
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.Rename(seeded, cachePath); err != nil {
+		t.Fatalf("moving seeded repo into cache: %v", err)
+	}
+	writeTestLockfile(t, city, map[string]LockedPack{
+		source: {Version: "1.0.0", Commit: head},
+	})
+
+	t.Setenv("GIT_TRACE", "1")
+	t.Setenv("GIT_TRACE2_PERF", "1")
+	report, err := CheckInstalled(city, map[string]config.Import{
+		"pack:tools": {Source: source, Version: "^1.0"},
+	})
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v", err)
+	}
+	if len(report.Issues) != 0 {
+		t.Fatalf("CheckInstalled issues = %#v, want none for a clean cache under GIT_TRACE", report.Issues)
+	}
+}
+
+// fakeStatusGitOnPath puts a git stub first and alone on PATH. It answers
+// rev-parse with headCommit and status with the given stdout and stderr,
+// exiting zero. The script uses only shell builtins.
+func fakeStatusGitOnPath(t *testing.T, headCommit, statusStdout, statusStderr string) {
+	t.Helper()
+	binDir := t.TempDir()
+	script := fmt.Sprintf(`#!/bin/sh
+for arg in "$@"; do
+	case "$arg" in
+	rev-parse) printf '%%s\n' '%s'; exit 0 ;;
+	status) printf '%%s' '%s'; printf '%%s\n' '%s' >&2; exit 0 ;;
+	esac
+done
+exit 2
+`, headCommit, statusStdout, statusStderr)
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+}
+
+func TestCachedRepoChecksFailClosedOnGitStderr(t *testing.T) {
+	const (
+		source     = "https://example.com/tools.git"
+		headCommit = "0123456789abcdef0123456789abcdef01234567"
+		diagnostic = "warning: could not open directory sub/: Permission denied"
+	)
+	requireStatusDiagnostic := func(t *testing.T, msg string) {
+		t.Helper()
+		for _, want := range []string{"git status --porcelain", diagnostic} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("error = %q, want it to contain %q", msg, want)
+			}
+		}
+		if strings.Contains(msg, "local worktree changes") {
+			t.Errorf("error = %q, want stderr not reported as local worktree changes", msg)
+		}
+	}
+
+	for _, tc := range []struct {
+		name   string
+		stdout string
+	}{
+		{name: "empty stdout", stdout: ""},
+		{name: "porcelain record", stdout: "?? x\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			city := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+			writeTestLockfile(t, city, map[string]LockedPack{
+				source: {Version: "1.0.0", Commit: headCommit},
+			})
+			stageCachedPackAtCommit(t, source, headCommit, headCommit, "[pack]\nname = \"tools\"\nschema = 1\n")
+			cachePath, err := RepoCachePath(source, headCommit)
+			if err != nil {
+				t.Fatalf("RepoCachePath: %v", err)
+			}
+			fakeStatusGitOnPath(t, headCommit, tc.stdout, diagnostic)
+
+			err = validateCachedRepoCheckout(cachePath, headCommit)
+			if err == nil {
+				t.Fatal("validateCachedRepoCheckout accepted a status that wrote diagnostics")
+			}
+			requireStatusDiagnostic(t, err.Error())
+
+			report, err := CheckInstalled(city, map[string]config.Import{
+				"pack:tools": {Source: source, Version: "^1.0"},
+			})
+			if err != nil {
+				t.Fatalf("CheckInstalled: %v", err)
+			}
+			assertSingleIssue(t, report, "unreadable-cache-git")
+			requireStatusDiagnostic(t, report.Issues[0].Message)
+		})
+	}
+}

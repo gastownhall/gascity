@@ -41,6 +41,10 @@
 //     controller's filesystem view and user) that no runtime.Provider method
 //     states; gc's side of it, host staging, is runtimetest's
 //     RunHostStagingContract.
+//   - input (the input-outcome token), but for the missing-session and
+//     running-session requirements the signaling cases back: the wire
+//     words, the faults and the exit-code shapes have no runtime.Provider
+//     method of their own; gc's reading of them is the exec provider's.
 //
 // Unlike rppcheck (the lighter `gc runtime check` smoke test), this suite
 // also proves each requirement is *gated*: a reference script that violates
@@ -70,6 +74,7 @@ const (
 	GroupObserve    Group = "observe"
 	GroupServer     Group = "server"
 	GroupFSHost     Group = "fshost"
+	GroupInput      Group = "input"
 
 	// The ported RunProviderTests groups (ported.go). Every requirement is
 	// Optional: an op that answers exit 2 SKIPs (unless a declared token
@@ -78,6 +83,11 @@ const (
 	GroupDiscovery   Group = "discovery"
 	GroupProcess     Group = "process"
 	GroupConcurrency Group = "concurrency"
+
+	// The observation group (observation.go) reads a box's screen, its last
+	// activity, clears its scrollback and copies into it. It is advisory
+	// (see advisory): a FAIL is reported but does not gate v2_ready yet.
+	GroupObservation Group = "observation"
 )
 
 // Requirement is one behavior an RPP executable must satisfy to be a
@@ -106,25 +116,21 @@ const (
 	ReqLifecycleStopIdempotent    Code = "RPP-LIFECYCLE-004"
 	ReqLifecycleUnknownNotRunning Code = "RPP-LIFECYCLE-005"
 
-	// ReqConnectionExec is the slim connection primitive: a carrier drives the
-	// box THROUGH exec instead of via dedicated driving ops. The six legacy
-	// driving ops (nudge / send-keys / interrupt / clear-scrollback / peek /
-	// watch-startup) are deliberately NOT catalog requirements — they are
-	// reproducible carrier-side over exec, so a runtime author is never
-	// contractually forced to implement them. It is Optional for now (absent =
-	// SKIP): gc still delivers input/observation via the driving-op methods, so
-	// requiring exec before that carrier rewrite would let an exec-only runtime
-	// pass conformance while gc silently no-ops its nudge/peek calls. It flips
-	// to required in the slice that moves gc's own driving over exec. See
-	// REQUIREMENTS.md (RUNTIME-RPP-013).
+	// ReqConnectionExec checks the optional generic exec connection. The
+	// default carrier drives tmux over it, with dedicated-op fallback on
+	// ErrExecUnsupported. carrier.ops instead requires five driving ops,
+	// checked by rppcheck; this catalog checks only its idle-boundary peek.
+	// See REQUIREMENTS.md (RUNTIME-RPP-013).
 	ReqConnectionExec Code = "RPP-CONN-001"
 
 	// ReqConnectionIdleBoundary is the idle-boundary capability's fidelity
-	// check: a script that declares idle-boundary says its agent runs in the
-	// in-box tmux session `main`, which gc reads over exec for the idle
-	// boundary and full idle sleep. The declaration must hold: `tmux
-	// has-session -t main` and the idle capture succeed over exec in a started
-	// box. Optional (undeclared = SKIP). See REQUIREMENTS.md (RUNTIME-RPP-016).
+	// check for the selected carrier. The default tmux branch checks session
+	// main and capture over exec. carrier.ops checks is-running and peek 120
+	// showing the started agent's command line or output, and that set-meta
+	// and get-meta round-trip a non-default ready prompt byte for byte, the
+	// store gc recovers each session's prompt from. Neither branch classifies
+	// an idle prompt. Optional when undeclared, otherwise required. See
+	// REQUIREMENTS.md (RUNTIME-RPP-016).
 	ReqConnectionIdleBoundary Code = "RPP-CONN-002"
 
 	// ReqProvisionBoxWithoutAgent is the runtime/transport un-weld's RPP wire
@@ -133,10 +139,31 @@ const (
 	// the controller can launch — and later relaunch — the agent in a warm box
 	// over exec instead of paying a full re-provision on every config change. The
 	// defining behavior: after `provision`, is-running reports false (no agent),
-	// yet the box is exec-able (the controller's launch transport). Optional
-	// (absent = SKIP): a welded `start` pack that launches the agent in one shot
-	// need not implement it. See REQUIREMENTS.md (RUNTIME-RPP-014).
+	// yet the box is exec-able (the controller's launch transport) — under
+	// proc.exec; a pack declaring proc.launch without it is launch-able instead
+	// (RPP-PROVISION-002). Optional (absent = SKIP): a welded `start` pack that
+	// launches the agent in one shot need not implement it. See REQUIREMENTS.md
+	// (RUNTIME-RPP-014).
 	ReqProvisionBoxWithoutAgent Code = "RPP-PROVISION-001"
+
+	// The proc.launch half of the provision group (RUNTIME-RPP-029): the
+	// `launch` op starts the agent in the box provision prepared, replacing a
+	// running one unless fresh_only (a fresh_only launch into a freshly
+	// provisioned box starts it), and types nothing. Optional: SKIP unless
+	// proc.launch is declared; RPP-PROVISION-003 also SKIPs without
+	// observe.v1, whose identity shows the replacement.
+	ReqProvisionLaunchStartsAgent Code = "RPP-PROVISION-002"
+	ReqProvisionLaunchReplaces    Code = "RPP-PROVISION-003"
+	ReqProvisionLaunchFreshOnly   Code = "RPP-PROVISION-004"
+
+	// A pack that un-welds start (proc.provision with proc.launch, or with
+	// proc.exec under the default carrier) has its first turn queued bound
+	// to the launch identity gc writes with set-meta after the launch, and
+	// judged and fenced by get-meta reads of it: after provision (and launch,
+	// under proc.launch), get-meta answers each identity key set-meta
+	// stored. Optional: SKIP unless the handshake un-welds start. Such a
+	// pack's meta group fails on exit 2 too, as under observe.v1.
+	ReqProvisionLaunchIdentity Code = "RPP-PROVISION-005"
 
 	// The observe group is the observe.v1 profile (PAR-EXEC): what a script
 	// declaring the observe.v1 capability promises reconciler v2. Every
@@ -229,6 +256,39 @@ const (
 	ReqFSHostRunsWhatItCarries Code = "RPP-FSHOST-004"
 	ReqFSHostAgentPIDOnHost    Code = "RPP-FSHOST-005"
 	ReqFSHostHomeView          Code = "RPP-FSHOST-006"
+
+	// The input group checks the input-outcome token (RUNTIME-RPP-028): a
+	// script declaring it answers the four driving ops (nudge, send-keys,
+	// interrupt, clear-scrollback) with exit 0 for delivered input and exit
+	// 80 with exactly one outcome line for every other outcome, each word the
+	// projection of one runtime sentinel. Every requirement is Optional: SKIP
+	// when input-outcome is not declared; the fault cases (-005, -006, -007,
+	// -009, -011) also SKIP without conformance-faults.
+	ReqInputNudgeDelivered      Code = "RPP-INPUT-001"
+	ReqInputNudgeAbsentGone     Code = "RPP-INPUT-002"
+	ReqInputKeysAbsentGone      Code = "RPP-INPUT-003"
+	ReqInputWordsAllowedOnOp    Code = "RPP-INPUT-004"
+	ReqInputBlockedNotTyped     Code = "RPP-INPUT-005"
+	ReqInputUnavailable         Code = "RPP-INPUT-006"
+	ReqInputLostReplyUnknown    Code = "RPP-INPUT-007"
+	ReqInputExitZeroIsDelivered Code = "RPP-INPUT-008"
+	ReqInputHeldSendTypedOnce   Code = "RPP-INPUT-009"
+	ReqInputExit80OneLine       Code = "RPP-INPUT-010"
+	ReqInputDeadBoxGone         Code = "RPP-INPUT-011"
+	ReqInputKeysDelivered       Code = "RPP-INPUT-012"
+
+	// The observation group: peek, get-last-activity, clear-scrollback and
+	// copy-to on a running box (RunProviderTests' *_NoError cases). An op
+	// that answers exit 2 SKIPs, unless a declared token makes it mandatory:
+	// carrier.ops for peek and clear-scrollback (the ops carrier reads that
+	// exit 2 as a failure), input-outcome for clear-scrollback, and
+	// report-activity for get-last-activity. copy-to is optional under every
+	// handshake. Advisory: a FAIL does not enter v2_failed. See
+	// REQUIREMENTS.md (RUNTIME-RPP-037).
+	ReqObservationPeek            Code = "RPP-OBSERVATION-001"
+	ReqObservationLastActivity    Code = "RPP-OBSERVATION-002"
+	ReqObservationClearScrollback Code = "RPP-OBSERVATION-003"
+	ReqObservationCopyTo          Code = "RPP-OBSERVATION-004"
 )
 
 // catalog is the authoritative, ordered requirement list. Run walks it in
@@ -243,10 +303,14 @@ var catalog = []Requirement{
 	{ReqLifecycleStopIdempotent, GroupLifecycle, "stop on a missing session succeeds (idempotent)", false},
 	{ReqLifecycleUnknownNotRunning, GroupLifecycle, "is-running on a never-started session reports false", false},
 
-	{ReqConnectionExec, GroupConnection, "exec runs a command in the box: command on stdin, combined output on stdout, op exit == command exit (absent = SKIP; becomes required when gc drives its own input/observation over exec)", true},
-	{ReqConnectionIdleBoundary, GroupConnection, "with idle-boundary declared, a started box's tmux session main answers has-session and the idle capture over exec, so gc can read the agent's idle boundary (undeclared = SKIP)", true},
+	{ReqConnectionExec, GroupConnection, "exec runs a command in the box: command on stdin, combined output on stdout, op exit == command exit (generic exec is optional: absent = SKIP; output and command exit code are checked when present)", true},
+	{ReqConnectionIdleBoundary, GroupConnection, "with idle-boundary declared, the selected carrier reads a started box: tmux main answers has-session and capture over exec; carrier.ops answers is-running true, peek 120 shows the started agent's command line or output, and get-meta answers a non-default ready prompt set-meta stored, byte for byte (undeclared = SKIP)", true},
 
-	{ReqProvisionBoxWithoutAgent, GroupProvision, "provision creates a reachable box WITHOUT launching the agent: after provision, is-running reports false yet the box is exec-able, so the controller launches the agent over exec (absent = SKIP; a welded start pack launches in one shot)", true},
+	{ReqProvisionBoxWithoutAgent, GroupProvision, "provision creates a reachable box WITHOUT launching the agent: after provision, is-running reports false yet the box is exec-able, so the controller launches the agent over exec; a pack declaring proc.launch without proc.exec is launch-able instead (RPP-PROVISION-002) (absent = SKIP; a welded start pack launches in one shot)", true},
+	{ReqProvisionLaunchStartsAgent, GroupProvision, "after provision, launch starts the agent (is-running true) and types nothing, not even the nudge its config carries (declared proc.launch only)", true},
+	{ReqProvisionLaunchReplaces, GroupProvision, "launch without fresh_only on a running agent replaces it: observe shows the new launch's identity (declared proc.launch with observe.v1 only)", true},
+	{ReqProvisionLaunchFreshOnly, GroupProvision, "launch with fresh_only into the box provision just prepared starts the agent (is-running true), and on a running agent exits 73 (declared proc.launch only)", true},
+	{ReqProvisionLaunchIdentity, GroupProvision, "a pack that un-welds start keeps the launch identity gc writes: after provision (and launch under proc.launch), get-meta answers GC_RUNTIME_EPOCH, GC_CONTINUATION_EPOCH and GC_INSTANCE_TOKEN as set-meta stored them, never exit 2 (un-welded start only)", true},
 
 	{ReqObserveDeclaredOpsRespond, GroupObserve, "observe, inventory and kill-object answer (never exit 2) when observe.v1 is declared", true},
 	{ReqObserveAbsentNeverStarted, GroupObserve, "observe on a never-started name answers absent", true},
@@ -300,6 +364,33 @@ var catalog = []Requirement{
 	{ReqFSHostRunsWhatItCarries, GroupFSHost, "start does exactly the host work its config carries: it stages overlay_dir and runs pre_start, a failing pre_start fails start and leaves no box, and a config carrying neither stages and runs nothing (declared fs.host only)", true},
 	{ReqFSHostAgentPIDOnHost, GroupFSHost, "observe reports a running box's agent_pid as a live host process the caller's user may signal (declared fs.host with observe.v1 only)", true},
 	{ReqFSHostHomeView, GroupFSHost, "a box's command reads a file the caller wrote under its HOME, at the same path: the box sees the caller's home directory, not only the work dir (declared fs.host only)", true},
+
+	{ReqInputNudgeDelivered, GroupInput, "nudge to a running box exits 0 with stdout empty or one success outcome line (declared input-outcome only)", true},
+	{ReqInputNudgeAbsentGone, GroupInput, "nudge to a name no box holds exits 80 with the outcome gone, never 0", true},
+	{ReqInputKeysAbsentGone, GroupInput, "send-keys, interrupt and clear-scrollback to a name no box holds exit 80 with the outcome gone", true},
+	{ReqInputWordsAllowedOnOp, GroupInput, "each op answers only its own words: busy, pending_interaction, unconfirmed and delivered_unobserved on nudge only", true},
+	{ReqInputBlockedNotTyped, GroupInput, "under GC_RPP_FAULT=blocked, a nudge exits 80 pending_interaction and types nothing (declared conformance-faults only)", true},
+	{ReqInputUnavailable, GroupInput, "under GC_RPP_FAULT=unavailable, every driving op exits 80 unavailable and types nothing (declared conformance-faults only)", true},
+	{ReqInputLostReplyUnknown, GroupInput, "under GC_RPP_FAULT=lose_reply (typed, reply lost), a nudge exits 80 unconfirmed (at least once) or exit 0 delivered or delivered_unobserved and typed exactly once (at most once), and send-keys, interrupt and clear-scrollback exit 1: never not_sent (declared conformance-faults only)", true},
+	{ReqInputExitZeroIsDelivered, GroupInput, "exit 0 never carries a non-success outcome word", true},
+	{ReqInputHeldSendTypedOnce, GroupInput, "under GC_RPP_FAULT=hold_send, the held nudge is typed once after release: a pack that answers it delivered (at most once) is not redelivered; otherwise the held nudge exits 80 unconfirmed (never not_sent) and a second identical nudge while the first is unresolved exits 80 unconfirmed or exit 0 delivered without typing it again (declared conformance-faults only)", true},
+	{ReqInputExit80OneLine, GroupInput, "exit 80 always carries exactly one outcome line gc reads as typed: a non-success word the op may answer", true},
+	{ReqInputDeadBoxGone, GroupInput, "under GC_RPP_FAULT=dead (the box holds the name but nothing runs in it: observe reports it dead), every driving op exits 80 gone and types nothing: gone means no running box holds the name (declared conformance-faults only)", true},
+	{ReqInputKeysDelivered, GroupInput, "send-keys, interrupt and clear-scrollback to a running box exit 0 with stdout empty or exactly one delivered line", true},
+
+	{ReqObservationPeek, GroupObservation, "peek of a running box exits 0 (absent = SKIP; exit 2 FAILs under carrier.ops or the v2 profile; advisory)", true},
+	{ReqObservationLastActivity, GroupObservation, "get-last-activity of a running box exits 0 with an RFC3339 time or nothing (absent = SKIP; exit 2 FAILs under report-activity; advisory)", true},
+	{ReqObservationClearScrollback, GroupObservation, "clear-scrollback of a running box exits 0 (absent = SKIP; exit 2 FAILs under carrier.ops or input-outcome; advisory)", true},
+	{ReqObservationCopyTo, GroupObservation, "copy-to into a running box exits 0 even when the source is missing: the copy is best-effort (absent = SKIP; advisory)", true},
+}
+
+// advisory reports whether a FAIL in group is kept out of v2_failed and
+// out of a failed run: a ported group lands advisory, so a published pack
+// it would fail is neither taken off v2_ready nor failed by a gc upgrade,
+// and is made strict once published packs pass it. Only the observation
+// group is advisory.
+func advisory(group Group) bool {
+	return group == GroupObservation
 }
 
 // Catalog returns the authoritative requirement list in run order. The

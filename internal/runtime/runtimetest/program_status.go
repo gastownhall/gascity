@@ -808,18 +808,18 @@ func checkPS016(t *testing.T, f ProgramStatusFixtures) error {
 	}
 	s := f.Nudged(t, runtime.ProgramStatusOn, true, startupNudgeStep, "report state=blocked:kind=permission")
 	nudge, ok := runtime.TakeStartupNudgeHandback(s.Provider, s.Name)
-	if !ok || nudge != startupNudgeStep {
-		return fmt.Errorf("blocked start: handback %q (%v), want the startup nudge %q", nudge, ok, startupNudgeStep)
+	if !ok || nudge.Text != startupNudgeStep {
+		return fmt.Errorf("blocked start: handback %q (%v), want the startup nudge %q", nudge.Text, ok, startupNudgeStep)
 	}
 	if again, ok := runtime.TakeStartupNudgeHandback(s.Provider, s.Name); ok {
-		return fmt.Errorf("blocked start: handback %q taken twice", again)
+		return fmt.Errorf("blocked start: handback %q taken twice", again.Text)
 	}
 	if _, err := readValid(s, "blocked start, after the ladder", runtime.ProgramBlocked); err != nil {
 		return fmt.Errorf("%w: the nudge was typed into the dialog", err)
 	}
 	s = f.Nudged(t, runtime.ProgramStatusOn, true, startupNudgeStep, "report state=idle")
 	if nudge, ok := runtime.TakeStartupNudgeHandback(s.Provider, s.Name); ok {
-		return fmt.Errorf("idle start: handback %q, want none", nudge)
+		return fmt.Errorf("idle start: handback %q, want none", nudge.Text)
 	}
 	return awaitTypedStartupNudge(s, "idle start")
 }
@@ -832,7 +832,7 @@ func checkPS016(t *testing.T, f ProgramStatusFixtures) error {
 func checkUndecidedStartupNudge(t *testing.T, f ProgramStatusFixtures) error {
 	s := f.Nudged(t, runtime.ProgramStatusOn, false, startupNudgeStep, "report state=blocked:kind=permission")
 	if nudge, ok := runtime.TakeStartupNudgeHandback(s.Provider, s.Name); ok {
-		return fmt.Errorf("undecided blocked start: handback %q, want none: the start did not opt into the record", nudge)
+		return fmt.Errorf("undecided blocked start: handback %q, want none: the start did not opt into the record", nudge.Text)
 	}
 	return awaitTypedStartupNudge(s, "undecided blocked start")
 }

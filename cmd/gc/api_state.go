@@ -45,6 +45,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/ssrf"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/usage"
@@ -81,6 +82,12 @@ type controllerState struct {
 	// work that passed its quiescence check before the city went quiescent is
 	// still reading, and its next read would restart a pair retired under it.
 	storeWork atomic.Int64
+	// beadEventsApplied is the seq of the last event the bead event watcher
+	// finished with, and beadEventWatcherLive is true while its tail runs
+	// (startBeadEventWatcher). The quiescence retire waits until the watcher
+	// has applied every event the log held (beadEventsPending).
+	beadEventsApplied    atomic.Uint64
+	beadEventWatcherLive atomic.Bool
 	// suspendedRigs is the set of rigs the city runtime last saw suspended,
 	// published every tick. A suspended rig's cache skips its periodic
 	// reconcile from the next tick on, with no reload: any bd read restarts
@@ -319,7 +326,21 @@ func newControllerStateWithRoutes(
 	// A split city's binding gets the CachingStore its work ledger has, before
 	// the class-routed services below are built over it (class_store_cache.go).
 	beadsQuiescent := new(atomic.Bool)
-	routes = routes.withControllerCache(ctx, ep, reconcileGateFor(beadsQuiescent))
+	// The binding's cache is built before the controller state it counts its
+	// background reads on, so it reaches the state through this pointer, set
+	// once the state exists. A read that starts before then (the async full
+	// prime) stays uncounted for its whole duration; the retire's
+	// stop-whenever-running convergence bounds that gap.
+	var owner atomic.Pointer[controllerState]
+	routes = routes.withControllerCache(ctx, ep, beads.JoinCachingStoreOptions(
+		reconcileGateFor(beadsQuiescent),
+		beads.WithStoreWork(func() func() {
+			if cs := owner.Load(); cs != nil {
+				return cs.beginStoreWork()
+			}
+			return func() {}
+		}),
+	))
 	// Latch the rollout-gate snapshot ONCE from the boot config. A resolve error
 	// (nil cfg or an out-of-enum config value) is warn-and-continue: the zero
 	// Flags is degraded-safe (legacy paths), and this constructor returns no
@@ -350,6 +371,7 @@ func newControllerStateWithRoutes(
 		rolloutFlags:        rolloutFlags,
 		nativeTransport:     nativeTransport,
 	}
+	owner.Store(cs)
 	cs.ledgerFeeds = newLedgerFeedSet(cityPath, ledgerFeedHooks{
 		work: cs.beginStoreWork,
 		deferClose: func(id string) {
@@ -558,7 +580,7 @@ func rigStoreBackgroundRefresh(suspState suspensionstate.State, rig config.Rig) 
 // reconcileGate is the CachingStoreOption every cache this state owns carries:
 // it pauses the cache's periodic reconcile while the city is quiescent.
 func (cs *controllerState) reconcileGate() beads.CachingStoreOption {
-	return beads.WithReconcileGate(cs.cityScopeGate())
+	return beads.JoinCachingStoreOptions(beads.WithReconcileGate(cs.cityScopeGate()), beads.WithStoreWork(cs.beginStoreWork))
 }
 
 // cityScopeGate admits store reads of the city scope: false while the city
@@ -589,7 +611,7 @@ func quiescenceGate(quiescent *atomic.Bool) func() bool {
 // rigReconcileGate is reconcileGate for one rig's cache: it also pauses while
 // that rig is suspended (suspendedRigs).
 func (cs *controllerState) rigReconcileGate(rigName string) beads.CachingStoreOption {
-	return beads.WithReconcileGate(cs.rigScopeGate(rigName))
+	return beads.JoinCachingStoreOptions(beads.WithReconcileGate(cs.rigScopeGate(rigName)), beads.WithStoreWork(cs.beginStoreWork))
 }
 
 // rigSuspended reports whether the city runtime last saw rigName suspended.
@@ -655,6 +677,25 @@ func (cs *controllerState) trackStoreWork(fn func()) func() {
 		defer end()
 		fn()
 	}
+}
+
+// beadEventsPending reports whether the bead event watcher has yet to finish
+// an event the log already holds: applying one can read the stores (the
+// session-list confirmation read, a cache's event check, a close's effects).
+// It is false while no watcher tail runs.
+func (cs *controllerState) beadEventsPending() bool {
+	if cs == nil || !cs.beadEventWatcherLive.Load() {
+		return false
+	}
+	ep := cs.EventProvider()
+	if ep == nil {
+		return false
+	}
+	head, err := ep.LatestSeq()
+	if err != nil {
+		return true
+	}
+	return cs.beadEventsApplied.Load() < head
 }
 
 // storeWorkInFlight reports whether any store work is in flight.
@@ -830,9 +871,12 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 				}
 			}
 			advanced := false // read past the cursor it watched from
+			cs.beadEventsApplied.Store(seq)
+			cs.beadEventWatcherLive.Store(true)
 			for {
 				evt, err := watcher.Next()
 				if err != nil {
+					cs.beadEventWatcherLive.Store(false)
 					_ = watcher.Close()
 					break
 				}
@@ -845,6 +889,7 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 				case events.BeadCreated, events.BeadUpdated, events.BeadClosed, events.BeadDeleted:
 					cs.applyBeadEventToStores(evt)
 				}
+				cs.beadEventsApplied.Store(evt.Seq)
 			}
 			if ctx.Err() != nil {
 				return
@@ -1101,8 +1146,13 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	stores := cs.beadEventStoresLocked(id)
 	probe := cs.beadEventRelicProbeLocked(id)
 	var storeRef string
+	var route []storeref.StoreRef
 	if evt.Type == events.BeadClosed {
 		storeRef = cs.autocloseStoreRefLocked(evt.Subject)
+		if probe.routes != nil {
+			// Only a relic's close confirmation reads the route by ref.
+			route = cs.beadEventRouteLocked(id)
+		}
 	}
 	cs.mu.RUnlock()
 	relic, residentProven := probe.residentStore(id)
@@ -1156,18 +1206,19 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 			cs.applyCommittedClose(evt, owner, relicStoreRef(owner, relic, storeRef))
 			return
 		}
-		beadCloseAutocloseDispatch(cs.trackStoreWork(func() { cs.applyInferredClose(evt, stores, storeRef, relic) }))
+		beadCloseAutocloseDispatch(cs.trackStoreWork(func() { cs.applyInferredClose(evt, route, stores, storeRef, relic) }))
 	}
 }
 
 // withRelicStore returns stores plus relic, the binding the residence probe
-// proved holds the id, unless stores already holds it.
+// proved holds the id, unless stores already holds it. Identity is physical
+// (beads.SameStore): a class handle over the binding is the binding.
 //
 // residency:allow — appends the one owner the by-id residency plan proved to
 // the watcher's prefix-route apply set; it resolves nothing itself.
 func withRelicStore(stores []beads.Store, relic beads.Store) []beads.Store {
 	for _, s := range stores {
-		if sameBeadStore(s, relic) {
+		if beads.SameStore(s, relic) {
 			return stores
 		}
 	}
@@ -1176,9 +1227,10 @@ func withRelicStore(stores []beads.Store, relic beads.Store) []beads.Store {
 
 // relicStoreRef is the autoclose store-ref for a close whose row lives in
 // owner: the ID-only mode ("") relocated ids use when owner is the relic's
-// binding, else the prefix route's own ref.
+// binding, else the prefix route's own ref. Identity is physical
+// (beads.SameStore), so a handle over the binding takes the ID-only mode too.
 func relicStoreRef(owner, relic beads.Store, prefixRef string) string {
-	if relic != nil && sameBeadStore(owner, relic) {
+	if relic != nil && beads.SameStore(owner, relic) {
 		return ""
 	}
 	return prefixRef
@@ -1190,7 +1242,7 @@ func relicStoreRef(owner, relic beads.Store, prefixRef string) string {
 // fails. stores must be non-empty.
 func committedCloseOwner(stores []beads.Store, id string) beads.Store {
 	for _, store := range stores {
-		if b, err := beads.HandlesFor(store).Live.Get(id); err == nil && b.Status == "closed" {
+		if b, err := beads.LiveFor(store).Get(id); err == nil && b.Status == "closed" {
 			return store
 		}
 	}
@@ -1233,11 +1285,15 @@ func (cs *controllerState) applyCommittedClose(evt events.Event, store beads.Sto
 // or gone gets nothing. An unreadable row gets nothing yet: the autoclose
 // sweep re-reads it, and the completions sweep backstops its fact. For a
 // relic's id the read is the row that reads closed (liveCloseOwner).
-func (cs *controllerState) applyInferredClose(evt events.Event, stores []beads.Store, storeRef string, relic beads.Store) {
+func (cs *controllerState) applyInferredClose(evt events.Event, route []storeref.StoreRef, stores []beads.Store, storeRef string, relic beads.Store) {
 	if cs.deferIfQuiescent(evt.Subject) {
 		return
 	}
-	store, live, err := liveCloseOwner(stores, evt.Subject, relic)
+	var epoch storeref.Stores
+	if relic != nil {
+		epoch = cs.Stores() // only the relic's CloseOwner plan reads it
+	}
+	store, live, err := liveCloseOwner(epoch, route, stores, evt.Subject, relic)
 	switch confirmInferredClose(live, err) {
 	case closeConfirmed:
 		cs.emitCompletedFact(live, evt.Actor)
@@ -1267,7 +1323,7 @@ func liveReadOwner(stores []beads.Store, id string) (beads.Store, beads.Bead, er
 	var err error
 	for _, store := range stores {
 		var b beads.Bead
-		if b, err = beads.HandlesFor(store).Live.Get(id); !errors.Is(err, beads.ErrNotFound) {
+		if b, err = beads.LiveFor(store).Get(id); !errors.Is(err, beads.ErrNotFound) {
 			return store, b, err
 		}
 	}
@@ -1283,32 +1339,53 @@ func liveReadOwner(stores []beads.Store, id string) (beads.Store, beads.Bead, er
 // read that fails before one does is returned (the close is unconfirmed);
 // when every store answers and no row reads closed, the first row found, or
 // ErrNotFound, refutes it. stores must be non-empty.
-func liveCloseOwner(stores []beads.Store, id string, relic beads.Store) (beads.Store, beads.Bead, error) {
+//
+// With a relic the probe is the epoch's CloseOwner plan: route, the event's
+// prefix route by ref (beadEventRouteLocked), then the relic's binding, every
+// leg read live through a federated leg (storeref.ResolveOwnerPreferring). Its
+// owner is the epoch's store for a route leg, the store the event routed to,
+// and the event's relic for the binding. Under the split-strict gate a
+// physical binding is read as the epoch holds it, unviewed, as every epoch
+// plan reads a relocated class. An empty route (the id's configured prefix
+// names a rig with no open store) plans the relic alone. On a worker site
+// whose every class is refused the epoch's binding is the refusing store
+// (T7c), so a relic proven in the raw binding is no binding of the epoch and
+// its close stays unconfirmed (TestLiveCloseOwnerFailsClosedOnAWorkerSite). A
+// route or relic the epoch cannot name (a reload between the event's route
+// and this read) leaves the close unconfirmed, for the sweep to re-read.
+func liveCloseOwner(epoch storeref.Stores, route []storeref.StoreRef, stores []beads.Store, id string, relic beads.Store) (beads.Store, beads.Bead, error) {
 	if relic == nil {
 		return liveReadOwner(stores, id)
 	}
-	var openStore beads.Store
-	var open beads.Bead
-	for _, store := range stores {
-		// A first-owner probe over the prefix route and the binding the
-		// residence probe proved holds the id: a relic's row lives in one.
-		var b beads.Bead
-		err := beads.FederatedRead(func() (err error) {
-			b, err = beads.HandlesFor(store).Live.Get(id)
-			return err
-		})
-		switch {
-		case errors.Is(err, beads.ErrNotFound):
-		case err != nil || b.Status == "closed":
-			return store, b, err
-		case openStore == nil:
-			openStore, open = store, b
+	// The relic is the event's handle on the binding: under the split-strict
+	// gate, its class view (splitStrictEventStores); the epoch names the
+	// binding itself, so the view's front is what is matched.
+	front, _ := storeref.Unview(splitStrictSeam, relic)
+	var relicRef storeref.StoreRef
+	ok := false
+	for _, b := range epoch.Topology().Bindings {
+		if beads.SameStore(b.Leg.Store, front) { // residency:allow — names the relic binding's ref by identity for the CloseOwner plan; reads nothing
+			relicRef, ok = b.Leg.Ref, true
+			break
 		}
 	}
-	if openStore == nil {
-		return stores[0], beads.Bead{}, beads.ErrNotFound
+	if !ok {
+		return stores[0], beads.Bead{}, fmt.Errorf("confirming the close of %q: the relic's binding is not one of this epoch's", id)
 	}
-	return openStore, open, nil
+	plan, err := epoch.Plan(storeref.CloseOwner{ID: id, Route: route, Relic: relicRef})
+	if err != nil {
+		return stores[0], beads.Bead{}, fmt.Errorf("confirming the close of %q: %w", id, err)
+	}
+	owner, err := storeref.ResolveOwnerPreferring(plan, id, func(b beads.Bead) bool { return b.Status == "closed" })
+	if err != nil {
+		return stores[0], beads.Bead{}, err
+	}
+	if owner.Ref == relicRef {
+		// The relic's close is run through the event's own handle on the
+		// binding (relicStoreRef keys the ID-only mode on it).
+		return relic, owner.Bead, nil
+	}
+	return owner.Store, owner.Bead, nil
 }
 
 // emitCompletedFact records step's execution.step_completed once per fact,
@@ -1395,13 +1472,13 @@ func (cs *controllerState) beadCloseAutoclose(beadID string, store beads.Store, 
 	// graph-root walks resolve through Stores().Graph() rather than assuming
 	// co-residence with the closed bead. On a single-store city the graph
 	// handle wraps the same store, so this is identity today.
-	graphStore := cs.Stores().Graph()
-	homes := cs.convoyAutocloseHomes(store, graphStore.Store)
+	stores := cs.Stores()
+	homes := cs.convoyAutocloseHomes(store, stores.Graph().Store)
 	return func() bool {
 		for attempt := 1; ; attempt++ {
-			run := doConvoyAutocloseWith(store, homes, rec, beadID, os.Stderr, os.Stderr)
-			run.merge(doWispAutocloseWith(store, beadID, os.Stderr, graphStore))
-			run.merge(doMoleculeAutocloseWith(store, storeRef, rec, beadID, os.Stderr, graphStore))
+			run := doConvoyAutocloseWith(store, stores, homes, rec, beadID, os.Stderr, os.Stderr)
+			run.merge(doWispAutocloseWith(store, beadID, os.Stderr, stores))
+			run.merge(doMoleculeAutocloseWith(store, storeRef, rec, beadID, os.Stderr, stores))
 			if !run.refused || attempt >= autocloseRefusalAttempts {
 				return run.finished()
 			}
@@ -1410,19 +1487,12 @@ func (cs *controllerState) beadCloseAutoclose(beadID string, store beads.Store, 
 }
 
 // convoyAutocloseHomes is where the convoy autoclose of a row closed in store
-// finds what store does not hold on a split city:
-//
-//   - A closed class row's legacy parent can be work class (a convoy, a work
-//     bead a graph root was poured under), which lives on the work ledger, not
-//     beside the row. The row's own store is read first (doConvoyAutocloseWith),
-//     then this work home: the rig whose prefix the parent id carries, else the
-//     city.
-//   - A work convoy's legacy children can be graph rows in the class binding
-//     (graph), counted too once every work child is terminal.
-//
-// A work store's own rows keep their parent beside them, and a city that
-// relocates nothing has no binding, so a single-store city reads exactly what
-// it read before.
+// finds the legacy children store does not hold on a split city: a work
+// convoy's legacy children can be graph rows in the class binding (graph),
+// counted too once every work child is terminal. A city that relocates
+// nothing has no binding, so a single-store city reads exactly what it read
+// before. (A class row's work-class parent is found through the epoch's
+// Convoy(Parent) plan: doConvoyAutocloseWith.)
 func (cs *controllerState) convoyAutocloseHomes(store, graph beads.Store) convoyAutocloseHomes {
 	var homes convoyAutocloseHomes
 	cs.mu.RLock()
@@ -1430,42 +1500,6 @@ func (cs *controllerState) convoyAutocloseHomes(store, graph beads.Store) convoy
 	cs.mu.RUnlock()
 	if graph != nil && !sameBeadStore(graph, cityRaw) && !sameBeadStore(graph, store) {
 		homes.children = graph
-	}
-	city := cs.CityBeadStore()
-	rigs := cs.BeadStores() // residency:allow — the controller's own work stores, compared against store and keyed by rig name for the prefix table below; no leg list is built
-	if store == nil || sameBeadStore(store, city) || sameBeadStore(store, cityRaw) {
-		return homes
-	}
-	for _, rig := range rigs {
-		if sameBeadStore(store, rig) {
-			return homes
-		}
-	}
-	type rigPrefix struct{ prefix, name string }
-	var prefixes []rigPrefix
-	cs.mu.RLock()
-	if cs.cfg != nil {
-		for _, rig := range cs.cfg.Rigs {
-			if prefix := rig.EffectivePrefix(); prefix != "" {
-				prefixes = append(prefixes, rigPrefix{prefix + "-", rig.Name})
-			}
-		}
-	}
-	cs.mu.RUnlock()
-	// Longest prefix first, so a rig whose prefix extends another's wins.
-	sort.SliceStable(prefixes, func(i, j int) bool { return len(prefixes[i].prefix) > len(prefixes[j].prefix) })
-	homes.parent = func(id string) beads.Store {
-		if bdIDIsClassReserved(id) { // residency:allow — a binding-minted parent id has no work-ledger home; the by-id read stays on the row's own store
-			return nil
-		}
-		for _, p := range prefixes {
-			if strings.HasPrefix(id, p.prefix) {
-				if rig := rigs[p.name]; rig != nil {
-					return rig
-				}
-			}
-		}
-		return city
 	}
 	return homes
 }
@@ -1543,7 +1577,7 @@ func (p beadEventRelicProbe) residentStore(id string) (beads.Store, bool) {
 // not probe residence; beadEventStores is the form that does.
 func (cs *controllerState) beadEventStoresLocked(id string) []beads.Store {
 	if id != "" && cs.cfg != nil {
-		if store, known := cs.beadEventConfiguredStoreLocked(id); known {
+		if store, _, _, known := cs.beadEventConfiguredStoreLocked(id); known {
 			if store == nil {
 				return nil
 			}
@@ -1568,7 +1602,44 @@ func (cs *controllerState) beadEventStoresLocked(id string) []beads.Store {
 	return stores
 }
 
-func (cs *controllerState) beadEventConfiguredStoreLocked(id string) (beads.Store, bool) {
+// beadEventRouteLocked is beadEventStoresLocked's work route as refs of the
+// epoch's legs, for the close confirmation (CloseOwner): the configured
+// prefix's store (WorkRef for the HQ prefix, the rig's ref for a rig's), or,
+// on the unconfigured fallback, every rig whose store is open, by name, then
+// the city. A prefix that names an unopened rig, or a class namespace, is no
+// work route: nil. The fallback's order is the rigs by name rather than the
+// rig map's iteration order (which varied run to run), and an unopened rig's
+// nil entry is not a leg: read, it panicked. cs.mu must be held.
+func (cs *controllerState) beadEventRouteLocked(id string) []storeref.StoreRef {
+	if id != "" && cs.cfg != nil {
+		if store, ref, work, known := cs.beadEventConfiguredStoreLocked(id); known {
+			if store == nil || !work {
+				return nil
+			}
+			return []storeref.StoreRef{ref}
+		}
+	}
+	names := make([]string, 0, len(cs.beadStores))
+	for name, s := range cs.beadStores {
+		if s != nil {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	route := make([]storeref.StoreRef, 0, len(names)+1)
+	for _, name := range names {
+		route = append(route, storeref.RigRef(name))
+	}
+	if cs.cityBeadStore != nil {
+		route = append(route, storeref.WorkRef)
+	}
+	return route
+}
+
+// beadEventConfiguredStoreLocked is the store whose configured prefix owns
+// id, with that prefix's ref: work reports a work store's prefix (the HQ's,
+// ref WorkRef, or a rig's, its rig ref), not a class namespace's.
+func (cs *controllerState) beadEventConfiguredStoreLocked(id string) (beads.Store, storeref.StoreRef, bool, bool) {
 	// A configured prefix owns the id even when its store is not loaded: the
 	// caller treats a (nil, true) result as "owned but absent here" and skips
 	// the all-stores fallback, so nil stores are passed in as candidates.
@@ -1589,19 +1660,21 @@ func (cs *controllerState) beadEventConfiguredStoreLocked(id string) (beads.Stor
 	// the all-stores fallback on known — so the scan resolves against the
 	// configured prefixes inline rather than each store's own IDPrefix.
 	var matchedStore beads.Store
+	var matchedRef storeref.StoreRef
+	matchedWork := false
 	matchedLen := -1
-	match := func(prefix string, store beads.Store) {
+	match := func(prefix string, store beads.Store, ref storeref.StoreRef, work bool) {
 		if prefix == "" || !strings.HasPrefix(id, prefix+"-") {
 			return
 		}
 		if len(prefix) > matchedLen {
 			matchedLen = len(prefix)
-			matchedStore = store
+			matchedStore, matchedRef, matchedWork = store, ref, work
 		}
 	}
-	match(config.EffectiveHQPrefix(cs.cfg), cs.cityBeadStore)
+	match(config.EffectiveHQPrefix(cs.cfg), cs.cityBeadStore, storeref.WorkRef, true)
 	for _, rig := range cs.cfg.Rigs {
-		match(rig.EffectivePrefix(), cs.beadStores[rig.Name])
+		match(rig.EffectivePrefix(), cs.beadStores[rig.Name], storeref.RigRef(rig.Name), true)
 	}
 	// Relocated classes are candidates under every prefix they reserve; without
 	// this a "gcg-*" close fell through to the broadcast and autoclose read an
@@ -1613,10 +1686,10 @@ func (cs *controllerState) beadEventConfiguredStoreLocked(id string) (beads.Stor
 			continue
 		}
 		for _, prefix := range config.ReservedClassPrefixesFor(string(class)) { // residency:allow — extends this scan's configured-prefix table, not a probe
-			match(prefix, store)
+			match(prefix, store, "", false)
 		}
 	}
-	return matchedStore, matchedLen >= 0
+	return matchedStore, matchedRef, matchedWork, matchedLen >= 0
 }
 
 // update replaces the config, session provider, and reopens stores.
@@ -1624,6 +1697,10 @@ func (cs *controllerState) beadEventConfiguredStoreLocked(id string) (beads.Stor
 func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	cs.updateMu.Lock()
 	defer cs.updateMu.Unlock()
+
+	if !controllerStateStoreUpdateAllowed(cs) {
+		return
+	}
 
 	// The beads CAS gate is boot-latched: a reload that would change it only
 	// records a pending-restart notice, it does not flip the process mid-run.
@@ -1655,11 +1732,45 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 		cityMailProv = newCityMailProvider(cs.storageRoutes, cityStore, cfg, cs.cityPath, cs.eventProv)
 		extSvc = newCityExtMsgServices(cs.storageRoutes, cityStore, cs.cityPath)
 	}
+	var cityCloseRequest beadStoreCloseRequest
+	if cityStore != nil {
+		key, _ := storePointerKey(cityStore)
+		stopper, _ := beads.As[interface{ StopReconciler() }](cityStore)
+		cityCloseRequest = newBeadStoreCloseRequest("city bead store", func() error { return closeBeadStoreHandle(cityStore) }, stopper, key)
+	}
+	storeCloseRequests := make(map[string]beadStoreCloseRequest, len(stores))
+	for name, store := range stores {
+		if store == nil {
+			continue
+		}
+		key, _ := storePointerKey(store)
+		stopper, _ := beads.As[interface{ StopReconciler() }](store)
+		storeCloseRequests[name] = newBeadStoreCloseRequest(fmt.Sprintf("rig bead store %q", name), func() error { return closeBeadStoreHandle(store) }, stopper, key)
+	}
+	// closeUnpublished releases stores built for a swap that will not happen.
+	// The city store is kept out of the rig requests so a rig entry sharing
+	// its handle is closed once.
+	closeUnpublished := func() {
+		requests := []beadStoreCloseRequest{cityCloseRequest}
+		requests = append(requests, replacedBeadStoreCloseRequests(nil, storeCloseRequests, map[string]beadStoreCloseRequest{"": cityCloseRequest})...)
+		for _, request := range requests {
+			request.run("unpublished")
+		}
+	}
+	if !controllerStateStoreUpdateAllowed(cs) {
+		closeUnpublished()
+		return
+	}
 
 	// Swap under short critical section.
-	var oldCityStore beads.Store
 	var oldRigStores map[string]beads.Store
+	var closeRequests []beadStoreCloseRequest
 	cs.mu.Lock()
+	if !controllerStateStoreUpdateAllowed(cs) {
+		cs.mu.Unlock()
+		closeUnpublished()
+		return
+	}
 	cs.cfg = cfg
 	if rawCfg != nil {
 		cs.rawCfg = rawCfg
@@ -1670,37 +1781,85 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	cs.beadStores = stores
 	cs.rigStoresGen++ // the store epoch keys on it (city_stores.go)
 	if cityStore != nil {
-		oldCityStore = cs.cityBeadStore
+		oldCityStore := cs.cityBeadStore
 		cs.cityBeadStore = cityStore
 		cs.cityBeadsDiagnostic = cityBeadsDiagnostic
 		cs.cityMailProv = cityMailProv
 		cs.storeMetadataSignature = storeSignature
+		if oldCityStore != nil && oldCityStore != cityStore {
+			key, _ := storePointerKey(oldCityStore)
+			stopper, _ := beads.As[interface{ StopReconciler() }](oldCityStore)
+			request := newBeadStoreCloseRequest("city bead store", func() error { return closeBeadStoreHandle(oldCityStore) }, stopper, key)
+			request.untrackRetiring = trackRetiringBeadStoreHandle(cs, request.reconciler)
+			closeRequests = append(closeRequests, request)
+		}
 	}
 	if extSvc != nil {
 		cs.extmsgSvc = extSvc
 	}
+	retiredCloseRequests := make(map[string]beadStoreCloseRequest, len(oldRigStores))
+	for name, store := range oldRigStores {
+		if store == nil {
+			continue
+		}
+		key, _ := storePointerKey(store)
+		stopper, _ := beads.As[interface{ StopReconciler() }](store)
+		retiredCloseRequests[name] = newBeadStoreCloseRequest(fmt.Sprintf("rig bead store %q", name), func() error { return closeBeadStoreHandle(store) }, stopper, key)
+	}
+	closeRequests = append(closeRequests, replacedBeadStoreCloseRequests(cs, retiredCloseRequests, storeCloseRequests)...)
 	// Keep prior non-nil store/provider if reopen fails.
 	cs.mu.Unlock()
-	if cityStore != nil && oldCityStore != nil && oldCityStore != cityStore {
-		scheduleCloseBeadStoreHandle("city bead store", oldCityStore)
+	afterControllerStateStoreSwapForTest()
+	for _, request := range closeRequests {
+		request.schedule()
 	}
-	scheduleCloseReplacedBeadStoreHandles(oldRigStores, stores)
 }
 
-func scheduleCloseBeadStoreHandle(label string, store beads.Store) {
-	if store == nil {
+// beadStoreCloseRequest closes one retired bead store handle. update builds
+// it while cs.mu still holds the swap, so quiesce tracking covers the handle
+// from the moment it stops being published, and schedules it after unlocking.
+type beadStoreCloseRequest struct {
+	label           string
+	close           func() error
+	reconciler      interface{ StopReconciler() }
+	handleKey       uintptr
+	untrackRetiring func()
+}
+
+// schedule closes the handle after controllerStateStoreCloseDelay, giving
+// readers that loaded it before the swap time to finish.
+func (r beadStoreCloseRequest) schedule() {
+	if r.close == nil {
 		return
-	}
-	closeFn := func() {
-		if err := closeBeadStoreHandle(store); err != nil {
-			log.Printf("api: close previous %s: %v", label, err)
-		}
 	}
 	if controllerStateStoreCloseDelay <= 0 {
-		closeFn()
+		r.run("previous")
 		return
 	}
-	time.AfterFunc(controllerStateStoreCloseDelay, closeFn)
+	time.AfterFunc(controllerStateStoreCloseDelay, func() { r.run("previous") })
+}
+
+func (r beadStoreCloseRequest) run(kind string) {
+	if r.close == nil {
+		return
+	}
+	if r.untrackRetiring != nil {
+		defer r.untrackRetiring()
+	}
+	if err := r.close(); err != nil {
+		log.Printf("api: close %s %s: %v", kind, r.label, err)
+	}
+}
+
+// newBeadStoreCloseRequest retains the close and reconciler capabilities of
+// one physical handle, without handing lifecycle code a bead store.
+func newBeadStoreCloseRequest(label string, closeHandle func() error, reconciler interface{ StopReconciler() }, handleKey uintptr) beadStoreCloseRequest {
+	return beadStoreCloseRequest{
+		label:      label,
+		close:      closeHandle,
+		reconciler: reconciler,
+		handleKey:  handleKey,
+	}
 }
 
 func closeBeadStoreHandle(store beads.Store) error {
@@ -1725,20 +1884,23 @@ func closeBeadStoreHandle(store beads.Store) error {
 	return closer.CloseStore()
 }
 
-func scheduleCloseReplacedBeadStoreHandles(oldStores, newStores map[string]beads.Store) {
-	if len(oldStores) == 0 {
-		return
+// replacedBeadStoreCloseRequests returns close requests for the rig stores in
+// retired that kept does not hold, one per distinct handle.
+func replacedBeadStoreCloseRequests(cs *controllerState, retired, kept map[string]beadStoreCloseRequest) []beadStoreCloseRequest {
+	if len(retired) == 0 {
+		return nil
 	}
-	newKeys := make(map[uintptr]struct{}, len(newStores))
-	for _, store := range newStores {
-		if key, ok := storePointerKey(store); ok {
-			newKeys[key] = struct{}{}
+	requests := make([]beadStoreCloseRequest, 0, len(retired))
+	keptKeys := make(map[uintptr]struct{}, len(kept))
+	for _, request := range kept {
+		if request.handleKey != 0 {
+			keptKeys[request.handleKey] = struct{}{}
 		}
 	}
-	closed := make(map[uintptr]struct{}, len(oldStores))
-	for name, store := range oldStores {
-		if key, ok := storePointerKey(store); ok {
-			if _, reused := newKeys[key]; reused {
+	closed := make(map[uintptr]struct{}, len(retired))
+	for _, request := range retired {
+		if key := request.handleKey; key != 0 {
+			if _, reused := keptKeys[key]; reused {
 				continue
 			}
 			if _, seen := closed[key]; seen {
@@ -1746,8 +1908,10 @@ func scheduleCloseReplacedBeadStoreHandles(oldStores, newStores map[string]beads
 			}
 			closed[key] = struct{}{}
 		}
-		scheduleCloseBeadStoreHandle(fmt.Sprintf("rig bead store %q", name), store)
+		request.untrackRetiring = trackRetiringBeadStoreHandle(cs, request.reconciler)
+		requests = append(requests, request)
 	}
+	return requests
 }
 
 func storePointerKey(store beads.Store) (uintptr, bool) {
@@ -2381,31 +2545,42 @@ func (cs *controllerState) CityBeadStore() beads.Store {
 // ScopedStoreLike implements api.State. See the interface doc comment for
 // the contract; scopedStoreLike (cmd/gc/scoped_store.go) does the actual
 // unwrap-and-rebuild work, reusing the same credential/env resolution as
-// every other bd-CLI store this package constructs.
-func (cs *controllerState) ScopedStoreLike(ctx context.Context, existing beads.Store) (beads.Store, error) {
+// every other bd-CLI store this package constructs. It binds the leg through
+// storeref.BindLeg, which hands the bind the raw store the plan leg holds
+// (never a class handle, which bdStoreBacking would answer "not bd" for, R12),
+// so the clone keeps the leg's ref, role and gate role.
+func (cs *controllerState) ScopedStoreLike(ctx context.Context, leg storeref.TypedLeg) (storeref.TypedLeg, bool, error) {
 	cs.mu.RLock()
 	cityPath := cs.cityPath
 	cfg := cs.cfg
 	cs.mu.RUnlock()
-	return scopedStoreLike(ctx, cityPath, cfg, existing)
+	cloned := false
+	var scopeErr error
+	bound, err := storeref.BindLeg(leg, func(existing beads.Store) (beads.Store, error) {
+		scoped, err := scopedStoreLike(ctx, cityPath, cfg, existing)
+		if err != nil || scoped == nil {
+			scopeErr = err
+			return existing, nil
+		}
+		cloned = true
+		return scoped, nil
+	})
+	switch {
+	case scopeErr != nil:
+		// Unwrapped, so status's "resolving scoped store: %w" reads as before.
+		return storeref.TypedLeg{}, false, scopeErr
+	case err != nil:
+		return storeref.TypedLeg{}, false, err
+	case !cloned:
+		return leg, false, nil
+	}
+	return bound, true, nil
 }
 
 // NudgeQueue returns the city's nudge queue over its nudges-class store, for the
 // API's deferred submits and wait-nudge withdrawals.
 func (cs *controllerState) NudgeQueue() api.NudgeQueue {
 	return openNudgeQueue(cs.cityPath, cs.Stores().Nudges()).Queue
-}
-
-// ClassBindingHasLegacyResidents replays the boot census for one binding store.
-//
-// The class handles Stores() mints wrap the routes' stores, which on the
-// controller are the CachingStores over the engines the boot census read;
-// hasLegacyResidents looks the engine up under the cache. A store this city
-// never censused, the work store included, keeps its probe.
-func (cs *controllerState) ClassBindingHasLegacyResidents(store beads.Store) bool {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
-	return cs.storageRoutes.hasLegacyResidents(store)
 }
 
 // CityBeadsDiagnostic returns the city-level bead store selection diagnostic.
@@ -2759,15 +2934,16 @@ func lexicalContainment(cityPath, resolved string) error {
 // first pass accepts; this pass refuses. TestSymlinkAwareContainmentIsLoadBearing
 // pins exactly those inputs.
 func symlinkAwareContainment(cityPath, resolved string) error {
-	realCity, err := filepath.EvalSymlinks(cityPath)
-	if err != nil {
-		realCity = filepath.Clean(cityPath)
-	}
+	realCity := pathutil.NormalizePathForCompare(cityPath)
 	realTarget, err := realPathForContainment(resolved)
 	if err != nil {
 		return fmt.Errorf("%w: resolving rig path %s: %w", configedit.ErrValidation, resolved, err)
 	}
-	return relWithinCity(realCity, realTarget)
+	// Both operands go through one canonicalizer: realCity is already collapsed
+	// by NormalizePathForCompare (darwin /private/var -> /var), so realTarget,
+	// a bare symlink resolution, must be collapsed the same way or every
+	// in-city rig on a /var or /tmp city reads as escaping it.
+	return relWithinCity(realCity, pathutil.NormalizePathForCompare(realTarget))
 }
 
 // relWithinCity reports the containment error if target is not lexically under

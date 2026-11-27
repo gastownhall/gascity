@@ -219,6 +219,7 @@ const (
 	DrainUnprojectedBlockersMetadataKey  = "gc.drain_unprojected_blockers"
 	DurationMsMetadataKey                = "gc.duration_ms"
 	DynamicFragmentMetadataKey           = "gc.dynamic_fragment"
+	ExcludeClaimantsMetadataKey          = "gc.exclude_claimants"
 	ExclusiveDrainReservationMetadataKey = "gc.exclusive_drain_reservation"
 	ExecutionRigContextMetadataKey       = "gc.execution_rig_context"
 	ExecutionRoutedToMetadataKey         = "gc.execution_routed_to"
@@ -383,6 +384,12 @@ const (
 	// resumed attempt can tell a row it wrote from content the destination
 	// already owned.
 	InfraMigratedFromMetadataKey = "gc.infra_migrated_from"
+	// InfraReversedFromMetadataKey stamps a bead the reverse migration (`gc
+	// storage migrate --to-work` or --to-rigs) copied out of a binding back
+	// into a work or rig store, with the binding and the run, so a resumed
+	// reverse can tell a row it wrote from one the store already held, and
+	// --abort-reverse removes exactly those rows.
+	InfraReversedFromMetadataKey = "gc.infra_reversed_from"
 	// MigratedCrossEdgesMetadataKey records, on a bead, the cross-boundary
 	// edges a writer dropped rather than write across stores: a JSON list of
 	// {dir, type, other, other_status_at_import, payload, action}. No
@@ -393,6 +400,15 @@ const (
 	// blocks literal it removed because only the binding holds <id>; there
 	// the entry, payload included, is the only trace of that edge.
 	MigratedCrossEdgesMetadataKey = "gc.migrated_cross_edges"
+	// MigratedParkedHoldMetadataKey records, on a bead a storage migration
+	// carried into a class binding, the hold bd parked it with in its
+	// source store and the binding cannot record (an undated deferral, or a
+	// status such as blocked, pinned or hooked): a JSON object
+	// {status, defer_until}. The binding holds such a bead with a defer_until
+	// far in the future instead, so it stays out of every ready view, and
+	// the reverse migration (`gc storage migrate --to-work`) restores the
+	// recorded status and defer_until from it.
+	MigratedParkedHoldMetadataKey = "gc.migrated_parked_hold"
 	// TriggerBeadStoreRefMetadataKey records the store ref of the bead named by
 	// TriggerBeadIDMetadataKey. Like that key it is controller demand
 	// bookkeeping and never reaches the session's shell.
@@ -668,6 +684,7 @@ var KnownMetadataKeys = []string{
 	DrainUnprojectedBlockersMetadataKey,
 	DurationMsMetadataKey,
 	DynamicFragmentMetadataKey,
+	ExcludeClaimantsMetadataKey,
 	ExclusiveDrainReservationMetadataKey,
 	ExecutionRigContextMetadataKey,
 	ExecutionRoutedToMetadataKey,
@@ -773,7 +790,9 @@ var KnownMetadataKeys = []string{
 	TerminalMetadataKey,
 	TriggerBeadIDMetadataKey,
 	InfraMigratedFromMetadataKey,
+	InfraReversedFromMetadataKey,
 	MigratedCrossEdgesMetadataKey,
+	MigratedParkedHoldMetadataKey,
 	TriggerBeadStoreRefMetadataKey,
 	TruncatedMetadataKey,
 	WorkBranchMetadataKey,

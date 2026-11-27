@@ -171,7 +171,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		"litellm>=1.106.5",
 		"filelock>=3.29.0,<4",
 		"opentelemetry-api>=1.45.1",
-		"dnspython>=2.9.0",
+		"dnspython>=2.9.2",
 		"joserfc>=1.7.5",
 	} {
 		if !strings.Contains(input, want) {
@@ -208,7 +208,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		"filelock==3.29.0 \\",
 		"opentelemetry-api==1.45.1 \\",
 		"authlib==1.9.1 \\",
-		"dnspython==2.9.0 \\",
+		"dnspython==2.9.2 \\",
 		// Lock-only CVE bumps: no input floor, so this pin is their only guard.
 		"bleach==6.4.0 \\",
 		"h2==4.4.1 \\",
@@ -870,7 +870,7 @@ func TestTrivyIgnoreRejectsPathPatternAndUnscopedWaivers(t *testing.T) {
 
 // TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools enforces that the rebuilt-from-
 // source tools (bd, dolt, gh) carry no waiver at all. They are rebuilt with the Go
-// 1.27.3 toolchain, which fixes every stdlib CVE listed, and Dockerfile.base forces
+// 1.27.4 toolchain, which fixes every stdlib CVE listed, and Dockerfile.base forces
 // x/crypto, x/net, x/text and thrift forward in the gh and Dolt builds the same way
 // it forces grpc, so a waiver on those paths would let the scan gate mask a regressed
 // rebuild instead of proving the fix holds. The surviving reviewed waivers are the
@@ -936,7 +936,7 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 	for _, v := range doc.Vulnerabilities {
 		for _, p := range v.Paths {
 			if stdlibCVEs[v.ID] && rebuiltPaths[p] {
-				t.Errorf("%s still waives rebuilt tool %q for a Go-stdlib CVE the 1.27.3 rebuild clears; drop the path so the scan proves the fix stays effective", v.ID, p)
+				t.Errorf("%s still waives rebuilt tool %q for a Go-stdlib CVE the 1.27.4 rebuild clears; drop the path so the scan proves the fix stays effective", v.ID, p)
 			}
 			if allowedPaths, ok := reviewedWaivers[v.ID]; ok && allowedPaths[p] {
 				if foundReviewed[v.ID] == nil {
@@ -1020,6 +1020,46 @@ func staleKubectlWaiverStatements(pin string, doc trivyIgnoreDoc) []string {
 		}
 	}
 	return found
+}
+
+// kubectlPinFloor is the minimum kubectl pin, chosen deliberately: a release
+// whose build info records golang.org/x/net >= 0.57.0 (the fix for
+// CVE-2026-39821, HIGH, golang.org/x/net/idna) and Go 1.26.10. Earlier 1.37
+// patches also carry x/net 0.57.0, but this floor stays at v1.37.2 on purpose.
+// kubectl is an upstream-signed prebuilt, so the module versions inside it
+// cannot be changed here: only the pin can move. v1.36.6 records x/net v0.56.0
+// and is flagged; v1.37.2 records v0.57.0 and is not.
+const kubectlPinFloor = "v1.37.2"
+
+// TestKubectlPinClearsCVE202639821 holds the kubectl pin at or above the
+// selected minimum release, built with x/net >= 0.57.0, and keeps
+// CVE-2026-39821 out of the kubectl waivers: the finding has a fix, so the way
+// to clear it is the pin, never a waiver.
+func TestKubectlPinClearsCVE202639821(t *testing.T) {
+	root := repoRoot(t)
+
+	var pin string
+	for _, line := range strings.Split(readFile(t, root, "contrib/k8s/Dockerfile.controller"), "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "ARG KUBECTL_VERSION="); ok {
+			pin = strings.TrimSpace(v)
+		}
+	}
+	if pin == "" {
+		t.Fatal("contrib/k8s/Dockerfile.controller has no ARG KUBECTL_VERSION=; the kubectl pin moved and this guard must follow it")
+	}
+	if !semverAtLeast(parseModuleSemver(t, pin), parseModuleSemver(t, kubectlPinFloor)) {
+		t.Errorf("contrib/k8s/Dockerfile.controller pins kubectl %s, below %s, the selected minimum release (built with golang.org/x/net >= 0.57.0 and Go 1.26.10); older releases carry CVE-2026-39821 (HIGH) and the container scan fails gc-controller on it", pin, kubectlPinFloor)
+	}
+
+	var doc trivyIgnoreDoc
+	if err := yaml.Unmarshal([]byte(readFile(t, root, ".trivyignore.yaml")), &doc); err != nil {
+		t.Fatalf("parsing .trivyignore.yaml: %v", err)
+	}
+	for _, v := range doc.Vulnerabilities {
+		if v.ID == "CVE-2026-39821" && slices.Contains(v.Paths, "usr/local/bin/kubectl") {
+			t.Errorf("%s waives kubectl, but a kubectl release at or above %s fixes it; clear it with the pin, not a waiver (a security-policy waiver is the operator's decision)", v.ID, kubectlPinFloor)
+		}
+	}
 }
 
 // TestTrivyIgnoreRejectsKubectlStatementsNamingAnotherRelease drives the kubectl

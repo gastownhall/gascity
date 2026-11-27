@@ -11,11 +11,13 @@ import (
 )
 
 // TestStatusHandsScopedStoreLikeRawStores pins R12 (typed-stores T6 plan):
-// ScopedStoreLike recognizes a bd-backed store by its concrete layers
+// the ctx-bound clone recognizes a bd-backed store by its concrete layers
 // (cmd/gc bdStoreBacking), so a class handle handed to it answers "not bd"
-// and the ga-cdmx6x ctx-bound clone silently turns off for /status. Until T7
-// retypes it, every store /status hands ScopedStoreLike is a raw store a
-// State accessor returns (or a class accessor's unwrap), never a handle.
+// and the ga-cdmx6x clone silently turns off for /status. Since T7e.2
+// ScopedStoreLike takes a plan's typed leg and binds it through
+// storeref.BindLeg, as fakeState does: every store the bind reaches is the raw
+// store the leg was planned over (a raw accessor's store, or a class handle's
+// unwrap), never a handle.
 func TestStatusHandsScopedStoreLikeRawStores(t *testing.T) {
 	state := newFakeState(t)
 	city := &legacyReadyStore{Store: beads.NewMemStore()}
