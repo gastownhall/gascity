@@ -133,7 +133,15 @@ func (s *Server) extmsgNotifyMembers(
 	text string,
 	excludeSelector string,
 	explicitTarget string,
+	messageDetails ...extmsgNotifyReminder,
 ) {
+	messageReminder := extmsgNotifyReminder{
+		ActorDisplay: actorDisplayName, ActorKind: actorKind, Text: text, ExplicitTarget: explicitTarget,
+	}
+	if len(messageDetails) > 0 {
+		messageReminder.ProviderMessageID = messageDetails[0].ProviderMessageID
+		messageReminder.Attribution = messageDetails[0].Attribution
+	}
 	svc := s.state.ExtMsgServices()
 	// Sessions class, and a WRITE path: the member fan-out below materializes a
 	// configured named session that has no live bead yet, so through the work
@@ -143,7 +151,7 @@ func (s *Server) extmsgNotifyMembers(
 		return
 	}
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "extmsg-notify"}
-	explicitTargetSessionID := extmsgNotifyExplicitTargetSessionID(ctx, svc, conv, explicitTarget)
+	explicitTargetSessionID := extmsgNotifyExplicitTargetSessionID(ctx, svc, conv, messageReminder.ExplicitTarget)
 	members, err := svc.Transcript.ListMemberships(ctx, caller, conv)
 	if err != nil {
 		log.Printf("extmsg: ListMemberships failed for %s/%s: %v", conv.Provider, conv.ConversationID, err)
@@ -163,18 +171,14 @@ func (s *Server) extmsgNotifyMembers(
 
 	notifyResolved := func(sessionSelector, resolvedID string) {
 		handle := s.extmsgSessionHandleForResolvedID(resolvedID, sessionSelector)
-		nudge := s.extmsgNotice(extmsgNotifyReminder{
-			Provider:                conv.Provider,
-			ConversationID:          conv.ConversationID,
-			ActorDisplay:            actorDisplayName,
-			ActorKind:               actorKind,
-			Text:                    text,
-			RecipientSelector:       sessionSelector,
-			RecipientSessionID:      resolvedID,
-			Handle:                  handle,
-			ExplicitTarget:          explicitTarget,
-			ExplicitTargetSessionID: explicitTargetSessionID,
-		})
+		reminder := messageReminder
+		reminder.Provider = conv.Provider
+		reminder.ConversationID = conv.ConversationID
+		reminder.RecipientSelector = sessionSelector
+		reminder.RecipientSessionID = resolvedID
+		reminder.Handle = handle
+		reminder.ExplicitTargetSessionID = explicitTargetSessionID
+		nudge := s.extmsgNotice(reminder)
 		if err := s.sendBackgroundMessageToSession(ctx, store, resolvedID, nudge); err != nil {
 			log.Printf("extmsg: notify %s failed: %v", sessionSelector, err)
 		}
@@ -236,7 +240,9 @@ func (s *Server) extmsgNotifyInboundMembers(ctx context.Context, msg extmsg.Exte
 	if !msg.Actor.IsBot {
 		actorKind = "human"
 	}
-	s.extmsgNotifyMembers(ctx, msg.Conversation, msg.Actor.DisplayName, actorKind, msg.Text, "", msg.ExplicitTarget)
+	s.extmsgNotifyMembers(ctx, msg.Conversation, msg.Actor.DisplayName, actorKind, msg.Text, "", msg.ExplicitTarget, extmsgNotifyReminder{
+		ProviderMessageID: msg.ProviderMessageID, Attribution: msg.Attribution,
+	})
 }
 
 // titleCaseProvider uppercases the first ASCII byte of a provider name.
@@ -277,6 +283,8 @@ type extmsgNotifyReminder struct {
 	Handle                  string
 	ExplicitTarget          string
 	ExplicitTargetSessionID string
+	ProviderMessageID       string
+	Attribution             map[string]string
 }
 
 // formatExtmsgNotifyReminder builds the inbound-message reminder body.
@@ -309,6 +317,19 @@ func formatExtmsgNotifyReminder(r extmsgNotifyReminder) string {
 			"Addressed to: @%s — if that is not you, do not reply.\n\n",
 			safeTarget,
 		)
+	}
+	if len(r.Attribution) > 0 {
+		// JSON encoding preserves adapter-defined strings and escapes control
+		// characters and HTML, including reminder delimiter sequences.
+		attribution, err := json.Marshal(r.Attribution)
+		if err != nil {
+			// A string dictionary is always encodable. Preserve a diagnostic
+			// if that contract ever changes rather than silently dropping it.
+			log.Printf("extmsg: encode inbound attribution: %v", err)
+		} else {
+			fmt.Fprintf(&b, "Provider message ID: %q\nAdapter-asserted attribution (trusted only as far as the adapter): %s\n\n",
+				extmsg.SanitizeForSystemReminder(r.ProviderMessageID), attribution)
+		}
 	}
 	fmt.Fprintf(&b,
 		"To reply in %s, write your response to a file and run:\n"+
