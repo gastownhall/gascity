@@ -436,6 +436,40 @@ func TestClaimReadsStopAtTheInvocationReadBudget(t *testing.T) {
 	}
 }
 
+// TestClaimRetryAnswerPastReadBudgetNeverReachesCAS pins retry admission
+// against the read budget (#5693): a first read that fails after 100s is
+// retried (its 105s start is inside the 150s read deadline), but the retry's
+// answer arriving at 175s is at or after the deadline, so it counts as a
+// timed-out read and never reaches a CAS. The outcome is the failed-read exit
+// 2 with the token — never the base behavior, where the late answer was
+// accepted as found work and then refused with "the claim window is spent".
+func TestClaimRetryAnswerPastReadBudgetNeverReachesCAS(t *testing.T) {
+	withProductionClaimRetryPacing(t)
+	h := newFailureHookHarness()
+	h.script("/own",
+		hookRunnerAnswer{err: errors.New("bd ready: exit status 1: Error: dial tcp 127.0.0.1:3307: connect: connection refused")},
+		hookRunnerAnswer{out: routedRowJSON("work-1")},
+	)
+	stores := []hookStore{{dir: "/own", env: []string{"BEADS_DIR=/own"}}}
+	clock := newClaimFanoutClock(0)
+	clock.readCosts = []time.Duration{100 * time.Second, 70 * time.Second}
+
+	code, result, stderr, rec := runClaimFanout(t, clock, h, stores)
+
+	if code != 2 || !strings.Contains(stderr, hookStoreUnavailableToken) {
+		t.Fatalf("exit=%d stderr=%q, want exit 2 with the token: the retry's answer landed at 175s, past the 150s read deadline", code, stderr)
+	}
+	if result.Action != "" || h.drained {
+		t.Fatalf("result=%+v drained=%v, want the failed-read contract: no drain result, no drain-ack", result, h.drained)
+	}
+	if len(rec.claims) != 0 || len(rec.windowExpired) != 0 {
+		t.Fatalf("claims=%v windowExpired=%d, want none: a late answer is a timed-out read, not a claim and not a window refusal", rec.claims, len(rec.windowExpired))
+	}
+	if rec.reads != 2 || len(clock.sleeps) != 1 {
+		t.Fatalf("reads=%d sleeps=%v, want the failed read plus exactly one (admitted) paced retry", rec.reads, clock.sleeps)
+	}
+}
+
 // End to end through the claim loop: a read that would recover on retry, but
 // only after the window closed, must not be retried into a claim. The
 // invocation keeps the failed-read contract: no drain result, no drain-ack, no
