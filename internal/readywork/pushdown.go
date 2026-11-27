@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/fanout"
+	"github.com/gastownhall/gascity/internal/inputadmission"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
@@ -151,13 +152,13 @@ func readyRead(q beads.ReadyQuery) legRead {
 
 // readReadyCandidates reads the ready arm: each leg asked with the pushed
 // predicates and, where it is exact, a pushed limit.
-func readReadyCandidates(ctx context.Context, legs []Leg, c compiled, cs *crossStore) ([]beads.Bead, map[string]int, error) {
+func readReadyCandidates(ctx context.Context, legs []Leg, c compiled, cs *crossStore, adm *inputadmission.Judge) ([]beads.Bead, map[string]int, error) {
 	plain := readyRead(beads.ReadyQuery{TierMode: beads.FederatedReadTier})
 	q := readyReadQuery(c)
 	order, bounded := boundedOrder(c)
 	switch {
 	case bounded:
-		return readNarrowed(ctx, legs, c, boundedRead(c, q, order, cs), plain)
+		return readNarrowed(ctx, legs, c, boundedRead(c, q, order, cs, adm, legs), plain)
 	case predicatesPushed(q):
 		return readNarrowed(ctx, legs, c, readyRead(q), plain)
 	default:
@@ -208,10 +209,11 @@ func readNarrowed(ctx context.Context, legs []Leg, c compiled, narrowed, plain l
 // set.
 //
 // On a split city a row a cross-store blocker holds is not a row in hand either
-// (crossstore.go), so it does not count toward the limit: a leg whose top rows
-// are held widens its own cut, step by step, until enough of its rows can be
-// served, and no leg's whole ready set is re-read for it.
-func boundedRead(c compiled, q beads.ReadyQuery, order beads.ReadyOrder, cs *crossStore) legRead {
+// (crossstore.go), and on every city neither is a row input admission
+// withholds (admission.go), so neither counts toward the limit: a leg whose
+// top rows are held widens its own cut, step by step, until enough of its rows
+// can be served, and no leg's whole ready set is re-read for it.
+func boundedRead(c compiled, q beads.ReadyQuery, order beads.ReadyOrder, cs *crossStore, adm *inputadmission.Judge, legs []Leg) legRead {
 	limit := c.query.Limit
 	return func(ctx context.Context, leg Leg) legResult {
 		want := limit + boundedSlack
@@ -242,6 +244,13 @@ func boundedRead(c compiled, q beads.ReadyQuery, order beads.ReadyOrder, cs *cro
 						kept--
 					}
 				}
+			}
+			if adm != nil && kept >= limit {
+				withheld, err := withheldRows(ctx, adm, legIndexFor(legs, beads.PhysicalStoreKey(leg.Store)), usable)
+				if err != nil {
+					return legResult{err: err}
+				}
+				kept -= len(withheld)
 			}
 			if kept >= limit {
 				return legResult{rows: rows}

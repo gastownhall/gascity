@@ -873,6 +873,25 @@ func DependencySatisfied(depStatus, depWorkOutcome string) bool {
 	return depWorkOutcome != beadmeta.WorkOutcomeBlocked
 }
 
+// DependencySatisfiedByCopies reports whether a blocking dependency's target
+// releases its dependents, judged from every copy of it the caller's stores
+// hold: satisfied only when at least one copy exists and every copy is
+// satisfied (DependencySatisfied). An id no store holds is unresolvable and
+// releases nothing. This is the cross-store copy rule the readywork reader
+// applies to a blocker and input admission applies to a prerequisite, stated
+// once so the two cannot drift.
+func DependencySatisfiedByCopies(copies []Bead) bool {
+	if len(copies) == 0 {
+		return false
+	}
+	for _, c := range copies {
+		if !DependencySatisfied(c.Status, ReadinessWorkOutcome(c.Metadata)) {
+			return false
+		}
+	}
+	return true
+}
+
 // ReadinessWorkOutcome is the gc.work_outcome value readiness should judge a
 // closed dependency by. gc.outcome is the control-plane step result that
 // internal/dispatch sequences a workflow on, and gc.work_outcome the worker's

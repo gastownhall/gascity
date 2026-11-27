@@ -7,6 +7,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/fanout"
+	"github.com/gastownhall/gascity/internal/inputadmission"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
@@ -140,7 +141,8 @@ func CutUntilUnblocked(rows []ReadyBead) []ReadyBead {
 // answer at its first unblocked row when untilUnblocked is set.
 func readCompiled(ctx context.Context, legs []Leg, c compiled, untilUnblocked bool) ([]ReadyBead, error) {
 	cs := newCrossStore(legs)
-	items, owners, err := readCandidates(ctx, legs, c, cs)
+	adm := newAdmission(legs)
+	items, owners, err := readCandidates(ctx, legs, c, cs, adm)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return nil, ctxErr
 	}
@@ -150,9 +152,11 @@ func readCompiled(ctx context.Context, legs []Leg, c compiled, untilUnblocked bo
 	if c.status == "" {
 		// On a split city the ready arm re-judges cross-store blockers
 		// (crossstore.go): it adds the rows a store strands behind an absent
-		// blocker, then withholds every row a blocker still holds. Elsewhere
-		// cs is nil and this is the stores' own answer.
-		items, err = readyAnswer(ctx, cs, c, items, owners)
+		// blocker, then withholds every row a blocker still holds. On every
+		// city it withholds the rows input admission holds (admission.go): a
+		// step whose workflow input is held, blocked, deferred or waiting on
+		// a prerequisite is not ready work.
+		items, err = readyAnswer(ctx, cs, adm, c, items, owners)
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
 		}
@@ -189,17 +193,17 @@ func readCompiled(ctx context.Context, legs []Leg, c compiled, untilUnblocked bo
 
 // readyAnswer turns the ready arm's merged candidates into its answer: the
 // stranded rows added, the predicates applied, the order imposed, the bound
-// applied after the cross-store gate. A bounded read already sized each leg's
-// cut past the rows the gate holds (boundedRead), and every verdict is
-// memoized, so the gate here re-reads nothing it has judged.
-func readyAnswer(ctx context.Context, cs *crossStore, c compiled, items []beads.Bead, owners map[string]int) ([]beads.Bead, error) {
+// applied after the cross-store gate and input admission. A bounded read
+// already sized each leg's cut past the rows the gates hold (boundedRead), and
+// every verdict is memoized, so the gate here re-reads nothing it has judged.
+func readyAnswer(ctx context.Context, cs *crossStore, adm *inputadmission.Judge, c compiled, items []beads.Bead, owners map[string]int) ([]beads.Bead, error) {
 	items, err := cs.addStranded(ctx, readyReadQuery(c), items, owners)
 	if err != nil {
 		return nil, err
 	}
 	items = c.filter(items)
 	c.order(items)
-	return cs.gate(ctx, owners, items, c.query.Limit)
+	return gateItems(ctx, cs, adm, owners, items, c.query.Limit)
 }
 
 // readCandidates reads the merged candidate set from the legs, and which leg
@@ -221,10 +225,10 @@ func readyAnswer(ctx context.Context, cs *crossStore, c compiled, items []beads.
 // recorded at MERGE time rather than re-probed afterwards: the merge is
 // first-leg-wins, and a co-resident bead that is open in one leg and in_progress
 // in another would resolve to the wrong store under a fresh probe.
-func readCandidates(ctx context.Context, legs []Leg, c compiled, cs *crossStore) ([]beads.Bead, map[string]int, error) {
+func readCandidates(ctx context.Context, legs []Leg, c compiled, cs *crossStore, adm *inputadmission.Judge) ([]beads.Bead, map[string]int, error) {
 	switch c.status {
 	case "":
-		return readReadyCandidates(ctx, legs, c, cs)
+		return readReadyCandidates(ctx, legs, c, cs, adm)
 	case StatusOpen:
 		return readOpenStatusCandidates(ctx, legs)
 	case StatusInProgress:

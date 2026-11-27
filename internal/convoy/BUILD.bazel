@@ -6,6 +6,7 @@ go_library(
         "classes.go",
         "convoy.go",
         "convoy_fields.go",
+        "members_across.go",
         "membership.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/convoy",
@@ -16,6 +17,7 @@ go_library(
         "//internal/config",
         "//internal/coordclass",
         "//internal/events",
+        "//internal/storeref",
     ],
 )
 
