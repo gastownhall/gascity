@@ -470,41 +470,24 @@ func drainConvoyMembers(store beads.GraphStore, convoyID string, opts ProcessOpt
 	if err != nil {
 		return nil, err
 	}
-	// Deliberately un-deduped (nil id fn): Union's own first-leg-wins would drop
-	// the second copy of a member id outright, and this merge needs to SEE it —
-	// a placeholder recorded by the leg that answered first must still yield to
-	// the real bead another leg records.
-	union, err := storeref.Union[beads.Bead](plan, nil,
-		func(leg storeref.Leg) ([]beads.Bead, error) {
-			// leg.Store is a raw plan leg, work class by the RoutedWork plan;
-			// T7's typed legs replace this relabel.
-			return convoycore.MembersIn(convoycore.MemberClasses{Convoy: beads.WorkStore{Store: leg.Store}, Work: []beads.WorkStore{opts.Work}}, convoyID, false)
+	// The union itself — placeholder yielding to a real bead another leg
+	// records, order stable across whichever leg answered first — is
+	// convoycore.MembersAcross (#8832); this supplies its scopes from the
+	// plan's legs with EachLeg, so the leg order and each leg's error policy
+	// stay the plan's, and each leg's membership is read through its own
+	// work-class view plus the ambient work handle, the same classes the union
+	// always read.
+	scopes := make([]convoycore.MemberScope, 0, len(plan.Legs))
+	storeref.EachLeg(plan, func(leg storeref.Leg, _ storeref.Role, onError storeref.ErrPolicy) {
+		scopes = append(scopes, convoycore.MemberScope{
+			Classes: convoycore.MemberClasses{
+				Convoy: beads.WorkStore{Store: leg.Store},
+				Work:   []beads.WorkStore{opts.Work},
+			},
+			OnError: onError,
 		})
-	if err != nil {
-		return nil, err
-	}
-	var merged []beads.Bead
-	at := make(map[string]int)
-	for _, member := range union.Items {
-		i, seen := at[member.ID]
-		if !seen {
-			at[member.ID] = len(merged)
-			merged = append(merged, member)
-			continue
-		}
-		if convoycore.IsUnresolvedTrackedItem(merged[i]) && !convoycore.IsUnresolvedTrackedItem(member) {
-			merged[i] = member
-		}
-	}
-	// Same order convoycore.MembersIn returns within one store, so the manifest
-	// row order does not depend on which store answered first.
-	slices.SortStableFunc(merged, func(a, b beads.Bead) int {
-		if c := a.CreatedAt.Compare(b.CreatedAt); c != 0 {
-			return c
-		}
-		return strings.Compare(a.ID, b.ID)
 	})
-	return merged, nil
+	return convoycore.MembersAcross(scopes, convoyID, false)
 }
 
 func loadDrainManifestMembers(store beads.GraphStore, controlID string, manifest drainManifest, opts ProcessOptions) ([]beads.Bead, error) {
