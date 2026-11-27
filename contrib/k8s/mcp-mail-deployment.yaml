@@ -7,8 +7,13 @@
 # the exec script caches read/archive state locally per pod in /tmp.
 # If persistence is needed later, add a PVC.
 #
-# Build the image first:
-#   docker build -f contrib/k8s/Dockerfile.mail -t gc-mcp-mail:latest .
+# Build the image first (from the repository root):
+#   make docker-mail
+# That runs `docker build -f contrib/k8s/Dockerfile.mail -t gc-mcp-mail:latest .`
+# and, when the current kubectl context is a kind cluster, loads the image into
+# it with `kind load docker-image` (the same convention as docker-agent and
+# docker-controller). Against a cluster that is not kind, load or push the image
+# yourself.
 
 apiVersion: apps/v1
 kind: Deployment
