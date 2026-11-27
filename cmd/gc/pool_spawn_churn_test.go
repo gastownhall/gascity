@@ -615,3 +615,38 @@ func TestPoolSpawnChurnConfigChangeResetsTheTemplate(t *testing.T) {
 		t.Fatal("a removed template kept its streak")
 	}
 }
+
+// One template's churn neither feeds nor holds another's: closes of A and B
+// interleaved keep separate streaks, and while A is held, B's allowance is
+// unlimited and the planner emits its full blind tail.
+func TestPoolSpawnChurnHoldsOnlyTheChurningTemplate(t *testing.T) {
+	h := newSpawnChurnHarness(t)
+	h.churn("churny")
+	h.advance(time.Minute)
+	h.churn("steady")
+	h.advance(time.Minute)
+	h.churn("churny")
+	if got := h.guard.allowance(); got != nil {
+		t.Fatalf("allowance = %v after 2+1 closes of two templates, want none", got)
+	}
+	h.advance(time.Minute)
+	h.churn("churny")
+	got := h.guard.allowance()
+	if _, ok := got["steady"]; ok || got["churny"] != 0 || len(got) != 1 {
+		t.Fatalf("allowance = %v, want only churny held", got)
+	}
+	cfg := blindSpawnDemandCity()
+	in := blindSpawnCollected()
+	in.BlindSpawnAllowance = got
+	merged := mergeCollectedDemand(cfg, in)
+	states := computePoolDesiredStatesParkedAt(cfg, nil, nil, nil, merged.ScaleCheckCounts, merged.ScaleCheckDemand, h.now, nil, nil)
+	if blind, bound := blindAndBoundNewRequests(states, "steady"); blind != 2 || bound != 1 {
+		t.Fatalf("steady new requests: blind=%d bound=%d, want blind=2 bound=1", blind, bound)
+	}
+	if blind, bound := blindAndBoundNewRequests(states, "churny"); blind != 0 || bound != 1 {
+		t.Fatalf("churny new requests: blind=%d bound=%d, want blind=0 bound=1", blind, bound)
+	}
+	if got := h.coolingDowns(); len(got) != 1 || got[0].Template != "churny" {
+		t.Fatalf("cooling-down events = %+v, want one, for churny", got)
+	}
+}
