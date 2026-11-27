@@ -309,6 +309,16 @@ func writeSlingTestCity(t *testing.T, cityDir, content string) {
 	}
 }
 
+// useFileBeadsForSlingNudgeQueue pins the file beads provider for a
+// doSlingNudge test whose nudge reaches the queued-nudge enqueue. That
+// enqueue opens the city's own nudges-class store at the test's city path,
+// not the store the test passes in, so with no GC_BEADS set it resolves to
+// the default bd provider and starts a managed Dolt server for the temp city.
+func useFileBeadsForSlingNudgeQueue(t *testing.T) {
+	t.Helper()
+	t.Setenv("GC_BEADS", "file")
+}
+
 //nolint:unused // retained for future sling cwd-sensitive scenarios
 func chdirSlingTest(t *testing.T, dir string) {
 	t.Helper()
@@ -1060,6 +1070,7 @@ func TestDoSlingNudgeFixedAgent(t *testing.T) {
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
+	useFileBeadsForSlingNudgeQueue(t)
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	deps.CityPath = t.TempDir()
 	prev := startNudgePoller
@@ -1094,6 +1105,7 @@ func TestDoSlingNudgeNoSession(t *testing.T) {
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
+	useFileBeadsForSlingNudgeQueue(t)
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	deps.CityPath = t.TempDir() // isolated path so poke doesn't hit real socket
 	opts := testOpts(a, "BL-1")
@@ -1148,6 +1160,7 @@ func TestDoSlingNudgePoolMember(t *testing.T) {
 		MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3),
 	}
 
+	useFileBeadsForSlingNudgeQueue(t)
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	deps.CityPath = t.TempDir()
 	prev := startNudgePoller
@@ -1254,6 +1267,7 @@ func TestDoSlingNudgePoolBeadDerivedSession(t *testing.T) {
 		Agents:    []config.Agent{a},
 	}
 
+	useFileBeadsForSlingNudgeQueue(t)
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	deps.CityPath = t.TempDir()
 	if _, err := deps.Store.Create(beads.Bead{
@@ -1312,6 +1326,7 @@ func TestDoSlingNudgePoolUsesCityStoreForSessionBeads(t *testing.T) {
 		Agents:    []config.Agent{a},
 	}
 
+	useFileBeadsForSlingNudgeQueue(t)
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	deps.CityPath = t.TempDir()
 	writeSlingTestCity(t, deps.CityPath, "[workspace]\nname = \"test-city\"\n")
@@ -1389,6 +1404,7 @@ func TestDoSlingNudgePoolMemberBindingQualifiedCityScope(t *testing.T) {
 		Agents:    []config.Agent{a},
 	}
 
+	useFileBeadsForSlingNudgeQueue(t)
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	deps.CityPath = t.TempDir()
 	if _, err := deps.Store.Create(beads.Bead{

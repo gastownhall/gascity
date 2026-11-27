@@ -44,6 +44,7 @@ func TestDoSlingNudgeNamepoolInstanceReachesRunningSession(t *testing.T) {
 		Agents:    []config.Agent{a},
 	}
 
+	useFileBeadsForSlingNudgeQueue(t)
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	deps.CityPath = t.TempDir()
 	if _, err := deps.Store.Create(beads.Bead{
