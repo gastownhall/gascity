@@ -9619,3 +9619,108 @@ func TestCityRuntimeShutdownSweepsWhenAttestationTurnsOnDuringTheListing(t *test
 		t.Fatalf("probe-1 survived the shutdown: the blind listing was read as attested; stderr = %q", stderr.String())
 	}
 }
+
+// blockingRetentionDeleteStore holds every Delete until release is closed,
+// signaling entered on the first one. Embedding the beads.Store interface
+// (not *MemStore) hides DeleteBatch so the sweep takes the per-bead path.
+type blockingRetentionDeleteStore struct {
+	beads.Store
+	entered     chan struct{}
+	enteredOnce sync.Once
+	release     chan struct{}
+}
+
+func (s *blockingRetentionDeleteStore) Delete(id string) error {
+	s.enteredOnce.Do(func() { close(s.entered) })
+	<-s.release
+	return s.Store.Delete(id)
+}
+
+// The order pass must not wait on the retention sweep's graph deletes: with
+// a delete held open in the store, dispatchOrders still returns (#6429).
+func TestOrderTrackingRetentionWatchdog_DoesNotBlockOrderPass(t *testing.T) {
+	now := time.Now()
+	seed := make([]beads.Bead, 0, minClosedOrderTrackingRetained+5)
+	for i := range minClosedOrderTrackingRetained + 5 {
+		seed = append(seed, beads.Bead{
+			ID:        fmt.Sprintf("block-%02d", i),
+			Title:     "order:block",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-8*24*time.Hour + time.Duration(i)*time.Minute),
+			Labels:    []string{"order-run:block", labelOrderTracking},
+			Ephemeral: true,
+		})
+	}
+	store := &blockingRetentionDeleteStore{
+		Store:   beads.NewMemStoreFrom(100, seed, nil),
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		standaloneCityStore: store,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+		logPrefix:           "gc test",
+		// Only the retention watchdog is due in this pass.
+		orderSweepWatchdogLast:     now,
+		nudgeMailSweepWatchdogLast: now,
+	}
+
+	passDone := make(chan struct{})
+	go func() {
+		defer close(passDone)
+		cr.dispatchOrders(context.Background(), "")
+	}()
+
+	// The order pass must return without touching the retention sweep's
+	// deletes: the sweep belongs to its own lane, so nothing in the pass may
+	// reach the store's Delete, and the pass may not wait on one (#6429).
+	select {
+	case <-passDone:
+	case <-time.After(5 * time.Second):
+		close(store.release)
+		<-passDone
+		t.Fatal("dispatchOrders did not return; the retention sweep still runs synchronously inside the order pass")
+	}
+	select {
+	case <-store.entered:
+		close(store.release)
+		t.Fatal("the order pass ran the retention sweep: it reached the store's Delete")
+	default:
+	}
+	close(store.release)
+}
+
+// The startup order pass runs before the retention lane exists and before
+// readiness, so it must not run the closed-tracking retention sweep: its zero
+// last-run stamp used to make the first pass always sweep, and on a store with
+// a large closed backlog that kept a restarting city not-ready for minutes
+// (#6429). The retention sweep belongs to its own lane.
+func TestStartupOrderPassDoesNotRunRetentionSweep(t *testing.T) {
+	now := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	cr, store, _ := seedRetentionWatchdogCity(t, now, time.Hour)
+	od := &recordingOrderDispatcher{}
+	cr.od = od
+	// Only the retention watchdog is due in this pass.
+	cr.orderSweepWatchdogLast = now
+	cr.nudgeMailSweepWatchdogLast = now
+
+	cr.dispatchOrders(context.Background(), cr.cityPath)
+
+	// The two oldest beads are past the TTL and beyond the retain floor: the
+	// retention sweep would delete exactly them.
+	for _, id := range []string{"guard-00", "guard-01"} {
+		if _, err := store.Get(id); err != nil {
+			t.Fatalf("%s should survive the startup order pass: %v", id, err)
+		}
+	}
+	if !od.called.Load() {
+		t.Fatal("the startup order pass did not dispatch orders")
+	}
+	if !cr.orderTrackingRetentionWatchdogLast.IsZero() {
+		t.Fatalf("orderTrackingRetentionWatchdogLast = %v, want zero: the startup pass must not stamp the retention watchdog", cr.orderTrackingRetentionWatchdogLast)
+	}
+}

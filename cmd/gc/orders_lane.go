@@ -26,7 +26,10 @@ import (
 //
 //   - The live dispatcher (cr.od), the retired dispatchers awaiting drain, and
 //     the dispatch-side watchdog clocks are held under passMu. A pass holds it
-//     for its whole length; nothing else dispatches.
+//     for its whole length; nothing else dispatches. The closed order-tracking
+//     retention watchdog is not one of them: it runs on its own paced lane
+//     (order_tracking_retention_lane.go), so its minutes-long store work never
+//     holds the pass (#6429).
 //   - The order-set bookkeeping (cr.orderSet, cr.orderSetSignature,
 //     cr.orderRescanLast) and a staged replacement dispatcher are held under
 //     setMu, because a config reload on the controller goroutine writes them.
@@ -291,8 +294,9 @@ func (cr *CityRuntime) dispatchOrdersLocked(ctx context.Context, cityRoot string
 		return
 	}
 	// A suspended city gets no order pass at all: dispatch already skips it,
-	// and the tracking and mail watchdogs below would read every scope's
-	// store, restarting the proxies suspension retired.
+	// and the stale-close and mail watchdogs below would read every scope's
+	// store, restarting the proxies suspension retired. The retention lane
+	// applies the same predicate on its own goroutine.
 	if effectiveCitySuspended(cfg, loadSuspensionStateBestEffort(cr.cityPath)) {
 		return
 	}
@@ -307,7 +311,6 @@ func (cr *CityRuntime) dispatchOrdersLocked(ctx context.Context, cityRoot string
 	// against the outgoing dispatcher.
 	cr.installPendingOrderDispatcherLocked(ctx)
 	cr.runOrderTrackingSweepWatchdog(cfg, now)
-	cr.runOrderTrackingRetentionWatchdog(cfg, now)
 	cr.runNudgeMailSweepWatchdog(cfg, now)
 	if cr.od != nil {
 		cr.od.dispatch(ctx, cityRoot, now)
