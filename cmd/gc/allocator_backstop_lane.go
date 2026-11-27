@@ -884,13 +884,16 @@ func runBackstopDemandRepairs(ctx context.Context, env externalReadsEnv, stderr 
 	assigned, assignedStores, assignedRefs, _, _ := collectAssignedWorkBeadsWithStores(env.CityPath, cfg, env.CityStore, env.RigStores, env.SuspendedRigPaths, env.Sessions, newReadyDemandCache())
 	repairPoolSlotWorkDirClobber(cfg, assigned, assignedStores, stderr)
 	stampRunSessionIdentity(cfg, assigned, assignedStores, env.Sessions, stderr)
-	canonicalizeLegacyBoundAssignedWork(cfg, assigned, assignedStores, assignedRefs, env.Sessions, stderr).log(stderr, "canonicalizeLegacyBoundAssignedWork")
+	// env.CityStore is the sessions store the pass leads with, so only this
+	// city's own session records vouch for a re-home (legacyRehomeProvenance).
+	rehomeProvenance := newLegacyRehomeProvenance(env.CityStore)
+	canonicalizeLegacyBoundAssignedWork(cfg, assigned, assignedStores, assignedRefs, rehomeProvenance, env.Sessions, stderr).log(stderr, "canonicalizeLegacyBoundAssignedWork")
 	if ctx.Err() != nil {
 		return nil
 	}
 	routed, routedStores, routedRefs, _ := collectOpenUnassignedRoutedWork(env.CityPath, cfg, env.CityStore, env.RigStores, env.SuspendedRigPaths, stderr, nil, nil)
 	repairPoolSlotWorkDirClobber(cfg, routed, routedStores, stderr)
-	canonicalizeLegacyBoundUnassignedRoutedWork(cfg, routed, routedStores, routedRefs, stderr).log(stderr, "canonicalizeLegacyBoundUnassignedRoutedWork")
+	canonicalizeLegacyBoundUnassignedRoutedWork(cfg, routed, routedStores, routedRefs, rehomeProvenance, stderr).log(stderr, "canonicalizeLegacyBoundUnassignedRoutedWork")
 	collapseSlotSuffixedRoutedWork(cfg, routed, routedStores, stderr)
 	return repairControlDispatcherRoutesForStoreScope(env.CityPath, cfg, routed, routedStores, routedRefs, stderr)
 }

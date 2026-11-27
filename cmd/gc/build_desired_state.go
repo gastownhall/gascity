@@ -710,7 +710,11 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 		// configured canonical identity, so the canonical session the awake/scale
 		// accounting wakes for it can actually surface and claim it (the
 		// agent-side work_query/claim path matches identities by raw string).
-		canonicalizeLegacyBoundAssignedWork(cfg, assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, sessionBeads, stderr).log(stderr, "canonicalizeLegacyBoundAssignedWork")
+		// Both re-home arms share one provenance memo (legacyRehomeProvenance):
+		// session records read from store, the city's own session store this
+		// pass leads with, and molecule roots read from each row's own leg.
+		rehomeProvenance := newLegacyRehomeProvenance(store)
+		canonicalizeLegacyBoundAssignedWork(cfg, assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, rehomeProvenance, sessionBeads, stderr).log(stderr, "canonicalizeLegacyBoundAssignedWork")
 		// The demand pass's own writes over the assigned snapshot, between the
 		// collect_assigned_work and collect_unassigned_routed records.
 		recordDemandSubPhase(trace, "demand_snapshot.assigned_repairs", repairsStart, map[string]any{
@@ -738,7 +742,7 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 		repairsStart = trace.demandNow()
 		repairPoolSlotWorkDirClobber(cfg, unassignedRoutedBeads, unassignedRoutedStores, stderr)
 		repairDone = trace.demandNow()
-		canonicalizeLegacyBoundUnassignedRoutedWork(cfg, unassignedRoutedBeads, unassignedRoutedStores, unassignedRoutedStoreRefs, stderr).log(stderr, "canonicalizeLegacyBoundUnassignedRoutedWork")
+		canonicalizeLegacyBoundUnassignedRoutedWork(cfg, unassignedRoutedBeads, unassignedRoutedStores, unassignedRoutedStoreRefs, rehomeProvenance, stderr).log(stderr, "canonicalizeLegacyBoundUnassignedRoutedWork")
 		canonicalizeDone := trace.demandNow()
 		// Same pass, same reason, different legacy form: a route stamped at a
 		// live slot ("<base>-N") is a load-balancing HINT that every raw reader
@@ -6615,16 +6619,19 @@ func stampRunRootFromStep(cfg *config.City, store beads.Store, step beads.Bead, 
 //
 // workRefs names each row's leg, index-aligned with workBeads and workStores
 // (a length mismatch writes nothing). A rig leg may be shared with other cities
-// attached to the same store, so there each field's rewrite must pass
-// legacyRehomeAllowed: only a strip of a binding this city mints on that rig is
-// made, and a row with any refused field is not written at all. The returned
+// attached to the same store, so there each field's rewrite must pass the
+// shared-leg guard (legacyRehomeGuard): a strip of a binding this city mints on
+// that rig, or a rewrite of an identity this city's own session records show
+// it running at or after the row's work began, its own creation or its
+// molecule root's (provenance, the pass's session-record test; nil proves
+// nothing). A row with any refused field is not written at all. The returned
 // report lists the rows rewritten and refused.
 //
 // Idempotent by design: it writes only when the canonical identity differs from
 // what is already on the bead, so steady-state reconciles perform no writes. A
 // write failure is logged and skipped — recovery is best-effort and must never
 // block reconciliation.
-func canonicalizeLegacyBoundAssignedWork(cfg *config.City, workBeads []beads.Bead, workStores []beads.Store, workRefs []string, sessionBeads *sessionBeadSnapshot, stderr io.Writer) legacyRehomeReport {
+func canonicalizeLegacyBoundAssignedWork(cfg *config.City, workBeads []beads.Bead, workStores []beads.Store, workRefs []string, provenance *legacyRehomeProvenance, sessionBeads *sessionBeadSnapshot, stderr io.Writer) legacyRehomeReport {
 	var report legacyRehomeReport
 	if cfg == nil || len(workBeads) != len(workStores) || len(workBeads) != len(workRefs) {
 		return report
@@ -6636,6 +6643,7 @@ func canonicalizeLegacyBoundAssignedWork(cfg *config.City, workBeads []beads.Bea
 		return report
 	}
 	sessionByAssignee := buildSessionAssigneeIndex(sessionBeads)
+	guard := legacyRehomeGuard{cfg: cfg, provenance: provenance}
 	for i, wb := range workBeads {
 		if wb.Status != "in_progress" && wb.Status != "open" {
 			continue
@@ -6664,11 +6672,10 @@ func canonicalizeLegacyBoundAssignedWork(cfg *config.City, workBeads []beads.Bea
 		}
 		// Each field is guarded on its own; a row with any refused field is not
 		// written at all, so it is never left half-migrated.
-		own := legacyRehomeLegIsOwn(workRefs[i])
 		var changes, refused []legacyRehomeChange
 		opts := beads.UpdateOpts{}
 		if assigneeChanged {
-			if legacyRehomeAllowed(cfg, own, assigneeChange.From, assigneeAgent) {
+			if guard.permits(workRefs[i], store, wb, assigneeChange.From, assigneeAgent) {
 				changes = append(changes, assigneeChange)
 				opts.Assignee = &assigneeChange.To
 			} else {
@@ -6676,7 +6683,7 @@ func canonicalizeLegacyBoundAssignedWork(cfg *config.City, workBeads []beads.Bea
 			}
 		}
 		if routedChanged {
-			if legacyRehomeAllowed(cfg, own, routedChange.From, routedAgent) {
+			if guard.permits(workRefs[i], store, wb, routedChange.From, routedAgent) {
 				changes = append(changes, routedChange)
 				opts.Metadata = map[string]string{beadmeta.RoutedToMetadataKey: routedChange.To}
 			} else {
@@ -6695,6 +6702,7 @@ func canonicalizeLegacyBoundAssignedWork(cfg *config.City, workBeads []beads.Bea
 		}
 		report.Rehomed = append(report.Rehomed, legacyRehomeRow{ID: wb.ID, Leg: workRefs[i], Changes: changes})
 	}
+	report.LookupErr = provenance.takeLookupErr()
 	return report
 }
 
@@ -6727,14 +6735,18 @@ func canonicalizeLegacyBoundAssignedWork(cfg *config.City, workBeads []beads.Bea
 //
 // workRefs names each row's leg, index-aligned with workBeads and workStores
 // (a length mismatch writes nothing). On a rig leg, which other cities attached
-// to the same store also read, a rewrite must pass legacyRehomeAllowed: only a
-// strip of a binding this city mints on that rig is made. The returned report
-// lists the rows rewritten and refused.
-func canonicalizeLegacyBoundUnassignedRoutedWork(cfg *config.City, workBeads []beads.Bead, workStores []beads.Store, workRefs []string, stderr io.Writer) legacyRehomeReport {
+// to the same store also read, a rewrite must pass the shared-leg guard
+// (legacyRehomeGuard): a strip of a binding this city mints on that rig, or a
+// rewrite of an identity this city's own session records show it running at
+// or after the row's work began, its own creation or its molecule root's
+// (provenance, the pass's session-record test; nil proves nothing). The
+// returned report lists the rows rewritten and refused.
+func canonicalizeLegacyBoundUnassignedRoutedWork(cfg *config.City, workBeads []beads.Bead, workStores []beads.Store, workRefs []string, provenance *legacyRehomeProvenance, stderr io.Writer) legacyRehomeReport {
 	var report legacyRehomeReport
 	if cfg == nil || len(workBeads) != len(workStores) || len(workBeads) != len(workRefs) {
 		return report
 	}
+	guard := legacyRehomeGuard{cfg: cfg, provenance: provenance}
 	for i, wb := range workBeads {
 		if wb.Status != "open" || strings.TrimSpace(wb.Assignee) != "" {
 			continue
@@ -6758,7 +6770,7 @@ func canonicalizeLegacyBoundUnassignedRoutedWork(cfg *config.City, workBeads []b
 			continue
 		}
 		row := legacyRehomeRow{ID: wb.ID, Leg: workRefs[i], Changes: []legacyRehomeChange{change}}
-		if !legacyRehomeAllowed(cfg, legacyRehomeLegIsOwn(workRefs[i]), change.From, agent) {
+		if !guard.permits(workRefs[i], store, wb, change.From, agent) {
 			report.Refused = append(report.Refused, row)
 			continue
 		}
@@ -6771,6 +6783,7 @@ func canonicalizeLegacyBoundUnassignedRoutedWork(cfg *config.City, workBeads []b
 		}
 		report.Rehomed = append(report.Rehomed, row)
 	}
+	report.LookupErr = provenance.takeLookupErr()
 	return report
 }
 

@@ -250,6 +250,14 @@ func filterAssignedWorkBeadsForPoolDemandAt(
 		if beads.IsDeferred(wb, now) {
 			continue
 		}
+		// Work assigned under a legacy spelling that no live session here
+		// answers to is not demand while this city cannot prove it may re-home
+		// it on the row's leg (legacyRehomeUnproven): the canonical session
+		// woken for it could not claim it.
+		if assignee := strings.TrimSpace(wb.Assignee); assignee != "" && i < len(assignedWorkStoreRefs) &&
+			assigneeToSessionBeadID[assignee] == "" && legacyRehomeUnproven(cfg, assignedWorkStoreRefs[i], assignee) {
+			continue
+		}
 		template := routedToOrLegacyWorkflowTarget(wb)
 		if template == "" {
 			if sessionBeadID := assigneeToSessionBeadID[strings.TrimSpace(wb.Assignee)]; sessionBeadID != "" {

@@ -73,6 +73,7 @@ func (c *v2DemandMigrationsCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 	if logged := strings.TrimSpace(log.String()); logged != "" {
 		s.problems = append(s.problems, strings.Split(logged, "\n")...)
 	}
+	details = append(details, s.refusals...)
 	details = append(details, s.problems...)
 	msg := fmt.Sprintf("%d row(s) need a legacy demand migration repair: %s", total, strings.Join(parts, " "))
 	if len(s.problems) > 0 {
@@ -104,8 +105,31 @@ type demandMigrationKey struct{ repair, leg string }
 type demandMigrationSweep struct {
 	counts   map[demandMigrationKey]int
 	problems []string
+	// refusals are the re-home repairs' refusal summaries, one line per
+	// repair that refused a row: information for the operator, never a count
+	// or a problem.
+	refusals []string
 	// assigned is the assigned work the repairs were run over.
 	assigned []beads.Bead
+}
+
+// noteRehomeReport records what a re-home repair reported. --fix logs it as
+// the tick does. A dry run cannot log it, because its buffered output is
+// reported as read problems and a refused row is not a problem: it keeps each
+// refusal summary as information instead (a refused row issues no write, so
+// it is never counted as a repair), and a provenance lookup error as the read
+// problem it is, since the counts are then a lower bound.
+func (s *demandMigrationSweep) noteRehomeReport(fix bool, repair string, report legacyRehomeReport, stderr io.Writer) {
+	if fix {
+		report.log(stderr, repair)
+		return
+	}
+	if summary := report.refusalSummary(); summary != "" {
+		s.refusals = append(s.refusals, repair+": "+summary)
+	}
+	if report.LookupErr != nil {
+		s.problems = append(s.problems, fmt.Sprintf("%s: provenance lookup: %v", repair, report.LookupErr))
+	}
 }
 
 // sweep runs legacy's demand-pass migration repairs over the city's work legs
@@ -147,7 +171,7 @@ func (c *v2DemandMigrationsCheck) sweep(fix bool, stderr io.Writer) demandMigrat
 		out := make([]beads.Store, len(stores))
 		for i, store := range stores {
 			if store != nil {
-				out[i] = recordingWriteStore{counts: s.counts, key: demandMigrationKey{repair, demandMigrationLeg(refs[i])}}
+				out[i] = recordingWriteStore{reads: store, counts: s.counts, key: demandMigrationKey{repair, demandMigrationLeg(refs[i])}}
 			}
 		}
 		return out
@@ -162,23 +186,20 @@ func (c *v2DemandMigrationsCheck) sweep(fix bool, stderr io.Writer) demandMigrat
 		s.problems = append(s.problems, "assigned collection partial")
 	}
 	repairPoolSlotWorkDirClobber(c.cfg, assigned, writes(demandMigrationRepairs[0], assignedStores, assignedRefs), stderr)
-	assignedReport := canonicalizeLegacyBoundAssignedWork(c.cfg, assigned, writes(demandMigrationRepairs[1], assignedStores, assignedRefs), assignedRefs, sessions, stderr)
-	// Only --fix logs the re-home report: a dry run's buffered output is
-	// reported as read problems, and a refused row is not a problem. Refused
-	// rows issue no write, so they are never counted as repairs either.
-	if fix {
-		assignedReport.log(stderr, demandMigrationRepairs[1])
-	}
+	// Both re-home repairs share one provenance memo over the city's own
+	// session store and the rows' molecule roots (legacyRehomeProvenance); its
+	// lookups are reads, so a dry run makes them too.
+	rehomeProvenance := newLegacyRehomeProvenance(sessionsStore)
+	assignedReport := canonicalizeLegacyBoundAssignedWork(c.cfg, assigned, writes(demandMigrationRepairs[1], assignedStores, assignedRefs), assignedRefs, rehomeProvenance, sessions, stderr)
+	s.noteRehomeReport(fix, demandMigrationRepairs[1], assignedReport, stderr)
 
 	routed, routedStores, routedRefs, routedPartial := collectOpenUnassignedRoutedWork(c.cityPath, c.cfg, city, rigs, suspended, stderr, nil, nil)
 	if routedPartial {
 		s.problems = append(s.problems, "unassigned routed collection partial")
 	}
 	repairPoolSlotWorkDirClobber(c.cfg, routed, writes(demandMigrationRepairs[0], routedStores, routedRefs), stderr)
-	routedReport := canonicalizeLegacyBoundUnassignedRoutedWork(c.cfg, routed, writes(demandMigrationRepairs[2], routedStores, routedRefs), routedRefs, stderr)
-	if fix {
-		routedReport.log(stderr, demandMigrationRepairs[2])
-	}
+	routedReport := canonicalizeLegacyBoundUnassignedRoutedWork(c.cfg, routed, writes(demandMigrationRepairs[2], routedStores, routedRefs), routedRefs, rehomeProvenance, stderr)
+	s.noteRehomeReport(fix, demandMigrationRepairs[2], routedReport, stderr)
 	collapseSlotSuffixedRoutedWork(c.cfg, routed, writes(demandMigrationRepairs[3], routedStores, routedRefs), stderr)
 	return s
 }
@@ -197,14 +218,23 @@ func demandMigrationLeg(ref string) string {
 }
 
 // recordingWriteStore stands in for a leg's store in a dry run. It counts the
-// two writes the repairs make and has nothing behind it: any other call, read
-// or write, panics on the nil embedded Store, which the doctor runner reports
-// as a failed check. So a repair that grows a new write fails the dry run
-// instead of reaching a real store.
+// two writes the repairs make, and serves the one read a repair makes through
+// its store, Get, from the leg's real store (reads): the re-home guard dates a
+// molecule's row by its root (legacyRehomeProvenance), and a read changes
+// nothing, so a dry run makes it as --fix does. It has nothing else behind
+// it: any other call, read or write, panics on the nil embedded Store, which
+// the doctor runner reports as a failed check. So a repair that grows a new
+// write fails the dry run instead of reaching a real store.
 type recordingWriteStore struct {
 	beads.Store // always nil
+	reads       beads.StoreReader
 	counts      map[demandMigrationKey]int
 	key         demandMigrationKey
+}
+
+// Get reads id from the leg's real store.
+func (s recordingWriteStore) Get(id string) (beads.Bead, error) {
+	return s.reads.Get(id)
 }
 
 func (s recordingWriteStore) Update(string, beads.UpdateOpts) error {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
@@ -125,6 +126,82 @@ func RecordAnsweringTo(store beads.SessionStore, identity string) (string, error
 // no whitespace, and a leading "-" would read as a flag to a CLI-backed store.
 func couldBeBeadID(identity string) bool {
 	return !strings.HasPrefix(identity, "-") && !strings.ContainsAny(identity, " \t\r\n")
+}
+
+// TemplateTenure is what one store's session records of a template show about
+// when the store's city ran that template. Until is the latest creation of a
+// record of the template, open or closed. A record carries the template it was
+// created from, and a new record carries its agent's identity (`gc session
+// new` stamps the resolved agent's qualified name), so the city ran that
+// template when the record was created. No later write to the record moves
+// Until, because a session record outlives a change of its agent's identity:
+// a city keeps a record created under the old identity as a seat of the
+// renamed agent, which pool reuse prefers and min_active_sessions revives, and
+// every later write to it, its wakes, sleeps and close included, comes from
+// running the new identity under the old template. Nor does a write to a
+// record after its close (the usage lane's settle, a released name claim).
+// Until is zero when no record carries a creation time; the zero value is no
+// record.
+type TemplateTenure struct {
+	Until time.Time
+}
+
+// Covers reports whether the tenure's city ran the template at or after a row
+// was created at created: created is known and no later than Until. A row
+// whose creation time is unknown (zero) is never covered, since nothing dates
+// it, and neither is any row when no record dates the tenure.
+func (t TemplateTenure) Covers(created time.Time) bool {
+	return !t.Until.IsZero() && !created.IsZero() && !created.After(t.Until)
+}
+
+// extend adds one session record of the template to the tenure, dated by its
+// creation whether it is open or closed (see TemplateTenure).
+func (t *TemplateTenure) extend(record beads.Bead) {
+	if record.CreatedAt.After(t.Until) {
+		t.Until = record.CreatedAt
+	}
+}
+
+// TemplateTenureIn returns the tenure of template in store, from every session
+// bead in store, open or closed, created from template: its recorded template
+// is exactly template. Each record dates the tenure by its creation, never by
+// a later write or its close (see TemplateTenure). It is the provenance query
+// for a template identity, as HasRecordAnsweringTo is for a session's own
+// identities: it selects no session, writes nothing (an empty-type session
+// bead counts without being repaired), and issues one Live, closed-inclusive
+// exact-metadata listing, whose cost is the backend's (on bd/Dolt a scan of
+// the store, see HasRecordAnsweringTo).
+//
+// store is read as handed, so pass the city's own session store (a
+// SessionStore, or the store a pass leads with), never a store other cities
+// share; a nil store holds no record. A hard listing error returns the zero
+// tenure with the error: the answer is unknown. The rows a partial result
+// returns still count, so the tenure that comes back with a partial-result
+// error is what those rows show: a record the result left out could only
+// lengthen it.
+func TemplateTenureIn(store beads.StoreReader, template string) (TemplateTenure, error) {
+	var tenure TemplateTenure
+	template = strings.TrimSpace(template)
+	if store == nil || template == "" {
+		return tenure, nil
+	}
+	rows, err := store.List(beads.ListQuery{
+		Metadata:      map[string]string{"template": template},
+		IncludeClosed: true,
+		Live:          true,
+	})
+	if err != nil {
+		err = fmt.Errorf("listing session beads by template: %w", err)
+		if !beads.IsPartialResult(err) {
+			return tenure, err
+		}
+	}
+	for _, b := range rows {
+		if IsSessionBeadOrRepairable(b) && strings.TrimSpace(infoFromPersistedBead(b).Template) == template {
+			tenure.extend(b)
+		}
+	}
+	return tenure, err
 }
 
 // recordAnsweringTo is the listing loop behind HasRecordAnsweringTo and
