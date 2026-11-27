@@ -3419,16 +3419,15 @@ func sessionBeadClaimsLiveRuntime(info session.Info) bool {
 // and counts as a match, the same way the reconciler's other token fences
 // treat an empty runtime token.
 func deadRuntimeBelongsToRow(info session.Info, name string, sp runtime.Provider, deadChecker runtime.DeadRuntimeSessionChecker, stderr io.Writer) bool {
-	rowToken := strings.TrimSpace(info.InstanceToken)
-	if rowToken == "" {
+	if strings.TrimSpace(info.InstanceToken) == "" {
 		return true
 	}
-	runtimeToken, err := sp.GetMeta(name, "GC_INSTANCE_TOKEN")
+	foreign, err := runtimeOfAnotherIncarnation(info, name, sp)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: reading instance token of dead runtime session %s: %v\n", name, err) //nolint:errcheck
 		return false
 	}
-	if runtimeToken = strings.TrimSpace(runtimeToken); runtimeToken != "" && runtimeToken != rowToken {
+	if foreign {
 		fmt.Fprintf(stderr, "session reconciler: dead runtime session %s belongs to another incarnation than session bead %s; leaving it to the in-flight start\n", name, info.ID) //nolint:errcheck
 		return false
 	}
@@ -3438,6 +3437,23 @@ func deadRuntimeBelongsToRow(info session.Info, name string, sp runtime.Provider
 		return false
 	}
 	return dead
+}
+
+// runtimeOfAnotherIncarnation reports whether runtime name carries a
+// GC_INSTANCE_TOKEN other than the one info's row records: the runtime was
+// started for another incarnation. A row or runtime without a token is not
+// foreign; the token is read only when the row records one.
+func runtimeOfAnotherIncarnation(info session.Info, name string, sp runtime.Provider) (bool, error) {
+	rowToken := strings.TrimSpace(info.InstanceToken)
+	if rowToken == "" {
+		return false, nil
+	}
+	runtimeToken, err := sp.GetMeta(name, "GC_INSTANCE_TOKEN")
+	if err != nil {
+		return false, err
+	}
+	runtimeToken = strings.TrimSpace(runtimeToken)
+	return runtimeToken != "" && runtimeToken != rowToken, nil
 }
 
 // cleanupDeadRuntimeSessionCorpses stops visible runtimes whose panes are all

@@ -80,6 +80,7 @@ type drainTracker struct {
 	idleProbes       map[string]*idleProbeState      // session bead ID -> async idle probe
 	resetStalls      map[string]bool                 // session bead ID -> reset stall event emitted
 	zombieCrashes    map[string]bool                 // session bead ID -> zombie-process session.crashed event emitted
+	corpseCrashes    map[string]string               // session bead ID -> dead-object key whose dead-pane session.crashed was decided
 	suspendDeferrals map[string]int                  // session bead ID -> consecutive ticks a named session has been suspend-drain-eligible with its spec absent (#3630)
 	liveClaimVetoes  map[string]string               // session bead ID -> claimed work bead ID whose live claim last vetoed a demand-class drain (log-once dedupe)
 	drainSkips       map[drainSkipKey]*drainSkipMark // session bead ID + condition kind -> last printed line (log-on-transition dedupe; session_drain_skip_log.go)
@@ -92,6 +93,7 @@ func newDrainTracker() *drainTracker {
 		idleProbes:       make(map[string]*idleProbeState),
 		resetStalls:      make(map[string]bool),
 		zombieCrashes:    make(map[string]bool),
+		corpseCrashes:    make(map[string]string),
 		suspendDeferrals: make(map[string]int),
 		liveClaimVetoes:  make(map[string]string),
 	}
@@ -311,6 +313,38 @@ func (dt *drainTracker) clearZombieCrash(beadID string) {
 	dt.mu.Lock()
 	defer dt.mu.Unlock()
 	delete(dt.zombieCrashes, beadID)
+}
+
+// markCorpseCrash reports whether deadObject is a dead runtime object of
+// beadID not yet decided, and marks it decided: one dead-pane
+// session.crashed per death, however many ticks observe the same corpse. A
+// later object dying is a new key. A nil tracker marks nothing and answers
+// true.
+func (dt *drainTracker) markCorpseCrash(beadID, deadObject string) bool {
+	if dt == nil || strings.TrimSpace(beadID) == "" {
+		return true
+	}
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	if dt.corpseCrashes[beadID] == deadObject {
+		return false
+	}
+	if dt.corpseCrashes == nil {
+		dt.corpseCrashes = make(map[string]string)
+	}
+	dt.corpseCrashes[beadID] = deadObject
+	return true
+}
+
+// clearCorpseCrash forgets beadID's decided dead object once the row is
+// observed alive again.
+func (dt *drainTracker) clearCorpseCrash(beadID string) {
+	if dt == nil || strings.TrimSpace(beadID) == "" {
+		return
+	}
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	delete(dt.corpseCrashes, beadID)
 }
 
 // Reconciler tuning defaults.

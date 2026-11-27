@@ -112,7 +112,7 @@ func zombieStep(v txView, peek deadPeek, peekErr error) txStep {
 		step.Write, step.Class = screen.patch, screen.class
 	}
 	if v.RT.Class != rtZombie || runtime.ContainsProviderRateLimitScreen(peek.content) && screen.patch["sleep_reason"] != string(session.SleepReasonProviderTerminalError) {
-		return step // legacy records a crash for a zombie alone, and never a rate-limit screen's
+		return step // legacy records a zombie's crash here, never a rate-limit screen's; its dead-pane crash of a named corpse is not mirrored yet (parity finding dead-pane-crash)
 	}
 	res, _ := v.World.Templates.lookup(v.Row)
 	// A row whose template the pass no longer resolves (an orphaned named
