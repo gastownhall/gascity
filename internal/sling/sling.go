@@ -27,7 +27,6 @@ import (
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
-	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
@@ -97,9 +96,14 @@ type AgentResolver interface {
 	ResolveAgent(cfg *config.City, name, rigContext string) (config.Agent, bool)
 }
 
-// BranchResolver resolves the default branch for a directory.
+// BranchResolver resolves the default branch for a directory and checks the
+// refs a sling hands to a formula as base_branch.
 type BranchResolver interface {
 	DefaultBranch(dir string) string
+	// BaseRefMissing reports true only when dir is a git repository in which
+	// ref resolves to no commit. Anything it cannot decide (dir is not a
+	// repository, git is unavailable) reports false.
+	BaseRefMissing(dir, ref string) bool
 }
 
 // Notifier sends wake notifications to the controller and control
@@ -241,6 +245,10 @@ type SlingResult struct {
 	FormulaName string // formula used (for display)
 	Idempotent  bool   // true if bead was already routed (skipped)
 	DryRun      bool   // true if this was a dry-run (no mutations)
+
+	// routeOnly makes DoSling take the plain-bead route (see
+	// BeadCheckResult.RouteOnly).
+	routeOnly bool
 
 	// Structured warnings (callers decide how to display).
 	AgentSuspended bool     // target agent is suspended
@@ -556,9 +564,15 @@ func SlingDirForBead(cfg *config.City, cityPath, beadID string) string {
 }
 
 // BuildSlingCommand replaces {} in the sling query template with the bead ID.
-// The bead ID is shell-quoted to prevent command injection.
+// The bead ID is quoted as one literal argument of the interpreter the command
+// runs under (runtime.ShellQuote) to prevent command injection: POSIX quoting
+// does not protect a command PowerShell runs. That quoting protects only the
+// interpreter: on Windows, when the sling program is a batch file, cmd.exe
+// reads the ID again and runs or expands what it holds whatever the quoting,
+// so a caller that runs the result first checks the ID with
+// CheckSlingQueryBeadID.
 func BuildSlingCommand(template, beadID string) string {
-	return strings.ReplaceAll(template, "{}", shellquote.Quote(beadID))
+	return strings.ReplaceAll(template, "{}", runtime.ShellQuote(beadID))
 }
 
 // BuildSlingCommandForAgent expands any PathContext placeholders in a custom
@@ -803,14 +817,23 @@ type CrossRigError struct {
 	BeadPrefix string
 	Target     string
 	RigPrefix  string
+	// ForceRefused reports that --force would not route the bead either:
+	// the target cannot read the store the bead lives in, so the cross-store
+	// check refuses the forced sling. The message then leaves --force out of
+	// its remedies.
+	ForceRefused bool
 }
 
 // Error returns the cross-rig routing diagnostic.
 func (e *CrossRigError) Error() string {
+	remedy := "Re-file the bead in that rig, pick a city-scope target, or pass --force to override."
+	if e.ForceRefused {
+		remedy = "Re-file the bead in that rig or pick a city-scope target; --force does not " +
+			"override this one, because the target cannot read the bead's store."
+	}
 	return fmt.Sprintf("gc sling: refusing cross-rig route: bead %s (prefix %q) "+
-		"does not belong to %s (rig prefix %q); nothing was routed. Re-file the "+
-		"bead in that rig, pick a city-scope target, or pass --force to override.",
-		e.BeadID, e.BeadPrefix, e.Target, e.RigPrefix)
+		"does not belong to %s (rig prefix %q); nothing was routed. %s",
+		e.BeadID, e.BeadPrefix, e.Target, e.RigPrefix, remedy)
 }
 
 // CrossRigRouteError returns a typed cross-rig error when routing is unsafe.
@@ -1107,6 +1130,28 @@ func SlingFormulaUsesBaseBranch(formulaName string) bool {
 // uses a target_branch variable.
 func SlingFormulaUsesTargetBranch(formulaName string) bool {
 	return formulaName == "mol-refinery-patrol"
+}
+
+// checkSlingBaseBranch refuses a formula sling whose base_branch names no ref
+// in the repository the work will be built in. The molecule's workspace step
+// would otherwise fail on it after the bead was already routed and its
+// molecule created. The check reads local refs only (no fetch) and passes
+// whenever the resolver cannot decide, so it refuses only on proof.
+func checkSlingBaseBranch(formulaName, beadID string, opts SlingOpts, deps SlingDeps, a config.Agent) error {
+	if deps.Branches == nil {
+		return nil
+	}
+	ref := BuildSlingFormulaVars(formulaName, beadID, opts.Vars, a, deps)["base_branch"]
+	if ref == "" {
+		return nil
+	}
+	repoDir := SlingFormulaRepoDir(beadID, deps, a)
+	if deps.Branches.BaseRefMissing(repoDir, ref) {
+		// Name the repository by its base name only: the API echoes this error
+		// to clients, and an absolute path is host detail they should not see.
+		return fmt.Errorf("base_branch %q resolves to no ref (neither origin/%s nor %s) in the build repository %q; fetch it or correct base_branch, do not retry unchanged", ref, ref, ref, filepath.Base(repoDir))
+	}
+	return nil
 }
 
 // SlingFormulaRepoDir returns the best repo directory for formula variable
@@ -1803,7 +1848,11 @@ func PromoteWorkflowLaunchBead(store beads.GraphStore, beadID string) error {
 // BeadCheckResult holds the result of pre-flight bead state checks.
 type BeadCheckResult struct {
 	Idempotent bool
-	Warnings   []string
+	// RouteOnly is set when the target already claims the bead but
+	// gc.routed_to names another target: the sling re-stamps the route and
+	// must not attach a formula onto the claimed work.
+	RouteOnly bool
+	Warnings  []string
 	// Status is the bead status the check read, empty when the bead could not
 	// be read. It is reported alongside the routing verdict, not folded into
 	// it: DoSlingBatch skips a child it listed as open whose status here is no

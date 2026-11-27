@@ -90,6 +90,14 @@ when the context ends. Take the bound from the caller's own context.
   `CurrentTurn`'s failure direction, an idle reading it did not get leaving
   the turn open.
 
+The worker operation event names its session from the persisted record only
+(`sessionRecordPersisted`), never `sessionRecordViaManager`: the live overlay
+(`Manager.EnrichInfo`) makes provider calls that cannot be canceled, and the
+event is named before and after every operation, so a wedged provider would hold
+a kill on the reconciler tick or a start on its async slot before the operation
+ran (`SESSION-RUNTIME-034`). Do not add a provider call to
+`populateOperationEventIdentity`.
+
 ## Turn sources
 
 A session's turns come from the routed runtime's protocol, else from the
@@ -99,7 +107,16 @@ runs the agent on this host (`runtime.LocalTranscriptProvider`), the session
 has a work directory, and the family has an exact by-key transcript lookup
 (`session.HasKeyedTranscriptLookup`). The read resolves only the file the
 session key finds and that records that conversation, never the work-directory
-fallback `Manager.TranscriptPath` serves for history. A session without a key
+fallback `Manager.TranscriptPath` serves for history. The key is looked up
+under the transcript search roots first; where they find none, among the files
+the session's own agent process holds open (`runtime.HeldFileProvider`, via
+`session.Manager.RuntimeHeldFiles`; only regular files the current user owns,
+and a process in the tree whose open files that user may not read, such as a
+root-owned sandbox wrapper above the agent or a zombie, is skipped), each tried
+by the family's own keyed lookup rooted at the file's ancestors
+(`session.ResolveHeldTranscriptPath`), so a provider home outside the search
+roots still has turns. A held-file read that fails is
+`runtime.ErrRuntimeUnavailable`, never a gone session. A session without a key
 yet, or whose transcript is not written yet, reads as
 `runtime.ErrRuntimeUnavailable`, not as a different capability.
 `TurnCapabilities.Replace` is internal/session's answer
@@ -119,11 +136,12 @@ watch read, protocol or transcript and whatever woke it, reloads the session
 first, so a session whose row closes reads as not found from the next read on,
 even while its runtime still answers or its transcript is still written. A
 read's session reload and runtime probes (the protocol history, the idle
-snapshot) run within `turnWatchReadBound` and through `ObserveShared`, so a
-stalled store or runtime probe reads as unavailable and never holds a watch
-past its context. A transcript read's file I/O (resolving the transcript,
-`os.Stat`, the follower's read) takes no context: a hung filesystem holds a
-transcript watch, and its close on cancel, until that I/O returns.
+snapshot, the held-file read) run within `turnWatchReadBound` and through
+`ObserveShared`, so a stalled store or runtime probe reads as unavailable and
+never holds a watch past its context. A transcript read's file I/O (resolving
+the transcript, `os.Stat`, the follower's read) takes no context: a hung
+filesystem holds a transcript watch, and its close on cancel, until that I/O
+returns.
 
 The transcript tier is never `Lossless`: a read reports at most
 `sessionlog.MaxRecentTurns` ended turns from a bounded window, so turns that
@@ -160,6 +178,17 @@ receipt on a nudge. A lookup that cannot tell fails the request wrapping
 `runtime.ErrNudgeNotSent`, with nothing sent. A request without `Redelivery`
 looks nothing up.
 
+The key also tells the queue's own delivery of a session's startup turn
+apart. A `RuntimeHandle` built for a session row
+(`Factory.SessionRuntimeHandle`: cmd/gc's nudge targets and the
+conversation lane's runtime handle) holds every nudge to the running
+session behind a startup turn the session's queue still holds, pending or
+in flight (`RuntimeHandleConfig.StartupTurnHolds`, reading
+`session.Manager.StartupTurnQueued`), as the session manager's own sends
+do: the nudge is undelivered and types nothing. Only a nudge under the key
+of the batch the claim pinned the turn to, the queue's delivery of that
+turn, passes it. The rule lives in `internal/session`; the handle only asks.
+
 ## Codex activity
 
 Codex activity comes from matching native turn lifecycle events, not assistant
@@ -190,6 +219,31 @@ hook must not make an unchanged transcript appear to be a different stream.
 The one exception is a provider with a session-id flag whose start the Manager
 launched without its key: its identity takes the key once one is written,
 normally by the provider's hook.
+
+## Fresh-cycle kill guard
+
+The legacy reconciler cycles a live `wake_mode=fresh` session whose assigned
+bead changed (`cycleAliveSessionForFreshReassign`, `cmd/gc/session_reconciler.go`)
+from a tick snapshot that can be minutes old, so the kill is gated on live
+reads first. Keep every gate before the kill or the stamp:
+
+- Q1: no in-progress claim still assigned to the session
+  (`sessionHasFreshInProgressClaim`). An unreadable store defers the cycle.
+- Q2: the anchor, read once and uncached (`freshAnchorBeadTerminal`), is not
+  closed and is still owned by the session. An unassigned anchor (a blank or
+  whitespace assignee included) or one assigned outside
+  `sessionAssignmentIdentifiersForConfigInfo`, which excludes pool-slot
+  aliases, `alias_history` and pool templates, was released or handed off, so
+  the session is not cycled onto it. Status and assignee come from that one
+  row: a second read, or the owner probe's row, can disagree with it.
+- Q3: the cycle is deferred while the previous bead is still open and owned by
+  the session, or when it closed before this incarnation started
+  (`awake_started_at` is after its `closed_at`, so the session is already
+  fresh). A previous bead handed to another owner, or closed since this
+  incarnation woke, does not defer it.
+
+A failed anchor read is "could not tell", and the cycle proceeds, since Q1
+already ruled out a claim a kill could cost. Do not turn that into a skip.
 
 ## Worker sites
 

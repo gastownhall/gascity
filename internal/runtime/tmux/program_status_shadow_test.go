@@ -62,7 +62,7 @@ func (e *shadowExecutor) execute(args []string) (string, error) {
 		}
 		e.reads++
 		e.order = append(e.order, "program-read")
-		return strings.Join([]string{dead, "agent", "%5", "1", tap, rec, "", runtimeInventoryEnd}, "\t"), nil
+		return strings.Join([]string{dead, "agent", "%5", "1", tap, rec, "", "", runtimeInventoryEnd}, "\t"), nil
 	case tmuxSubcommand(args) == "show-environment" && strings.HasPrefix(args[len(args)-1], "="):
 		return "GC_PROVIDER=claude\nGC_SESSION_ID=gc-7\nSECRET=x", nil
 	}

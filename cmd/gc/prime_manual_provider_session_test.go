@@ -15,9 +15,14 @@ import (
 )
 
 // workerPersonaMarker is the claim instruction every worker persona carries,
-// the core pool-worker prompt and the embedded fallback alike. It is what turns
-// a client's provider chat into a queue worker.
+// the core pack's graph-worker and pool-worker prompts and the embedded fallback
+// alike. It is what turns a client's provider chat into a queue worker.
 const workerPersonaMarker = "gc hook --claim"
+
+// graphWorkerHeading is the heading of the core graph-worker prompt, the
+// builtin worker prompt under the default formula_v2. "gc hook --claim" is in
+// both builtin prompts and cannot tell them apart.
+const graphWorkerHeading = "# Graph Worker"
 
 // implicitProviderCityTOML configures the claude provider without composing the
 // core pack, so the claude implicit agent's prompt is the embedded fallback.
@@ -147,8 +152,9 @@ func TestDoPrimeExplicit_ManualProviderSessionStillGetsWorkerPrompt(t *testing.T
 
 // coreComposedProviderCity loads a city that composes the core pack and
 // configures the claude and codex providers, so each provider's implicit agent
-// carries the core pool-worker prompt_template as in a real city, and returns
-// it with the build params the controller resolves session templates under.
+// starts its sessions with the core pack's builtin worker prompt as in a real
+// city, and returns it with the build params the controller resolves session
+// templates under.
 func coreComposedProviderCity(t *testing.T) (*config.City, *agentBuildParams) {
 	t.Helper()
 	cityDir := writePrimeCity(t, implicitProviderCityTOML+`
@@ -197,8 +203,8 @@ func TestResolveDiscoveredSessionTemplate_ClientProviderChatLaunchesWithoutWorke
 	for _, template := range []string{"claude", "codex"} {
 		t.Run(template, func(t *testing.T) {
 			agent := findAgentByTemplate(cfg, template)
-			if agent == nil || !agent.Implicit || !strings.HasSuffix(agent.PromptTemplate, "pool-worker.template.md") {
-				t.Fatalf("implicit %s agent = %+v, want the core pool-worker prompt_template", template, agent)
+			if agent == nil || !agent.Implicit || agent.PromptTemplate != "" {
+				t.Fatalf("implicit %s agent = %+v, want an implicit agent that carries no prompt_template", template, agent)
 			}
 
 			rows := map[string]session.Info{
@@ -216,6 +222,9 @@ func TestResolveDiscoveredSessionTemplate_ClientProviderChatLaunchesWithoutWorke
 				for channel, text := range channels {
 					if !strings.Contains(text, workerPersonaMarker) {
 						t.Errorf("%s: %s carries no worker persona, but this session is a worker\n%s: %q", name, channel, channel, text)
+					}
+					if !strings.Contains(text, graphWorkerHeading) {
+						t.Errorf("%s: %s does not carry the graph-worker prompt formula_v2 selects\n%s: %q", name, channel, channel, text)
 					}
 				}
 			}
@@ -302,8 +311,12 @@ func TestBuildDesiredState_ClientProviderChatResumedForRoutedWorkLaunchesWithout
 				},
 			}
 			for name, metadata := range workers {
-				if prompt := resumedForRoutedWorkPrompt(t, cfg, bp, template, metadata); !strings.Contains(prompt, workerPersonaMarker) {
+				prompt := resumedForRoutedWorkPrompt(t, cfg, bp, template, metadata)
+				if !strings.Contains(prompt, workerPersonaMarker) {
 					t.Errorf("%s: startup prompt carries no worker persona, but this session is a worker\nprompt: %q", name, prompt)
+				}
+				if !strings.Contains(prompt, graphWorkerHeading) {
+					t.Errorf("%s: startup prompt does not carry the graph-worker prompt formula_v2 selects\nprompt: %q", name, prompt)
 				}
 			}
 

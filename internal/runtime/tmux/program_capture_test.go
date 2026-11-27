@@ -288,6 +288,7 @@ func TestRespawnRearmsTapAndClearsRecordInOneList(t *testing.T) {
 			{"set-option", "-pu", "-t", "%5", programStatusOption},
 			{"set-option", "-pu", "-t", "%5", programTextOption},
 			{"set-option", "-pu", "-t", "%5", programHoldOption},
+			{"set-option", "-pu", "-t", "%5", programSettleOption},
 			{"pipe-pane", "-O", "-t", "%5", wantTapCommand(r, "claude-code")},
 		})...)
 		if !slices.Equal(got, want) {
@@ -371,6 +372,7 @@ func offDisarmLine(target string) string {
 		"'set-option' '-pu' '-t' '" + target + "' '@gc_ps' ; " +
 		"'set-option' '-pu' '-t' '" + target + "' '@gc_ps_text' ; " +
 		"'set-option' '-pu' '-t' '" + target + "' '@gc_ps_hold' ; " +
+		"'set-option' '-pu' '-t' '" + target + "' '@gc_ps_settle' ; " +
 		"'pipe-pane' '-t' '" + target + "'"
 }
 
@@ -554,6 +556,7 @@ func TestRelayDeclaredWithoutCompanionRelayStartsUnwrapped(t *testing.T) {
 				{"set-option", "-pu", "-t", "%2", programStatusOption},
 				{"set-option", "-pu", "-t", "%2", programTextOption},
 				{"set-option", "-pu", "-t", "%2", programHoldOption},
+				{"set-option", "-pu", "-t", "%2", programSettleOption},
 				{"pipe-pane", "-O", "-t", "%2", wantTapCommand(r, "claude-code")},
 			})...)
 			if !slices.Equal(respawn, wantRespawn) {
@@ -861,6 +864,7 @@ func TestUnarmedRespawnUnderLiveSwitchRemovesCapture(t *testing.T) {
 					{"set-option", "-pu", "-t", "%5", programStatusOption},
 					{"set-option", "-pu", "-t", "%5", programTextOption},
 					{"set-option", "-pu", "-t", "%5", programHoldOption},
+					{"set-option", "-pu", "-t", "%5", programSettleOption},
 					{"pipe-pane", "-t", "%5"},
 				})...)
 				if len(rec.calls) != 1 || !slices.Equal(rec.calls[0], want) {

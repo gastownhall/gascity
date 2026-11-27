@@ -423,18 +423,32 @@ func (p *Provider) InboxRecipients(recipients []string) ([]mail.Message, error) 
 	return p.filterMessagesForRecipients(recipients, false)
 }
 
+// getMessageBead loads the bead at id and enforces the message-type boundary
+// and removed-message visibility that every ID-addressed mail operation
+// (Get, Read, MarkRead, MarkUnread, Reply) must honor identically. Factored
+// out so that boundary can't drift between callers the way it did before:
+// Get checked b.Type != messageBeadType but Read/MarkRead/MarkUnread did not,
+// letting a task/session/other bead be loaded and mutated as mail.
+func (p *Provider) getMessageBead(operation, id string) (beads.Bead, error) {
+	b, err := p.store.Get(id)
+	if err != nil {
+		return beads.Bead{}, beadmailError(operation, err)
+	}
+	if b.Type != messageBeadType {
+		return beads.Bead{}, fmt.Errorf("beadmail %s: bead %s is type %q, not message", operation, id, b.Type)
+	}
+	if isRemovedMessageBead(b) {
+		return beads.Bead{}, beadmailError(operation, beads.ErrNotFound)
+	}
+	return b, nil
+}
+
 // Get retrieves a message by ID without marking it read.
 // Returns an error if the bead is not a message type.
 func (p *Provider) Get(id string) (mail.Message, error) {
-	b, err := p.store.Get(id)
+	b, err := p.getMessageBead("get", id)
 	if err != nil {
-		return mail.Message{}, beadmailError("get", err)
-	}
-	if b.Type != messageBeadType {
-		return mail.Message{}, fmt.Errorf("beadmail get: bead %s is type %q, not message", id, b.Type)
-	}
-	if isRemovedMessageBead(b) {
-		return mail.Message{}, beadmailError("get", beads.ErrNotFound)
+		return mail.Message{}, err
 	}
 	return beadToMessage(b), nil
 }
@@ -442,12 +456,9 @@ func (p *Provider) Get(id string) (mail.Message, error) {
 // Read retrieves a message by ID and marks it as read (adds "read" label).
 // The message remains in the store (not closed).
 func (p *Provider) Read(id string) (mail.Message, error) {
-	b, err := p.store.Get(id)
+	b, err := p.getMessageBead("read", id)
 	if err != nil {
-		return mail.Message{}, beadmailError("read", err)
-	}
-	if isRemovedMessageBead(b) {
-		return mail.Message{}, beadmailError("read", beads.ErrNotFound)
+		return mail.Message{}, err
 	}
 	if !hasLabel(b.Labels, "read") {
 		if err := p.store.Update(id, beads.UpdateOpts{
@@ -465,12 +476,8 @@ func (p *Provider) Read(id string) (mail.Message, error) {
 
 // MarkRead marks a message as read (adds "read" label).
 func (p *Provider) MarkRead(id string) error {
-	b, err := p.store.Get(id)
-	if err != nil {
-		return beadmailError("mark-read", err)
-	}
-	if isRemovedMessageBead(b) {
-		return beadmailError("mark-read", beads.ErrNotFound)
+	if _, err := p.getMessageBead("mark-read", id); err != nil {
+		return err
 	}
 	if err := p.store.Update(id, beads.UpdateOpts{
 		Labels:   []string{"read"},
@@ -484,12 +491,8 @@ func (p *Provider) MarkRead(id string) error {
 
 // MarkUnread marks a message as unread (removes "read" label).
 func (p *Provider) MarkUnread(id string) error {
-	b, err := p.store.Get(id)
-	if err != nil {
-		return beadmailError("mark-unread", err)
-	}
-	if isRemovedMessageBead(b) {
-		return beadmailError("mark-unread", beads.ErrNotFound)
+	if _, err := p.getMessageBead("mark-unread", id); err != nil {
+		return err
 	}
 	return p.store.Update(id, beads.UpdateOpts{
 		RemoveLabels: []string{"read"},
@@ -847,26 +850,13 @@ func (p *Provider) CheckAutoHandoffs(recipients []string) ([]mail.Message, error
 
 // Reply creates a reply to an existing message. Inherits ThreadID from the
 // original, sets ReplyTo to the original's ID. Reply is addressed to the
-// original sender.
+// original sender, except when the replier IS that sender: then the other
+// party on the thread is the original's recipient, and the reply goes there.
+// A reply is never addressed to its own sender.
 func (p *Provider) Reply(id, from, subject, body string) (mail.Message, error) {
-	original, err := p.store.Get(id)
+	original, err := p.getMessageBead("reply", id)
 	if err != nil {
-		return mail.Message{}, beadmailError("reply", err)
-	}
-	if isRemovedMessageBead(original) {
-		return mail.Message{}, beadmailError("reply", beads.ErrNotFound)
-	}
-	toSessionID := strings.TrimSpace(original.Metadata[fromSessionIDMetadataKey])
-	to := toSessionID
-	if to == "" {
-		to = strings.TrimSpace(original.From)
-	}
-	if to == "" {
-		return mail.Message{}, fmt.Errorf("beadmail reply: original message %s has no sender to reply to", id)
-	}
-	toDisplay := strings.TrimSpace(original.Metadata[fromDisplayMetadataKey])
-	if toDisplay == "" {
-		toDisplay = strings.TrimSpace(original.From)
+		return mail.Message{}, err
 	}
 	from, metadata, err := p.resolveSenderRoute(from)
 	if err != nil {
@@ -874,6 +864,10 @@ func (p *Provider) Reply(id, from, subject, body string) (mail.Message, error) {
 	}
 	if metadata == nil {
 		metadata = make(map[string]string)
+	}
+	to, toSessionID, toDisplay, err := replyRecipient(original, id, from, metadata[fromSessionIDMetadataKey])
+	if err != nil {
+		return mail.Message{}, err
 	}
 	if toSessionID != "" {
 		metadata[toSessionIDMetadataKey] = toSessionID
@@ -893,7 +887,7 @@ func (p *Provider) Reply(id, from, subject, body string) (mail.Message, error) {
 		Title:       deriveReplyTitle(subject, original.Title, body),
 		Description: body,
 		Type:        messageBeadType,
-		Assignee:    to, // reply goes back to sender
+		Assignee:    to, // the other party on the thread
 		From:        from,
 		Labels:      labels,
 		Metadata:    metadata,
@@ -903,6 +897,52 @@ func (p *Provider) Reply(id, from, subject, body string) (mail.Message, error) {
 		return mail.Message{}, fmt.Errorf("beadmail reply: %w", err)
 	}
 	return beadToMessage(b), nil
+}
+
+// replyRecipient picks the other party on the thread for a reply from from
+// (whose resolved session ID is replierSessionID) to original. It is the
+// original's sender unless the replier is that sender, in which case it is the
+// original's recipient. It errors rather than address a reply to its own sender.
+func replyRecipient(original beads.Bead, id, from, replierSessionID string) (to, toSessionID, toDisplay string, err error) {
+	parentSessionID := strings.TrimSpace(original.Metadata[fromSessionIDMetadataKey])
+	parentFrom := strings.TrimSpace(original.From)
+	parentDisplay := strings.TrimSpace(original.Metadata[fromDisplayMetadataKey])
+	if parentDisplay == "" {
+		parentDisplay = parentFrom
+	}
+
+	// Send stamps only the sender's identity, so the original's recipient is
+	// known only as its Assignee (plus any to_* metadata a reply carries). The
+	// replier owns the parent when both carry the same session ID, or, when
+	// either side lacks a session identity, the same address.
+	replyingToOwnMessage := (replierSessionID != "" && parentSessionID != "" && replierSessionID == parentSessionID) ||
+		((replierSessionID == "" || parentSessionID == "") && from != "" && from == parentDisplay)
+
+	if replyingToOwnMessage {
+		to = strings.TrimSpace(original.Assignee)
+		toSessionID = strings.TrimSpace(original.Metadata[toSessionIDMetadataKey])
+		toDisplay = strings.TrimSpace(original.Metadata[toDisplayMetadataKey])
+		if toDisplay == "" {
+			toDisplay = to
+		}
+		if to == "" {
+			return "", "", "", fmt.Errorf("beadmail reply: original message %s has no other party to reply to", id)
+		}
+	} else {
+		toSessionID = parentSessionID
+		to = toSessionID
+		if to == "" {
+			to = parentFrom
+		}
+		toDisplay = parentDisplay
+		if to == "" {
+			return "", "", "", fmt.Errorf("beadmail reply: original message %s has no sender to reply to", id)
+		}
+	}
+	if (replierSessionID != "" && (toSessionID == replierSessionID || to == replierSessionID)) || (from != "" && (to == from || toDisplay == from)) {
+		return "", "", "", fmt.Errorf("beadmail reply: reply to %s would address its own sender %q", id, from)
+	}
+	return to, toSessionID, toDisplay, nil
 }
 
 // beadmailError wraps a store error for the given mail operation, deliberately

@@ -418,7 +418,7 @@ func TestComputeStoreHealthEmptyCityPath(t *testing.T) {
 }
 
 func TestCountBeadStoreRowsReturnsUnavailableForNilStore(t *testing.T) {
-	got, err := countBeadStoreRows(context.Background(), newFakeState(t), nil)
+	got, err := countBeadStoreRows(context.Background(), newFakeState(t), testWorkLeg(t, nil))
 	if got != 0 {
 		t.Errorf("countBeadStoreRows(nil) = %d, want zero value when unavailable", got)
 	}
@@ -431,7 +431,7 @@ func TestCountBeadStoreRowsReturnsScanError(t *testing.T) {
 	wantErr := errors.New("store health row scan failed")
 	store := &storeHealthListErrorStore{Store: beads.NewMemStore(), err: wantErr}
 
-	got, err := countBeadStoreRows(context.Background(), newFakeState(t), store)
+	got, err := countBeadStoreRows(context.Background(), newFakeState(t), testWorkLeg(t, store))
 	if got != 0 {
 		t.Errorf("countBeadStoreRows rows = %d, want zero value when unavailable", got)
 	}
@@ -453,7 +453,7 @@ func TestCountBeadStoreRowsIncludesClosedBeads(t *testing.T) {
 	if err := store.Close(closed.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	got, err := countBeadStoreRows(context.Background(), newFakeState(t), store)
+	got, err := countBeadStoreRows(context.Background(), newFakeState(t), testWorkLeg(t, store))
 	if err != nil {
 		t.Fatalf("countBeadStoreRows: %v", err)
 	}
@@ -483,7 +483,7 @@ func (s *storeHealthCounterStore) List(query beads.ListQuery) ([]beads.Bead, err
 func TestCountBeadStoreRowsPrefersCounterWithoutHydration(t *testing.T) {
 	store := &storeHealthCounterStore{Store: beads.NewMemStore(), count: 41252}
 
-	got, err := countBeadStoreRows(context.Background(), newFakeState(t), store)
+	got, err := countBeadStoreRows(context.Background(), newFakeState(t), testWorkLeg(t, store))
 	if err != nil {
 		t.Fatalf("countBeadStoreRows: %v", err)
 	}
@@ -507,7 +507,7 @@ func TestCountBeadStoreRowsFallsBackWhenCountUnsupported(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	got, err := countBeadStoreRows(context.Background(), newFakeState(t), store)
+	got, err := countBeadStoreRows(context.Background(), newFakeState(t), testWorkLeg(t, store))
 	if err != nil {
 		t.Fatalf("countBeadStoreRows: %v", err)
 	}
@@ -523,7 +523,7 @@ func TestCountBeadStoreRowsReturnsCounterError(t *testing.T) {
 	wantErr := errors.New("store health count failed")
 	store := &storeHealthCounterStore{Store: beads.NewMemStore(), countErr: wantErr}
 
-	got, err := countBeadStoreRows(context.Background(), newFakeState(t), store)
+	got, err := countBeadStoreRows(context.Background(), newFakeState(t), testWorkLeg(t, store))
 	if got != 0 {
 		t.Errorf("countBeadStoreRows = %d, want zero value on Counter error", got)
 	}
@@ -638,7 +638,7 @@ func newStoreHealthWitnessStore(inner *storeHealthCounterStore, sawRows bool) *s
 func TestCountBeadStoreRowsRefusesACounterZeroTheStoreContradicts(t *testing.T) {
 	store := newStoreHealthWitnessStore(&storeHealthCounterStore{Store: beads.NewMemStore(), count: 0}, true)
 
-	got, err := countBeadStoreRows(context.Background(), newFakeState(t), store)
+	got, err := countBeadStoreRows(context.Background(), newFakeState(t), testWorkLeg(t, store))
 	if got != 0 {
 		t.Errorf("countBeadStoreRows = %d, want zero value when the count is unavailable", got)
 	}
@@ -661,7 +661,7 @@ func TestCountBeadStoreRowsRefusesAListFallbackZeroTheStoreContradicts(t *testin
 		countErr: fmt.Errorf("counting beads: %w", beads.ErrCountUnsupported),
 	}, true)
 
-	got, err := countBeadStoreRows(context.Background(), newFakeState(t), store)
+	got, err := countBeadStoreRows(context.Background(), newFakeState(t), testWorkLeg(t, store))
 	if got != 0 {
 		t.Errorf("countBeadStoreRows = %d, want zero value when the count is unavailable", got)
 	}
@@ -682,7 +682,7 @@ func TestCountBeadStoreRowsRefusesAListFallbackZeroTheStoreContradicts(t *testin
 func TestCountBeadStoreRowsKeepsAZeroFromAnEmptyLedger(t *testing.T) {
 	store := newStoreHealthWitnessStore(&storeHealthCounterStore{Store: beads.NewMemStore(), count: 0}, false)
 
-	got, err := countBeadStoreRows(context.Background(), newFakeState(t), store)
+	got, err := countBeadStoreRows(context.Background(), newFakeState(t), testWorkLeg(t, store))
 	if err != nil {
 		t.Fatalf("countBeadStoreRows error = %v, want nil for a store with no evidence against its zero", err)
 	}
@@ -700,7 +700,7 @@ func TestCountBeadStoreRowsKeepsAZeroFromAStoreThatCannotWitnessItself(t *testin
 		t.Fatal("MemStore implements RowWitness; this test no longer covers the witness-less case")
 	}
 
-	got, err := countBeadStoreRows(context.Background(), newFakeState(t), store)
+	got, err := countBeadStoreRows(context.Background(), newFakeState(t), testWorkLeg(t, store))
 	if err != nil {
 		t.Fatalf("countBeadStoreRows error = %v, want nil", err)
 	}
@@ -714,7 +714,7 @@ func TestCountBeadStoreRowsKeepsAZeroFromAStoreThatCannotWitnessItself(t *testin
 func TestCountBeadStoreRowsLeavesARealCountAlone(t *testing.T) {
 	store := newStoreHealthWitnessStore(&storeHealthCounterStore{Store: beads.NewMemStore(), count: 41252}, true)
 
-	got, err := countBeadStoreRows(context.Background(), newFakeState(t), store)
+	got, err := countBeadStoreRows(context.Background(), newFakeState(t), testWorkLeg(t, store))
 	if err != nil {
 		t.Fatalf("countBeadStoreRows error = %v, want nil", err)
 	}
@@ -948,7 +948,7 @@ func TestCountBeadStoreRowsTagsOnlyAListFallbackTimeoutAsOverrun(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		state := newFakeState(t)
 		slow := &heldListStore{Store: beads.NewMemStore(), release: make(chan struct{})}
-		_, err := countBeadStoreRows(context.Background(), state, slow)
+		_, err := countBeadStoreRows(context.Background(), state, testWorkLeg(t, slow))
 		if !isRetainedListOverrun(err) {
 			t.Errorf("slow list fallback error %v not tagged as an overrun", err)
 		}
@@ -957,11 +957,11 @@ func TestCountBeadStoreRowsTagsOnlyAListFallbackTimeoutAsOverrun(t *testing.T) {
 		}
 
 		failing := &storeHealthListErrorStore{Store: beads.NewMemStore(), err: errors.New("bd: exit status 1")}
-		if _, err := countBeadStoreRows(context.Background(), state, failing); err == nil || isRetainedListOverrun(err) {
+		if _, err := countBeadStoreRows(context.Background(), state, testWorkLeg(t, failing)); err == nil || isRetainedListOverrun(err) {
 			t.Errorf("immediate list error %v tagged as an overrun", err)
 		}
 		counter := &storeHealthCounterStore{Store: beads.NewMemStore(), countErr: context.DeadlineExceeded}
-		if _, err := countBeadStoreRows(context.Background(), state, counter); err == nil || isRetainedListOverrun(err) {
+		if _, err := countBeadStoreRows(context.Background(), state, testWorkLeg(t, counter)); err == nil || isRetainedListOverrun(err) {
 			t.Errorf("counter timeout %v tagged as an overrun", err)
 		}
 		// The timed-out list was abandoned, not canceled: let it finish.

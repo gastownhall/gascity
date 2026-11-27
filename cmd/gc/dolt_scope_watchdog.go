@@ -39,6 +39,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/processgroup"
+
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
 
@@ -146,7 +148,8 @@ func startManagedDoltSQLServerWithScopeWatchdogEnv(cityPath, configFile, logFile
 	if err != nil {
 		return managedDoltStartedProcess{}, err
 	}
-	cmd := exec.Command(watchdogExecutable, managedDoltScopeWatchdogArg, configFile, logFilePath, cityPath)
+	// The watchdog's dolt child inherits the watchdog's infrastructure scope.
+	cmd, infraScopeUnit := infraCommand(managedDoltInfraDescription(cityPath), watchdogExecutable, managedDoltScopeWatchdogArg, configFile, logFilePath, cityPath)
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
 	cmd.SysProcAttr = managedDoltSQLServerSysProcAttr()
@@ -158,19 +161,21 @@ func startManagedDoltSQLServerWithScopeWatchdogEnv(cityPath, configFile, logFile
 	if err := cmd.Start(); err != nil {
 		return managedDoltStartedProcess{}, fmt.Errorf("start dolt scope watchdog: %w", err)
 	}
-	pid, startTimeTicks, startIdentity, err := readManagedDoltScopeWatchdogStart(stdout, cmd.Process.Pid)
+	// Snapshot the watchdog's own OS start identity while it is definitely alive,
+	// before the handshake read and before the reaper goroutine below can Wait()
+	// it and free the PID. Startup-failure cleanup, here and later, re-verifies
+	// the watchdog PID against it the same way it does the dolt child's, so a
+	// reused watchdog PID is never signaled.
+	watchdogPID := cmd.Process.Pid
+	watchdogTicks, watchdogIdentity := snapshotManagedDoltStartIdentity(watchdogPID)
+	pid, startTimeTicks, startIdentity, err := readManagedDoltScopeWatchdogStart(stdout, watchdogPID)
 	if err != nil {
-		_ = terminateManagedDoltPID(cityPath, cmd.Process.Pid)
+		_ = terminateManagedDoltPIDGuarded(cityPath, watchdogPID, func() bool {
+			return managedDoltPIDStartIdentityMatches(watchdogPID, watchdogTicks, watchdogIdentity)
+		})
 		_ = cmd.Wait()
 		return managedDoltStartedProcess{}, err
 	}
-	watchdogPID := cmd.Process.Pid
-	// Snapshot the watchdog's own OS start identity while it is definitely alive
-	// (it has just handed off the dolt PID and entered its supervise loop), before
-	// the reaper goroutine below can Wait() it and free the PID. Startup-failure
-	// cleanup then re-verifies the watchdog PID the same way it does the dolt
-	// child's, so a reused watchdog PID is never signaled.
-	watchdogTicks, watchdogIdentity := snapshotManagedDoltStartIdentity(watchdogPID)
 	go func() { _ = cmd.Wait() }()
 	return managedDoltStartedProcess{
 		CityPath:               cityPath,
@@ -180,6 +185,7 @@ func startManagedDoltSQLServerWithScopeWatchdogEnv(cityPath, configFile, logFile
 		StartIdentity:          startIdentity,
 		WatchdogStartTimeTicks: watchdogTicks,
 		WatchdogStartIdentity:  watchdogIdentity,
+		InfraScope:             infraScopeUnit,
 	}, nil
 }
 
@@ -222,7 +228,7 @@ func runManagedDoltScopeWatchdog(args []string, stdout, stderr *os.File) int {
 	// cmd_dolt_config.go), so descendant helpers are rare by construction,
 	// and a SIGTERM'd dolt winds down its own children; only the SIGKILL
 	// escalation of an unresponsive server could strand descendants.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	processgroup.StartCommandInNewGroup(cmd)
 	cmd.Env = doltServerEnv(cityPath, os.Environ())
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(stderr, "start dolt sql-server: %v\n", err) //nolint:errcheck

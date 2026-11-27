@@ -332,7 +332,7 @@ func computePoolDesiredStatesAt(
 	decisionTime time.Time,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStatesParkedAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, decisionTime, nil, trace)
+	return computePoolDesiredStatesParkedAt(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, scaleCheckDemand, decisionTime, nil, trace)
 }
 
 // computePoolDesiredStatesParkedAt is computePoolDesiredStatesAt with the
@@ -340,9 +340,16 @@ func computePoolDesiredStatesAt(
 // Parked, accepted outside the nested caps (it takes no headroom from
 // anything, floors included) and left out of the pool's demand count. A seat
 // is parked here only when every request it makes is an open pin.
+//
+// ready is the store-scoped wake-demand readiness of assignedWorkBeads,
+// index-aligned (readyAssignedFlagsForBeads). A nil slice means the caller
+// already supplied actionable work. A non-nil slice is authoritative: an open
+// bead whose flag is false or missing is not proven ready, so it cannot plan a
+// clean session for a wake_mode="fresh" agent's asleep assignee.
 func computePoolDesiredStatesParkedAt(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
+	ready []bool,
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 	scaleCheckDemand map[string]scaleCheckDemand,
@@ -463,6 +470,15 @@ func computePoolDesiredStatesParkedAt(
 				// agents with unset or wake_mode="resume" are unaffected.
 				// (gastownhall/gascity#4849)
 				if agent.EffectiveWakeMode() == "fresh" && asleepSessionBeadIDs[sessionBeadID] {
+					// Open work without a store-scoped readiness proof (a
+					// blocked continuation step, say) is not demand: a clean
+					// session could not claim it and would drain and respawn
+					// every tick. Skip before reserving the template's wake
+					// slot so a later ready bead can still take it.
+					// (gastownhall/gascity#8172)
+					if wb.Status == "open" && ready != nil && (w >= len(ready) || !ready[w]) {
+						continue
+					}
 					if _, ok := wakeRequestedTemplates[template]; ok {
 						continue
 					}

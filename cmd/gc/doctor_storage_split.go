@@ -45,6 +45,7 @@ type storageSplitFindings struct {
 func (c *storageSplitCheck) Run(*doctor.CheckContext) *doctor.CheckResult {
 	var f storageSplitFindings
 	c.versionFloor(&f)
+	c.splitJournal(&f)
 	var ok string
 	switch stage, staged, err := readRemoteStage(c.cityPath); {
 	case err != nil:
@@ -78,8 +79,8 @@ func (c *storageSplitCheck) versionFloor(f *storageSplitFindings) {
 	case !present:
 		return
 	}
-	if gcVersionBelowFloor(version, floor) {
-		f.errs = append(f.errs, fmt.Sprintf("this gc is %s, below the city's floor %s (%s)", version, floor, minGCVersionPath(c.cityPath)))
+	if running := gcVersionForFloor(); gcVersionBelowFloor(running, floor) {
+		f.errs = append(f.errs, fmt.Sprintf("this gc is %s, below the city's floor %s (%s)", running, floor, minGCVersionPath(c.cityPath)))
 	}
 	path, running, err := minGCVersionPathProbe(c.cfg)
 	switch {
@@ -97,8 +98,63 @@ func (c *storageSplitCheck) versionFloor(f *storageSplitFindings) {
 	}
 }
 
+// splitJournal warns on a guided split that stopped with work left
+// (S5-H, owner decision: WARN): what it left is graded by the checks below
+// (an unconverged city is an error through status), and this names the
+// command that continues it. The hint goes into the details too, so it is
+// shown beside an error.
+func (c *storageSplitCheck) splitJournal(f *storageSplitFindings) {
+	j, present, err := readStorageSplitJournal(c.cityPath)
+	var hint string
+	switch {
+	case err != nil:
+		hint = err.Error()
+	case !present || !j.open():
+		return
+	default:
+		if hint = c.splitJournalHint(j); hint == "" {
+			return
+		}
+	}
+	f.warns = append(f.warns, hint)
+	f.details = append(f.details, hint)
+}
+
+// splitJournalHint is the warning for the open split j, or "" for none. A
+// split past its rig imports has only its verification left, which the
+// checks below are. A split a reverse undid (splitUndone) has nothing left to
+// continue: the next split starts over, and --abandon closes its journal.
+func (c *storageSplitCheck) splitJournalHint(j storageSplitJournal) string {
+	undone, err := splitUndone(j, c.cfg, c.cityPath)
+	switch {
+	case err != nil:
+		return err.Error()
+	case undone:
+		return fmt.Sprintf("the guided split %s stopped at %s and was undone since, as a reverse leaves it (city.toml composes no [storage] and binding %s holds no convergence marker); `%s` closes it, and `%s` starts a new split", j.Run, j.Phase, j.Binding, storageSplitAbandonInstruction(), j.continueInstruction())
+	case j.Phase == splitPhaseRigsImported:
+		return ""
+	case j.Phase == splitPhaseAbandoning:
+		if state, err := readInfraConvergenceState(j.target()); err == nil && splitAbandoningConverged(j, state == infraConvergenceMarked) {
+			return fmt.Sprintf("the abandon of the guided split %s stopped, and binding %s has converged since, so it holds this city's infrastructure state; `%s` resumes the split from %s", j.Run, j.Binding, j.continueInstruction(), j.AbandonedFrom)
+		}
+		return fmt.Sprintf("the guided split %s is being abandoned; `%s` finishes it", j.Run, storageSplitAbandonInstruction())
+	case splitPhaseRank[j.Phase] < splitPhaseRank[splitPhaseConfiguring] && c.cfg != nil && c.cfg.Storage != nil:
+		return fmt.Sprintf("the guided split %s stopped at %s, before it wrote city.toml, and city.toml authors [storage] it did not write; `%s` closes the split and changes nothing else", j.Run, j.Phase, storageSplitAbandonInstruction())
+	case splitPhaseRank[j.Phase] <= splitPhaseRank[splitPhaseConfiguring] && (c.cfg == nil || c.cfg.Storage == nil):
+		// The judge starts such a split over (a boot may have served the
+		// city unsplit since); it is not continued.
+		return fmt.Sprintf("the guided split %s stopped at %s, before it wrote city.toml; `%s` starts it over, and `%s` closes it", j.Run, j.Phase, j.continueInstruction(), storageSplitAbandonInstruction())
+	}
+	return fmt.Sprintf("the guided split %s stopped at %s; `%s` continues it", j.Run, j.Phase, j.continueInstruction())
+}
+
 // unsplit is the verdict of a city with no [storage].
 func (c *storageSplitCheck) unsplit(f *storageSplitFindings) string {
+	// A reverse past its R4 has removed [storage] and is not finished.
+	if err := storageReverseRefusal(c.cityPath, ""); err != nil {
+		f.errs = append(f.errs, err.Error())
+		return ""
+	}
 	if blocked, held := revertHoldingNote(storageSplitNone, c.cityPath); held {
 		f.errs = append(f.errs, preflightAdviceDetail(blocked))
 		return ""
@@ -121,7 +177,15 @@ func (c *storageSplitCheck) unsplit(f *storageSplitFindings) string {
 func (c *storageSplitCheck) split(f *storageSplitFindings) string {
 	var out, errOut bytes.Buffer
 	if doStorageStatusCity(storageOperatorRequest{CityPath: c.cityPath, Cfg: c.cfg}, &out, &errOut) != 0 {
-		f.errs = append(f.errs, fmt.Sprintf("the city binding is not serving: `%s` exits non-zero", storageStatusInstruction()))
+		// A stranded city whose binding names no id twice serves degraded
+		// (infraMigrationReport.servesDegraded) rather than refusing, and the
+		// error says so: nothing stops it any more, so this is where an
+		// operator who does not watch the event stream finds out.
+		if serving := storageStatusServingLine(out.String()); strings.HasPrefix(serving, "degraded") {
+			f.errs = append(f.errs, fmt.Sprintf("the city serves %s: `%s` exits non-zero and names the repair", serving, storageStatusInstruction()))
+		} else {
+			f.errs = append(f.errs, fmt.Sprintf("the city binding is not serving: `%s` exits non-zero", storageStatusInstruction()))
+		}
 		f.details = append(f.details, storageSplitLines(out.String(), errOut.String())...)
 		return ""
 	}
@@ -150,7 +214,7 @@ func (c *storageSplitCheck) split(f *storageSplitFindings) string {
 		}
 	}
 	awaiting := 0
-	for _, r := range censusRigs(c.cityPath, c.cfg, target, false) {
+	for _, r := range censusRigs(c.cityPath, c.cfg, target) {
 		if r.blocking() {
 			awaiting++
 		}
@@ -187,6 +251,17 @@ func storageAttestationRecorded(cityPath, hazard string) bool {
 		}
 	}
 	return false
+}
+
+// storageStatusServingLine is the value of the "serving:" line a stranded
+// city's `gc storage status` prints (infraStrandedServingLine), or "".
+func storageStatusServingLine(stdout string) string {
+	for _, line := range strings.Split(stdout, "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "serving:"); ok {
+			return strings.TrimSpace(rest)
+		}
+	}
+	return ""
 }
 
 // storageSplitLines is a report's non-empty lines, stdout then stderr.

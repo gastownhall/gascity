@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/pendingwatch"
+	"github.com/gastownhall/gascity/internal/session"
 
 	// Blank import: emergency's init() registers emergency.Record as the payload
 	// type for EmergencySignaled and EmergencyAcked events.
@@ -789,6 +790,63 @@ type SessionPendingClearedPayload struct {
 // IsEventPayload marks SessionPendingClearedPayload as an events.Payload variant.
 func (SessionPendingClearedPayload) IsEventPayload() {}
 
+// SessionCreatedPayload is the typed payload for session.created: a session
+// joined the city's set of open sessions (its session bead was created open,
+// or a closed one reopened). It carries the identity fields GET
+// /v0/city/{cityName}/sessions shows for the session, so a client can add it
+// to its list before reading the session in full.
+type SessionCreatedPayload struct {
+	SessionID string `json:"session_id" doc:"Session bead ID."`
+	Template  string `json:"template,omitempty" doc:"Session template, when known."`
+	Title     string `json:"title,omitempty" doc:"Session title."`
+	Alias     string `json:"alias,omitempty" doc:"Session alias, when set."`
+	AgentName string `json:"agent_name,omitempty" doc:"The concrete agent identity the session runs as: the agent's qualified name or a pool slot such as rig/worker-1. Empty when the session records none."`
+}
+
+// IsEventPayload marks SessionCreatedPayload as an events.Payload variant.
+func (SessionCreatedPayload) IsEventPayload() {}
+
+// SessionCreatedPayloadFor builds the session.created payload from a session's
+// persisted projection.
+func SessionCreatedPayloadFor(info session.Info) SessionCreatedPayload {
+	return SessionCreatedPayload{
+		SessionID: info.ID,
+		Template:  info.Template,
+		Title:     info.Title,
+		Alias:     info.Alias,
+		AgentName: info.AgentName,
+	}
+}
+
+// SessionClosedPayload is the typed payload for session.closed: a session
+// left the city's set of open sessions (its session bead closed). It repeats
+// the session.created identity fields and the close reason the session bead
+// records.
+type SessionClosedPayload struct {
+	SessionID string `json:"session_id" doc:"Session bead ID."`
+	Template  string `json:"template,omitempty" doc:"Session template, when known."`
+	Title     string `json:"title,omitempty" doc:"Session title."`
+	Alias     string `json:"alias,omitempty" doc:"Session alias, when set."`
+	AgentName string `json:"agent_name,omitempty" doc:"The concrete agent identity the session ran as. Empty when the session records none."`
+	Reason    string `json:"reason,omitempty" doc:"The close reason the session bead records (its close_reason), when it records one."`
+}
+
+// IsEventPayload marks SessionClosedPayload as an events.Payload variant.
+func (SessionClosedPayload) IsEventPayload() {}
+
+// SessionClosedPayloadFor builds the session.closed payload from a session's
+// persisted projection and the close reason its bead records.
+func SessionClosedPayloadFor(info session.Info, reason string) SessionClosedPayload {
+	return SessionClosedPayload{
+		SessionID: info.ID,
+		Template:  info.Template,
+		Title:     info.Title,
+		Alias:     info.Alias,
+		AgentName: info.AgentName,
+		Reason:    reason,
+	}
+}
+
 // SessionWakeRefusedPayload is the typed payload for session.wake_refused: a
 // durable explicit wake request refused before the session reached a live
 // runtime (held, quarantined, or asleep past its idle-sleep window).
@@ -866,6 +924,8 @@ func init() {
 	events.RegisterPayload(events.SessionConversationReset, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionPending, SessionPendingPayload{})
 	events.RegisterPayload(events.SessionPendingCleared, SessionPendingClearedPayload{})
+	events.RegisterPayload(events.SessionCreated, SessionCreatedPayload{})
+	events.RegisterPayload(events.SessionClosed, SessionClosedPayload{})
 	events.RegisterPayload(events.ConvoyCreated, events.NoPayload{})
 	events.RegisterPayload(events.ConvoyClosed, events.NoPayload{})
 	events.RegisterPayload(events.ControllerStarted, events.NoPayload{})

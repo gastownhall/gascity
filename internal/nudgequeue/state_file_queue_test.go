@@ -126,3 +126,32 @@ func TestStateFileQueueWithdrawQueuedWaitNudges(t *testing.T) {
 		})
 	}
 }
+
+// Kills a snapshot that takes the queue lock or runs maintenance: Snapshot
+// reads state.json as is, under a held lock, expired items included.
+func TestStateFileQueueSnapshot(t *testing.T) {
+	now := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	city := t.TempDir()
+	pending := deferredTestItem("p", now)
+	expired := deferredTestItem("x", now.Add(-2*time.Hour))
+	inFlight := deferredTestItem("f", now)
+	if err := WithState(city, func(state *State) error {
+		state.Pending = []Item{pending, expired}
+		state.InFlight = []Item{inFlight}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := lockState(city, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	state, err := StateFileQueue{CityPath: city}.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot under a held lock: %v", err)
+	}
+	if len(state.Pending) != 2 || len(state.InFlight) != 1 || len(state.Dead) != 0 {
+		t.Fatalf("Snapshot = %d pending, %d in flight, %d dead; want 2, 1, 0: as stored, unmaintained", len(state.Pending), len(state.InFlight), len(state.Dead))
+	}
+}

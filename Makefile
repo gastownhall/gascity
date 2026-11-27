@@ -110,7 +110,7 @@ endif
 
 .PHONY: build check check-all check-bd check-docker check-docs check-dolt check-hooks check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-split-topology-rows check-version-tag lint lint-changed lint-affected lint-full lint-golangci vet-go fmt-check fmt-check-changed fmt vet test test-ci-policy test-mac test-coarse-clock test-fast-parallel test-fsys-darwin-compile test-herdr-live test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-productmetrics-testhook test-worker-core test-worker-core-phase2 test-worker-core-phase2-all test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-beads-topology-matrix test-bd-cli-contract test-bd-cli-contract-home-isolation test-bd-conditional-release-contract test-acceptance-b test-acceptance-split-storage test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover check-self-contained install install-tools install-buildx install-oasdiff openapi-breaking-check setup clean generate check-schema complexity complexity-diff complexity-check complexity-update docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-build dashboard-build-npm dashboard-generate-client dashboard-lock dashboard-dev dashboard-check dashboard-check-npm dashboard-ci dashboard-smoke dashboard-e2e-go dashboard-e2e-play dashboard-e2e
 .PHONY: check-release-dist-ignore
-.PHONY: bazel-tmpdir test-go check-go check-all-go check-docs-go test-acceptance-go test-integration-go
+.PHONY: bazel-tmpdir test-go check-go check-all-go check-affected lint-targets test-go-pkgs test-bazel-targets check-docs-go test-acceptance-go test-integration-go
 
 # Build and test engine. Bazel is what CI gates on: .github/workflows/bazel.yml
 # runs `bazel test` lanes on rbe-west, and nogo (lint + vet), formatting,
@@ -235,6 +235,26 @@ check: check-release-dist-ignore check-routed-test-rows check-split-topology-row
 
 ## check-go: the same gates without Bazel: golangci-lint fmt/lint, go vet, go test (offline convenience; CI does not run it)
 check-go: fmt-check lint-golangci vet-go check-release-dist-ignore check-routed-test-rows check-split-topology-rows check-residency-boundary test-go
+
+## check-affected: pre-flight scoped to the diff against AFFECTED_BASE: check-go's shell guards, nogo over the changed and importing packages, go test over the packages the diff can affect; runs check-go when the diff touches build configuration
+# scripts/affected-preflight documents the selection. AFFECTED_ACTION=plan
+# prints it without running anything. Importer and aggregate-reader tests run
+# only up to their caps; nogo still builds every importer.
+AFFECTED_BASE ?= origin/HEAD
+AFFECTED_ACTION ?= run
+AFFECTED_MAX_RDEP_TESTS ?= 5
+AFFECTED_MAX_READER_TESTS ?= 5
+AFFECTED_MAKE ?= $(MAKE) --no-print-directory -f $(abspath $(firstword $(MAKEFILE_LIST))) NOGO_BAZEL=$(BAZEL)
+GO_TEST_BUDGET ?= 15m
+check-affected:
+	@AFFECTED_BASE="$(AFFECTED_BASE)" \
+		AFFECTED_MAX_RDEP_TESTS="$(AFFECTED_MAX_RDEP_TESTS)" \
+		AFFECTED_MAX_READER_TESTS="$(AFFECTED_MAX_READER_TESTS)" \
+		AFFECTED_MAKE="$(AFFECTED_MAKE)" \
+		AFFECTED_BAZEL="$(BAZEL)" \
+		NOGO_BAZEL="$(BAZEL)" \
+		GOFLAGS="$(QUALITY_GATE_GOFLAGS)" \
+		"$(dir $(CI_STATIC_SELECT))affected-preflight" "$(AFFECTED_ACTION)"
 
 ## check-release-dist-ignore: keep GoReleaser output from marking release builds dirty
 check-release-dist-ignore:
@@ -410,6 +430,11 @@ lint-changed:
 	echo "lint-changed: $$(printf '%s\n' "$$targets" | tr '\n' ' ')"; \
 	$(NOGO_BAZEL) build $(NOGO_BUILD_FLAGS) $$targets
 
+## lint-targets: run nogo over the Bazel targets in LINT_TARGETS (check-affected's lint step)
+lint-targets:
+	@test -n "$(strip $(LINT_TARGETS))" || { echo "lint-targets: set LINT_TARGETS to the Bazel targets to lint" >&2; exit 2; }
+	$(NOGO_BAZEL) build $(NOGO_BUILD_FLAGS) $(LINT_TARGETS)
+
 ## vet: go vet's analyzers run inside nogo; same as lint
 vet: lint
 
@@ -537,6 +562,16 @@ test: bazel-tmpdir
 test-go: test-fsys-darwin-compile
 	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout 15m ./...
 
+## test-go-pkgs: test-go over only the packages in GO_TEST_PKGS (check-affected's go test step)
+test-go-pkgs: test-fsys-darwin-compile
+	@test -n "$(strip $(GO_TEST_PKGS))" || { echo "test-go-pkgs: set GO_TEST_PKGS to the packages to test" >&2; exit 2; }
+	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout $(GO_TEST_BUDGET) $(GO_TEST_PKGS)
+
+## test-bazel-targets: bazel test the targets in BAZEL_TEST_TARGETS (check-affected's step for test targets go test cannot run)
+test-bazel-targets: bazel-tmpdir
+	@test -n "$(strip $(BAZEL_TEST_TARGETS))" || { echo "test-bazel-targets: set BAZEL_TEST_TARGETS to the Bazel test targets" >&2; exit 2; }
+	$(BAZEL_TEST) $(BAZEL_TEST_TARGETS)
+
 ## test-herdr-live: run the live herdr journeys against a real herdr server —
 ## the provider's own tier under internal/runtime/herdr, plus the controller's
 ## event-driven liveness journeys under cmd/gc. These drive panes, force
@@ -551,7 +586,12 @@ test-herdr-live:
 
 # MAC_UNIT_PKGS excludes cmd/gc from the Mac unit sweep; cmd/gc runs
 # sharded via the mac-cmd-gc-process CI matrix job instead.
-MAC_UNIT_PKGS = $(shell go list ./... | grep -v '/cmd/gc$$')
+# go list runs outside TEST_ENV/env -i here, so a toolchain mismatch (e.g. a
+# pinned setup-go version older than go.mod's directive) makes go list fail;
+# $(shell ...) swallows that non-zero exit and yields an empty string, which
+# would otherwise make go test silently run zero packages. Guard it: an empty
+# result is always a go list failure, never an intentional "test nothing".
+MAC_UNIT_PKGS = $(or $(strip $(shell go list ./... | grep -v '/cmd/gc$$')),$(error MAC_UNIT_PKGS resolved to an empty package list -- go list failed (check the Go toolchain against go.mod) or matched no packages))
 
 ## test-mac-pkgs-guard: fail when MAC_UNIT_PKGS is empty. A failed go list
 ## expands it to nothing, and go test over no packages passes vacuously.
@@ -977,7 +1017,10 @@ check-docs-go:
 #   session/tmux: integration-test-only, not meaningful for unit coverage
 #   beadstest: conformance helper, runs under internal/beads coverage
 # cmd/gc excluded: it runs sharded below in test-cover to stay under per-package timeout
-UNIT_COVER_PKGS_NONCMDGC = $(shell go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... | grep -v -e /session/tmux -e /beadstest -e '/cmd/gc$$')
+# See MAC_UNIT_PKGS above: go list runs outside TEST_ENV/env -i, so a broken
+# toolchain silently yields an empty $(shell ...) result instead of failing;
+# guard against go test then running with zero package arguments.
+UNIT_COVER_PKGS_NONCMDGC = $(or $(strip $(shell go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... | grep -v -e /session/tmux -e /beadstest -e '/cmd/gc$$')),$(error UNIT_COVER_PKGS_NONCMDGC resolved to an empty package list -- go list failed (check the Go toolchain against go.mod) or matched no packages))
 
 ## test-cover: run fast unit-test coverage without the integration-tagged package sweep.
 ## cmd/gc is sharded CMD_GC_COVER_TOTAL (default 6) ways via test-go-test-shard so each
@@ -1034,12 +1077,28 @@ $(GOLANGCI_LINT):
 
 ## install-oapi-codegen: install pinned oapi-codegen so the spec→client drift
 ## test (TestGeneratedClientInSync) can regenerate client_gen.go without skipping.
+# Retries like $(GOLANGCI_LINT): spec-ci installs this on every CI run, and the
+# tool's own module graph (not gascity's go.sum) comes from the module proxy,
+# so one transient proxy stream error would otherwise fail the required Check.
 .PHONY: install-oapi-codegen
 install-oapi-codegen:
-	@if ! command -v oapi-codegen >/dev/null; then \
-		echo "Installing oapi-codegen..." >&2; \
-		go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.6.0; \
-	fi
+	@if command -v oapi-codegen >/dev/null; then exit 0; fi; \
+	echo "Installing oapi-codegen..." >&2; \
+	attempt=1; max_attempts=5; delay=2; \
+	while [ $$attempt -le $$max_attempts ]; do \
+		echo "oapi-codegen install attempt $$attempt/$$max_attempts" >&2; \
+		if go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.6.0; then \
+			exit 0; \
+		fi; \
+		if [ $$attempt -lt $$max_attempts ]; then \
+			echo "oapi-codegen install failed; retrying in $${delay}s..." >&2; \
+			sleep $$delay; \
+		fi; \
+		attempt=$$((attempt + 1)); \
+		delay=$$((delay * 2)); \
+	done; \
+	echo "ERROR: failed to install oapi-codegen after $$max_attempts attempts" >&2; \
+	exit 1
 
 ## install-oasdiff: install the pinned oasdiff used by openapi-breaking-check.
 ## Reinstalls when the binary on disk is a different version.

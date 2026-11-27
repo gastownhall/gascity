@@ -38,9 +38,16 @@ import (
 // can live in a rig store exactly as every ga-* bead does in production.
 func freshCycleReproEnv(t *testing.T, sessionMeta map[string]string) (*restartRequestTestEnv, beads.Bead, string) {
 	t.Helper()
+	return freshCycleReproEnvIn(t, config.Workspace{Name: "test-city"}, sessionMeta)
+}
+
+// freshCycleReproEnvIn is freshCycleReproEnv in workspace ws, whose
+// session_template decides the session's runtime name.
+func freshCycleReproEnvIn(t *testing.T, ws config.Workspace, sessionMeta map[string]string) (*restartRequestTestEnv, beads.Bead, string) {
+	t.Helper()
 	env := newRestartRequestTestEnv(t)
 	env.cfg = &config.City{
-		Workspace:     config.Workspace{Name: "test-city"},
+		Workspace:     ws,
 		Rigs:          []config.Rig{{Name: "gascity", Prefix: "ga"}},
 		Agents:        []config.Agent{{Name: "witness", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
 		NamedSessions: []config.NamedSession{{Template: "witness", Mode: "on_demand"}},

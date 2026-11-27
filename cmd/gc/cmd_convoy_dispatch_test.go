@@ -1816,21 +1816,13 @@ func TestDecorateDrainItemRecipeDoesNotFallbackToControllerAssignee(t *testing.T
 }
 
 // TestDecorateDrainItemRecipeSharedContinuationGroupFollowsPoolLifecycle pins
-// the interaction between a shared drain and pool routing as it behaves after
-// #6360: decorateDrainItemRecipe copies the step's own continuation pair into
-// the binding, so ApplyGraphRouteBinding takes its stamp arm and BOTH pool
-// lifecycles keep the pair -- the one-shot mark changes nothing here, because
-// its only consumer is the refuse arm, which the copied group discharges
-// before it is reached.
-//
-// The one-shot expectation used to read "drops both". Measured after the
-// rebase it does not: gc.continuation_group stays drain:gc-ctl with
-// gc.session_affinity=require. That is the surviving #5584 exposure (a step
-// pinned require to a session that exits after one bounded invocation), and
-// whether the router's own drain bookkeeping should be clearable for an
-// IndependentSteps route is an open maintainer call -- it cannot be answered
-// without editing the branch #6360 asked us to keep verbatim. This test
-// records the behavior; it does not bless it.
+// the interaction between a shared drain and pool routing: decorateDrainItemRecipe
+// copies the step's own continuation pair into the binding, and a one-shot pool
+// refuses any non-empty group (ga-sj2h8f.1), because no runtime survives to
+// carry the shared session into the next step. A persistent pool keeps the pair.
+// Before ga-sj2h8f.1 the one-shot pool kept it too: gc.continuation_group stayed
+// drain:gc-ctl with gc.session_affinity=require, pinning siblings to a session
+// that exits after one invocation.
 func TestDecorateDrainItemRecipeSharedContinuationGroupFollowsPoolLifecycle(t *testing.T) {
 	zero := 0
 	three := 3
@@ -1839,12 +1831,12 @@ func TestDecorateDrainItemRecipeSharedContinuationGroupFollowsPoolLifecycle(t *t
 		lifecycle    string
 		wantGroup    string
 		wantAffinity string
+		wantRefused  bool
 	}{
 		{
-			name:         "one-shot pool also keeps the shared drain group",
-			lifecycle:    config.AgentLifecycleOneShot,
-			wantGroup:    "drain:gc-ctl",
-			wantAffinity: "require",
+			name:        "one-shot pool refuses the shared drain group",
+			lifecycle:   config.AgentLifecycleOneShot,
+			wantRefused: true,
 		},
 		{
 			name:         "persistent pool keeps the shared drain group",
@@ -1902,7 +1894,14 @@ func TestDecorateDrainItemRecipeSharedContinuationGroupFollowsPoolLifecycle(t *t
 				},
 			}
 
-			if err := decorateDrainItemRecipe(recipe, source, store, "city:test", "test", t.TempDir(), cfg); err != nil {
+			err := decorateDrainItemRecipe(recipe, source, store, "city:test", "test", t.TempDir(), cfg)
+			if tt.wantRefused {
+				if !errors.Is(err, graphroute.ErrIndependentStepsContinuationGroup) {
+					t.Fatalf("decorateDrainItemRecipe error = %v, want ErrIndependentStepsContinuationGroup", err)
+				}
+				return
+			}
+			if err != nil {
 				t.Fatalf("decorateDrainItemRecipe: %v", err)
 			}
 
@@ -2007,6 +2006,227 @@ func TestFindWorkflowBeadsResolvesLogicalWorkflowID(t *testing.T) {
 	}
 	if !slices.Contains(ids, child.ID) {
 		t.Fatalf("findWorkflowBeads(logical) missing child %q: %#v", child.ID, ids)
+	}
+}
+
+// sequentialInterruptStore closes ids one at a time, in the given order, and
+// stops with an error the moment it reaches interruptAt -- mirroring the real
+// native store's non-transactional per-id CloseAll loop, so a test can pin
+// exactly what a genuine mid-sweep interruption leaves behind.
+type sequentialInterruptStore struct {
+	beads.Store
+	interruptAt string
+}
+
+func (s sequentialInterruptStore) CloseAll(ids []string, _ map[string]string) (int, error) {
+	closed := 0
+	for _, id := range ids {
+		if id == s.interruptAt {
+			return closed, fmt.Errorf("interrupted before closing %s", id)
+		}
+		if err := s.Close(id); err != nil {
+			return closed, err
+		}
+		closed++
+	}
+	return closed, nil
+}
+
+// TestFindWorkflowBeadsCloseOrderKeepsRootClosedLast pins the #6332 fix: an
+// interrupted sweep must never leave a closed root with open descendants
+// still routed. Root-first order let that happen because the root was the
+// first bead the non-transactional per-id CloseAll loop reached; ordering the
+// root last instead means "root closed" implies "every step closed" across
+// any interruption -- an interruption can now only ever leave an open root
+// behind, which the existing dead-root sweeps already handle.
+func TestFindWorkflowBeadsCloseOrderKeepsRootClosedLast(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title:  "Workflow",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":        "workflow",
+			"gc.workflow_id": "wf-6332",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	child, err := store.Create(beads.Bead{
+		Title:  "Step",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+
+	found, err := findWorkflowBeads(store, root.ID)
+	if err != nil {
+		t.Fatalf("findWorkflowBeads: %v", err)
+	}
+	if len(found) == 0 || found[len(found)-1].ID != root.ID {
+		t.Fatalf("findWorkflowBeads(...) = %v, want root %q ordered last", workflowBeadIDs(found), root.ID)
+	}
+
+	// Interrupt exactly when the sweep reaches the root -- the worst case:
+	// every descendant before it in the order has already closed.
+	interrupting := sequentialInterruptStore{Store: store, interruptAt: root.ID}
+	if _, err := closeWorkflowMatches([]workflowStoreMatch{{
+		store: interrupting,
+		beads: found,
+		label: "city",
+	}}); err == nil {
+		t.Fatal("closeWorkflowMatches: want an error from the simulated interruption")
+	}
+
+	gotChild, err := store.Get(child.ID)
+	if err != nil {
+		t.Fatalf("Get(child): %v", err)
+	}
+	if gotChild.Status != "closed" {
+		t.Fatalf("child status = %q, want closed before the interruption reached the root", gotChild.Status)
+	}
+	gotRoot, err := store.Get(root.ID)
+	if err != nil {
+		t.Fatalf("Get(root): %v", err)
+	}
+	if gotRoot.Status == "closed" {
+		t.Fatal("root closed despite the interruption landing exactly on it -- the invariant this fix establishes (root closed only after every descendant) is broken")
+	}
+}
+
+// continueOnErrorStore closes ids one at a time and, like BdStore's per-id
+// fallback after a failed batch, keeps going past an id that fails, joining
+// the failures at the end.
+type continueOnErrorStore struct {
+	beads.Store
+	failOn map[string]bool
+}
+
+func (s continueOnErrorStore) CloseAll(ids []string, _ map[string]string) (int, error) {
+	closed := 0
+	var errs []error
+	for _, id := range ids {
+		if s.failOn[id] {
+			errs = append(errs, fmt.Errorf("closing %s: simulated failure", id))
+			continue
+		}
+		if err := s.Close(id); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		closed++
+	}
+	return closed, errors.Join(errs...)
+}
+
+// TestCloseWorkflowMatchesKeepsRootOpenWhenAStepFailsUnderContinueOnErrorStore
+// pins #6332 on a store whose CloseAll keeps going after a failed id: the root
+// must stay open while any step failed to close.
+func TestCloseWorkflowMatchesKeepsRootOpenWhenAStepFailsUnderContinueOnErrorStore(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title:  "Workflow",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":        "workflow",
+			"gc.workflow_id": "wf-6332-continue",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	var steps []beads.Bead
+	for i := 0; i < 2; i++ {
+		step, err := store.Create(beads.Bead{
+			Title:    fmt.Sprintf("Step %d", i),
+			Type:     "task",
+			Status:   "open",
+			Metadata: map[string]string{"gc.root_bead_id": root.ID},
+		})
+		if err != nil {
+			t.Fatalf("Create(step %d): %v", i, err)
+		}
+		steps = append(steps, step)
+	}
+	failing, closing := steps[0], steps[1]
+
+	found, err := findWorkflowBeads(store, root.ID)
+	if err != nil {
+		t.Fatalf("findWorkflowBeads: %v", err)
+	}
+	continuing := continueOnErrorStore{Store: store, failOn: map[string]bool{failing.ID: true}}
+	if _, err := closeWorkflowMatches([]workflowStoreMatch{{
+		store: continuing,
+		beads: found,
+		label: "city",
+	}}); err == nil {
+		t.Fatal("closeWorkflowMatches: want an error from the failed step")
+	}
+
+	for _, tc := range []struct {
+		id, want string
+	}{
+		{closing.ID, "closed"},
+		{failing.ID, "open"},
+		{root.ID, "open"},
+	} {
+		got, err := store.Get(tc.id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", tc.id, err)
+		}
+		if got.Status != tc.want {
+			t.Errorf("bead %s status = %q, want %q", tc.id, got.Status, tc.want)
+		}
+	}
+}
+
+func TestFindWorkflowBeadsFromRootOrdersRootLast(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title:    "Workflow",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := store.Create(beads.Bead{
+			Title:    fmt.Sprintf("Step %d", i),
+			Type:     "task",
+			Status:   "open",
+			Metadata: map[string]string{"gc.root_bead_id": root.ID},
+		}); err != nil {
+			t.Fatalf("Create(step %d): %v", i, err)
+		}
+	}
+
+	found, err := findWorkflowBeadsFromRoot(store, root)
+	if err != nil {
+		t.Fatalf("findWorkflowBeadsFromRoot: %v", err)
+	}
+	if len(found) != 3 {
+		t.Fatalf("findWorkflowBeadsFromRoot(...) = %v, want root and 2 descendants", workflowBeadIDs(found))
+	}
+	if found[len(found)-1].ID != root.ID {
+		t.Fatalf("findWorkflowBeadsFromRoot(...) = %v, want root %q last", workflowBeadIDs(found), root.ID)
+	}
+	rootCount := 0
+	for _, b := range found {
+		if b.ID == root.ID {
+			rootCount++
+		}
+	}
+	if rootCount != 1 {
+		t.Fatalf("root %q appears %d times in %v, want once", root.ID, rootCount, workflowBeadIDs(found))
 	}
 }
 

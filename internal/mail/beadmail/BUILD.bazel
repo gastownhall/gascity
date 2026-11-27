@@ -26,6 +26,7 @@ go_test(
         "handoff_archive_test.go",
         "handoff_test.go",
         "inbox_test.go",
+        "reply_self_address_test.go",
         "testenv_import_test.go",
     ],
     embed = [":beadmail"],

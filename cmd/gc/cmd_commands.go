@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
@@ -23,6 +26,10 @@ const (
 	productMetricsClassAnnotation  = "gc.productmetrics.class"
 	packCommandClassificationValue = "pack-command"
 )
+
+// nativeHelpTimeout bounds a delegated --help run so a hung script cannot
+// stall help; it is not a security control.
+var nativeHelpTimeout = 5 * time.Second
 
 type commandClassification string
 
@@ -202,10 +209,18 @@ func addDiscoveredLeaf(root *cobra.Command, entry config.DiscoveredCommand, city
 		DisableFlagParsing: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			action := resolveDiscoveredLeafAction(cmd, args, func() int {
-				return runDiscoveredCommand(entry, cityPath, cityName, args, stdin(), stdout, stderr)
+				return runScopedDiscoveredCommand(entry, cityPath, cityName, args, stdout, stderr)
 			})
 			return executeProductMetricsPackAction(cmd, action).err()
 		},
+	}
+	if entry.NativeHelp {
+		renderHelp := leaf.HelpFunc()
+		leaf.SetHelpFunc(func(c *cobra.Command, args []string) {
+			if !printNativeHelp(c.OutOrStdout(), entry, cityPath, cityName) {
+				renderHelp(c, args)
+			}
+		})
 	}
 	parent.AddCommand(leaf)
 }
@@ -258,6 +273,87 @@ func resolvedPackCommandHelpAction(cmd *cobra.Command) packCommandAction {
 	})
 }
 
+// runScopedDiscoveredCommand runs a pack leaf after checkDiscoveredLeafScope
+// confirms its argv does not select a city other than the bound one.
+func runScopedDiscoveredCommand(entry config.DiscoveredCommand, cityPath, cityName string, args []string, stdout, stderr io.Writer) int {
+	if err := checkDiscoveredLeafScope(entry, cityPath, args); err != nil {
+		fmt.Fprintf(stderr, "gc %s %s: %v\n", entry.BindingName, strings.Join(entry.Command, " "), err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	return runDiscoveredCommand(entry, cityPath, cityName, args, stdin(), stdout, stderr)
+}
+
+// checkDiscoveredLeafScope refuses a --city or --rig in a pack leaf's argv that
+// selects a different city than the one the leaf was bound to. The leaf's city
+// is captured when the command tree is built, before a DisableFlagParsing
+// leaf's own arguments exist, so honoring the flag is impossible there; running
+// the script against the bound city would silently retarget it. A scope that
+// resolves to the bound city (including the pre-leaf scope that selected it) is
+// harmless and passes. Tokens after "--" are left to the script.
+func checkDiscoveredLeafScope(entry config.DiscoveredCommand, cityPath string, args []string) error {
+	city, rig, citySet, rigSet := scanDiscoveredLeafScope(args)
+	if !citySet && !rigSet {
+		return nil
+	}
+
+	var selected string
+	var err error
+	if citySet && city == "" || rigSet && rig == "" {
+		err = errors.New("empty --city or --rig value")
+	} else {
+		selected, err = resolveCityForExplicitScope(city, rig, citySet, rigSet)
+	}
+	if err == nil && rigSet {
+		// Resolution takes any --city value, including a pre-leaf --city
+		// already parsed into cityFlag, and then never checks the rig; that
+		// would mask the rig, so resolve the rig on its own: it must belong to
+		// the bound city too.
+		rigCity, rigErr := resolveCityForExplicitScope("", rig, true, true)
+		switch {
+		case rigErr != nil:
+			err = rigErr
+		case !samePath(rigCity, cityPath):
+			selected = rigCity
+		}
+	}
+	if err == nil && samePath(selected, cityPath) {
+		return nil
+	}
+	reason := fmt.Sprintf("it would run against city %s, not the one selected", cityPath)
+	if err != nil {
+		reason = fmt.Sprintf("the selected scope does not resolve (%v)", err)
+	}
+	return fmt.Errorf("--city/--rig is not supported after the command name: %s; put it before the pack binding (gc --city <dir> %s ...) or cd to the target city", reason, entry.BindingName)
+}
+
+// scanDiscoveredLeafScope reports the last --city and --rig values in a pack
+// leaf's argv, stopping at "--".
+func scanDiscoveredLeafScope(args []string) (city, rig string, citySet, rigSet bool) {
+scan:
+	for i := 0; i < len(args); i++ {
+		switch arg := args[i]; {
+		case arg == "--":
+			break scan
+		case arg == "--city" || arg == "--rig":
+			value := ""
+			if i+1 < len(args) {
+				i++
+				value = args[i]
+			}
+			if arg == "--city" {
+				city, citySet = value, true
+			} else {
+				rig, rigSet = value, true
+			}
+		case strings.HasPrefix(arg, "--city="):
+			city, citySet = strings.TrimPrefix(arg, "--city="), true
+		case strings.HasPrefix(arg, "--rig="):
+			rig, rigSet = strings.TrimPrefix(arg, "--rig="), true
+		}
+	}
+	return city, rig, citySet, rigSet
+}
+
 func resolveDiscoveredLeafAction(cmd *cobra.Command, args []string, invoke func() int) packCommandAction {
 	if discoveredHelpRequested(args) {
 		return resolvedPackCommandHelpAction(cmd)
@@ -300,37 +396,14 @@ func discoveredHelpRequested(args []string) bool {
 }
 
 func runDiscoveredCommand(entry config.DiscoveredCommand, cityPath, cityName string, args []string, stdinR io.Reader, stdout, stderr io.Writer) int {
-	packDir := entry.PackDir
-	if packDir == "" {
-		packDir = packRootFromEntryDir(entry.SourceDir, "commands")
+	cmd, err := newDiscoveredCommandExec(context.Background(), entry, cityPath, cityName, args, stderr)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc %s %s: %v\n", entry.BindingName, strings.Join(entry.Command, " "), err) //nolint:errcheck
+		return 1
 	}
-	scriptPath := expandScriptTemplate(entry.RunScript, cityPath, cityName, packDir)
-	if !filepath.IsAbs(scriptPath) {
-		scriptPath = filepath.Join(entry.SourceDir, scriptPath)
-	}
-
-	cmd := exec.Command(scriptPath, args...)
 	cmd.Stdin = stdinR
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	cmd.Env = append(os.Environ(), citylayout.PackRuntimeEnv(cityPath, entry.PackName)...)
-	cmd.Env = append(cmd.Env,
-		"GC_PACK_DIR="+packDir,
-		"GC_PACK_NAME="+entry.PackName,
-		"GC_CITY_NAME="+cityName,
-	)
-	// Pack commands are extensions of this exact gc process. Pin recursive
-	// calls to the invoking executable instead of inheriting an ambient GC_BIN
-	// (or falling back to a different `gc` on PATH).
-	exe, err := resolveInvokingExecutable()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc %s %s: resolving invoking gc executable: %v\n", entry.BindingName, strings.Join(entry.Command, " "), err) //nolint:errcheck
-		return 1
-	}
-	cmd.Env = pinInvokingGCBinary(cmd.Env, exe)
-	cmd.Env = pinSupervisorURL(cmd.Env, cityPath, stderr)
-	cmd.Env = mergeCanonicalScopeDoltEnv(cmd.Env, cityPath)
-	cmd.Env = applyCityDoltSettingsEnv(cmd.Env, cityPath)
 	disableProductMetricsForChild(cmd)
 
 	if err := cmd.Run(); err != nil {
@@ -342,6 +415,75 @@ func runDiscoveredCommand(entry config.DiscoveredCommand, cityPath, cityName str
 		return 1
 	}
 	return 0
+}
+
+// newDiscoveredCommandExec builds the process for a pack command script with
+// the pack-runtime environment every pack command runs under. The caller
+// wires stdio and starts it.
+func newDiscoveredCommandExec(ctx context.Context, entry config.DiscoveredCommand, cityPath, cityName string, args []string, stderr io.Writer) (*exec.Cmd, error) {
+	packDir := entry.PackDir
+	if packDir == "" {
+		packDir = packRootFromEntryDir(entry.SourceDir, "commands")
+	}
+	scriptPath := expandScriptTemplate(entry.RunScript, cityPath, cityName, packDir)
+	if !filepath.IsAbs(scriptPath) {
+		scriptPath = filepath.Join(entry.SourceDir, scriptPath)
+	}
+
+	cmd := exec.CommandContext(ctx, scriptPath, args...)
+	cmd.Env = append(os.Environ(), citylayout.PackRuntimeEnv(cityPath, entry.PackName)...)
+	cmd.Env = append(cmd.Env,
+		"GC_PACK_DIR="+packDir,
+		"GC_PACK_NAME="+entry.PackName,
+		"GC_CITY_NAME="+cityName,
+	)
+	// Pack commands are extensions of this exact gc process. Pin recursive
+	// calls to the invoking executable instead of inheriting an ambient GC_BIN
+	// (or falling back to a different `gc` on PATH).
+	exe, err := resolveInvokingExecutable()
+	if err != nil {
+		return nil, fmt.Errorf("resolving invoking gc executable: %w", err)
+	}
+	cmd.Env = pinInvokingGCBinary(cmd.Env, exe)
+	cmd.Env = pinSupervisorURL(cmd.Env, cityPath, stderr)
+	cmd.Env = mergeCanonicalScopeDoltEnv(cmd.Env, cityPath)
+	cmd.Env = applyCityDoltSettingsEnv(cmd.Env, cityPath)
+	return cmd, nil
+}
+
+// printNativeHelp writes the output of entry's own script run with exactly
+// "--help" and reports whether it did. It is false, and writes nothing, when
+// the command has not opted in or the run fails, times out, or prints nothing,
+// so the caller falls back to the static help.
+func printNativeHelp(w io.Writer, entry config.DiscoveredCommand, cityPath, cityName string) bool {
+	if !entry.NativeHelp {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), nativeHelpTimeout)
+	defer cancel()
+	cmd, err := newDiscoveredCommandExec(ctx, entry, cityPath, cityName, []string{"--help"}, io.Discard)
+	if err != nil {
+		return false
+	}
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	// A script's child can outlive the killed script holding the pipe open;
+	// WaitDelay stops Run from waiting on it.
+	cmd.WaitDelay = time.Second
+	disableProductMetricsForChild(cmd)
+	if cmd.Run() != nil || strings.TrimSpace(out.String()) == "" {
+		return false
+	}
+	_, _ = w.Write(out.Bytes())
+	return true
+}
+
+// printCommandHelp renders help for a lazily resolved command: the script's own
+// help when the command opted in, else the static help.
+func printCommandHelp(w io.Writer, entry config.DiscoveredCommand, cityPath, cityName string) {
+	if !printNativeHelp(w, entry, cityPath, cityName) {
+		printDiscoveredCommandHelp(w, entry)
+	}
 }
 
 func pinInvokingGCBinary(env []string, executable string) []string {
@@ -562,7 +704,7 @@ func resolveDiscoveredCommandFallback(args []string, cfg *config.City, cityPath 
 		for _, entry := range matching {
 			if slices.Equal(prefix, entry.Command) {
 				return resolvedPackCommandAction(func() int {
-					printDiscoveredCommandHelp(stdout, entry)
+					printCommandHelp(stdout, entry, cityPath, cityName)
 					return 0
 				})
 			}
@@ -582,12 +724,12 @@ func resolveDiscoveredCommandFallback(args []string, cfg *config.City, cityPath 
 			commandArgs := slices.Clone(args[1+len(entry.Command):])
 			if discoveredHelpRequested(commandArgs) {
 				return resolvedPackCommandAction(func() int {
-					printDiscoveredCommandHelp(stdout, entry)
+					printCommandHelp(stdout, entry, cityPath, cityName)
 					return 0
 				})
 			}
 			return resolvedPackCommandAction(func() int {
-				return runDiscoveredCommand(entry, cityPath, cityName, commandArgs, stdin(), stdout, stderr)
+				return runScopedDiscoveredCommand(entry, cityPath, cityName, commandArgs, stdout, stderr)
 			})
 		}
 	}

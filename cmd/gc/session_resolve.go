@@ -35,6 +35,9 @@ type namedSessionResolveOptions struct {
 	// session start it left to the reconciler (noteDeferredSessionStart); nil
 	// discards it, for a caller that reports the start itself.
 	stderr io.Writer
+	// observeOnly: the resolution writes nothing, not even the empty-type
+	// heal of scanned rows (resolveOpenQualifiedAliasBasename).
+	observeOnly bool
 }
 
 const templateTargetPrefix = "template:"
@@ -171,7 +174,7 @@ func resolveSessionIDWithOptions(
 	} else if !errors.Is(err, session.ErrSessionNotFound) {
 		return "", err
 	}
-	if id, err := resolveOpenQualifiedAliasBasename(store, identifier); err == nil {
+	if id, err := resolveOpenQualifiedAliasBasename(store, identifier, !opts.observeOnly); err == nil {
 		return id, nil
 	} else if !errors.Is(err, session.ErrSessionNotFound) {
 		return "", err
@@ -194,7 +197,10 @@ func resolveSessionIDWithOptions(
 	return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 }
 
-func resolveOpenQualifiedAliasBasename(store beads.Store, identifier string) (string, error) {
+// resolveOpenQualifiedAliasBasename resolves identifier as the basename of an
+// open session's qualified alias. With heal, a scanned row with an empty type
+// has its type repaired; an observe-only caller passes false.
+func resolveOpenQualifiedAliasBasename(store beads.Store, identifier string, heal bool) (string, error) {
 	identifier = strings.TrimSpace(identifier)
 	if store == nil || identifier == "" || strings.Contains(identifier, "/") {
 		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
@@ -211,7 +217,7 @@ func resolveOpenQualifiedAliasBasename(store beads.Store, identifier string) (st
 		if info.Closed {
 			continue
 		}
-		if info.Type == "" {
+		if heal && info.Type == "" {
 			sessFront.RepairTypeBestEffort(info.ID)
 		}
 		alias := strings.TrimSpace(info.Alias)

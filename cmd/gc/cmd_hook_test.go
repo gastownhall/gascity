@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -55,7 +57,7 @@ name = "test-city"
 
 [[agent]]
 name = "worker"
-work_query = "printf '[]'"
+work_query = ` + strconv.Quote(printJSONCommand(`[]`)) + `
 ` + builtinImportsTOML("core", "bd")
 	writeBuiltinImportsLock(t, cityDir, "core", "bd")
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
@@ -243,7 +245,7 @@ name = "test-city"
 
 [[agent]]
 name = "polecat"
-work_query = "printf '[{\"id\":\"ga-pool1\",\"status\":\"open\",\"title\":\"work item\"}]'"
+work_query = ` + strconv.Quote(printJSONCommand(`[{"id":"ga-pool1","status":"open","title":"work item"}]`)) + `
 `
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatal(err)
@@ -1352,9 +1354,13 @@ func TestHookCommandErrorPrintsPartialOutput(t *testing.T) {
 func TestShellWorkQueryWithEnvTimeoutReportsPartialOutput(t *testing.T) {
 	oldTimeout := hookWorkQueryTimeout
 	hookWorkQueryTimeout = 200 * time.Millisecond
+	if goruntime.GOOS == "windows" {
+		// PowerShell takes longer than that to start, so it would print nothing.
+		hookWorkQueryTimeout = 10 * time.Second
+	}
 	t.Cleanup(func() { hookWorkQueryTimeout = oldTimeout })
 
-	out, err := shellWorkQueryWithEnv("printf '[]\\n'; sleep 1", "", nil)
+	out, err := shellWorkQueryWithEnv(platformCommand("printf '[]\\n'; sleep 1", "Write-Output '[]'; Start-Sleep -Seconds 60"), "", nil)
 	if err == nil {
 		t.Fatal("shellWorkQueryWithEnv() error = nil, want timeout")
 	}
@@ -1642,7 +1648,7 @@ name = "test-city"
 
 [[agent]]
 name = "worker"
-work_query = "printf '[{\"id\":\"hw-1\",\"title\":\"Fix the bug\"}]'"
+work_query = ` + strconv.Quote(printJSONCommand(`[{"id":"hw-1","title":"Fix the bug"}]`)) + `
 ` + builtinImportsTOML("core", "bd")
 	writeBuiltinImportsLock(t, cityDir, "core", "bd")
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
@@ -2096,7 +2102,7 @@ name = "test-city"
 [[agent]]
 name = "builder"
 max_active_sessions = 3
-work_query = "printf '[{\"id\":\"ga-frpt4k\",\"status\":\"in_progress\",\"assignee\":\"builder\",\"metadata\":{\"gc.routed_to\":\"builder\"}}]'"
+work_query = ` + strconv.Quote(printJSONCommand(`[{"id":"ga-frpt4k","status":"in_progress","assignee":"builder","metadata":{"gc.routed_to":"builder"}}]`)) + `
 
 [[named_session]]
 template = "builder"
@@ -2106,17 +2112,15 @@ mode = "on_demand"
 		t.Fatal(err)
 	}
 
-	fakeBin := t.TempDir()
 	logPath := filepath.Join(t.TempDir(), "bd.log")
 	script := fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$*" >> %q
 printf '[]'
 `, logPath)
-	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(script), 0o755); err != nil {
-		t.Fatal(err)
+	if recorded := installFakeBdOnPath(t, script, map[string]nativeFakeBdReply{"": {Stdout: "[]"}}); recorded != "" {
+		logPath = recorded
 	}
 
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GC_CITY", cityDir)
 	// Suffixed pool worker: GC_TEMPLATE is the bare pool binding, GC_ALIAS and
 	// GC_SESSION_NAME are this instance's own suffixed runtime identity.
@@ -2174,7 +2178,7 @@ name = "test-city"
 [[agent]]
 name = "builder"
 max_active_sessions = 3
-work_query = "printf '[{\"id\":\"ga-frpt4k\",\"status\":\"in_progress\",\"assignee\":\"builder\",\"metadata\":{\"gc.routed_to\":\"builder\"}}]'"
+work_query = ` + strconv.Quote(printJSONCommand(`[{"id":"ga-frpt4k","status":"in_progress","assignee":"builder","metadata":{"gc.routed_to":"builder"}}]`)) + `
 
 [[named_session]]
 template = "builder"
@@ -2184,12 +2188,8 @@ mode = "on_demand"
 		t.Fatal(err)
 	}
 
-	fakeBin := t.TempDir()
-	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte("#!/bin/sh\nprintf '[]'\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	installFakeBdOnPath(t, "#!/bin/sh\nprintf '[]'\n", map[string]nativeFakeBdReply{"": {Stdout: "[]"}})
 
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GC_CITY", cityDir)
 	// Named holder / canonical slot: GC_ALIAS IS the bare template.
 	t.Setenv("GC_TEMPLATE", "builder")
@@ -2681,7 +2681,6 @@ func TestCmdHookExpandsTemplateCommandsWithCityFallback(t *testing.T) {
 	t.Setenv("GC_TMUX_SESSION", "host-session")
 	cityDir := filepath.Join(t.TempDir(), "demo-city")
 	rigDir := filepath.Join(cityDir, "frontend")
-	fakeBin := t.TempDir()
 
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -2702,13 +2701,9 @@ work_query = "bd {{.CityName}} {{.Rig}} {{.AgentBase}}"
 		t.Fatal(err)
 	}
 
-	fakeBD := filepath.Join(fakeBin, "bd")
-	script := "#!/bin/sh\nprintf 'args=%s\\n' \"$*\"\n"
-	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	installFakeBdOnPath(t, "#!/bin/sh\nprintf 'args=%s\\n' \"$*\"\n", map[string]nativeFakeBdReply{
+		"demo-city frontend worker": {Stdout: "args=demo-city frontend worker\n"},
+	})
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_DIR", rigDir)
 

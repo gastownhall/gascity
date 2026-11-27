@@ -1,11 +1,81 @@
 package git
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+const fakeGitEnvLog = "GASCITY_FAKE_GIT_ENV_LOG"
+
+func init() {
+	base := strings.ToLower(filepath.Base(os.Args[0]))
+	if base != "git" && base != "git.exe" {
+		return
+	}
+	logPath := os.Getenv(fakeGitEnvLog)
+	if logPath == "" {
+		os.Exit(0)
+	}
+	var b strings.Builder
+	b.WriteString("argv=")
+	b.WriteString(strings.Join(os.Args[1:], " "))
+	b.WriteString("\n")
+	for _, entry := range os.Environ() {
+		if strings.HasPrefix(entry, "GIT_LFS_SKIP_SMUDGE=") {
+			b.WriteString(entry)
+			b.WriteString("\n")
+		}
+	}
+	if err := os.WriteFile(logPath, []byte(b.String()), 0o600); err != nil {
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
+func fakeGitOnPath(t *testing.T) string {
+	t.Helper()
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	name := "git"
+	if filepath.Ext(self) == ".exe" {
+		name = "git.exe"
+	}
+	fake := filepath.Join(dir, name)
+	if err := os.Link(self, fake); err != nil {
+		copyTestExecutable(t, self, fake)
+	}
+	t.Cleanup(func() { _ = os.Remove(fake) })
+	logPath := filepath.Join(t.TempDir(), "git-env.log")
+	t.Setenv(fakeGitEnvLog, logPath)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return logPath
+}
+
+func copyTestExecutable(t *testing.T, from, to string) {
+	t.Helper()
+	src, err := os.Open(from)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close() //nolint:errcheck
+	dst, err := os.OpenFile(to, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o755)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(dst, src); err != nil {
+		dst.Close() //nolint:errcheck
+		t.Fatal(err)
+	}
+	if err := dst.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestBranchExists(t *testing.T) {
 	dir := initTestRepo(t)
@@ -116,6 +186,36 @@ func TestWorktreeAddExistingBranch(t *testing.T) {
 	}
 	if branch != "feature-y" {
 		t.Errorf("worktree branch = %q, want feature-y", branch)
+	}
+}
+
+func TestWorktreeAddDefaultDoesNotSkipLFSSmudge(t *testing.T) {
+	logPath := fakeGitOnPath(t)
+	g := New(t.TempDir())
+	if err := g.WorktreeAddNewBranch(filepath.Join(t.TempDir(), "wt"), "feature-default", "main"); err != nil {
+		t.Fatalf("WorktreeAddNewBranch: %v", err)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile fake git log: %v", err)
+	}
+	if strings.Contains(string(data), "GIT_LFS_SKIP_SMUDGE=") {
+		t.Fatalf("default worktree add set GIT_LFS_SKIP_SMUDGE:\n%s", data)
+	}
+}
+
+func TestWorktreeAddOptionSkipsLFSSmudge(t *testing.T) {
+	logPath := fakeGitOnPath(t)
+	g := New(t.TempDir())
+	if err := g.WorktreeAddNewBranchWithOptions(filepath.Join(t.TempDir(), "wt"), "feature-lfs", "main", WorktreeAddOptions{SkipLFSSmudge: true}); err != nil {
+		t.Fatalf("WorktreeAddNewBranchWithOptions: %v", err)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile fake git log: %v", err)
+	}
+	if !strings.Contains(string(data), "GIT_LFS_SKIP_SMUDGE=1") {
+		t.Fatalf("option-scoped worktree add did not set GIT_LFS_SKIP_SMUDGE:\n%s", data)
 	}
 }
 
@@ -306,5 +406,73 @@ func TestIsHexObjectIDAcceptsBothObjectFormats(t *testing.T) {
 		if isHexObjectID(bad) {
 			t.Fatalf("isHexObjectID(%q) = true, want false", bad)
 		}
+	}
+}
+
+// BaseRefMissing is the sling-time base_branch check, so it must refuse only
+// when it can prove the ref is absent: a local branch, a remote-tracking ref
+// (bare name resolved as origin/<name>, or a full "remote/branch" ref) and a
+// directory it cannot read as a repository are all "not missing".
+func TestBaseRefMissing(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+	local, err := g.CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch: %v", err)
+	}
+	// A remote-tracking ref for a branch that exists nowhere locally.
+	runGit(t, dir, "update-ref", "refs/remotes/origin/only-on-origin", "HEAD")
+	runGit(t, dir, "update-ref", "refs/remotes/headfork/restack/foo", "HEAD")
+
+	tests := []struct {
+		name string
+		ref  string
+		want bool
+	}{
+		{"local branch", local, false},
+		{"bare name found as origin/<name>", "only-on-origin", false},
+		{"full remote-tracking ref", "headfork/restack/foo", false},
+		{"unknown ref", "no-such-base", true},
+		{"typo of a real ref", local + "x", true},
+		// A probe that fails for any reason but git's "no such ref" status
+		// (here, an argument git would read as an option) proves nothing.
+		{"unprobeable ref", "-x", false},
+	}
+	for _, tt := range tests {
+		if got := g.BaseRefMissing(tt.ref); got != tt.want {
+			t.Errorf("%s: BaseRefMissing(%q) = %v, want %v", tt.name, tt.ref, got, tt.want)
+		}
+	}
+
+	// Inconclusive is not "missing": a non-repository cannot prove anything.
+	if New(t.TempDir()).BaseRefMissing("main") {
+		t.Error("BaseRefMissing in a non-repository = true, want false (cannot decide)")
+	}
+}
+
+// TestBaseRefMissingIsFalseWhenGitFailsAnotherWay pins the other half of the
+// "cannot decide" contract in BaseRefMissing's doc: in a directory git accepts
+// as a repository, a probe that fails with any status but git's "no such ref"
+// 1 proves nothing about the ref, so the refusal built on it must not fire. A
+// damaged packed-refs file is such a failure: rev-parse dies with 128 while
+// rev-parse --git-dir, which IsRepo runs, still succeeds.
+func TestBaseRefMissingIsFalseWhenGitFailsAnotherWay(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+	// Control: before the damage, the same unknown ref is missing.
+	if !g.BaseRefMissing("no-such-base") {
+		t.Fatal("BaseRefMissing(no-such-base) = false in a healthy repository, want true")
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".git", "packed-refs"), []byte("not a packed-refs line\n"), 0o600); err != nil {
+		t.Fatalf("damaging packed-refs: %v", err)
+	}
+	// The probe, not the repository check, has to be what fails here;
+	// otherwise the IsRepo guard alone would satisfy this test.
+	if !g.IsRepo() {
+		t.Fatal("IsRepo() = false with a damaged packed-refs file, want true")
+	}
+	if g.BaseRefMissing("no-such-base") {
+		_, probeErr := g.RevParseVerifyCommit("no-such-base")
+		t.Errorf("BaseRefMissing(no-such-base) = true with a damaged packed-refs file, want false (cannot decide); the probe itself says: %v", probeErr)
 	}
 }

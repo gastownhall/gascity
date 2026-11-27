@@ -1,6 +1,7 @@
 package git
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -40,6 +41,29 @@ func (g *Git) BranchExists(branch string) (bool, error) {
 		return false, nil
 	}
 	return false, fmt.Errorf("probing branch %q: %w", branch, err)
+}
+
+// BaseRefMissing reports true only when g is a git repository in which ref
+// resolves to no commit, either as the remote-tracking ref origin/<ref> or as
+// the literal ref, and git said so with its "no such ref" exit status. Anything
+// it cannot decide (not a repository, git unavailable, a probe that failed any
+// other way) reports false, so a caller that refuses on true never blocks work
+// it could not actually check. It reads local refs and never fetches.
+func (g *Git) BaseRefMissing(ref string) bool {
+	if !g.IsRepo() {
+		return false
+	}
+	for _, candidate := range []string{"origin/" + ref, ref} {
+		_, err := g.RevParseVerifyCommit(candidate)
+		if err == nil {
+			return false
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+			return false
+		}
+	}
+	return true
 }
 
 // RevParseVerifyCommit resolves ref to a full commit SHA, failing when the
@@ -85,10 +109,24 @@ func (g *Git) RevParseVerifyCommit(ref string) (string, error) {
 	return sha, nil
 }
 
+// WorktreeAddOptions controls optional git worktree add behavior.
+type WorktreeAddOptions struct {
+	// SkipLFSSmudge leaves Git LFS files as pointers rather than downloading
+	// their contents during checkout. Callers must run git lfs pull before
+	// building or testing code that needs those contents.
+	SkipLFSSmudge bool
+}
+
 // WorktreeAddNewBranch creates a worktree at path with a NEW branch created
 // from base. It never detaches: the new worktree has branch checked out.
 // Fails if the branch already exists.
 func (g *Git) WorktreeAddNewBranch(path, branch, base string) error {
+	return g.WorktreeAddNewBranchWithOptions(path, branch, base, WorktreeAddOptions{})
+}
+
+// WorktreeAddNewBranchWithOptions is WorktreeAddNewBranch with explicit
+// checkout options for callers that need non-default git environment.
+func (g *Git) WorktreeAddNewBranchWithOptions(path, branch, base string, opts WorktreeAddOptions) error {
 	if err := validateRefArg("branch", branch); err != nil {
 		return err
 	}
@@ -98,7 +136,7 @@ func (g *Git) WorktreeAddNewBranch(path, branch, base string) error {
 	if err := validateRefArg("path", path); err != nil {
 		return err
 	}
-	if _, err := g.run("worktree", "add", "-b", branch, path, base); err != nil {
+	if _, err := g.runWorktreeAdd(opts, "worktree", "add", "-b", branch, path, base); err != nil {
 		return fmt.Errorf("adding worktree %q on new branch %q from %q: %w", path, branch, base, err)
 	}
 	return nil
@@ -108,16 +146,30 @@ func (g *Git) WorktreeAddNewBranch(path, branch, base string) error {
 // branch checked out. It never detaches. Fails if the branch is already
 // checked out in another worktree.
 func (g *Git) WorktreeAddExistingBranch(path, branch string) error {
+	return g.WorktreeAddExistingBranchWithOptions(path, branch, WorktreeAddOptions{})
+}
+
+// WorktreeAddExistingBranchWithOptions is WorktreeAddExistingBranch with
+// explicit checkout options for callers that need non-default git environment.
+func (g *Git) WorktreeAddExistingBranchWithOptions(path, branch string, opts WorktreeAddOptions) error {
 	if err := validateRefArg("branch", branch); err != nil {
 		return err
 	}
 	if err := validateRefArg("path", path); err != nil {
 		return err
 	}
-	if _, err := g.run("worktree", "add", path, branch); err != nil {
+	if _, err := g.runWorktreeAdd(opts, "worktree", "add", path, branch); err != nil {
 		return fmt.Errorf("adding worktree %q on branch %q: %w", path, branch, err)
 	}
 	return nil
+}
+
+func (g *Git) runWorktreeAdd(opts WorktreeAddOptions, args ...string) (string, error) {
+	var extraEnv []string
+	if opts.SkipLFSSmudge {
+		extraEnv = []string{"GIT_LFS_SKIP_SMUDGE=1"}
+	}
+	return g.runCtxExtraEnv(context.Background(), extraEnv, args...)
 }
 
 // BranchDeleteIfMerged deletes a local branch only when git can prove the

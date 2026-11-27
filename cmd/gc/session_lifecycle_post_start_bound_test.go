@@ -50,6 +50,15 @@ type postStartProvider struct {
 	hangObservation atomic.Int64
 	hangPeek        atomic.Bool
 	hangGetMeta     atomic.Bool
+	// hangStop hangs every Stop. The *InCommit flags hang only the calls the
+	// commit and settle phase makes (inCommitPhase), so the start phase
+	// answers and the scenario wedges the commit alone.
+	hangStop            atomic.Bool
+	hangStopInCommit    atomic.Bool
+	hangGetMetaInCommit atomic.Bool
+	// onHang, when set, runs on the goroutine of every call that hangs, just
+	// before it blocks.
+	onHang func()
 	// peekDelay is how long Peek takes to answer, in nanoseconds.
 	peekDelay atomic.Int64
 	// startUntilDeadline makes Start wait for its context to end and then
@@ -76,6 +85,9 @@ func newPostStartProvider() *postStartProvider {
 // hang blocks the calling provider call until release, recording call as the
 // one that hung.
 func (p *postStartProvider) hang(call string) {
+	if p.onHang != nil {
+		p.onHang()
+	}
 	p.mu.Lock()
 	p.hungCalls = append(p.hungCalls, call)
 	p.mu.Unlock()
@@ -141,10 +153,17 @@ func (p *postStartProvider) Peek(name string, lines int) (string, error) {
 }
 
 func (p *postStartProvider) GetMeta(name, key string) (string, error) {
-	if p.hangGetMeta.Load() {
+	if p.hangGetMeta.Load() || (p.hangGetMetaInCommit.Load() && inCommitPhase()) {
 		p.hang("GetMeta " + key)
 	}
 	return p.Fake.GetMeta(name, key)
+}
+
+func (p *postStartProvider) Stop(name string) error {
+	if p.hangStop.Load() || (p.hangStopInCommit.Load() && inCommitPhase()) {
+		p.hang("Stop")
+	}
+	return p.Fake.Stop(name)
 }
 
 func (p *postStartProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {

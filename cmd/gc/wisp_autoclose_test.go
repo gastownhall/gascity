@@ -21,7 +21,7 @@ func TestWispAutocloseClosesOpenMolecule(t *testing.T) {
 	_ = store.Close("gc-1")
 
 	var stdout bytes.Buffer
-	doWispAutocloseWith(store, "gc-1", &stdout, beads.GraphStore{Store: store})
+	doWispAutocloseWith(store, "gc-1", &stdout, testStores(store, store))
 
 	if !strings.Contains(stdout.String(), "Auto-closed molecule gc-2 on gc-1") {
 		t.Errorf("stdout = %q, want auto-close message", stdout.String())
@@ -46,7 +46,7 @@ func TestWispAutocloseLeavesAnOpenParentsAttachments(t *testing.T) {
 	_, _ = store.Create(beads.Bead{Title: "attached", Type: "molecule"})                                    // gc-3
 
 	var stdout bytes.Buffer
-	doWispAutocloseWith(store, "gc-1", &stdout, beads.GraphStore{Store: store})
+	doWispAutocloseWith(store, "gc-1", &stdout, testStores(store, store))
 
 	for _, id := range []string{"gc-2", "gc-3"} {
 		b, err := store.Get(id)
@@ -69,7 +69,7 @@ func TestWispAutocloseLeavesAnOpenWorkflowRootsSpecSidecars(t *testing.T) {
 	spec, _ := store.Create(beads.Bead{Title: "spec", Type: "spec", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID}})
 
 	var stdout bytes.Buffer
-	doWispAutocloseWith(store, root.ID, &stdout, beads.GraphStore{Store: store})
+	doWispAutocloseWith(store, root.ID, &stdout, testStores(store, store))
 
 	if got, _ := store.Get(spec.ID); got.Status != "open" {
 		t.Fatalf("spec sidecar %s under an open workflow root, want open", got.Status)
@@ -86,7 +86,7 @@ func TestWispAutocloseClosesMetadataAttachedMolecule(t *testing.T) {
 	_ = store.Close("gc-1")
 
 	var stdout bytes.Buffer
-	doWispAutocloseWith(store, "gc-1", &stdout, beads.GraphStore{Store: store})
+	doWispAutocloseWith(store, "gc-1", &stdout, testStores(store, store))
 
 	if !strings.Contains(stdout.String(), "Auto-closed molecule gc-2 on gc-1") {
 		t.Fatalf("stdout = %q, want metadata auto-close message", stdout.String())
@@ -129,7 +129,7 @@ func TestWispAutoclosePreservesParkedMoleculeSubtree(t *testing.T) {
 	_ = store.Close("gc-1")
 
 	var stdout bytes.Buffer
-	doWispAutocloseWith(store, "gc-1", &stdout, beads.GraphStore{Store: store})
+	doWispAutocloseWith(store, "gc-1", &stdout, testStores(store, store))
 
 	if stdout.String() != "" {
 		t.Fatalf("parked molecule must not be auto-closed, got %q", stdout.String())
@@ -160,7 +160,7 @@ func TestWispAutocloseForceClosesTerminalMoleculeSubtree(t *testing.T) {
 	_ = store.Close("gc-1")
 
 	var stdout bytes.Buffer
-	doWispAutocloseWith(store, "gc-1", &stdout, beads.GraphStore{Store: store})
+	doWispAutocloseWith(store, "gc-1", &stdout, testStores(store, store))
 
 	if !strings.Contains(stdout.String(), "Auto-closed molecule gc-2 on gc-1") {
 		t.Fatalf("stdout = %q, want auto-close message for terminal subtree", stdout.String())
@@ -277,7 +277,7 @@ func TestWispAutoclosePreservesParkedMoleculeSubtreeOnWalkError(t *testing.T) {
 	store := &walkFailOnceStore{Store: base, failID: "gc-2"}
 
 	var stdout bytes.Buffer
-	doWispAutocloseWith(store, "gc-1", &stdout, beads.GraphStore{Store: store})
+	doWispAutocloseWith(store, "gc-1", &stdout, testStores(store, store))
 
 	if stdout.String() != "" {
 		t.Fatalf("walk-error fail-safe must not auto-close parked molecule, got %q", stdout.String())
@@ -305,7 +305,7 @@ func TestWispAutocloseChecksDescendantsWhenAttachedRootAlreadyClosed(t *testing.
 	_ = store.Close("gc-1")
 
 	var stdout bytes.Buffer
-	doWispAutocloseWith(store, "gc-1", &stdout, beads.GraphStore{Store: store})
+	doWispAutocloseWith(store, "gc-1", &stdout, testStores(store, store))
 
 	if !strings.Contains(stdout.String(), "Auto-closed molecule gc-2 on gc-1") {
 		t.Fatalf("stdout = %q, want auto-close message for descendant cleanup", stdout.String())
@@ -357,7 +357,7 @@ func TestWispAutocloseClosesGeneratedSpecsForClosedWorkflowRoot(t *testing.T) {
 	_ = store.Close(root.ID)
 
 	var stdout bytes.Buffer
-	doWispAutocloseWith(store, root.ID, &stdout, beads.GraphStore{Store: store})
+	doWispAutocloseWith(store, root.ID, &stdout, testStores(store, store))
 
 	if !strings.Contains(stdout.String(), "Auto-closed 1 generated spec bead(s) on "+root.ID) {
 		t.Fatalf("stdout = %q, want generated spec cleanup message", stdout.String())
@@ -416,7 +416,7 @@ func TestWispAutocloseSkipsGeneratedSpecsForClosedWorkflowChild(t *testing.T) {
 	_ = store.Close(child.ID)
 
 	var stdout bytes.Buffer
-	doWispAutocloseWith(store, child.ID, &stdout, beads.GraphStore{Store: store})
+	doWispAutocloseWith(store, child.ID, &stdout, testStores(store, store))
 
 	if stdout.String() != "" {
 		t.Fatalf("stdout = %q, want no generated spec cleanup message", stdout.String())
@@ -461,7 +461,7 @@ func TestWispAutocloseReadsClosedWorkflowRootFromLiveHandle(t *testing.T) {
 	store := wrapStoreWithBeadPolicies(staleCachedWispStore{MemStore: mem}, &config.City{})
 
 	var stdout bytes.Buffer
-	doWispAutocloseWith(store, root.ID, &stdout, beads.GraphStore{Store: store})
+	doWispAutocloseWith(store, root.ID, &stdout, testStores(store, store))
 
 	if !strings.Contains(stdout.String(), "Auto-closed 1 generated spec bead(s) on "+root.ID) {
 		t.Fatalf("stdout = %q, want generated spec cleanup message", stdout.String())
@@ -499,7 +499,7 @@ func TestWispAutocloseTraversesChildrenViaLiveHandle(t *testing.T) {
 	store := tierNarrowListWispStore{MemStore: mem}
 
 	var stdout bytes.Buffer
-	doWispAutocloseWith(store, "gc-1", &stdout, beads.GraphStore{Store: store})
+	doWispAutocloseWith(store, "gc-1", &stdout, testStores(store, store))
 
 	if !strings.Contains(stdout.String(), "Auto-closed molecule gc-2 on gc-1") {
 		t.Fatalf("stdout = %q, want auto-close message for live-listed child", stdout.String())
@@ -541,7 +541,7 @@ func TestWispAutocloseSkipsAlreadyClosed(t *testing.T) {
 	_ = store.Close("gc-1")
 
 	var stdout bytes.Buffer
-	doWispAutocloseWith(store, "gc-1", &stdout, beads.GraphStore{Store: store})
+	doWispAutocloseWith(store, "gc-1", &stdout, testStores(store, store))
 
 	if stdout.String() != "" {
 		t.Errorf("already-closed wisp should produce no output, got %q", stdout.String())
@@ -555,7 +555,7 @@ func TestWispAutocloseSkipsNonMoleculeChildren(t *testing.T) {
 	_ = store.Close("gc-1")
 
 	var stdout bytes.Buffer
-	doWispAutocloseWith(store, "gc-1", &stdout, beads.GraphStore{Store: store})
+	doWispAutocloseWith(store, "gc-1", &stdout, testStores(store, store))
 
 	if stdout.String() != "" {
 		t.Errorf("non-molecule children should produce no output, got %q", stdout.String())
@@ -573,7 +573,7 @@ func TestWispAutocloseNoChildren(t *testing.T) {
 	_ = store.Close("gc-1")
 
 	var stdout bytes.Buffer
-	doWispAutocloseWith(store, "gc-1", &stdout, beads.GraphStore{Store: store})
+	doWispAutocloseWith(store, "gc-1", &stdout, testStores(store, store))
 
 	if stdout.String() != "" {
 		t.Errorf("no-children bead should produce no output, got %q", stdout.String())
@@ -588,7 +588,7 @@ func TestWispAutocloseMultipleMolecules(t *testing.T) {
 	_ = store.Close("gc-1")
 
 	var stdout bytes.Buffer
-	doWispAutocloseWith(store, "gc-1", &stdout, beads.GraphStore{Store: store})
+	doWispAutocloseWith(store, "gc-1", &stdout, testStores(store, store))
 
 	out := stdout.String()
 	if !strings.Contains(out, "gc-2") || !strings.Contains(out, "gc-3") {
@@ -640,7 +640,7 @@ func TestWispAutocloseClosesRootOnlyWispViaInputConvoy(t *testing.T) {
 	_ = store.Close(issue.ID)
 
 	var stdout bytes.Buffer
-	doWispAutocloseWith(store, issue.ID, &stdout, beads.GraphStore{Store: store})
+	doWispAutocloseWith(store, issue.ID, &stdout, testStores(store, store))
 
 	rootAfter, err := store.Get(root.ID)
 	if err != nil {
@@ -704,7 +704,7 @@ func TestWispAutocloseClosesRootOnlyWispViaInputConvoyAcrossStores(t *testing.T)
 		}
 
 		var stdout bytes.Buffer
-		doWispAutocloseWith(e.work, issue.ID, &stdout, beads.GraphStore{Store: e.graphStore()})
+		doWispAutocloseWith(e.work, issue.ID, &stdout, testStores(e.work, e.graphStore()))
 
 		rootAfter, err := e.graphStore().Get(root.ID)
 		if err != nil {
@@ -772,7 +772,7 @@ func TestWispAutocloseClosesRootOnlyWispViaGraphResidentInputConvoy(t *testing.T
 		}
 
 		var stdout bytes.Buffer
-		doWispAutocloseWith(e.work, issue.ID, &stdout, beads.GraphStore{Store: e.graphStore()})
+		doWispAutocloseWith(e.work, issue.ID, &stdout, testStores(e.work, e.graphStore()))
 
 		rootAfter, err := e.graphStore().Get(root.ID)
 		if err != nil {
@@ -822,7 +822,7 @@ func TestWispAutocloseFailsClosedOnRefusedGraphBinding(t *testing.T) {
 	}}
 
 	var stdout bytes.Buffer
-	doWispAutocloseWith(store, issue.ID, &stdout, beads.GraphStore{Store: refused})
+	doWispAutocloseWith(store, issue.ID, &stdout, testStores(store, refused))
 
 	if stdout.String() != "" {
 		t.Fatalf("stdout = %q, want no auto-close output on a refused graph binding; a success line here is the looks-like-success answer the refusal exists to close", stdout.String())
@@ -904,7 +904,7 @@ func TestWispAutocloseFailsClosedOnPartialGraphView(t *testing.T) {
 	graphDouble := partialGraphViewStore{Store: graph, failID: issue.ID}
 
 	var stdout bytes.Buffer
-	doWispAutocloseWith(workStore, issue.ID, &stdout, beads.GraphStore{Store: graphDouble})
+	doWispAutocloseWith(workStore, issue.ID, &stdout, testStores(workStore, graphDouble))
 
 	rootAfter, err := graph.Get(root.ID)
 	if err != nil {
@@ -950,7 +950,7 @@ func TestWispAutoclosePreservesOrchestratedWorkflowViaInputConvoyWhenStepsOpen(t
 	_ = store.Close(issue.ID)
 
 	var stdout bytes.Buffer
-	doWispAutocloseWith(store, issue.ID, &stdout, beads.GraphStore{Store: store})
+	doWispAutocloseWith(store, issue.ID, &stdout, testStores(store, store))
 
 	rootAfter, err := store.Get(root.ID)
 	if err != nil {
@@ -985,7 +985,7 @@ func TestWispAutocloseLeavesLegacyWorkflowRootViaInputConvoy(t *testing.T) {
 	_ = store.Close(issue.ID)
 
 	var stdout bytes.Buffer
-	doWispAutocloseWith(store, issue.ID, &stdout, beads.GraphStore{Store: store})
+	doWispAutocloseWith(store, issue.ID, &stdout, testStores(store, store))
 
 	rootAfter, err := store.Get(root.ID)
 	if err != nil {
@@ -1000,7 +1000,7 @@ func TestWispAutocloseBeadNotFound(t *testing.T) {
 	store := beads.NewMemStore()
 
 	var stdout bytes.Buffer
-	doWispAutocloseWith(store, "nonexistent", &stdout, beads.GraphStore{Store: store})
+	doWispAutocloseWith(store, "nonexistent", &stdout, testStores(store, store))
 
 	if stdout.String() != "" {
 		t.Errorf("missing bead should produce no output, got %q", stdout.String())
@@ -1039,7 +1039,7 @@ func TestWispAutocloseLeavesInFlightWorkflowWhenInputConvoyClosed(t *testing.T) 
 
 	_ = store.Close(convoy.ID)
 	var stdout bytes.Buffer
-	doWispAutocloseWith(store, convoy.ID, &stdout, beads.GraphStore{Store: store})
+	doWispAutocloseWith(store, convoy.ID, &stdout, testStores(store, store))
 
 	if stdout.String() != "" {
 		t.Fatalf("stdout = %q, want no auto-close on an input convoy's close", stdout.String())

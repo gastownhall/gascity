@@ -12,9 +12,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -30,18 +30,7 @@ import (
 
 func freeLoopbackPort(t *testing.T) string {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
-	defer func() {
-		_ = listener.Close()
-	}()
-	addr, ok := listener.Addr().(*net.TCPAddr)
-	if !ok {
-		t.Fatalf("listener addr = %T, want *net.TCPAddr", listener.Addr())
-	}
-	return strconv.Itoa(addr.Port)
+	return strconv.Itoa(reserveRandomTCPPort(t))
 }
 
 func setScopedBeadsProviderForTest(t *testing.T, scopeRoot, provider string) {
@@ -4969,126 +4958,6 @@ func TestRunProviderOpSanitizesInheritedRuntimeEnv(t *testing.T) {
 	}
 }
 
-func TestRunProviderOpKillsProcessGroupOnTimeout(t *testing.T) {
-	cancelCh := useCancelableProviderLifecycleContext(t)
-
-	dir := t.TempDir()
-	childPIDFile := filepath.Join(dir, "child.pid")
-	script := filepath.Join(dir, "provider-op.sh")
-	content := `#!/bin/sh
-sh -c 'echo $$ > "$GC_TEST_CHILD_PID"; while :; do sleep 1; done' &
-wait
-`
-	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Timeouts and explicit cancellation both drive exec.Cmd.Cancel; cancel only
-	// after the child PID is observable so the cleanup assertion cannot race setup.
-	resultCh := make(chan error, 1)
-	go func() {
-		resultCh <- runProviderOpWithEnv(script, append(os.Environ(), "GC_TEST_CHILD_PID="+childPIDFile), "health")
-	}()
-
-	cancel := waitForProviderLifecycleCancel(t, cancelCh)
-	t.Cleanup(cancel)
-	pid := waitForProviderTestChildPID(t, childPIDFile)
-	t.Cleanup(func() {
-		_ = syscall.Kill(pid, syscall.SIGKILL)
-	})
-
-	cancel()
-
-	var err error
-	select {
-	case err = <-resultCh:
-	case <-time.After(5 * time.Second):
-		t.Fatal("provider op did not return after cancellation")
-	}
-	if err == nil {
-		t.Fatal("expected timeout error")
-	}
-
-	waitForProviderTestPIDExit(t, pid, "provider op")
-}
-
-func TestRunProviderOpWithEnvContextParentCancellationKillsProcessGroup(t *testing.T) {
-	dir := t.TempDir()
-	childPIDFile := filepath.Join(dir, "child.pid")
-	script := filepath.Join(dir, "provider-op.sh")
-	content := `#!/bin/sh
-sh -c 'echo $$ > "$GC_TEST_CHILD_PID"; while :; do sleep 1; done' &
-wait
-`
-	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	resultCh := make(chan error, 1)
-	go func() {
-		resultCh <- runProviderOpWithEnvContext(ctx, script, append(os.Environ(), "GC_TEST_CHILD_PID="+childPIDFile), "health")
-	}()
-
-	pid := waitForProviderTestChildPID(t, childPIDFile)
-	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
-	cancel()
-
-	select {
-	case err := <-resultCh:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("provider op error = %v, want context canceled", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("provider op did not return after parent cancellation")
-	}
-	waitForProviderTestPIDExit(t, pid, "provider op with parent context")
-}
-
-func TestRunProviderProbeKillsProcessGroupOnTimeout(t *testing.T) {
-	cancelCh := useCancelableProviderLifecycleContext(t)
-
-	dir := t.TempDir()
-	childPIDFile := filepath.Join(dir, "child.pid")
-	script := filepath.Join(dir, "provider-probe.sh")
-	content := `#!/bin/sh
-sh -c 'echo $$ > "$GC_TEST_CHILD_PID"; while :; do sleep 1; done' &
-wait
-`
-	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("GC_TEST_CHILD_PID", childPIDFile)
-
-	// Timeouts and explicit cancellation both drive exec.Cmd.Cancel; cancel only
-	// after the child PID is observable so the cleanup assertion cannot race setup.
-	resultCh := make(chan bool, 1)
-	go func() {
-		resultCh <- runProviderProbe(script, "", "")
-	}()
-
-	cancel := waitForProviderLifecycleCancel(t, cancelCh)
-	t.Cleanup(cancel)
-	pid := waitForProviderTestChildPID(t, childPIDFile)
-	t.Cleanup(func() {
-		_ = syscall.Kill(pid, syscall.SIGKILL)
-	})
-
-	cancel()
-
-	var ok bool
-	select {
-	case ok = <-resultCh:
-	case <-time.After(5 * time.Second):
-		t.Fatal("provider probe did not return after cancellation")
-	}
-	if ok {
-		t.Fatal("expected timeout probe to return false")
-	}
-
-	waitForProviderTestPIDExit(t, pid, "provider probe")
-}
-
 func useCancelableProviderLifecycleContext(t *testing.T) <-chan context.CancelFunc {
 	t.Helper()
 	oldProviderLifecycleContext := providerLifecycleContext
@@ -5145,18 +5014,6 @@ func waitForProviderTestNonEmptyFile(t *testing.T, path string, timeout time.Dur
 	}
 	t.Fatalf("child pid was not written within %s", timeout)
 	return ""
-}
-
-func waitForProviderTestPIDExit(t *testing.T, pid int, label string) {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
-			return
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	t.Fatalf("provider child pid %d survived %s cancellation", pid, label)
 }
 
 // waitForProviderOwnedPIDStopped waits until pid is gone or a zombie, the same
@@ -8623,6 +8480,14 @@ esac
 //   - probe-init-lock: when init writes the issue_prefix config row, after
 //     its migration step, the dolt stub tries to take the init lock
 //     exclusively and creates init-lock-free or init-lock-held.
+//   - database-absent: the server does not have "hq" until init's CREATE
+//     DATABASE (the dolt stub then creates database-created), and the
+//     database holds none of bd's tables and no migration history, so this
+//     init is the one that created it. Without it the database is already
+//     there, as for every database an earlier init or another client made.
+//   - tables-present: with database-absent, the database the CREATE found
+//     already holds bd's tables: a database that was on the server all along
+//     but read as absent (a USE that failed for a transient reason).
 func gcBeadsBdHealTestStubs(t *testing.T, binDir, sqlLog, bdLog string, issueRows int) {
 	t.Helper()
 	writeExecutable(t, filepath.Join(binDir, "sleep"), "#!/bin/sh\nexit 0\n")
@@ -8679,6 +8544,22 @@ done
 printf '%%s\n' "$query" >> %q
 table() { printf '+---+\n| c |\n+---+\n| %%s |\n+---+\n' "$1"; }
 case "$query" in
+  'USE `+"`hq`"+`')
+    if [ -f "$dir/database-absent" ] && [ ! -f "$dir/database-created" ]; then
+      echo "error on line 1 for query USE hq: Error 1049 (HY000): database not found: hq" >&2
+      exit 1
+    fi
+    exit 0
+    ;;
+  'CREATE DATABASE IF NOT EXISTS `+"`hq`"+`')
+    : > "$dir/database-created"
+    exit 0
+    ;;
+  *"FROM information_schema.tables WHERE table_schema = 'hq'"*)
+    if [ ! -f "$dir/database-absent" ]; then exit 0; fi
+    if [ -f "$dir/tables-present" ]; then printf 'cnt\n4\n'; else printf 'cnt\n0\n'; fi
+    exit 0
+    ;;
   'USE `+"`hq`"+`; SELECT 1 FROM config LIMIT 1')
     if [ -f "$dir/init-done" ]; then exit 0; fi
     echo "error on line 1 for query SELECT 1 FROM config LIMIT 1: Error 1146 (HY000): table not found: config" >&2
@@ -8860,21 +8741,6 @@ func failedOnHeldInitLock(out []byte, err error) bool {
 		!strings.Contains(string(out), "flock: ")
 }
 
-// holdGcBeadsBdInitLockForTest takes database db's init lock in lockDir the
-// way a concurrent initializer's op_init does, shared (syscall.LOCK_SH) or
-// exclusive (syscall.LOCK_EX), and holds it until the test ends.
-func holdGcBeadsBdInitLockForTest(t *testing.T, lockDir, db string, how int) {
-	t.Helper()
-	f, err := os.OpenFile(filepath.Join(lockDir, db+".lock"), os.O_CREATE|os.O_RDWR, 0o644)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = f.Close() })
-	if err := syscall.Flock(int(f.Fd()), how|syscall.LOCK_NB); err != nil {
-		t.Fatalf("hold init lock: %v", err)
-	}
-}
-
 // TestGcBeadsBdInitHealsInterruptedBootstrapBeforeForcing pins the recovery
 // for a gc-created database whose first bd bootstrap died between a
 // migration's DDL and its commit: the working set is dirty, there are no
@@ -8982,98 +8848,6 @@ func TestGcBeadsBdInitHealsOnlyAConfirmedInterruptedBootstrap(t *testing.T) {
 	}
 }
 
-// TestGcBeadsBdInitNeverHealsWhileAnotherInitializerHoldsTheLock pins the
-// exclusion half of the heal. A concurrent initializer between one migration
-// step's DDL and its commit shows exactly the signature the heal matches (a
-// dirty working set, no issues), so the reset only ever runs under the
-// database's init lock held exclusively. While another initializer holds that
-// lock, migrating (shared) or forcing a reinit (exclusive), init must give up
-// with the lock error instead of resetting the database or running bd against
-// it, on both paths the heal runs on: a present schema (the ready path) and a
-// missing one (before a forced reinit). Init gets no wait budget, under a
-// flock that refuses a zero wait the way the macOS port does.
-func TestGcBeadsBdInitNeverHealsWhileAnotherInitializerHoldsTheLock(t *testing.T) {
-	hostFlock := requireFlockForTest(t)
-	for _, tc := range []struct {
-		name    string
-		markers []string
-		how     int
-	}{
-		{"schema present, initializer migrating", []string{"init-done"}, syscall.LOCK_SH},
-		{"schema present, initializer forcing a reinit", []string{"init-done"}, syscall.LOCK_EX},
-		{"schema missing, initializer migrating", nil, syscall.LOCK_SH},
-		{"schema missing, initializer forcing a reinit", nil, syscall.LOCK_EX},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			h := newGcBeadsBdHealTest(t, true, 0, tc.markers...)
-			installMacOSFlockForTest(t, h.binDir, hostFlock)
-			lockDir := t.TempDir()
-			holdGcBeadsBdInitLockForTest(t, lockDir, "hq", tc.how)
-
-			out, err := h.runInit(t, "GC_DOLT_INIT_LOCK_DIR="+lockDir, "GC_DOLT_INIT_LOCK_TIMEOUT_MS=0")
-			if !failedOnHeldInitLock(out, err) {
-				t.Fatalf("expected init to fail on the held init lock, got err=%v:\n%s", err, out)
-			}
-			sql, bdArgs := h.logs(t)
-			if strings.Contains(sql, "DOLT_RESET") {
-				t.Fatalf("reset a database while another initializer held its lock:\n%s", sql)
-			}
-			if strings.Contains(bdArgs, "migrate") || strings.Contains(bdArgs, "init ") {
-				t.Fatalf("ran bd against a database while another initializer held its lock:\n%s", bdArgs)
-			}
-		})
-	}
-}
-
-// TestGcBeadsBdInitMigrationStepsHoldTheInitLockShared pins the lock mode of
-// init's two migration steps, `bd migrate schema` on the ready path and the
-// plain `bd init`: each runs alongside another initializer's migration (both
-// hold the lock shared, so migrations never queue behind one another, as they
-// did not before the lock existed), and neither runs while another initializer
-// holds the lock exclusively to reset the database or force a reinit. Init
-// gets no wait budget, under a flock that refuses a zero wait the way the
-// macOS port does.
-func TestGcBeadsBdInitMigrationStepsHoldTheInitLockShared(t *testing.T) {
-	hostFlock := requireFlockForTest(t)
-	for _, tc := range []struct {
-		name         string
-		withMetadata bool
-		markers      []string
-		step         string
-		how          int
-	}{
-		{"migrate schema alongside a migrating initializer", true, []string{"init-done", "reset-done"}, "migrate schema", syscall.LOCK_SH},
-		{"migrate schema during an exclusive hold", true, []string{"init-done", "reset-done"}, "migrate schema", syscall.LOCK_EX},
-		{"plain init alongside a migrating initializer", false, []string{"reset-done"}, "init ", syscall.LOCK_SH},
-		{"plain init during an exclusive hold", false, []string{"reset-done"}, "init ", syscall.LOCK_EX},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			h := newGcBeadsBdHealTest(t, tc.withMetadata, 0, tc.markers...)
-			installMacOSFlockForTest(t, h.binDir, hostFlock)
-			lockDir := t.TempDir()
-			holdGcBeadsBdInitLockForTest(t, lockDir, "hq", tc.how)
-
-			out, err := h.runInit(t, "GC_DOLT_INIT_LOCK_DIR="+lockDir, "GC_DOLT_INIT_LOCK_TIMEOUT_MS=0")
-			_, bdArgs := h.logs(t)
-			if tc.how == syscall.LOCK_SH {
-				if err != nil {
-					t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
-				}
-				if !strings.Contains(bdArgs, tc.step) {
-					t.Fatalf("expected bd %s, got:\n%s", tc.step, bdArgs)
-				}
-				return
-			}
-			if !failedOnHeldInitLock(out, err) {
-				t.Fatalf("expected init to fail on the held init lock, got err=%v:\n%s", err, out)
-			}
-			if strings.Contains(bdArgs, tc.step) {
-				t.Fatalf("bd %s ran while another initializer held the lock exclusively:\n%s", tc.step, bdArgs)
-			}
-		})
-	}
-}
-
 // TestGcBeadsBdInitNeverHandsItsInitLockToBd pins that no bd command init runs
 // while it holds its init lock inherits the descriptor the lock is held on
 // (FD 8). A flock belongs to the open file, not to the process that took it,
@@ -9116,14 +8890,16 @@ func TestGcBeadsBdInitNeverHandsItsInitLockToBd(t *testing.T) {
 }
 
 // TestGcBeadsBdInitNamesAnUnopenableInitLock pins what init does when it
-// cannot open its database's init lock file, which every init takes where
-// flock is installed, the ready path included: it fails naming the lock file
-// and GC_DOLT_INIT_LOCK_DIR before running bd, instead of dying on the
-// shell's bare redirection error. In the field that is a lock directory or
-// file another OS user (or a sudo run) left behind, which the mode rows
-// reproduce; the other two rows fail the open for any user, root included,
-// so the guard is exercised whoever runs the test. The open fails before
-// flock is ever run, so a stub stands in for it.
+// cannot open its database's init lock file, which every init that migrates
+// takes where flock is installed, the ready path's migration step included:
+// it fails naming the lock file and GC_DOLT_INIT_LOCK_DIR before running bd,
+// instead of dying on the shell's bare redirection error. In the field that
+// is a lock directory or file another OS user (or a sudo run) left behind,
+// which the mode rows reproduce; the other two rows fail the open for any
+// user, root included, so the guard is exercised whoever runs the test. The
+// open fails before flock is ever run, so a stub stands in for it. Each row
+// creates the database in this init and finds a schema in it, so the ready
+// path's migration step runs and takes the lock.
 func TestGcBeadsBdInitNamesAnUnopenableInitLock(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -9164,7 +8940,7 @@ func TestGcBeadsBdInitNamesAnUnopenableInitLock(t *testing.T) {
 			if tc.modeBased && os.Geteuid() == 0 {
 				t.Skip("root bypasses file modes")
 			}
-			h := newGcBeadsBdHealTest(t, true, 0, "init-done", "reset-done")
+			h := newGcBeadsBdHealTest(t, true, 0, "database-absent", "init-done", "reset-done")
 			writeExecutable(t, filepath.Join(h.binDir, "flock"), "#!/bin/sh\nexit 0\n")
 			lockDir := tc.lockDir(t, t.TempDir())
 
@@ -9181,21 +8957,44 @@ func TestGcBeadsBdInitNamesAnUnopenableInitLock(t *testing.T) {
 }
 
 // TestGcBeadsBdInitKeepsItsDefaultInitLockPerOSUser pins where init's lock
-// lives when GC_DOLT_INIT_LOCK_DIR is unset: in a directory of this OS user's
-// own under $TMPDIR, so a lock directory or file another user (or a sudo run)
-// created under the same $TMPDIR never stops this user's init.
+// lives when GC_DOLT_INIT_LOCK_DIR is unset: in /tmp/gc-beads-bd-init-locks-<uid>,
+// a directory of this OS user's own, so a lock directory or file another user
+// (or a sudo run) created never stops this user's init. $TMPDIR is deliberately
+// not consulted: every initializer of one store must find the same lock file
+// whatever its own environment, or one lock silently becomes two.
+//
+// The default is the real /tmp directory, which belongs to the host's own
+// initializers, so the test never stats, removes or renames anything in it: a
+// recording mkdir stub shows which directory init asked for, and the test then
+// only lets init create it and open hq.lock for append.
+//
+// The init creates the database and finds a schema in it, so its migration step
+// takes the lock.
 func TestGcBeadsBdInitKeepsItsDefaultInitLockPerOSUser(t *testing.T) {
-	h := newGcBeadsBdHealTest(t, true, 0, "init-done", "reset-done")
+	h := newGcBeadsBdHealTest(t, true, 0, "database-absent", "init-done", "reset-done")
 	writeExecutable(t, filepath.Join(h.binDir, "flock"), "#!/bin/sh\nexit 0\n")
+	realMkdir, err := exec.LookPath("mkdir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mkdirOperands := filepath.Join(t.TempDir(), "mkdir-operands")
+	writeExecutable(t, filepath.Join(h.binDir, "mkdir"), fmt.Sprintf(
+		"#!/bin/sh\nfor a in \"$@\"; do printf '%%s\\n' \"$a\" >>'%s'; done\nexec '%s' \"$@\"\n",
+		mkdirOperands, realMkdir))
 	tmp := t.TempDir()
 
 	out, err := h.runInit(t, "GC_DOLT_INIT_LOCK_DIR=", "TMPDIR="+tmp)
 	if err != nil {
 		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
 	}
-	lockFile := filepath.Join(tmp, fmt.Sprintf("gc-beads-bd-init-locks-%d", os.Geteuid()), "hq.lock")
-	if _, err := os.Stat(lockFile); err != nil {
-		t.Fatalf("expected init's lock at %s: %v\noutput:\n%s", lockFile, err, out)
+	wantDir := fmt.Sprintf("/tmp/gc-beads-bd-init-locks-%d", os.Geteuid())
+	operands := readGcBeadsBdHealTestLog(t, mkdirOperands)
+	if !slices.Contains(strings.Split(operands, "\n"), wantDir) {
+		t.Fatalf("expected init to create its lock directory %s; mkdir operands:\n%s\noutput:\n%s", wantDir, operands, out)
+	}
+	ignored := filepath.Join(tmp, fmt.Sprintf("gc-beads-bd-init-locks-%d", os.Geteuid()))
+	if _, err := os.Stat(ignored); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("init's lock directory followed $TMPDIR to %s (stat err = %v); it must not consult TMPDIR\noutput:\n%s", ignored, err, out)
 	}
 }
 
@@ -9205,7 +9004,8 @@ func TestGcBeadsBdInitKeepsItsDefaultInitLockPerOSUser(t *testing.T) {
 // pending migrations, or to migrate a clone whose remote is already migrated
 // or has forked) are reported and init carries on; any other failure fails
 // init with bd's message, even one that happens to mention a remote and a
-// migration.
+// migration. Each row creates the database in this init, so the ready path
+// is bootstrapping it and runs the step.
 func TestGcBeadsBdInitWarnsOnlyOnBdsRemoteMigrateRefusal(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -9227,7 +9027,7 @@ func TestGcBeadsBdInitWarnsOnlyOnBdsRemoteMigrateRefusal(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h := newGcBeadsBdHealTest(t, true, 0, "init-done", "reset-done", tc.marker)
+			h := newGcBeadsBdHealTest(t, true, 0, "database-absent", "init-done", "reset-done", tc.marker)
 
 			out, err := h.runInit(t)
 			if (err != nil) != tc.wantErr {
@@ -9247,9 +9047,10 @@ func TestGcBeadsBdInitWarnsOnlyOnBdsRemoteMigrateRefusal(t *testing.T) {
 // verb is also bd's consent to promote the schema of a database on a shared
 // server, which can lock out an older bd that uses the same database
 // (gastownhall/beads#5920), so what bd reports it applied reaches init's
-// output.
+// output. The init creates the database, so it is bootstrapping it and runs
+// the step.
 func TestGcBeadsBdInitReportsWhatBdMigrateSchemaApplied(t *testing.T) {
-	h := newGcBeadsBdHealTest(t, true, 0, "init-done", "reset-done", "migrate-applies")
+	h := newGcBeadsBdHealTest(t, true, 0, "database-absent", "init-done", "reset-done", "migrate-applies")
 
 	out, err := h.runInit(t)
 	if err != nil {
@@ -9328,37 +9129,55 @@ func TestGcBeadsBdInitRunsMigrateSchemaOnlyOnABdThatHasIt(t *testing.T) {
 // version witness: a re-cloned rig, or a second scope directory pointed at
 // a shared server. bd's plain init refuses that database ("already
 // initialized") and bd's server-branch guard refuses any bd command on a
-// witness-less server-mode scope, so the script must stamp the witness first,
-// then finish pending migrations and adopt, and never run bd init. The dolt
-// stub answers every probe as "schema present, schema_migrations present,
-// clean working set".
+// witness-less server-mode scope, so the script must stamp the witness and
+// adopt, and never run bd init. It migrates the database only when this init
+// is bootstrapping it, here because this init created it (a concurrent
+// initializer wrote its schema since), and then only after the witness is in
+// place: a database that was already on the server keeps its schema, because
+// migrating it is an operator's consent to give, not gc's. The dolt stub answers every probe as "schema present,
+// schema_migrations present, clean working set".
 func TestGcBeadsBdInitAdoptsAnExistingSchemaFromAFreshScope(t *testing.T) {
-	cityPath := t.TempDir()
-	for _, d := range []string{".gc", ".beads"} {
-		if err := os.MkdirAll(filepath.Join(cityPath, d), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// Canonical server-mode metadata but NO .local_version witness: the
-	// shape gc leaves after normalizing a re-cloned rig (and what the
-	// fresh-scope path produces before its own adopt decision). No gc
-	// helper is on PATH here, so the metadata is written up front.
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
-		[]byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	materializeBuiltinPacksForTest(t, cityPath)
-	script := gcBeadsBdScriptPath(cityPath)
-	binDir := filepath.Join(t.TempDir(), "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	writeExecutable(t, filepath.Join(binDir, "sleep"), "#!/bin/sh\nexit 0\n")
-	bdLog := filepath.Join(t.TempDir(), "bd-args.log")
-	// The stub behaves like bd's server-branch legacy guard: any command
-	// other than `bd version` on a server-mode scope with no .local_version
-	// witness is refused. That is what makes the witness ordering testable.
-	writeExecutable(t, filepath.Join(binDir, "bd"), fmt.Sprintf(`#!/bin/sh
+	for _, tc := range []struct {
+		name        string
+		created     bool
+		wantMigrate bool
+	}{
+		{"database already on the server", false, false},
+		{"database this init created", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			for _, d := range []string{".gc", ".beads"} {
+				if err := os.MkdirAll(filepath.Join(cityPath, d), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Canonical server-mode metadata but NO .local_version witness: the
+			// shape gc leaves after normalizing a re-cloned rig (and what the
+			// fresh-scope path produces before its own adopt decision). No gc
+			// helper is on PATH here, so the metadata is written up front.
+			if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+				[]byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			materializeBuiltinPacksForTest(t, cityPath)
+			script := gcBeadsBdScriptPath(cityPath)
+			binDir := filepath.Join(t.TempDir(), "bin")
+			if err := os.MkdirAll(binDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			writeExecutable(t, filepath.Join(binDir, "sleep"), "#!/bin/sh\nexit 0\n")
+			markers := t.TempDir()
+			if tc.created {
+				if err := os.WriteFile(filepath.Join(markers, "database-absent"), nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			bdLog := filepath.Join(t.TempDir(), "bd-args.log")
+			// The stub behaves like bd's server-branch legacy guard: any command
+			// other than `bd version` on a server-mode scope with no .local_version
+			// witness is refused. That is what makes the witness ordering testable.
+			writeExecutable(t, filepath.Join(binDir, "bd"), fmt.Sprintf(`#!/bin/sh
 set -eu
 printf '%%s\n' "$*" >> %q
 case "${1:-}" in
@@ -9370,8 +9189,12 @@ if [ ! -f "${BEADS_DIR:?}/.local_version" ]; then
 fi
 exit 0
 `, bdLog))
-	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+			// Without the database-absent marker the server already has "hq";
+			// with it, "hq" appears only once init's CREATE DATABASE runs, and
+			// holds none of bd's tables at that moment.
+			writeExecutable(t, filepath.Join(binDir, "dolt"), fmt.Sprintf(`#!/bin/sh
 set -eu
+dir=%q
 query=""
 prev=""
 for arg in "$@"; do
@@ -9382,6 +9205,21 @@ for arg in "$@"; do
   prev="$arg"
 done
 case "$query" in
+  'USE `+"`hq`"+`')
+    if [ -f "$dir/database-absent" ] && [ ! -f "$dir/database-created" ]; then
+      echo "error on line 1 for query USE hq: Error 1049 (HY000): database not found: hq" >&2
+      exit 1
+    fi
+    exit 0
+    ;;
+  'CREATE DATABASE IF NOT EXISTS `+"`hq`"+`')
+    : > "$dir/database-created"
+    exit 0
+    ;;
+  *"FROM information_schema.tables WHERE table_schema = 'hq'"*)
+    if [ -f "$dir/database-absent" ]; then printf 'cnt\n0\n'; fi
+    exit 0
+    ;;
   *'SELECT COUNT(*) FROM dolt_status'*)
     printf '+---+\n| c |\n+---+\n| 0 |\n+---+\n'
     exit 0
@@ -9390,31 +9228,33 @@ case "$query" in
     exit 0
     ;;
 esac
-`)
+`, markers))
 
-	out, err := runGcBeadsBdHQInitForTest(t, script, cityPath, binDir)
-	if err != nil {
-		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
-	}
-	args, err := os.ReadFile(bdLog)
-	if err != nil {
-		t.Fatalf("bd never ran: %v", err)
-	}
-	if strings.Contains(string(args), "init ") {
-		t.Fatalf("a fresh scope over an already-initialized database must adopt it, not run bd init (bd refuses that as \"already initialized\"); bd was invoked with:\n%s", args)
-	}
-	if !strings.Contains(string(args), "migrate schema") {
-		t.Fatalf("adopting an existing schema must finish its pending migrations; bd was invoked with:\n%s", args)
-	}
-	meta, err := os.ReadFile(filepath.Join(cityPath, ".beads", "metadata.json"))
-	if err != nil {
-		t.Fatalf("canonical metadata must be written on adopt: %v", err)
-	}
-	if !strings.Contains(string(meta), `"dolt_mode"`) || !strings.Contains(string(meta), `"server"`) {
-		t.Fatalf("metadata is not canonical server-mode:\n%s", meta)
-	}
-	if _, err := os.Stat(filepath.Join(cityPath, ".beads", ".local_version")); err != nil {
-		t.Fatalf("adopting a current-era schema must stamp the version witness, or bd's server-branch guard refuses the scope: %v", err)
+			out, err := runGcBeadsBdHQInitForTest(t, script, cityPath, binDir)
+			if err != nil {
+				t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
+			}
+			args, err := os.ReadFile(bdLog)
+			if err != nil {
+				t.Fatalf("bd never ran: %v", err)
+			}
+			if strings.Contains(string(args), "init ") {
+				t.Fatalf("a fresh scope over an already-initialized database must adopt it, not run bd init (bd refuses that as \"already initialized\"); bd was invoked with:\n%s", args)
+			}
+			if migrated := strings.Contains(string(args), "migrate"); migrated != tc.wantMigrate {
+				t.Fatalf("bd migrate ran = %v, want %v (gc migrates only a database this init created); bd was invoked with:\n%s\noutput:\n%s", migrated, tc.wantMigrate, args, out)
+			}
+			meta, err := os.ReadFile(filepath.Join(cityPath, ".beads", "metadata.json"))
+			if err != nil {
+				t.Fatalf("canonical metadata must be written on adopt: %v", err)
+			}
+			if !strings.Contains(string(meta), `"dolt_mode"`) || !strings.Contains(string(meta), `"server"`) {
+				t.Fatalf("metadata is not canonical server-mode:\n%s", meta)
+			}
+			if _, err := os.Stat(filepath.Join(cityPath, ".beads", ".local_version")); err != nil {
+				t.Fatalf("adopting a current-era schema must stamp the version witness, or bd's server-branch guard refuses the scope: %v", err)
+			}
+		})
 	}
 }
 
@@ -9468,8 +9308,15 @@ func TestGcBeadsBdInitDoltliteInitializesDelegatedBdWrites(t *testing.T) {
 		"BD_NON_INTERACTIVE=1",
 		"PATH="+os.Getenv("PATH"),
 	)...)
-	created, err := create.CombinedOutput()
+	// Output, not CombinedOutput: bd logs diagnostics to stderr behind a bare
+	// timestamp, and merged ahead of the JSON document it breaks the parse
+	// below. stderr stays reachable on the failure path via *exec.ExitError.
+	created, err := create.Output()
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			t.Fatalf("bd create after doltlite init failed: %v\nstdout:\n%s\nstderr:\n%s", err, created, exitErr.Stderr)
+		}
 		t.Fatalf("bd create after doltlite init failed: %v\n%s", err, created)
 	}
 	var createdIssue struct {
@@ -10383,192 +10230,6 @@ esac
 `
 	if err := os.WriteFile(fakeDolt, []byte(fakeDoltScript), 0o755); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestGcBeadsBdStartDoesNotReplaceLiveLockFileInode(t *testing.T) {
-	skipSlowCmdGCTest(t, "starts the real gc-beads-bd lifecycle script; run make test-cmd-gc-process for full coverage")
-	if _, err := exec.LookPath("flock"); err != nil {
-		t.Skip("flock not installed")
-	}
-
-	cityPath := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	materializeBuiltinPacksForTest(t, cityPath)
-	script := gcBeadsBdScriptPath(cityPath)
-
-	binDir := filepath.Join(t.TempDir(), "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation")
-	fakeDolt := filepath.Join(binDir, "dolt")
-	fakeDoltScript := `#!/bin/sh
-set -eu
-case "${1:-}" in
-  config)
-    exit 0
-    ;;
-  sql-server)
-    printf 'sql-server\n' >> "$GC_FAKE_DOLT_INVOCATION_FILE"
-    config_file=""
-    prev=""
-    for arg in "$@"; do
-      if [ "$prev" = "--config" ]; then
-        config_file="$arg"
-        break
-      fi
-      prev="$arg"
-    done
-    port=$(awk '/port:/ {print $2; exit}' "$config_file")
-    data_dir=$(awk '/data_dir:/ {print $2; exit}' "$config_file" | tr -d '"')
-    exec python3 - "$port" "$data_dir" <<'INNERPY'
-import os
-import signal
-import socket
-import sys
-import time
-port = int(sys.argv[1])
-data_dir = sys.argv[2]
-if data_dir:
-    os.makedirs(data_dir, exist_ok=True)
-    os.chdir(data_dir)
-sock = socket.socket()
-sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-sock.bind(("0.0.0.0", port))
-sock.listen(128)
-sock.settimeout(1.0)
-def _stop(*_args):
-    raise SystemExit(0)
-signal.signal(signal.SIGTERM, _stop)
-signal.signal(signal.SIGINT, _stop)
-while True:
-    try:
-        conn, _ = sock.accept()
-        conn.close()
-    except socket.timeout:
-        continue
-INNERPY
-    ;;
-  *)
-    exit 0
-    ;;
-esac
-`
-	if err := os.WriteFile(fakeDolt, []byte(fakeDoltScript), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
-	if err != nil {
-		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(layout.LockFile), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	readyFile := filepath.Join(t.TempDir(), "holder-ready")
-	releaseFile := filepath.Join(t.TempDir(), "holder-release")
-	holder := exec.Command("sh", "-c", `
-set -eu
-lock_file="$1"
-ready_file="$2"
-release_file="$3"
-: > "$lock_file"
-exec 9>"$lock_file"
-flock 9
-printf 'ready\n' > "$ready_file"
-while [ ! -f "$release_file" ]; do
-  sleep 0.1
- done
-`, "sh", layout.LockFile, readyFile, releaseFile)
-	holder.Env = sanitizedBaseEnv("PATH=" + os.Getenv("PATH"))
-	if err := holder.Start(); err != nil {
-		t.Fatalf("start lock holder: %v", err)
-	}
-	holderDone := make(chan error, 1)
-	go func() {
-		holderDone <- holder.Wait()
-	}()
-	t.Cleanup(func() {
-		_ = os.WriteFile(releaseFile, []byte("release\n"), 0o644)
-		select {
-		case err := <-holderDone:
-			if err != nil {
-				t.Errorf("lock holder exit: %v", err)
-			}
-		case <-time.After(5 * time.Second):
-			_ = holder.Process.Kill()
-			<-holderDone
-			t.Errorf("timed out waiting for lock holder to exit")
-		}
-	})
-
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if _, err := os.Stat(readyFile); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for lock holder to acquire flock")
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-
-	inodeFor := func(path string) uint64 {
-		t.Helper()
-		info, err := os.Stat(path)
-		if err != nil {
-			t.Fatalf("Stat(%s): %v", path, err)
-		}
-		stat, ok := info.Sys().(*syscall.Stat_t)
-		if !ok {
-			t.Fatalf("Stat(%s) did not expose syscall.Stat_t", path)
-		}
-		return stat.Ino
-	}
-	beforeInode := inodeFor(layout.LockFile)
-
-	env := sanitizedBaseEnv(
-		"GC_CITY_PATH="+cityPath,
-		"GC_DOLT_PORT=3311",
-		"GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS=1000",
-		"GC_FAKE_DOLT_INVOCATION_FILE="+invocationFile,
-		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
-	)
-	cmd := exec.Command(script, "start")
-	cmd.Env = env
-	out, err := cmd.CombinedOutput()
-	exitCode := 0
-	if err != nil {
-		exitErr := &exec.ExitError{}
-		if errors.As(err, &exitErr) {
-			exitCode = exitErr.ExitCode()
-		} else {
-			t.Fatalf("gc-beads-bd start unexpected error: %v", err)
-		}
-	}
-	if exitCode == 0 {
-		stop := exec.Command(script, "stop")
-		stop.Env = env
-		_ = stop.Run()
-		t.Fatalf("gc-beads-bd start unexpectedly succeeded while another process held the start lock\n%s", out)
-	}
-	if exitCode != 1 {
-		t.Fatalf("gc-beads-bd start exit %d, want 1\n%s", exitCode, out)
-	}
-	if !strings.Contains(string(out), "could not acquire dolt start lock") {
-		t.Fatalf("gc-beads-bd start output = %q, want lock acquisition failure", out)
-	}
-	afterInode := inodeFor(layout.LockFile)
-	if afterInode != beforeInode {
-		t.Fatalf("lock inode changed from %d to %d while original holder was still live", beforeInode, afterInode)
-	}
-	if invocation, err := os.ReadFile(invocationFile); err == nil && strings.TrimSpace(string(invocation)) != "" {
-		t.Fatalf("dolt should not have been invoked while the start lock was held:\n%s", string(invocation))
 	}
 }
 
@@ -11842,160 +11503,6 @@ func TestGcBeadsBdStartIsIdempotentWhenAlreadyRunning(t *testing.T) {
 	}
 	if got := strings.Count(invocation, "gc dolt-state start-managed\n"); got != 1 {
 		t.Fatalf("start-managed invocation count = %d, want 1:\n%s", got, invocation)
-	}
-}
-
-func TestGcBeadsBdStartRestartsServerHoldingDeletedDataInodes(t *testing.T) {
-	skipSlowCmdGCTest(t, "starts the real gc-beads-bd lifecycle script; run make test-cmd-gc-process for full coverage")
-	cityPath := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	materializeBuiltinPacksForTest(t, cityPath)
-	script := gcBeadsBdScriptPath(cityPath)
-
-	binDir := filepath.Join(t.TempDir(), "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	countFile := filepath.Join(t.TempDir(), "dolt-start-count")
-	deletedMarkerFile := filepath.Join(t.TempDir(), "deleted-inode-held")
-	fakeDolt := filepath.Join(binDir, "dolt")
-	port := freeLoopbackPort(t)
-	fakeScript := fmt.Sprintf(`#!/bin/sh
-set -eu
-count_file=%q
-data_dir=%q
-case "${1:-}" in
-  config)
-    exit 0
-    ;;
-  sql-server)
-    count=0
-    if [ -f "$count_file" ]; then
-      count=$(cat "$count_file")
-    fi
-    count=$((count + 1))
-    printf '%%s\n' "$count" > "$count_file"
-    config_file=""
-    prev=""
-    for arg in "$@"; do
-      if [ "$prev" = "--config" ]; then
-        config_file="$arg"
-        break
-      fi
-      prev="$arg"
-    done
-    port=$(awk '/port:/ {print $2; exit}' "$config_file")
-    exec python3 - "$port" "$data_dir" %q <<'INNERPY'
-import os
-import signal
-import socket
-import sys
-import time
-port = int(sys.argv[1])
-data_dir = sys.argv[2]
-marker_path = sys.argv[3]
-os.makedirs(data_dir, exist_ok=True)
-os.chdir(data_dir)
-open_file = None
-if not os.path.exists(marker_path):
-    with open(marker_path, "w") as marker:
-        marker.write("held")
-    stale = os.path.join(data_dir, "stale-open.txt")
-    open_file = open(stale, "w+")
-    open_file.write("stale")
-    open_file.flush()
-    os.unlink(stale)
-sock = socket.socket()
-sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-sock.bind(("0.0.0.0", port))
-sock.listen(128)
-sock.settimeout(1.0)
-def _stop(*_args):
-    raise SystemExit(0)
-signal.signal(signal.SIGTERM, _stop)
-signal.signal(signal.SIGINT, _stop)
-while True:
-    try:
-        conn, _ = sock.accept()
-        conn.close()
-    except socket.timeout:
-        continue
-INNERPY
-    ;;
-  *)
-    exit 0
-    ;;
-esac
-	`, countFile, filepath.Join(cityPath, ".beads", "dolt"), deletedMarkerFile)
-	if err := os.WriteFile(fakeDolt, []byte(fakeScript), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	env := sanitizedBaseEnv(
-		"GC_CITY_PATH="+cityPath,
-		"GC_DOLT_PORT="+port,
-		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
-	)
-
-	runStart := func() {
-		t.Helper()
-		cmd := exec.Command(script, "start")
-		cmd.Env = env
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("gc-beads-bd start failed: %v\n%s", err, out)
-		}
-	}
-
-	runStart()
-	t.Cleanup(func() {
-		stop := exec.Command(script, "stop")
-		stop.Env = env
-		_ = stop.Run()
-	})
-
-	firstPIDData, err := os.ReadFile(filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt.pid"))
-	if err != nil {
-		t.Fatalf("read first pid file: %v", err)
-	}
-	firstPID := strings.TrimSpace(string(firstPIDData))
-	if firstPID == "" {
-		t.Fatal("first pid file is empty")
-	}
-	initialStartCount := readDoltStartCountForTest(t, countFile)
-
-	runStart()
-
-	secondPIDData, err := os.ReadFile(filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt.pid"))
-	if err != nil {
-		t.Fatalf("read second pid file: %v", err)
-	}
-	secondPID := strings.TrimSpace(string(secondPIDData))
-	if secondPID == "" {
-		t.Fatal("second pid file is empty")
-	}
-
-	if got := readDoltStartCountForTest(t, countFile); got <= initialStartCount {
-		t.Fatalf("dolt sql-server launch count = %d, want greater than initial %d", got, initialStartCount)
-	}
-
-	// The relaunch only counts as a restart if the stale server is gone:
-	// otherwise the new one would be fighting it for the port. Stopping an
-	// owned server that holds deleted inodes is the one thing start does to
-	// a port holder, so pin it separately from the launch count.
-	stalePID, err := strconv.Atoi(firstPID)
-	if err != nil {
-		t.Fatalf("parse first pid %q: %v", firstPID, err)
-	}
-	if !waitForProcessExit(stalePID, 5*time.Second) {
-		t.Fatalf("stale dolt server (pid %d) is still running after start restarted it", stalePID)
-	}
-	if secondPID == firstPID {
-		t.Fatalf("pid file still names the stale server (pid %s) after the restart", firstPID)
 	}
 }
 

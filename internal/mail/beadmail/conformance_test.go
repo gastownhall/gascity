@@ -13,3 +13,9 @@ func TestBeadmailConformance(t *testing.T) {
 		return newTestProvider(beads.NewMemStore())
 	})
 }
+
+func TestBeadmailReplyToOwnMessage(t *testing.T) {
+	mailtest.RunReplyToOwnMessageTests(t, func(_ *testing.T) mail.Provider {
+		return newTestProvider(beads.NewMemStore())
+	})
+}
