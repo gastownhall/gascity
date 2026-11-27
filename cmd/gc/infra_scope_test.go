@@ -218,25 +218,39 @@ func writeMarkingFakeDolt(t *testing.T) (string, string) {
 	return dir, marker
 }
 
-// writeMarkingFakeDoltDyingOnSecondTERM writes a fake dolt that records it
-// is running and then stays up, exiting only on its second SIGTERM: the
-// first (a unit stop's cgroup-wide signal) alone does not finish it, the
-// second (the watchdog forwarding that stop) does. That makes the
-// watchdog's forwarding observable and deterministic — the server cannot
-// die before the watchdog has logged and forwarded — without depending on
-// the SIGKILL escalation's grace period. The shell stays the process image,
-// and the marker appears only after the kernel finished exec'ing it, so no
-// waitForFinalImage dance is needed.
-func writeMarkingFakeDoltDyingOnSecondTERM(t *testing.T) (string, string) {
+// scopeWatchdogReceivedTERMLog is the line the scope watchdog logs when a
+// SIGTERM reaches it, just before it forwards the stop to its dolt server:
+// the signature of the #5910 report.
+const scopeWatchdogReceivedTERMLog = "gc scope watchdog: received terminated"
+
+// writeMarkingFakeDoltDyingAfterWatchdogStop writes a fake dolt that records
+// it is running and then stays up, exiting on a SIGTERM only once logPath
+// holds scopeWatchdogReceivedTERMLog. A unit stop signals the server and the
+// watchdog together: the server cannot exit before the watchdog has taken
+// the stop (the watchdog would then log the server's exit instead), and the
+// watchdog's forward, sent after that line, always brings a trap run that
+// sees it, so the SIGKILL escalation's grace never matters. Each TERM
+// re-reads the log instead of counting signals: the shell runs its trap once
+// for all the TERMs that reach it before the trap runs, so the unit stop and
+// the forward can count as one. The shell waits on a background sleep, which
+// a trapped TERM interrupts at once. The trap is set before the marker is
+// written and the shell stays the process image, so once the marker exists
+// no TERM takes the default action and no waitForFinalImage dance is needed.
+func writeMarkingFakeDoltDyingAfterWatchdogStop(t *testing.T, logPath string) (string, string) {
 	t.Helper()
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "dolt.started")
 	script := "#!/bin/sh\n" +
 		"[ \"$1\" = sql-server ] || { echo \"unexpected dolt args: $*\" >&2; exit 2; }\n" +
+		"stop_taken() {\n" +
+		"  while IFS= read -r line; do\n" +
+		"    case $line in *'" + scopeWatchdogReceivedTERMLog + "'*) return 0 ;; esac\n" +
+		"  done < '" + logPath + "'\n" +
+		"  return 1\n" +
+		"}\n" +
+		"trap 'stop_taken && exit 0' TERM\n" +
 		": > '" + marker + "'\n" +
-		"terms=0\n" +
-		"trap 'terms=$((terms+1)); [ \"$terms\" -ge 2 ] && exit 0' TERM\n" +
-		"while :; do sleep 5; done\n"
+		"while :; do sleep 1 & wait $!; done\n"
 	if err := os.WriteFile(filepath.Join(dir, "dolt"), []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake dolt: %v", err)
 	}
@@ -854,19 +868,20 @@ func TestCallerUnitStopSparesManagedDoltStartedOutsideASession(t *testing.T) {
 		t.Skip("fake cgroup signal reads /proc")
 	}
 	// startWatchdog starts the managed Dolt through its scope watchdog with
-	// this process's environment, as a provider-script gc does. The fake
-	// dolt dies only on its second SIGTERM
-	// (writeMarkingFakeDoltDyingOnSecondTERM), so its death proves the
-	// watchdog forwarded the unit stop. It returns the dolt log path.
+	// this process's environment, as a provider-script gc does. Its fake
+	// dolt exits on a SIGTERM only once the watchdog has logged taking the
+	// unit stop (writeMarkingFakeDoltDyingAfterWatchdogStop), so the
+	// watchdog's "received terminated" line is never lost to a server that
+	// exited first. It returns the dolt log path.
 	startWatchdog := func(t *testing.T) (managedDoltStartedProcess, string) {
 		t.Helper()
-		binDir, marker := writeMarkingFakeDoltDyingOnSecondTERM(t)
 		dir := t.TempDir()
 		configPath := filepath.Join(dir, "dolt-config.yaml")
 		if err := os.WriteFile(configPath, []byte("log_level: debug\n"), 0o644); err != nil {
 			t.Fatalf("write config: %v", err)
 		}
 		logFilePath := filepath.Join(dir, "dolt.log")
+		binDir, marker := writeMarkingFakeDoltDyingAfterWatchdogStop(t, logFilePath)
 		logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 		if err != nil {
 			t.Fatalf("open log file: %v", err)
@@ -940,7 +955,7 @@ func TestCallerUnitStopSparesManagedDoltStartedOutsideASession(t *testing.T) {
 					if err != nil {
 						t.Fatalf("read dolt log: %v", err)
 					}
-					if !strings.Contains(string(data), "gc scope watchdog: received terminated") {
+					if !strings.Contains(string(data), scopeWatchdogReceivedTERMLog) {
 						t.Fatalf("watchdog log missing the forwarded unit stop; log:\n%s", data)
 					}
 				}
