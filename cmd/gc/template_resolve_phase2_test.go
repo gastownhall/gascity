@@ -104,7 +104,7 @@ func selectedPhase2ProviderCases(t *testing.T) []phase2ProviderCase {
 		{
 			profileID:             "kimi/tmux-cli",
 			family:                "kimi",
-			wantCommand:           "kimi --yolo --no-thinking",
+			wantCommand:           "kimi --yolo --model kimi-code/k3",
 			wantPromptMode:        "none",
 			wantReadyDelayMs:      5000,
 			wantReadyPromptPrefix: "",
