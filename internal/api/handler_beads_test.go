@@ -373,6 +373,24 @@ func TestResolveStoreByPrefixKeepsRigRouteResolution(t *testing.T) {
 	}
 }
 
+func TestResolveStoreByPrefixSupportsHyphenatedRoutes(t *testing.T) {
+	state, alphaStore, betaStore := configureBeadRouteState(t)
+	alphaPath := filepath.Join(state.cityPath, "rigs", "alpha")
+	routes := `{"prefix":"ga-","path":"."}` + "\n" + `{"prefix":"gb-","path":"../beta"}` + "\n"
+	if err := os.WriteFile(filepath.Join(alphaPath, ".beads", "routes.jsonl"), []byte(routes), 0o644); err != nil {
+		t.Fatalf("WriteFile(routes.jsonl): %v", err)
+	}
+	s := New(state)
+
+	loaded := loadedWorkLegs(state.Stores())
+	if got, ok := s.resolveRefByPrefix("ga", loaded); !ok || got != storeref.RigRef("alpha") {
+		t.Errorf("resolveRefByPrefix(ga) = %q, %t, want alpha rig (store %p)", got, ok, alphaStore)
+	}
+	if got, ok := s.resolveRefByPrefix("gb", loaded); !ok || got != storeref.RigRef("beta") {
+		t.Errorf("resolveRefByPrefix(gb) = %q, %t, want beta rig (store %p)", got, ok, betaStore)
+	}
+}
+
 // TestResolveRefByPrefixStopsAtAnUnloadedOwner pins the rig arm's stop: a
 // prefix a configured rig owns belongs to that rig, so when its store is not
 // loaded there is no route, and a routes.jsonl entry naming another store for

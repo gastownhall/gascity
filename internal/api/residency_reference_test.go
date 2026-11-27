@@ -421,6 +421,10 @@ func referenceBeadPrefix(id string) string {
 // referenceRoutePrefix reads routes.jsonl from a rig's .beads/ directory and
 // resolves the given prefix to an absolute store path.
 func referenceRoutePrefix(rigPath, prefix string) (string, bool) {
+	want := strings.TrimSuffix(strings.TrimSpace(prefix), "-")
+	if want == "" {
+		return "", false
+	}
 	routesPath := filepath.Join(rigPath, ".beads", "routes.jsonl")
 	data, err := os.ReadFile(routesPath)
 	if err != nil {
@@ -437,7 +441,7 @@ func referenceRoutePrefix(rigPath, prefix string) (string, bool) {
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
 			continue
 		}
-		if entry.Prefix == prefix {
+		if strings.TrimSuffix(strings.TrimSpace(entry.Prefix), "-") == want {
 			resolved := entry.Path
 			if !filepath.IsAbs(resolved) {
 				resolved = filepath.Join(rigPath, resolved)
