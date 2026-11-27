@@ -14,7 +14,8 @@ package main
 // failure's cause:
 //
 //   - Input: bead.claim_failed, which `gc hook --claim` records for each routed
-//     candidate it skips because the claim write failed (template, seat, bead,
+//     candidate it skips because the claim write failed, or because it is a
+//     workflow root whose steps other sessions hold (template, seat, bead,
 //     error text), read off the city's event journal by the same feed as the
 //     delta lanes. A seat is a session and its runtime epoch, so a session
 //     woken again for the same bead counts again.
