@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
@@ -959,7 +960,7 @@ func TestScanWithRootReportsStartIdentity(t *testing.T) {
 }
 
 // TestOrphanCandidateScanReadsOnlyReparentedProcesses (mc-ygved): the
-// empty-id scan reports the roots reparented to init or the user subreaper
+// empty-id scan reports the roots reparented to init or a subreaper
 // and reads no other process's environment: a non-candidate whose environ
 // cannot be read adds no error, while a candidate's unreadable parent is
 // the entry's error (fail-closed). The id-scoped scan is unchanged.
@@ -995,7 +996,7 @@ func TestOrphanCandidateScanReadsOnlyReparentedProcesses(t *testing.T) {
 				t.Skip("root reads every file; the unreadable fixtures need an unprivileged user")
 			}
 
-			got, err := scanOrphanCandidatesWithRoot(root, subreaper)
+			got, err := scanOrphanCandidatesWithRoot(root, pidutil.NewSubreapers(subreaper))
 			var ids []string
 			for _, r := range got {
 				ids = append(ids, r.SessionID)
@@ -1013,9 +1014,9 @@ func TestOrphanCandidateScanReadsOnlyReparentedProcesses(t *testing.T) {
 			// ScanBySessionID: the empty id is the orphan scan, a session id the
 			// full one.
 			SetScanRootForTesting(t, root)
-			savedDetect := detectSubreaper
-			detectSubreaper = func(int) int { return subreaper }
-			t.Cleanup(func() { detectSubreaper = savedDetect })
+			savedDetect := detectSubreapers
+			detectSubreapers = func() (pidutil.Subreapers, error) { return pidutil.NewSubreapers(subreaper), nil }
+			t.Cleanup(func() { detectSubreapers = savedDetect })
 			public, _ := ScanBySessionID("")
 			var publicIDs []string
 			for _, r := range public {
@@ -1031,15 +1032,24 @@ func TestOrphanCandidateScanReadsOnlyReparentedProcesses(t *testing.T) {
 	}
 }
 
-// TestOrphanCandidate (mc-ygved): init and the user subreaper are the
+// TestOrphanCandidate (mc-ygved): init and the detected subreapers are the
 // orphan parents; no subreaper, or any other parent, is not.
 func TestOrphanCandidate(t *testing.T) {
 	for _, tc := range []struct {
-		ppid, subreaper int
-		want            bool
-	}{{1, 0, true}, {1, 50, true}, {50, 50, true}, {50, 0, false}, {77, 50, false}, {0, 0, false}} {
-		if got := OrphanCandidate(tc.ppid, tc.subreaper); got != tc.want {
-			t.Errorf("OrphanCandidate(%d, %d) = %t, want %t", tc.ppid, tc.subreaper, got, tc.want)
+		ppid       int
+		subreapers []int
+		want       bool
+	}{
+		{1, nil, true},
+		{1, []int{50}, true},
+		{50, []int{50}, true},
+		{60, []int{50, 60}, true},
+		{50, nil, false},
+		{77, []int{50}, false},
+		{0, nil, false},
+	} {
+		if got := OrphanCandidate(tc.ppid, pidutil.NewSubreapers(tc.subreapers...)); got != tc.want {
+			t.Errorf("OrphanCandidate(%d, %v) = %t, want %t", tc.ppid, tc.subreapers, got, tc.want)
 		}
 	}
 }

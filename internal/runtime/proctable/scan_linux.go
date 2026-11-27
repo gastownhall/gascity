@@ -20,23 +20,30 @@ import (
 // ScanBySessionID returns live agent root processes whose environment carries
 // GC_SESSION_ID equal to id. Empty id is the orphan sweep's scan: the roots
 // with any GC_SESSION_ID that were reparented away from their spawner, to
-// init or the user subreaper ([OrphanCandidate]), the only roots the sweep
-// may reap. It reads a process's environment only when its parent makes it
-// a candidate, so a host's other processes cost one stat read each, not an
+// init or to the subreaper observed adopting this process's orphans
+// ([OrphanCandidate], [pidutil.DetectSubreapers]), the only roots the sweep
+// may reap. It reads a process's environment only when its parent makes it a
+// candidate, so a host's other processes cost one stat read each, not an
 // environ read (mc-ygved).
+//
+// When the adopter cannot be observed, the scan counts init alone, which can
+// only miss an orphan, never take an owned child for one; the session sweep,
+// which detects again before it reaps, reports the failure.
 func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	if err := liveScanGuard(); err != nil {
 		return []runtime.LiveRuntime{}, err
 	}
 	if id == "" {
-		return scanOrphanCandidatesWithRoot(scanRoot, detectSubreaper(os.Getpid()))
+		subreapers, _ := detectSubreapers() // the session sweep reports a failure; the empty set fails closed
+		return scanOrphanCandidatesWithRoot(scanRoot, subreapers)
 	}
 	return scanWithRoot(scanRoot, id)
 }
 
-// detectSubreaper is the user subreaper the empty-id scan counts as an
-// orphan parent (a systemd --user supervisor); a test sets its fixture's.
-var detectSubreaper = pidutil.DetectUserSubreaperPID
+// detectSubreapers is the set of subreapers the empty-id scan counts as
+// orphan parents besides init: the one observed adopting this process's
+// orphans. A test sets its fixture's.
+var detectSubreapers = pidutil.DetectSubreapers
 
 // ScanBySessionIDSince scans for an exact session incarnation. Inspection
 // failures from processes proven to predate incarnationStartedAt do not make
@@ -92,22 +99,22 @@ func scanWithRootSince(root, id string, incarnationStartedAt time.Time) ([]runti
 }
 
 // scanOrphanCandidatesWithRoot is the all-roots scan restricted to processes
-// reparented to init or subreaperPID (OrphanCandidate), each decided on its
-// stat before anything else is read. A stat that cannot be read is the
+// reparented to init or one of subreapers (OrphanCandidate), each decided on
+// its stat before anything else is read. A stat that cannot be read is the
 // entry's error, as an unreadable owner is: the scan stays fail-closed.
 //
 // A process whose parent is the program-status relay is decided on the
 // relay's parent, as the scan reports it (see effectiveParent): an orphaned
 // relay's program is the orphan. Each parent's relay check is read once per
 // scan.
-func scanOrphanCandidatesWithRoot(root string, subreaperPID int) ([]runtime.LiveRuntime, error) {
+func scanOrphanCandidatesWithRoot(root string, subreapers pidutil.Subreapers) ([]runtime.LiveRuntime, error) {
 	relays := make(map[int]bool)
 	return scanEntries(root, "", time.Time{}, func(pid int) (bool, error) {
 		ppid, ok, err := readParentPID(filepath.Join(root, strconv.Itoa(pid), "stat"))
 		if err != nil || !ok {
 			return false, err // a vanished process is no candidate; a failed read is the entry's error
 		}
-		if OrphanCandidate(ppid, subreaperPID) {
+		if OrphanCandidate(ppid, subreapers) {
 			return true, nil
 		}
 		relay, seen := relays[ppid]
@@ -118,7 +125,7 @@ func scanOrphanCandidatesWithRoot(root string, subreaperPID int) ([]runtime.Live
 		if !relay {
 			return false, nil
 		}
-		return OrphanCandidate(effectiveParent(root, ppid), subreaperPID), nil
+		return OrphanCandidate(effectiveParent(root, ppid), subreapers), nil
 	})
 }
 

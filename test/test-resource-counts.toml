@@ -1189,6 +1189,12 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
+path = "cmd/gc/process_sweep_ancestor_linux_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "cmd/gc/productmetrics_child_env_test.go"
 resource = "subprocess"
 calls = 4
@@ -2422,6 +2428,12 @@ resource = "subprocess"
 calls = 2
 
 [[count]]
+path = "internal/pidutil/subreaper_linux_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
 path = "internal/pidutil/testcmd_unix_test.go"
 resource = "subprocess"
 calls = 2
@@ -2537,6 +2549,12 @@ calls = 1
 path = "internal/runtime/acp/lifecycle_lock_open_windows_test.go"
 resource = "subprocess"
 calls = 1
+tagged = true
+
+[[count]]
+path = "internal/runtime/acp/proctable_linux_test.go"
+resource = "subprocess"
+calls = 2
 tagged = true
 
 [[count]]

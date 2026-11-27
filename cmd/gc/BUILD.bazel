@@ -2067,6 +2067,7 @@ go_test(
         "proc_environ_settled_test.go",
         "process_scan_error_log_test.go",
         "process_scan_windows_test.go",
+        "process_sweep_ancestor_linux_test.go",
         "process_sweep_incarnation_test.go",
         "productmetrics_child_env_test.go",
         "productmetrics_controls_process_test.go",

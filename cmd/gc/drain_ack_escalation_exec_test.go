@@ -7,6 +7,7 @@ import (
 	goruntime "runtime"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
@@ -44,7 +45,7 @@ func TestDrainAckEscalationNeverTargetsInBoxTmuxPaneOfExecPack(t *testing.T) {
 		t.Fatalf("FindRuntimesBySessionID: %v", err)
 	}
 	var stderr bytes.Buffer
-	if targets, _ := drainAckForceTerminationTargets(found, "gc-seat", cityPath, "seat", 0, &stderr); len(targets) != 0 {
+	if targets, _ := drainAckForceTerminationTargets(found, "gc-seat", cityPath, "seat", pidutil.Subreapers{}, &stderr); len(targets) != 0 {
 		t.Fatalf("escalation targets %+v of an exec pack, want none: the pane under the in-box tmux server is not the seat's runtime; stderr=%q", targets, stderr.String())
 	}
 
@@ -56,7 +57,7 @@ func TestDrainAckEscalationNeverTargetsInBoxTmuxPaneOfExecPack(t *testing.T) {
 		t.Fatalf("ScanBySessionID = %+v, %v; want the pane pid %d with a tmux parent", tmuxFound, err, pane.PID)
 	}
 	tmuxFound[0].IsTracked, tmuxFound[0].ProviderName = true, "seat"
-	if targets, _ := drainAckForceTerminationTargets(tmuxFound, "gc-seat", cityPath, "seat", 0, &stderr); len(targets) != 1 {
+	if targets, _ := drainAckForceTerminationTargets(tmuxFound, "gc-seat", cityPath, "seat", pidutil.Subreapers{}, &stderr); len(targets) != 1 {
 		t.Fatalf("escalation targets %+v of the tmux runtime's pane, want it: the tmux rule is unchanged; stderr=%q", targets, stderr.String())
 	}
 }
@@ -96,7 +97,7 @@ func TestDrainAckEscalationNeverTargetsAnExecSeatsOwnProgram(t *testing.T) {
 				t.Fatalf("FindRuntimesBySessionID = %+v, %v; want the seat's program pid %d tracked as seat, or the case proves nothing", found, err, program.PID)
 			}
 			var stderr bytes.Buffer
-			if targets, _ := drainAckForceTerminationTargets(found, "gc-seat", cityPath, "seat", 0, &stderr); len(targets) != 0 {
+			if targets, _ := drainAckForceTerminationTargets(found, "gc-seat", cityPath, "seat", pidutil.Subreapers{}, &stderr); len(targets) != 0 {
 				t.Fatalf("escalation targets %+v, want none: an exec seat's own program is never force-terminated by the escalation; stderr=%q", targets, stderr.String())
 			}
 		})
@@ -151,7 +152,7 @@ func TestDrainAckEscalationTargetsTheAgentPaneOfAnExecPackRunningItInTmux(t *tes
 		t.Fatalf("FindRuntimesBySessionID = %+v, %v; want the seat's agent pid %d, tracked as seat with a tmux parent", found, err, agent.PID)
 	}
 	var stderr bytes.Buffer
-	if targets, _ := drainAckForceTerminationTargets(found, "gc-seat", cityPath, "seat", 0, &stderr); len(targets) != 1 || targets[0].PID != agent.PID {
+	if targets, _ := drainAckForceTerminationTargets(found, "gc-seat", cityPath, "seat", pidutil.Subreapers{}, &stderr); len(targets) != 1 || targets[0].PID != agent.PID {
 		t.Fatalf("escalation targets %+v, want the seat's agent pane %d; stderr=%q", targets, agent.PID, stderr.String())
 	}
 }

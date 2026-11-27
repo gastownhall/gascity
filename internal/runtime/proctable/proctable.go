@@ -18,11 +18,11 @@ import (
 var ErrIncarnationBoundUnsupported = errors.New("proctable: incarnation start-time bound unsupported on this platform")
 
 // OrphanCandidate reports whether a process whose parent is ppid was
-// reparented away from its spawner, to init or the user subreaper: the only
+// reparented away from its spawner, to init or one of subreapers: the only
 // roots the orphan sweep may reap ([pidutil.IsReparentedOrphan]), and so the
 // only processes the empty-id scan reads.
-func OrphanCandidate(ppid, subreaperPID int) bool {
-	return pidutil.IsReparentedOrphan(ppid, subreaperPID)
+func OrphanCandidate(ppid int, subreapers pidutil.Subreapers) bool {
+	return pidutil.IsReparentedOrphan(ppid, subreapers)
 }
 
 // EntryError is a scan's failure to inspect one process entry. Its message is

@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -103,7 +104,7 @@ func scanRecordsBySessionID(records map[int]psRecord, id string) []runtime.LiveR
 func orphanCandidates(roots []runtime.LiveRuntime) []runtime.LiveRuntime {
 	out := roots[:0]
 	for _, r := range roots {
-		if OrphanCandidate(r.PPID, 0) {
+		if OrphanCandidate(r.PPID, pidutil.Subreapers{}) {
 			out = append(out, r)
 		}
 	}

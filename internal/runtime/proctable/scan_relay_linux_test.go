@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
 // writeFakeCmdline writes pid's NUL-separated argv, as /proc does.
@@ -96,7 +98,7 @@ func TestScanWithRootNeverReportsProgramStatusTapAsRoot(t *testing.T) {
 	if len(got) != 1 || got[0].PID != 701 {
 		t.Fatalf("scanWithRoot = %+v, want only the founding session's program pid 701", got)
 	}
-	orphans, err := scanOrphanCandidatesWithRoot(root, 0)
+	orphans, err := scanOrphanCandidatesWithRoot(root, pidutil.Subreapers{})
 	if err != nil {
 		t.Fatalf("scanOrphanCandidatesWithRoot: %v", err)
 	}
@@ -125,11 +127,28 @@ func TestOrphanCandidateScanLooksThroughOrphanedRelay(t *testing.T) {
 	buildFakeRelay(t, root, 601, 600, map[string]string{"GC_SESSION_ID": "ga-live-relay"})
 	buildFakeProcUnder(t, root, 602, 601, "claude", map[string]string{"GC_SESSION_ID": "ga-live-relay"})
 
-	got, err := scanOrphanCandidatesWithRoot(root, 0)
+	got, err := scanOrphanCandidatesWithRoot(root, pidutil.Subreapers{})
 	if err != nil {
 		t.Fatalf("scanOrphanCandidatesWithRoot: %v", err)
 	}
 	if len(got) != 1 || got[0].PID != 502 || got[0].PPID != 1 || got[0].ParentIsProviderInfrastructure {
 		t.Fatalf("orphan candidates %+v, want only the orphaned relay's program 502 reading as reparented to init", got)
+	}
+}
+
+// An ancestor subreaper can adopt the relay instead of init.
+func TestOrphanCandidateScanLooksThroughRelayAdoptedBySubreaper(t *testing.T) {
+	root := t.TempDir()
+	writeFakeBootTime(t, root, time.Unix(1700000000, 0))
+	env := map[string]string{"GC_SESSION_ID": "ga-orphan-relay"}
+	buildFakeRelay(t, root, 501, 400, env)
+	buildFakeProcUnder(t, root, 502, 501, "claude", env)
+
+	got, err := scanOrphanCandidatesWithRoot(root, pidutil.NewSubreapers(400))
+	if err != nil {
+		t.Fatalf("scanOrphanCandidatesWithRoot: %v", err)
+	}
+	if len(got) != 1 || got[0].PID != 502 || got[0].PPID != 400 {
+		t.Fatalf("orphan candidates %+v, want the relay's program 502 attributed to subreaper 400", got)
 	}
 }

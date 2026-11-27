@@ -16,6 +16,8 @@ go_library(
         "procfs_unix.go",
         "procfs_windows.go",
         "subreaper.go",
+        "subreaper_probe_linux.go",
+        "subreaper_probe_other.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/pidutil",
     visibility = ["//:__subpackages__"],
@@ -47,6 +49,7 @@ go_test(
         "procfs_windows_test.go",
         "starttime_portable_test.go",
         "starttime_unix_test.go",
+        "subreaper_linux_test.go",
         "subreaper_test.go",
         "testcmd_unix_test.go",
         "testcmd_windows_test.go",
@@ -57,6 +60,14 @@ go_test(
     deps = [
         "//internal/testenv",
     ] + select({
+        "@rules_go//go/platform:android": [
+            "//internal/bazeltest",
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:linux": [
+            "//internal/bazeltest",
+            "@org_golang_x_sys//unix",
+        ],
         "@rules_go//go/platform:windows": [
             "@org_golang_x_sys//windows",
         ],

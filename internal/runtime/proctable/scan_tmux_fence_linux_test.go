@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -50,9 +51,9 @@ func tmuxFenceFixture(t *testing.T) string {
 func TestScanBySessionIDOutsideTmuxFencesTmuxSubtrees(t *testing.T) {
 	root := tmuxFenceFixture(t)
 	SetScanRootForTesting(t, root)
-	savedDetect := detectSubreaper
-	detectSubreaper = func(int) int { return 0 }
-	t.Cleanup(func() { detectSubreaper = savedDetect })
+	savedDetect := detectSubreapers
+	detectSubreapers = func() (pidutil.Subreapers, error) { return pidutil.Subreapers{}, nil }
+	t.Cleanup(func() { detectSubreapers = savedDetect })
 
 	for _, tc := range []struct {
 		id   string

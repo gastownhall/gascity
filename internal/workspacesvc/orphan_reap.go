@@ -23,9 +23,11 @@ import (
 // (see orphanIdentity.matchesLive):
 //
 //  1. it is alive and not a zombie;
-//  2. it has re-parented to a subreaper — init (ppid 1), or the detected
+//  2. it has re-parented to a subreaper — init (ppid 1), or the subreaper
+//     ancestor observed adopting the sweeper's orphans, such as the
 //     `systemd --user` manager under a user@.service — so no live supervisor
-//     owns it (see orphanIdentity.parentIsSubreaper);
+//     owns it (see
+//     orphanIdentity.parentIsSubreaper);
 //  3. its command line is exactly the service's configured command; and
 //  4. its environment carries GC_SERVICE_NAME=<service> and
 //     GC_SERVICE_STATE_ROOT=<this instance's state root>, proving a gc
@@ -54,12 +56,12 @@ type orphanIdentity struct {
 	serviceName string
 	stateRoot   string
 	command     []string
-	// subreaperPID is the pid of the `systemd --user` subreaper that adopts
-	// this user session's orphans, or 0 when there is none (plain init host /
-	// container). It is set at sweep time by reapOrphanedServiceProcesses;
-	// newOrphanIdentity leaves it 0 so the identity keeps the strict
-	// re-parented-to-init (ppid 1) rule until a subreaper is detected.
-	subreaperPID int
+	// subreapers are the processes besides init that adopt this supervisor's
+	// orphans: the subreaper observed adopting them (pidutil.DetectSubreapers),
+	// empty on a plain init host. It is set at sweep time by reapOrphanedServiceProcesses;
+	// newOrphanIdentity leaves it empty so the identity keeps the strict
+	// re-parented-to-init (ppid 1) rule until subreapers are detected.
+	subreapers pidutil.Subreapers
 }
 
 // newOrphanIdentity builds the sweep identity for one service instance.
@@ -101,15 +103,15 @@ func (id orphanIdentity) matchesLive(pid int) bool {
 
 // parentIsSubreaper reports whether ppid is a subreaper that would own this
 // process only if the supervisor that spawned it has already exited: init
-// (pid 1) on hosts without a user subreaper, or the detected `systemd --user`
-// manager under a user@.service. A live gc supervisor is never a subreaper, so
-// a still-owned service child — whose ppid is its live supervisor's pid —
-// never matches, and neither does the sweeper's own supervisor process (it
+// (pid 1), or the subreaper ancestor observed adopting the sweeper's orphans,
+// such as the `systemd --user` manager under a user@.service. The sweeper's own process is
+// never in that set, so a still-owned service child — whose ppid is its live
+// supervisor's pid — never matches, and neither does the sweeper's own supervisor process (it
 // fails the command/environ checks regardless). Rule 2 of the file header
 // ("no live supervisor owns it") thus holds under both the plain-init and
-// systemd --user reparenting models.
+// subreaper reparenting models.
 func (id orphanIdentity) parentIsSubreaper(ppid int) bool {
-	return pidutil.IsReparentedOrphan(ppid, id.subreaperPID)
+	return pidutil.IsReparentedOrphan(ppid, id.subreapers)
 }
 
 // reapOrphanedServiceProcesses terminates orphaned survivors of previous
@@ -117,10 +119,14 @@ func (id orphanIdentity) parentIsSubreaper(ppid int) bool {
 // or signal failures are logged and never block the spawn; on hosts without
 // /proc the sweep is a no-op.
 func reapOrphanedServiceProcesses(id orphanIdentity) {
-	// The sweeper runs under the same subreaper that adopts this supervisor's
-	// orphans, so detect it from the sweeper's own ancestry. On a plain-init
-	// host this stays 0 and matchesLive keeps the strict ppid==1 rule.
-	id.subreaperPID = detectUserSubreaperPID(os.Getpid())
+	// The observed adopter of the sweeper's orphans, if not init. On a
+	// plain-init host, or when the adopter cannot be observed, the empty set
+	// leaves the strict ppid == 1 rule in place.
+	subreapers, err := pidutil.DetectSubreapers()
+	if err != nil {
+		log.Printf("workspacesvc: orphan sweep for service %q counts only init as an orphan adopter: %v", id.serviceName, err)
+	}
+	id.subreapers = subreapers
 	pids, err := findOrphanedServiceProcesses(id)
 	if err != nil {
 		log.Printf("workspacesvc: orphan sweep for service %q did not run; duplicates from a previous hard exit will not be reaped: %v", id.serviceName, err)
@@ -131,23 +137,6 @@ func reapOrphanedServiceProcesses(id orphanIdentity) {
 	}
 	log.Printf("workspacesvc: terminating %d orphaned process(es) for service %q: %v", len(pids), id.serviceName, pids)
 	terminateOrphanedProcesses(id, pids)
-}
-
-// detectUserSubreaperPID returns the pid of the `systemd --user` manager that
-// acts as the child subreaper for this user session, or 0 if there is none.
-//
-// Under a user@UID.service, systemd --user sets PR_SET_CHILD_SUBREAPER, so any
-// orphan in the session reparents to it (not to pid 1). The sweeper is itself a
-// descendant of that manager, so we walk the sweeper's parent chain and return
-// the nearest ancestor named "systemd" whose pid is not 1 — i.e. the user
-// manager, distinct from the system systemd at pid 1. The walk is bounded to
-// guard against malformed /proc data and stops at pid 1.
-func detectUserSubreaperPID(self int) int {
-	return pidutil.DetectUserSubreaperPID(self)
-}
-
-func detectUserSubreaperPIDWith(self int, parentOf func(int) (int, error), commOf func(int) string) int {
-	return pidutil.DetectUserSubreaperPIDWith(self, parentOf, commOf)
 }
 
 // findOrphanedServiceProcesses scans the process table for processes matching id.
