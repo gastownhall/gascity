@@ -5850,7 +5850,10 @@ type SessionRespondOutputBody struct {
 // SessionResponse defines model for SessionResponse.
 type SessionResponse struct {
 	ActiveBead *string `json:"active_bead,omitempty"`
-	Activity   *string `json:"activity,omitempty"`
+
+	// ActiveBeadUnknown True when the list's bounded active-work lookup could not answer for this session (a store read timed out or failed under load), so active_bead is unknown rather than absent. Omitted when active_bead was looked up.
+	ActiveBeadUnknown *bool   `json:"active_bead_unknown,omitempty"`
+	Activity          *string `json:"activity,omitempty"`
 
 	// ActivitySource Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report.
 	ActivitySource *SessionResponseActivitySource `json:"activity_source,omitempty"`

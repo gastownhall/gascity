@@ -2281,3 +2281,35 @@ func TestActiveBeadLookupLogsUnreadableSuspensionStateOnce(t *testing.T) {
 		t.Fatalf("state file corrupt again after it read logged %d times in all, want 2; log:\n%s", n, logs.String())
 	}
 }
+
+func TestBoundedActiveWorkLookupUsesSelectedWorkScope(t *testing.T) {
+	t.Run("suspended rig shares a warm store", func(t *testing.T) {
+		l := newSuspendedRigLookup(t)
+		suspendAlphaAtRuntime(t, l.state)
+		l.state.stores["alpha"] = l.beta
+		other := &listCountingStore{Store: &beads.MemStore{IDPrefix: "able"}}
+		addActiveWork(t, other.Store, "session-id")
+		l.state.cfg.Rigs = append(l.state.cfg.Rigs, config.Rig{Name: "able", Path: "/tmp/able"})
+		l.state.stores["able"] = other
+		lookup := &activeWorkLookup{ctx: context.Background(), server: New(l.state)}
+		if got := lookup.find("alpha", "session-id"); got != l.betaWork || lookup.err != nil {
+			t.Fatalf("lookup = %q, %v; want shared work %q", got, lookup.err, l.betaWork)
+		}
+		if other.listCalls != 0 {
+			t.Fatalf("unrelated store read %d times", other.listCalls)
+		}
+	})
+	t.Run("rig replaces city name", func(t *testing.T) {
+		state := newFakeState(t)
+		city := &beads.MemStore{IDPrefix: "city"}
+		rig := &beads.MemStore{IDPrefix: "rig"}
+		state.cityBeadStore = city
+		state.stores = map[string]beads.Store{state.cityName: rig}
+		addActiveWork(t, city, "session-id")
+		want := addActiveWork(t, rig, "session-id")
+		lookup := &activeWorkLookup{ctx: context.Background(), server: New(state)}
+		if got := lookup.find(state.cityName, "session-id"); got != want || lookup.err != nil {
+			t.Fatalf("lookup = %q, %v; want rig work %q", got, lookup.err, want)
+		}
+	})
+}

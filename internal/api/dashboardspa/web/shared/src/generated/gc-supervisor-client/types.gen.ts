@@ -4370,6 +4370,10 @@ export type SessionRespondOutputBody = {
 
 export type SessionResponse = {
     active_bead?: string;
+    /**
+     * True when the list's bounded active-work lookup could not answer for this session (a store read timed out or failed under load), so active_bead is unknown rather than absent. Omitted when active_bead was looked up.
+     */
+    active_bead_unknown?: boolean;
     activity?: string;
     /**
      * Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report.

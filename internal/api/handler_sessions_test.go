@@ -9114,8 +9114,150 @@ func TestHandleSessionListActiveBeadSkipsSuspendedRig(t *testing.T) {
 		if item.ActiveBead != betaWork {
 			t.Errorf("active_bead = %q, want beta's %q", item.ActiveBead, betaWork)
 		}
+		if item.ActiveBeadUnknown {
+			t.Errorf("active_bead_unknown = true for a lookup that answered %q", item.ActiveBead)
+		}
 	}
 	if !found {
 		t.Fatalf("session %s not listed in %+v", info.ID, resp.Items)
+	}
+}
+
+type blockedActiveWorkStore struct {
+	beads.Store
+	release <-chan struct{}
+}
+
+func (s blockedActiveWorkStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	<-s.release
+	return s.Store.List(q)
+}
+
+// A stalled work-store lookup must not hold either list endpoint until bd's
+// own 30-second timeout, or make a missing active bead look authoritative.
+// The agent list reports the unread lookup as partial, because agent state is
+// derived from the active bead. The session list marks the row's active bead
+// unknown and stays complete: active work is optional enrichment there, and a
+// partial session list fails `gc session list` (ga-ix489).
+func TestListActiveWorkLookupHonorsRequestDeadline(t *testing.T) {
+	for _, endpoint := range []string{"sessions", "agents"} {
+		t.Run(endpoint, func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			info := createTestSession(t, fs.cityBeadStore, fs.sp, "My Session")
+			release := make(chan struct{})
+			defer close(release)
+			fs.stores["myrig"] = blockedActiveWorkStore{Store: beads.NewMemStore(), release: release}
+			srv := New(fs)
+			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			defer cancel()
+			type result struct {
+				partial  bool
+				errors   []string
+				sessions []sessionResponse
+				err      error
+			}
+			done := make(chan result, 1)
+			go func() {
+				if endpoint == "sessions" {
+					out, err := srv.humaHandleSessionList(ctx, &SessionListInput{})
+					if err != nil {
+						done <- result{err: err}
+						return
+					}
+					done <- result{partial: out.Body.Partial, errors: out.Body.PartialErrors, sessions: out.Body.Items}
+				} else {
+					out, err := srv.humaHandleAgentList(ctx, &AgentListInput{})
+					if err != nil {
+						done <- result{err: err}
+						return
+					}
+					done <- result{partial: out.Body.Partial, errors: out.Body.PartialErrors}
+				}
+			}()
+			var got result
+			select {
+			case got = <-done:
+			case <-time.After(time.Second):
+				t.Fatal("list did not return after the request deadline")
+			}
+			if got.err != nil {
+				t.Fatalf("list error = %v", got.err)
+			}
+			if endpoint == "agents" {
+				if !got.partial || len(got.errors) == 0 {
+					t.Fatalf("agent list = %+v, want a partial result identifying the unavailable work lookup", got)
+				}
+				return
+			}
+			if got.partial || len(got.errors) != 0 {
+				t.Fatalf("session list partial = %v, errors = %v; want a complete list", got.partial, got.errors)
+			}
+			var row *sessionResponse
+			for i := range got.sessions {
+				if got.sessions[i].ID == info.ID {
+					row = &got.sessions[i]
+				}
+			}
+			if row == nil {
+				t.Fatalf("session %s not listed in %+v", info.ID, got.sessions)
+			}
+			if !row.ActiveBeadUnknown || row.ActiveBead != "" {
+				t.Fatalf("row active_bead = %q, active_bead_unknown = %v; want unknown", row.ActiveBead, row.ActiveBeadUnknown)
+			}
+		})
+	}
+}
+
+type contextBlockedActiveWorkStore struct {
+	beads.Store
+	ctx     context.Context
+	stopped chan<- struct{}
+}
+
+func (s contextBlockedActiveWorkStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	<-s.ctx.Done()
+	close(s.stopped)
+	return nil, s.ctx.Err()
+}
+
+func TestActiveWorkLookupCancelsScopedStoreAndPreservesPriority(t *testing.T) {
+	fs := newSessionFakeState(t)
+	first := beads.NewMemStore()
+	second := &listCountingStore{Store: beads.NewMemStore()}
+	fs.stores = map[string]beads.Store{"a": first, "b": second}
+	addActiveWork(t, second.Store, "session")
+	stopped := make(chan struct{})
+	fs.scopedStoreFn = func(ctx context.Context, store beads.Store) (beads.Store, error) {
+		return contextBlockedActiveWorkStore{Store: store, ctx: ctx, stopped: stopped}, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	lookup := &activeWorkLookup{ctx: ctx, server: New(fs)}
+	if got := lookup.find("", "session"); got != "" || lookup.err == nil {
+		t.Fatalf("active work = %q, error = %v; want unknown", got, lookup.err)
+	}
+	if second.listCalls != 0 {
+		t.Fatalf("lower-priority store read %d times after a higher-priority failure", second.listCalls)
+	}
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("scoped store did not observe cancellation")
+	}
+}
+
+func TestActiveWorkLookupUsesCleanCacheAfterDeadline(t *testing.T) {
+	fs := newSessionFakeState(t)
+	store := &cachedOnlyListStoreForSessionTest{MemStore: beads.NewMemStore(), blockList: true}
+	fs.stores = map[string]beads.Store{"myrig": store}
+	want := addActiveWork(t, store.MemStore, "session")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	lookup := &activeWorkLookup{ctx: ctx, server: New(fs)}
+	if got := lookup.find("", "session"); got != want || lookup.err != nil {
+		t.Fatalf("active work = %q, error = %v; want cached %q", got, lookup.err, want)
+	}
+	if store.listCalls != 0 {
+		t.Fatalf("backing store read %d times", store.listCalls)
 	}
 }
