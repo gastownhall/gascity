@@ -325,6 +325,7 @@ func TestManagedDoltSpawnWrappedInInfraScope(t *testing.T) {
 	}{
 		{name: "from a session with GC_INFRA_SLICE=off", host: wrappableFromSession, sliceEnv: "off"},
 		{name: "from a session in a system service", host: infraScopeHost{session: true, linger: true, cgroup: supervisorSliceServiceCgroup}},
+		{name: "from a session in a login session without lingering", host: infraScopeHost{session: true, linger: false}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			logPath := installInfraScopeHost(t, tc.host)
@@ -457,6 +458,7 @@ func TestScopeWatchdogSpawnWrappedInInfraScope(t *testing.T) {
 		sliceEnv string
 	}{
 		{name: "from a session with GC_INFRA_SLICE=off", host: wrappableFromSession, sliceEnv: "off"},
+		{name: "from a session in a login session without lingering", host: infraScopeHost{session: true, linger: false}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			logPath := installInfraScopeHost(t, tc.host)
