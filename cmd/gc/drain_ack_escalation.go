@@ -109,10 +109,11 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 )
 
-// drainAckDetectSubreapers resolves the subreapers that adopt this
-// controller's orphans besides init — its own ancestors
-// (pidutil.DetectSubreapers) — or the empty set on a plain-init host. It is a
-// package var so tests can model a subreaper topology without a real one.
+// drainAckDetectSubreapers resolves the subreaper that adopts this
+// controller's orphans besides init — the one the kernel is observed to
+// reparent them to (pidutil.DetectSubreapers) — or the empty set on a
+// plain-init host. It is a package var so tests can model a subreaper
+// topology without a real one.
 //
 // It must be read on the RECONCILE goroutine and the value threaded down, never
 // re-read from the detached termination goroutine: that goroutine outlives its
@@ -120,7 +121,7 @@ import (
 // (the same hazard the confirm-dead bounds and the poke seam already bind at
 // queue time). It also walks the parent chain, so once per escalation is the
 // right cost, not once per scan hit.
-var drainAckDetectSubreapers = func() pidutil.Subreapers { return pidutil.DetectSubreapers(os.Getpid()) }
+var drainAckDetectSubreapers = pidutil.DetectSubreapers
 
 // drainAckEscalationLabel prefixes this pass's journal lines so a terminal kill
 // is greppable next to the reminder lines that preceded it.
@@ -452,7 +453,11 @@ func escalateWedgedDrainAckStopPending(
 
 	// The event is emitted from the goroutine, at the point an outcome is known
 	// — see recordDrainAckEscalation.
-	queueDrainAckForcedTermination(cityPath, store, sp, cfg, info, name, reason, attempt, now, processNames, drainAckDetectSubreapers(), done, rec, stderr)
+	subreapers, err := drainAckDetectSubreapers()
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %s: counting only init as an orphan adopter: %v\n", drainAckEscalationLabel, name, err) //nolint:errcheck
+	}
+	queueDrainAckForcedTermination(cityPath, store, sp, cfg, info, name, reason, attempt, now, processNames, subreapers, done, rec, stderr)
 	return true
 }
 
@@ -673,9 +678,9 @@ func terminateDrainAckRuntimeByProcessTable(
 // made to fail closed. Recognizing a reparent destination means knowing which
 // pid is the child subreaper, and that is NOT always pid 1: under a
 // user@UID.service, `systemd --user` sets PR_SET_CHILD_SUBREAPER, so orphans
-// reparent to the USER MANAGER and carry a large LIVE ppid. The subreapers can
-// only be DETECTED, by walking a parent chain — and the chain available here is
-// the CONTROLLER's, used as a proxy for the target's. When the two
+// reparent to the USER MANAGER and carry a large LIVE ppid. The subreaper can
+// only be DETECTED, by orphaning a probe and seeing where it goes — and the
+// probe available here is the CONTROLLER's, used as a proxy for the target's. When the two
 // diverge (a controller restarted from an ssh shell or a system unit while the
 // tmux server descends from the user manager) detection returns nothing, every
 // `ppid <= 1` style test reads the orphaned watchdog as a live owned child, and

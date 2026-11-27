@@ -3960,7 +3960,8 @@ func processRootIncarnationOver(live runtime.LiveRuntime, snapshot, store proces
 // processRootReapable is the orphan sweep's process guard (CONTRACT C4): the
 // root is not this controller, it carries a start identity the kill can bind
 // to, and it was reparented away from every tmux server, to init (PPID exactly
-// 1) or to a subreaper ancestor of this controller, with no scanned tmux parent. An agent pane, or a
+// 1) or to the subreaper observed adopting this controller's orphans
+// (pidutil.DetectSubreapers), with no scanned tmux parent. An agent pane, or a
 // detached handoff in its own tmux session, still has its tmux server as
 // parent and is never reaped; a PPID of 0 is unreported and proves nothing.
 func processRootReapable(live runtime.LiveRuntime, selfPID int, subreapers pidutil.Subreapers) bool {
@@ -3999,6 +4000,10 @@ const processScanErrorLogRepeat = 10 * time.Minute
 // processScanErrorLogs paces the orphan sweep's scan-error line per city.
 var processScanErrorLogs = &scanErrorLog{last: map[string]scanErrorLogged{}}
 
+// subreaperDetectErrorLogs paces the orphan sweep's line for a failed
+// orphan-adopter detection per city.
+var subreaperDetectErrorLogs = &scanErrorLog{last: map[string]scanErrorLogged{}}
+
 // scanErrorLog remembers, per city, the last scan error the sweep logged.
 type scanErrorLog struct {
 	mu   sync.Mutex
@@ -4018,7 +4023,13 @@ func (l *scanErrorLog) report(city string, err error, now time.Time) bool {
 	if proctable.HasWholeScanFailure(err) {
 		return true
 	}
-	shape := proctable.ScanErrorShape(err)
+	return l.reportShape(city, proctable.ScanErrorShape(err), now)
+}
+
+// reportShape reports whether a failure of this shape is logged now: the
+// first time it is seen for city, and again once processScanErrorLogRepeat
+// has passed.
+func (l *scanErrorLog) reportShape(city, shape string, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if prev, ok := l.last[city]; ok && prev.shape == shape && now.Sub(prev.at) < processScanErrorLogRepeat {
@@ -4084,7 +4095,12 @@ func sweepProcessTableOrphans(
 	fenced := make(map[string]struct{})
 	defer fencedInfrastructureRoots.put(cityPath, fenced)
 	selfPID := os.Getpid()
-	subreapers := pidutil.DetectSubreapers(selfPID)
+	// A failed detection leaves init as the only adopter: the sweep can then
+	// miss an orphan of a subreaper, never take an owned child for one.
+	subreapers, detectErr := pidutil.DetectSubreapers()
+	if detectErr != nil && subreaperDetectErrorLogs.reportShape(cityPath, "detect", time.Now()) {
+		fmt.Fprintf(stderr, "session reconciler: process-table orphan sweep counts only init as an orphan adopter: %v\n", detectErr) //nolint:errcheck
+	}
 	reaped := 0
 	for _, live := range found {
 		live.SessionID = strings.TrimSpace(live.SessionID)

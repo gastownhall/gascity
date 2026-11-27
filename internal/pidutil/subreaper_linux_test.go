@@ -5,6 +5,7 @@ package pidutil
 import (
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -15,7 +16,8 @@ import (
 )
 
 // subreaperHelperEnv selects the role a re-executed test binary plays in
-// TestDetectSubreapersFindsAnAncestorSubreaper.
+// TestDetectSubreapersFindsAnAncestorSubreaper and
+// TestDetectSubreapersLeavesANonSubreaperAncestorOut.
 const subreaperHelperEnv = "GC_PIDUTIL_SUBREAPER_ROLE"
 
 // runTestAs re-executes this test binary to run only t's test, in role.
@@ -60,18 +62,76 @@ func TestDetectSubreapersFindsAnAncestorSubreaper(t *testing.T) {
 		if Comm(helper) == "systemd" {
 			t.Fatalf("helper subreaper %d is named systemd; the test no longer models a non-systemd subreaper", helper)
 		}
-		subreapers := DetectSubreapers(os.Getpid())
-		if !subreapers.Contains(helper) {
-			t.Fatalf("DetectSubreapers(self) = %v, want it to contain the helper subreaper %d", subreapers, helper)
+		subreapers, err := DetectSubreapers()
+		if err != nil {
+			t.Fatalf("DetectSubreapers: %v", err)
 		}
-		if subreapers.Contains(os.Getpid()) {
-			t.Fatalf("DetectSubreapers(self) = %v contains the caller itself", subreapers)
+		if !slices.Equal(subreapers.PIDs(), []int{helper}) {
+			t.Fatalf("DetectSubreapers() = %v, want the helper subreaper %d alone", subreapers, helper)
 		}
 		if !IsReparentedOrphan(ppid, subreapers) {
 			t.Fatalf("IsReparentedOrphan(%d, %v) = false for an orphan adopted by the helper subreaper", ppid, subreapers)
 		}
 	default:
 		t.Fatalf("unknown %s=%q", subreaperHelperEnv, os.Getenv(subreaperHelperEnv))
+	}
+}
+
+// Being an ancestor is no proof of adoption. A helper parent that never set
+// PR_SET_CHILD_SUBREAPER runs the scanner below it, the way bash runs gc:
+// the kernel passes the helper by when it reparents an orphan, so the helper
+// is not in the set, and the scanner itself, the helper's own live child,
+// does not read as orphaned. An orphan the scanner makes still reads as one.
+func TestDetectSubreapersLeavesANonSubreaperAncestorOut(t *testing.T) {
+	switch os.Getenv(subreaperHelperEnv) {
+	case "":
+		runTestAs(t, "ancestor")
+	case "ancestor":
+		runTestAs(t, "scanner")
+	case "scanner":
+		helper := os.Getppid()
+		subreapers, err := DetectSubreapers()
+		if err != nil {
+			t.Fatalf("DetectSubreapers: %v", err)
+		}
+		if subreapers.Contains(helper) {
+			t.Fatalf("DetectSubreapers() = %v contains the live non-subreaper ancestor %d", subreapers, helper)
+		}
+		if IsReparentedOrphan(helper, subreapers) {
+			t.Fatalf("IsReparentedOrphan(%d, %v) = true for the helper's own live child", helper, subreapers)
+		}
+		if n := len(subreapers.PIDs()); n > 1 {
+			t.Fatalf("DetectSubreapers() = %v, want at most the one observed adopter", subreapers)
+		}
+		orphanPID := startOrphan(t)
+		ppid, err := ParentPID(orphanPID)
+		if err != nil {
+			t.Fatalf("reading parent of orphan %d: %v", orphanPID, err)
+		}
+		if !IsReparentedOrphan(ppid, subreapers) {
+			t.Fatalf("orphan %d adopted by %d (%s) does not read as orphaned under %v", orphanPID, ppid, Comm(ppid), subreapers)
+		}
+	default:
+		t.Fatalf("unknown %s=%q", subreaperHelperEnv, os.Getenv(subreaperHelperEnv))
+	}
+}
+
+// A detection is remembered for an unchanged ancestry: the second call costs
+// no probe, so its answer is the first one's.
+func TestDetectSubreapersIsStableAcrossCalls(t *testing.T) {
+	first, err := DetectSubreapers()
+	if err != nil {
+		t.Fatalf("DetectSubreapers: %v", err)
+	}
+	second, err := DetectSubreapers()
+	if err != nil {
+		t.Fatalf("DetectSubreapers again: %v", err)
+	}
+	if !slices.Equal(first.PIDs(), second.PIDs()) {
+		t.Fatalf("DetectSubreapers() = %v then %v for one ancestry", first, second)
+	}
+	if first.Contains(os.Getpid()) {
+		t.Fatalf("DetectSubreapers() = %v contains the caller itself", first)
 	}
 }
 

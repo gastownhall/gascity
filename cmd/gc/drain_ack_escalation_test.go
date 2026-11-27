@@ -123,7 +123,7 @@ func newEscalationEnv(t *testing.T) *escalationEnv {
 
 	env := &escalationEnv{}
 	prevSubreapers := drainAckDetectSubreapers
-	drainAckDetectSubreapers = func() pidutil.Subreapers { return env.subreapers }
+	drainAckDetectSubreapers = func() (pidutil.Subreapers, error) { return env.subreapers, nil }
 	t.Cleanup(func() { drainAckDetectSubreapers = prevSubreapers })
 
 	// Keep the confirm-dead loop short; production bounds would add 6s per test.
@@ -927,8 +927,8 @@ func TestEscalationRecoversAPanicInTheDetachedTermination(t *testing.T) {
 
 // The watchdog pin, with subreaper DETECTION FAILING.
 //
-// drainAckDetectSubreapers walks the CONTROLLER's own ancestry as a proxy for
-// the target's reparent destination. The two diverge whenever the controller was
+// drainAckDetectSubreapers observes where the CONTROLLER's own orphans go, as a
+// proxy for the target's reparent destination. The two diverge whenever the controller was
 // (re)started outside the `systemd --user` tree — an ssh shell, a system unit —
 // while the tmux server and its agents descend from the user manager. Detection
 // then answers nothing, the orphaned watchdog carries a large LIVE ppid that matches

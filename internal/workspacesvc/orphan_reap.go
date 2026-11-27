@@ -23,9 +23,10 @@ import (
 // (see orphanIdentity.matchesLive):
 //
 //  1. it is alive and not a zombie;
-//  2. it has re-parented to a subreaper — init (ppid 1), or a subreaper
-//     ancestor of the sweeper such as the `systemd --user` manager under a
-//     user@.service — so no live supervisor owns it (see
+//  2. it has re-parented to a subreaper — init (ppid 1), or the subreaper
+//     ancestor observed adopting the sweeper's orphans, such as the
+//     `systemd --user` manager under a user@.service — so no live supervisor
+//     owns it (see
 //     orphanIdentity.parentIsSubreaper);
 //  3. its command line is exactly the service's configured command; and
 //  4. its environment carries GC_SERVICE_NAME=<service> and
@@ -56,8 +57,8 @@ type orphanIdentity struct {
 	stateRoot   string
 	command     []string
 	// subreapers are the processes besides init that adopt this supervisor's
-	// orphans: its own ancestors (pidutil.DetectSubreapers), empty on a plain
-	// init host. It is set at sweep time by reapOrphanedServiceProcesses;
+	// orphans: the subreaper observed adopting them (pidutil.DetectSubreapers),
+	// empty on a plain init host. It is set at sweep time by reapOrphanedServiceProcesses;
 	// newOrphanIdentity leaves it empty so the identity keeps the strict
 	// re-parented-to-init (ppid 1) rule until subreapers are detected.
 	subreapers pidutil.Subreapers
@@ -102,8 +103,8 @@ func (id orphanIdentity) matchesLive(pid int) bool {
 
 // parentIsSubreaper reports whether ppid is a subreaper that would own this
 // process only if the supervisor that spawned it has already exited: init
-// (pid 1), or one of the sweeper's subreaper ancestors such as the
-// `systemd --user` manager under a user@.service. The sweeper's own process is
+// (pid 1), or the subreaper ancestor observed adopting the sweeper's orphans,
+// such as the `systemd --user` manager under a user@.service. The sweeper's own process is
 // never in that set, so a still-owned service child — whose ppid is its live
 // supervisor's pid — never matches, and neither does the sweeper's own supervisor process (it
 // fails the command/environ checks regardless). Rule 2 of the file header
@@ -118,9 +119,14 @@ func (id orphanIdentity) parentIsSubreaper(ppid int) bool {
 // or signal failures are logged and never block the spawn; on hosts without
 // /proc the sweep is a no-op.
 func reapOrphanedServiceProcesses(id orphanIdentity) {
-	// The sweeper's ancestors may adopt its orphans. On a plain-init host
-	// the empty set leaves the strict ppid == 1 rule in place.
-	id.subreapers = pidutil.DetectSubreapers(os.Getpid())
+	// The observed adopter of the sweeper's orphans, if not init. On a
+	// plain-init host, or when the adopter cannot be observed, the empty set
+	// leaves the strict ppid == 1 rule in place.
+	subreapers, err := pidutil.DetectSubreapers()
+	if err != nil {
+		log.Printf("workspacesvc: orphan sweep for service %q counts only init as an orphan adopter: %v", id.serviceName, err)
+	}
+	id.subreapers = subreapers
 	pids, err := findOrphanedServiceProcesses(id)
 	if err != nil {
 		log.Printf("workspacesvc: orphan sweep for service %q did not run; duplicates from a previous hard exit will not be reaped: %v", id.serviceName, err)

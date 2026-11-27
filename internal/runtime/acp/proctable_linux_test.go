@@ -424,14 +424,20 @@ func TestFindRuntimesBySessionIDTracksPerSessionAcrossSessions(t *testing.T) {
 }
 
 // orphanScanRoleEnv selects the role a re-executed test binary plays in
-// TestFindRuntimesBySessionIDFindsOrphansAdoptedByAnAncestorSubreaper.
+// TestFindRuntimesBySessionIDFindsOrphansAdoptedByAnAncestorSubreaper and
+// TestFindRuntimesBySessionIDLeavesALiveAncestorsOwnChildOwned.
 const orphanScanRoleEnv = "GC_ACP_ORPHAN_SCAN_ROLE"
 
-// runTestInRole re-executes this test binary to run only t's test, in role.
-func runTestInRole(t *testing.T, role string) {
+// ownChildPIDEnv passes the scanner role the pid of its parent's own
+// session-tagged child.
+const ownChildPIDEnv = "GC_ACP_OWN_CHILD_PID"
+
+// runTestInRole re-executes this test binary to run only t's test, in role,
+// with env added to its environment.
+func runTestInRole(t *testing.T, role string, env ...string) {
 	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$", "-test.count=1", "-test.v")
-	cmd.Env = append(bazeltest.HelperProcessEnv(os.Environ()), orphanScanRoleEnv+"="+role)
+	cmd.Env = append(append(bazeltest.HelperProcessEnv(os.Environ()), orphanScanRoleEnv+"="+role), env...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("%s role failed: %v\n%s", role, err, out)
@@ -465,6 +471,74 @@ func TestFindRuntimesBySessionIDFindsOrphansAdoptedByAnAncestorSubreaper(t *test
 	default:
 		t.Fatalf("unknown %s=%q", orphanScanRoleEnv, role)
 	}
+}
+
+// A live ancestor of the scanner that never set PR_SET_CHILD_SUBREAPER is not
+// an adopter, so its own child is owned, not orphaned, even when that child
+// is a session root whose session has no row: bash running gc beside a
+// session-tagged program it spawned itself. A helper parent that is no
+// subreaper starts such a child and runs the scanner below it. The empty-id
+// scan, the one the orphan sweep reaps from, must leave the child out, while
+// it still finds a crashed session's escaped tool, which the kernel did
+// reparent.
+func TestFindRuntimesBySessionIDLeavesALiveAncestorsOwnChildOwned(t *testing.T) {
+	switch role := os.Getenv(orphanScanRoleEnv); role {
+	case "":
+		runTestInRole(t, "ancestor")
+	case "ancestor":
+		own := exec.Command("sleep", "600")
+		own.Env = append(os.Environ(), "GC_SESSION_ID=sid-"+testName()+"-own-child", "GC_CITY_PATH="+t.TempDir())
+		if err := own.Start(); err != nil {
+			t.Fatalf("starting own child: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = own.Process.Kill()
+			_ = own.Wait()
+		})
+		runTestInRole(t, "scanner", ownChildPIDEnv+"="+strconv.Itoa(own.Process.Pid))
+	case "scanner":
+		ownChild, err := strconv.Atoi(os.Getenv(ownChildPIDEnv))
+		if err != nil || ownChild <= 1 {
+			t.Fatalf("%s=%q: %v", ownChildPIDEnv, os.Getenv(ownChildPIDEnv), err)
+		}
+		if ppid := readPPID(t, ownChild); ppid != os.Getppid() {
+			t.Fatalf("own child %d has parent %d, want the live ancestor %d", ownChild, ppid, os.Getppid())
+		}
+		p := newTestProvider(t)
+		var found []runtime.LiveRuntime
+		scanSnapshot(t, func() {
+			// The child is a session root in every other respect, so only the
+			// adopter rule can keep it out of the orphan scan.
+			if !proctable.IsScanRoot(ownChild) {
+				t.Fatalf("own child %d is not a scan root; the test no longer models a session-tagged child", ownChild)
+			}
+			found = findOnly(t, p, "")
+		}, ownChild)
+		if len(found) != 0 {
+			t.Fatalf("orphan scan found %+v, want the live ancestor's own child %d left owned", found, ownChild)
+		}
+		checkCrossSessionOrphanScan(t)
+	default:
+		t.Fatalf("unknown %s=%q", orphanScanRoleEnv, role)
+	}
+}
+
+// readPPID reads pid's parent from /proc/<pid>/stat.
+func readPPID(t *testing.T, pid int) int {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		t.Fatalf("reading stat of %d: %v", pid, err)
+	}
+	fields := strings.Fields(string(data[strings.LastIndexByte(string(data), ')')+1:]))
+	if len(fields) < 2 {
+		t.Fatalf("malformed stat of %d: %q", pid, data)
+	}
+	ppid, err := strconv.Atoi(fields[1])
+	if err != nil {
+		t.Fatalf("parent in stat of %d: %v", pid, err)
+	}
+	return ppid
 }
 
 // checkCrossSessionOrphanScan runs a live and a crashed session side by side

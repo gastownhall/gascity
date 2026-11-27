@@ -1189,6 +1189,12 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
+path = "cmd/gc/process_sweep_ancestor_linux_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "cmd/gc/productmetrics_child_env_test.go"
 resource = "subprocess"
 calls = 4
@@ -2548,7 +2554,7 @@ tagged = true
 [[count]]
 path = "internal/runtime/acp/proctable_linux_test.go"
 resource = "subprocess"
-calls = 1
+calls = 2
 tagged = true
 
 [[count]]

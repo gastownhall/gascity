@@ -1241,8 +1241,8 @@ type LiveRuntime struct {
 	// negative form cannot be made reliable: recognizing a reparent destination
 	// means knowing which pid is the child subreaper, and under a
 	// user@UID.service that is the `systemd --user` manager, which a caller can
-	// only DETECT (see pidutil.DetectSubreapers) by walking its OWN
-	// ancestry. When the caller's ancestry and the target's diverge — a
+	// only DETECT (see pidutil.DetectSubreapers) for its OWN orphans, by
+	// orphaning a probe. When the caller's ancestry and the target's diverge — a
 	// controller (re)started from an ssh shell or a system unit while the tmux
 	// server descends from the user manager — detection returns nothing and an
 	// orphan's large live ppid reads as a live owning parent.

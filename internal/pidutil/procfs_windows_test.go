@@ -41,8 +41,8 @@ func TestProcfsIsNeverConsultedOnWindows(t *testing.T) {
 	if got := Comm(pid); got != "" {
 		t.Fatalf("Comm = %q, want empty", got)
 	}
-	if got := DetectSubreapers(pid); len(got.PIDs()) != 0 {
-		t.Fatalf("DetectSubreapers = %v, want empty; Windows has no subreaper reparenting to model", got)
+	if got, err := DetectSubreapers(); err != nil || len(got.PIDs()) != 0 {
+		t.Fatalf("DetectSubreapers = %v, %v; want empty; Windows has no subreaper reparenting to model", got, err)
 	}
 
 	// Cmdline has no Windows implementation and must say so in a form callers

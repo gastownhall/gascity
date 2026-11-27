@@ -16,6 +16,8 @@ go_library(
         "procfs_unix.go",
         "procfs_windows.go",
         "subreaper.go",
+        "subreaper_probe_linux.go",
+        "subreaper_probe_other.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/pidutil",
     visibility = ["//:__subpackages__"],

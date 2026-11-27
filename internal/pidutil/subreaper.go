@@ -3,9 +3,12 @@ package pidutil
 import (
 	"bytes"
 	"fmt"
+	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // This file is the shared answer to one question: "has this process been
@@ -22,10 +25,12 @@ import (
 // owned by a live parent".
 //
 // Another process's subreaper flag cannot be read (PR_GET_CHILD_SUBREAPER
-// answers only for the caller), so the set is approximated from the caller's
-// side: a process the caller spawned descends from the caller, so its orphan
-// is adopted by pid 1 or by one of the caller's own ancestors. Those
-// ancestors are the set (DetectSubreapers).
+// answers only for the caller), and being an ancestor is no proof of it: a
+// live ancestor that never set the flag is the real parent of every child it
+// spawns. So the adopter is observed instead (DetectSubreapers): the caller
+// orphans a probe process of its own and reads whom the kernel reparented it
+// to. Every orphan whose dead parent descends from the caller goes to that
+// same process, the nearest subreaper ancestor of the caller, or to pid 1.
 //
 // That distinction is load-bearing wherever the answer gates a kill. A daemon
 // that inherited an agent's environment and then outlived its spawner (the
@@ -73,10 +78,10 @@ func Comm(pid int) string {
 	return strings.TrimSpace(string(data))
 }
 
-// Subreapers is the set of processes that may adopt an orphan of a process
-// the caller spawned: the caller's ancestors above pid 1 (DetectSubreapers).
-// Pid 1 is never a member; IsReparentedOrphan counts it on its own. The zero
-// value is the empty set, which leaves only pid 1 as an adopter.
+// Subreapers is the set of processes besides pid 1 that adopt an orphan of a
+// process the caller spawned (DetectSubreapers). Pid 1 is never a member;
+// IsReparentedOrphan counts it on its own. The zero value is the empty set,
+// which leaves only pid 1 as an adopter.
 type Subreapers struct {
 	pids map[int]struct{}
 }
@@ -126,55 +131,95 @@ func (s Subreapers) String() string {
 // maxAncestorDepth bounds the ancestry walk against malformed /proc data.
 const maxAncestorDepth = 64
 
-// DetectSubreapers returns the processes that may adopt an orphan of a
-// process self spawned: self's ancestors above pid 1. It returns the empty
-// set on a plain-init host where self's parent is pid 1, and on any platform
-// without /proc.
+// DetectSubreapers returns the process that adopts an orphan of a process
+// this process spawned, when that is not pid 1: the nearest ancestor that set
+// PR_SET_CHILD_SUBREAPER, such as the `systemd --user` manager, Bazel's
+// process-wrapper or a container init. It returns the empty set on a host
+// where such orphans go to pid 1, and on any platform without the Linux
+// subreaper model.
 //
-// An orphan is adopted by the nearest subreaper ancestor of its dead parent.
-// When self spawned that parent, the adopter is pid 1 or an ancestor of self,
-// whichever process set PR_SET_CHILD_SUBREAPER: the `systemd --user` manager,
-// Bazel's process-wrapper, a container init. Self is never a member: it is
-// the live parent of everything it spawns directly.
+// The adopter is observed, not inferred. The caller orphans a probe process
+// (a shell's background child, whose shell exits at once), reads the probe's
+// parent while the probe blocks on a pipe, then closes the pipe so the probe
+// exits. The kernel picks the adopter by walking up from the probe's dead
+// parent, which is the caller's child, so it is the process that adopts
+// every orphan whose dead parent descends from the caller. An ancestor that
+// never set the flag is never the adopter, so its own children stay owned.
+// The caller itself is never a member: when the caller is the subreaper it
+// is the live parent of the agents it spawns.
 //
-// A tmux server is never a member either. tmux never sets
-// PR_SET_CHILD_SUBREAPER, and it is the live parent of every pane root it
-// serves, so a caller started from a pane would otherwise read those roots
-// as orphans.
-//
-// Callers should resolve this ONCE per sweep and pass it down: it walks the
-// parent chain on every call.
-func DetectSubreapers(self int) Subreapers {
-	return DetectSubreapersWith(self, ParentPID, Comm)
+// The result is remembered for this process's ancestry, so a sweep pays for
+// one probe per change of ancestry, not one per call: an ancestor's exit
+// reparents its child and so changes the chain. A failed probe is not
+// remembered; it returns the empty set with the error, and the next call
+// probes again.
+func DetectSubreapers() (Subreapers, error) {
+	return processAdopter.detect(os.Getpid(), ParentPID, probeOrphanAdopter)
 }
 
-// DetectSubreapersWith is DetectSubreapers with its two /proc reads injected,
-// so the ancestry walk can be tested without a real process tree. A parent
-// that cannot be read ends the walk with the ancestors already read.
-func DetectSubreapersWith(self int, parentOf func(int) (int, error), commOf func(int) string) Subreapers {
-	var s Subreapers
+// processAdopter holds the last successful detection for this process.
+var processAdopter adopterCache
+
+// adopterCache remembers the subreaper set detected for one ancestry.
+type adopterCache struct {
+	mu    sync.Mutex
+	valid bool
+	chain []int
+	set   Subreapers
+}
+
+// detect returns the subreaper set for self, whose ancestry parentOf reads,
+// running probe (which reports the observed adopter of an orphan of self's
+// child) only when the ancestry differs from the remembered one.
+func (c *adopterCache) detect(self int, parentOf func(int) (int, error), probe func() (int, error)) (Subreapers, error) {
+	chain := ancestry(self, parentOf)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.valid && slices.Equal(c.chain, chain) {
+		return c.set, nil
+	}
+	set, err := adopterSet(self, chain, probe)
+	if err != nil {
+		return Subreapers{}, err
+	}
+	c.valid, c.chain, c.set = true, chain, set
+	return set, nil
+}
+
+// ancestry returns self's ancestors above pid 1, nearest first. A parent that
+// cannot be read, a loop, or the depth bound ends the walk.
+func ancestry(self int, parentOf func(int) (int, error)) []int {
+	var chain []int
 	pid := self
 	for depth := 0; depth < maxAncestorDepth; depth++ {
 		ppid, err := parentOf(pid)
-		if err != nil || ppid <= 1 || ppid == self || s.Contains(ppid) {
+		if err != nil || ppid <= 1 || ppid == self || slices.Contains(chain, ppid) {
 			break
 		}
-		if !isTmuxComm(commOf(ppid)) {
-			s.add(ppid)
-		}
+		chain = append(chain, ppid)
 		pid = ppid
 	}
-	return s
+	return chain
 }
 
-// isTmuxComm reports whether comm is a tmux process: the bare executable, or
-// the "tmux: server" / "tmux: client" titles tmux sets on Linux.
-func isTmuxComm(comm string) bool {
-	switch comm {
-	case "tmux", "tmux: server", "tmux: client":
-		return true
+// adopterSet runs probe and turns the adopter it observed into the set. The
+// kernel reparents an orphan to pid 1, to the caller when the caller is a
+// subreaper, or to a subreaper ancestor; any other answer means the probe
+// did not measure what it should, and fails closed.
+func adopterSet(self int, chain []int, probe func() (int, error)) (Subreapers, error) {
+	adopter, err := probe()
+	if err != nil {
+		return Subreapers{}, fmt.Errorf("probing the orphan adopter of pid %d: %w", self, err)
 	}
-	return false
+	switch {
+	case adopter == 1 || adopter == self:
+		return Subreapers{}, nil
+	case adopter <= 0:
+		return Subreapers{}, fmt.Errorf("probe orphan of pid %d has no visible parent", self)
+	case !slices.Contains(chain, adopter):
+		return Subreapers{}, fmt.Errorf("probe orphan of pid %d was adopted by pid %d, which is not one of its ancestors %v", self, adopter, chain)
+	}
+	return NewSubreapers(adopter), nil
 }
 
 // IsReparentedOrphan reports whether ppid identifies a subreaper that would own
@@ -182,10 +227,11 @@ func isTmuxComm(comm string) bool {
 // subreapers.
 //
 // An empty set collapses this to the plain `ppid == 1` rule. A live parent — a
-// still-running supervisor, or the tmux server that owns a pane's root process
-// — is never a member, so a genuinely owned child never matches. A ppid of 0
-// means the parent could not be read, which proves nothing, so it never
-// matches either.
+// still-running supervisor, a shell that spawned the process itself, or the
+// tmux server that owns a pane's root process — never set
+// PR_SET_CHILD_SUBREAPER and so is never a member, and a genuinely owned
+// child never matches. A ppid of 0 means the parent could not be read, which
+// proves nothing, so it never matches either.
 func IsReparentedOrphan(ppid int, subreapers Subreapers) bool {
 	if ppid == 1 {
 		return true

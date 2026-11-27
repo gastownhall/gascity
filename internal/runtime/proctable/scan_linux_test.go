@@ -1015,7 +1015,7 @@ func TestOrphanCandidateScanReadsOnlyReparentedProcesses(t *testing.T) {
 			// full one.
 			SetScanRootForTesting(t, root)
 			savedDetect := detectSubreapers
-			detectSubreapers = func(int) pidutil.Subreapers { return pidutil.NewSubreapers(subreaper) }
+			detectSubreapers = func() (pidutil.Subreapers, error) { return pidutil.NewSubreapers(subreaper), nil }
 			t.Cleanup(func() { detectSubreapers = savedDetect })
 			public, _ := ScanBySessionID("")
 			var publicIDs []string

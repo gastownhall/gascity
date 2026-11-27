@@ -20,24 +20,29 @@ import (
 // ScanBySessionID returns live agent root processes whose environment carries
 // GC_SESSION_ID equal to id. Empty id is the orphan sweep's scan: the roots
 // with any GC_SESSION_ID that were reparented away from their spawner, to
-// init or a subreaper ancestor of this process ([OrphanCandidate],
-// [pidutil.DetectSubreapers]), the only roots the sweep may reap. It reads a
-// process's environment only when its parent makes it a candidate, so a
-// host's other processes cost one stat read each, not an environ read
-// (mc-ygved).
+// init or to the subreaper observed adopting this process's orphans
+// ([OrphanCandidate], [pidutil.DetectSubreapers]), the only roots the sweep
+// may reap. It reads a process's environment only when its parent makes it a
+// candidate, so a host's other processes cost one stat read each, not an
+// environ read (mc-ygved).
+//
+// When the adopter cannot be observed, the scan counts init alone, which can
+// only miss an orphan, never take an owned child for one; the session sweep,
+// which detects again before it reaps, reports the failure.
 func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	if err := liveScanGuard(); err != nil {
 		return []runtime.LiveRuntime{}, err
 	}
 	if id == "" {
-		return scanOrphanCandidatesWithRoot(scanRoot, detectSubreapers(os.Getpid()))
+		subreapers, _ := detectSubreapers() // the session sweep reports a failure; the empty set fails closed
+		return scanOrphanCandidatesWithRoot(scanRoot, subreapers)
 	}
 	return scanWithRoot(scanRoot, id)
 }
 
 // detectSubreapers is the set of subreapers the empty-id scan counts as
-// orphan parents besides init: this process's ancestors. A test sets its
-// fixture's.
+// orphan parents besides init: the one observed adopting this process's
+// orphans. A test sets its fixture's.
 var detectSubreapers = pidutil.DetectSubreapers
 
 // ScanBySessionIDSince scans for an exact session incarnation. Inspection

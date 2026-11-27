@@ -52,7 +52,7 @@ func TestScanBySessionIDOutsideTmuxFencesTmuxSubtrees(t *testing.T) {
 	root := tmuxFenceFixture(t)
 	SetScanRootForTesting(t, root)
 	savedDetect := detectSubreapers
-	detectSubreapers = func(int) pidutil.Subreapers { return pidutil.Subreapers{} }
+	detectSubreapers = func() (pidutil.Subreapers, error) { return pidutil.Subreapers{}, nil }
 	t.Cleanup(func() { detectSubreapers = savedDetect })
 
 	for _, tc := range []struct {
