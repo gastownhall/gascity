@@ -126,6 +126,7 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		"reconcileGate":   true, // reconcile-loop gate, fixed at construction
 		"storeWork":       true, // owner's store-work hook (WithStoreWork), fixed at construction
 		"now":             true, // the clock (WithClock), fixed at construction
+		"logger":          true, // the log sink (WithLogger), fixed at construction
 		"onChange":        true, "problemf": true, "problemLog": true,
 		"lastReconcileLogAt": true, "primeMu": true, "primeRunning": true,
 		"primeCycle": true, "lastFullPrimeStartedAt": true, "primeRetryDelay": true,

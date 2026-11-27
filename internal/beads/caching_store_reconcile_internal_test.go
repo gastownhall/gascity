@@ -1,9 +1,11 @@
 package beads
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"strings"
 	"sync"
 	"testing"
@@ -468,6 +470,34 @@ func TestRunReconciliationLogsSuccess(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing field %q in log; out=%q", want, out)
 		}
+	}
+}
+
+// TestWithLoggerTakesTheCacheLog asserts WithLogger routes the cache's log
+// lines, its reconcile heartbeat and its problems alike, to the injected
+// logger and none to the standard logger.
+func TestWithLoggerTakesTheCacheLog(t *testing.T) {
+	std := captureLog(t)
+	var own bytes.Buffer
+
+	mem := NewMemStore()
+	if _, err := mem.Create(Bead{Title: "heartbeat target"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cs := NewCachingStoreForTest(mem, nil, WithLogger(log.New(&own, "", 0)))
+	if err := cs.Prime(t.Context()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	cs.runReconciliation()
+	cs.recordProblem("test op", errors.New("boom"))
+
+	for _, want := range []string{"beads cache: reconciled", "beads cache: test op: boom"} {
+		if !strings.Contains(own.String(), want) {
+			t.Errorf("injected logger missing %q; got:\n%s", want, own.String())
+		}
+	}
+	if std.Len() != 0 {
+		t.Errorf("standard logger got cache lines despite WithLogger:\n%s", std.String())
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"maps"
 	"math/rand/v2"
 	"os"
@@ -57,6 +58,8 @@ const (
 	simGuard   = 2 * time.Minute
 	simCityLeg = "city"
 	simRigLeg  = "rig-a"
+	// simCacheLogTail bounds the cache log a failing sim shows (simCacheLogger).
+	simCacheLogTail = 40
 )
 
 // simLeafOverride, when set, is every sim's leaf that its options leave
@@ -487,6 +490,28 @@ type simOpts struct {
 	leaf func(*simProvider) runtime.Provider
 }
 
+// simCacheLogger is the legs' caches' logger. A cache logs each reconcile,
+// and on sim time its rate limits never bite: thousands of lines a run, which
+// pushed gc_sim_exec_test's -v log past the 1.125 MiB message limit RBE
+// uploads the test's stdout under. It keeps them, and t shows the last
+// simCacheLogTail of them only when it fails, so a failed corpus's log stays
+// bounded too.
+func simCacheLogger(t *testing.T) *log.Logger {
+	buf := newSyncBuffer()
+	t.Cleanup(func() {
+		out := strings.TrimSuffix(buf.String(), "\n")
+		if !t.Failed() || out == "" {
+			return
+		}
+		lines := strings.Split(out, "\n")
+		if n := len(lines) - simCacheLogTail; n > 0 {
+			lines = append([]string{fmt.Sprintf("(%d earlier lines)", n)}, lines[n:]...)
+		}
+		t.Logf("beads cache log:\n%s", strings.Join(lines, "\n"))
+	})
+	return log.New(buf, "", 0)
+}
+
 func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 	s := &sim{
 		t: t, seed: seed, rng: rand.New(rand.NewPCG(seed, 0x51d1a)), clk: newFakePlannerClock(plannerT0), obsClk: &clock.Fake{Time: plannerT0},
@@ -511,6 +536,7 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 	}
 	s.noPendingCreates = o.noPendingCreates
 	city, rig := o.rows(s)
+	cacheLog := simCacheLogger(t)
 	for name, rows := range map[string][]beads.Bead{simCityLeg: city, simRigLeg: rig} {
 		var deps []beads.Dep
 		if name == simCityLeg {
@@ -520,7 +546,7 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 		if err := beads.StampOpenedStore(m, "MemStore", gate.Require, false, nil, nil); err != nil {
 			t.Fatalf("stamp: %v", err)
 		}
-		cache := beads.NewCachingStoreForTest(simLegBacking{simBacking{m}}, nil, beads.WithClock(s.clk.Now)) // its windows run on sim time
+		cache := beads.NewCachingStoreForTest(simLegBacking{simBacking{m}}, nil, beads.WithClock(s.clk.Now), beads.WithLogger(cacheLog)) // its windows run on sim time
 		if err := cache.Prime(context.Background()); err != nil {
 			t.Fatalf("prime %s: %v", name, err)
 		}
