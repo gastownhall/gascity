@@ -1853,7 +1853,9 @@ func cmdSessionAttachWith(args []string, opts sessionAttachOpts, stdout, stderr 
 		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cfg, err := loadCityConfig(cityPath, stderr)
+	// Strict: a session no configured agent runs is resumed from this process,
+	// and a quarantined rig's sessions are not such sessions.
+	cfg, err := strictCityConfig(loadCityConfig(cityPath, stderr))
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

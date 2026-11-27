@@ -486,6 +486,15 @@ const (
 	// Rate-bounded at the emit site (see cmd/gc/order_dispatch.go) — a
 	// permanently wedged order cannot turn this into a per-tick stream.
 	OrderSuppressed = "order.suppressed"
+	// OrderFailing reports that an order has failed FailureAlertAfter times in
+	// a row (internal/orders): a run of order.failed events that nothing
+	// else escalates. Re-emitted at most hourly while the streak lasts, and
+	// never for failures inside the startup grace after a controller start.
+	OrderFailing = "order.failing"
+	// OrderRecovered reports that an order whose failure streak raised
+	// order.failing has completed successfully, ending the streak. Emitted
+	// once per alerted streak; a streak that never alerted ends silently.
+	OrderRecovered = "order.recovered"
 	// OrderSkipped reports that an exec order finished (exit 0) but declared
 	// that some or all of its work did not run: a bead scope it could not
 	// reach, or a safety gate that held a step back. It accompanies the run's
@@ -759,7 +768,7 @@ var KnownEventTypes = []string{
 	RequestResultSessionSubmit, RequestResultRigCreate, RequestFailed,
 	RequestAccepted, RigProvisionProgress,
 	CityCreated, CityUnregisterRequested,
-	OrderFired, OrderCompleted, OrderFailed, OrderSuppressed, OrderSkipped, OrderInapplicable,
+	OrderFired, OrderCompleted, OrderFailed, OrderSuppressed, OrderFailing, OrderRecovered, OrderSkipped, OrderInapplicable,
 	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
 	MoleculeResolved,
 	SupervisorStarted, SupervisorShutdownRequested, SupervisorRequest,

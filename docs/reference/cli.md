@@ -156,8 +156,8 @@ exactly like this. Every identity shape is checked, qualified or bare.
 Exit codes:
   0  local    this city can vouch for the identity
   1  foreign  this city cannot vouch for it; protect the claim
-  2  unknown  this city cannot answer (no roster, a failed lookup, bad usage);
-              protect the claim
+  2  unknown  this city cannot answer (no roster, a failed lookup, a quarantined
+              rig, bad usage); protect the claim
 
 "local" is not a liveness claim: a dead local claimant is still local, and the
 caller has to establish liveness itself.

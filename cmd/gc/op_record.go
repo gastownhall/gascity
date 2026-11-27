@@ -344,12 +344,14 @@ func startCLIOp(cfg *config.City, sessStore beads.Store, req cliOpRequest) (*cli
 // cliCityConfig is the city config a session verb runs under, with the error
 // its op's request carries as cfgErr when there is no config: cityErr when the
 // city did not resolve, so the verb says its [ops] gates were not read, else
-// loadCityConfig's own. Config warnings go to warn.
+// the strict load's own. A verb judges a session's template and claims against
+// the configured agents, so a quarantined rig leaves it no config rather than
+// one without that rig's agents. Config warnings go to warn.
 func cliCityConfig(cityPath string, cityErr error, warn io.Writer) (*config.City, error) {
 	if cityErr != nil {
 		return nil, cityErr
 	}
-	return loadCityConfig(cityPath, warn)
+	return strictCityConfig(loadCityConfig(cityPath, warn))
 }
 
 // preflight opens the op store and checks the request's key and payload ahead

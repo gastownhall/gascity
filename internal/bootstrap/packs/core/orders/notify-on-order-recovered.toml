@@ -1,0 +1,10 @@
+# notify-on-order-recovered closes the loop notify-on-order-failing opens:
+# when an order whose failure streak alerted completes again
+# (order.recovered), the streak's incident is resolved, so the order's next
+# streak mails at once. See assets/scripts/notify-order-failing.sh, which
+# both orders run.
+[order]
+description = "Resolve an order's failing incident when it completes again"
+trigger = "event"
+on = "order.recovered"
+exec = "$PACK_DIR/assets/scripts/notify-order-failing.sh"

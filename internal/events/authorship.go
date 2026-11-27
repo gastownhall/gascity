@@ -251,6 +251,8 @@ var builtinAuthorship = map[string]Authorship{
 	OrderFired:                    AuthorController,
 	OrderCompleted:                AuthorController,
 	OrderSuppressed:               AuthorController,
+	OrderFailing:                  AuthorController,
+	OrderRecovered:                AuthorController,
 	OrderSkipped:                  AuthorController,
 	OrderInapplicable:             AuthorController,
 	RequestResultCityCreate:       AuthorController,

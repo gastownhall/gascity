@@ -184,7 +184,12 @@ func runControlDispatcherInStore(cityPath, storePath, beadID string, stdout, std
 		storePath = cityPath
 	}
 
-	cfg, err := loadCityConfig(cityPath, stderr)
+	// Strict, as everywhere the dispatcher loads: it compiles and routes from
+	// the configured formulas and agents, and fails a control it cannot
+	// compile or route for good. So while any rig is quarantined every control
+	// in the city waits, not only the rig's own, as when such a load failed
+	// outright.
+	cfg, err := strictCityConfig(loadCityConfig(cityPath, stderr))
 	if err != nil {
 		return err
 	}
@@ -245,7 +250,7 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 	defer restoreTraceWarnings()
 	var cfgLoadErr error
 	if cfg == nil {
-		cfg, cfgLoadErr = loadCityConfig(cityPath, stderr)
+		cfg, cfgLoadErr = strictCityConfig(loadCityConfig(cityPath, stderr))
 		if cfg != nil {
 			resolveRigPaths(cityPath, cfg.Rigs)
 		}

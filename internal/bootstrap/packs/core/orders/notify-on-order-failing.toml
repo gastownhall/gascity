@@ -1,0 +1,17 @@
+# notify-on-order-failing mails the escalation recipient when the controller
+# finds an order failing run after run (order.failing): three consecutive
+# order.failed outcomes, outside the startup grace after a controller start.
+# Without it a failing order reaches only the event log and gc doctor, which
+# nobody reads until something else breaks.
+#
+# Mail rides escalate.sh with the order as the incident key and the streak's
+# first failure as its fingerprint, so one streak mails once (reminded daily
+# while it lasts), however often the controller re-alerts during it. See
+# assets/scripts/notify-order-failing.sh.
+#
+# Mechanical (an event read and a mail send), no LLM judgment: exec order.
+[order]
+description = "Mail the escalation recipient when an order keeps failing"
+trigger = "event"
+on = "order.failing"
+exec = "$PACK_DIR/assets/scripts/notify-order-failing.sh"

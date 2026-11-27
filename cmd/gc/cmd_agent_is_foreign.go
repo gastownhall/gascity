@@ -27,8 +27,9 @@ import (
 //	0  local    this city can vouch for the identity: its roster resolves it,
 //	            or one of its own session records, open or closed, answers to it
 //	1  foreign  this city cannot vouch for it; PROTECT the claim
-//	2  unknown  this city cannot answer (no roster, a failed lookup, an
-//	            unresolvable city, bad usage); PROTECT the claim
+//	2  unknown  this city cannot answer (no roster, a failed lookup, a
+//	            quarantined rig, an unresolvable city, bad usage); PROTECT
+//	            the claim
 //
 // Exit 2 means "no answer", never "no match": a caller that treats it as
 // foreign is still safe, and one that treats it as local is not.
@@ -84,8 +85,8 @@ exactly like this. Every identity shape is checked, qualified or bare.
 Exit codes:
   0  local    this city can vouch for the identity
   1  foreign  this city cannot vouch for it; protect the claim
-  2  unknown  this city cannot answer (no roster, a failed lookup, bad usage);
-              protect the claim
+  2  unknown  this city cannot answer (no roster, a failed lookup, a quarantined
+              rig, bad usage); protect the claim
 
 "local" is not a liveness claim: a dead local claimant is still local, and the
 caller has to establish liveness itself.

@@ -26,12 +26,15 @@ const (
 	// order. Three, not two: two in a row is a plausible transient for anything
 	// touching the network or a lock. Three, not five: on a 6h order five failures
 	// is 30h before anything surfaces.
-	orderOutcomeFailureThreshold = 3
+	// It is the controller's order.failing threshold, so the two cannot
+	// disagree.
+	orderOutcomeFailureThreshold = orders.FailureAlertAfter
 
 	// orderOutcomeStartGrace covers gastownhall/gascity#3898 — for ~5 minutes
 	// after a supervisor start, exec orders fail spuriously because dispatch
 	// begins before pack staging completes. 2x margin on the observed window.
-	orderOutcomeStartGrace = 10 * time.Minute
+	// It is the controller's order.failing grace.
+	orderOutcomeStartGrace = orders.StartupFailureGrace
 )
 
 // nearControllerStart reports whether ts falls within grace after any controller

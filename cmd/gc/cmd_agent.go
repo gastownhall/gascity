@@ -56,7 +56,30 @@ func loadCityConfig(cityPath string, warningWriter ...io.Writer) (*config.City, 
 //
 // Revision reads from disk for anything the snapshot does not hold, so declining
 // it changes no revision value; see config.LoadOptions.SkipRevisionSnapshot.
-var skipRevisionSnapshot = config.LoadOptions{SkipRevisionSnapshot: true}
+//
+// It also isolates rig pack failures: one rig whose packs cannot compose is
+// quarantined with a warning instead of failing every command in the city
+// (#6656). Processes that act on the composed agent set (controller reload,
+// start, the supervisor, `gc config`) load strictly, and a one-shot caller
+// that reads what the config lacks as unconfigured goes through
+// strictCityConfig. cliStorageRoutesLoad, hostedCredentialProbeLoad and
+// invocationMemoLoadOptions are this same option set.
+var skipRevisionSnapshot = config.LoadOptions{SkipRevisionSnapshot: true, IsolateRigPackFailures: true}
+
+// strictCityConfig turns a one-shot load's result into a strict load's: a
+// composition that quarantined a rig becomes the error a strict load fails
+// with for it. A quarantined rig's agents, formulas and named sessions are
+// withheld, not removed, so a caller that would act on one being absent
+// loads through it: validators, gc doctor's checks, the control dispatcher
+// and the session verbs.
+func strictCityConfig(cfg *config.City, err error) (*config.City, error) {
+	if err == nil {
+		if qErr := cfg.QuarantineError(); qErr != nil {
+			return nil, qErr
+		}
+	}
+	return cfg, err
+}
 
 // loadCityConfigFS is the testable variant of loadCityConfig that accepts a
 // filesystem implementation. Used by functions that take an fsys.FS parameter
@@ -116,7 +139,7 @@ func loadPrematerializedCityConfig(fs fsys.FS, tomlPath string, opts config.Load
 // blocking load turns one `gc import install` into a hang for every other gc
 // process on the machine. An advisory load reports config.ErrRepoCacheBusy
 // instead and its caller degrades to "no pack state right now".
-var advisoryLoad = config.LoadOptions{SkipRevisionSnapshot: true, RepoCacheNonBlocking: true}
+var advisoryLoad = config.LoadOptions{SkipRevisionSnapshot: true, RepoCacheNonBlocking: true, IsolateRigPackFailures: true}
 
 // loadCityConfigAdvisory loads city config for callers that would rather have
 // no answer than a slow one: eager pack-command discovery and shell
@@ -203,6 +226,9 @@ func isNonFatalLoadConfigWarning(warning string) bool {
 		return true
 	}
 	if config.IsNonFatalSiteBindingWarning(warning) {
+		return true
+	}
+	if config.IsRigQuarantineWarning(warning) {
 		return true
 	}
 	if strings.Contains(warning, "[agents] is a deprecated compatibility alias for [agent_defaults]") {

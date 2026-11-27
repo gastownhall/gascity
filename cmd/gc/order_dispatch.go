@@ -556,6 +556,9 @@ func newMemoryOrderDispatcher(routes *storageRoutes, aa []orders.Order, cityPath
 	if p, ok := rec.(events.Provider); ok {
 		ep = p
 	}
+	// Every outcome the dispatcher records goes through the alert recorder,
+	// which escalates a run of consecutive failures as order.failing.
+	rec = newOrderOutcomeAlertRecorder(rec, time.Now())
 
 	maxDispatchesPerTick := cfg.Orders.EffectiveMaxDispatchesPerTick()
 
