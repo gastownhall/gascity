@@ -695,10 +695,17 @@ func waitForFinalImage(t *testing.T, pid int, name string) {
 }
 
 // killFakeCgroup kills every process in the fake cgroup scope, the way a
-// runtime's cgroup-wide stop of an agent session does. It reads each
-// process's environment once: a process still exec'ing is passed over, so
-// wait for the target's final image first (waitForFinalImage).
+// runtime's cgroup-wide stop of an agent session does; see signalFakeCgroup.
 func killFakeCgroup(t *testing.T, scope string) {
+	t.Helper()
+	signalFakeCgroup(t, scope, syscall.SIGKILL)
+}
+
+// signalFakeCgroup sends sig to every process in the fake cgroup scope, the
+// way systemd signals a unit's control group when it stops the unit. It reads
+// each process's environment once: a process still exec'ing is passed over,
+// so wait for the target's final image first (waitForFinalImage).
+func signalFakeCgroup(t *testing.T, scope string, sig syscall.Signal) {
 	t.Helper()
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
@@ -714,7 +721,7 @@ func killFakeCgroup(t *testing.T, scope string) {
 		if err != nil || !bytes.Contains(environ, want) {
 			continue
 		}
-		_ = syscall.Kill(pid, syscall.SIGKILL)
+		_ = syscall.Kill(pid, sig)
 	}
 }
 
@@ -773,6 +780,98 @@ func TestAgentScopeKillSparesAgentStartedManagedDolt(t *testing.T) {
 				t.Fatalf("managed Dolt alive after the agent's cgroup kill = %t, want %t", alive, tc.wantAlive)
 			}
 		})
+	}
+}
+
+// TestCallerUnitStopSparesManagedDoltStartedOutsideASession reproduces
+// #5910: a gc/bd call from a user service that is not an agent session
+// autostarts the managed Dolt server, then the unit stops and systemd
+// SIGTERMs its control group (KillMode=control-group). Left in the caller's
+// cgroup the store dies with the unit; scoped, it survives.
+func TestCallerUnitStopSparesManagedDoltStartedOutsideASession(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("fake cgroup signal reads /proc")
+	}
+	// startWatchdog starts the managed Dolt through its scope watchdog with
+	// this process's environment, as a provider-script gc does.
+	startWatchdog := func(t *testing.T) managedDoltStartedProcess {
+		t.Helper()
+		binDir, marker := writeMarkingFakeDolt(t)
+		dir := t.TempDir()
+		configPath := filepath.Join(dir, "dolt-config.yaml")
+		if err := os.WriteFile(configPath, []byte("log_level: debug\n"), 0o644); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		logFilePath := filepath.Join(dir, "dolt.log")
+		logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			t.Fatalf("open log file: %v", err)
+		}
+		t.Cleanup(func() { _ = logFile.Close() })
+		parentEnv := removeEnvKey(os.Environ(), "PATH")
+		parentEnv = append(parentEnv, "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+		started, err := startManagedDoltSQLServerWithScopeWatchdogEnv(t.TempDir(), configPath, logFilePath, logFile, parentEnv)
+		if err != nil {
+			t.Fatalf("start managed dolt with scope watchdog: %v", err)
+		}
+		killInfraScopeTestPID(t, started.PID)
+		killInfraScopeTestPID(t, started.WatchdogPID)
+		waitForFile(t, marker)
+		return started
+	}
+	startDirect := func(t *testing.T) managedDoltStartedProcess {
+		t.Helper()
+		started, _ := startDirectManagedDolt(t)
+		return started
+	}
+	for _, shape := range []struct {
+		name  string
+		start func(t *testing.T) managedDoltStartedProcess
+	}{
+		{name: "direct", start: startDirect},
+		{name: "scope watchdog", start: startWatchdog},
+	} {
+		for _, tc := range []struct {
+			name      string
+			unscoped  bool
+			wantAlive bool
+		}{
+			{name: "without infrastructure scoping the store dies with the unit", unscoped: true, wantAlive: false},
+			{name: "scoped the store survives the unit", unscoped: false, wantAlive: true},
+		} {
+			t.Run(shape.name+"/"+tc.name, func(t *testing.T) {
+				installInfraScopeHost(t, infraScopeHost{session: false, linger: false, cgroup: userServiceCgroup})
+				if tc.unscoped {
+					disableInfraScopeForTests()
+				}
+				callerUnit := fmt.Sprintf("caller-unit-%d-%d", os.Getpid(), time.Now().UnixNano())
+				t.Setenv(fakeCgroupEnv, callerUnit)
+
+				started := shape.start(t)
+				pids := []int{started.PID}
+				if started.WatchdogPID > 0 {
+					pids = append(pids, started.WatchdogPID)
+				}
+				// The fake marks itself running before it execs its final
+				// image; a signal that scans it mid-exec misses it.
+				waitForFinalImage(t, started.PID, fakeDoltFinalImage)
+				signalFakeCgroup(t, callerUnit, syscall.SIGTERM)
+
+				// A process the stop reached is gone within moments; one it
+				// spared is still running after the window.
+				window := 10 * time.Second
+				if tc.wantAlive {
+					window = 500 * time.Millisecond
+				}
+				for _, pid := range pids {
+					died := infraPollUntil(window, func() bool { return !processAlive(pid) })
+					if alive := !died; alive != tc.wantAlive {
+						t.Fatalf("pid %d (dolt %d, watchdog %d) alive after the caller unit's SIGTERM = %t, want %t",
+							pid, started.PID, started.WatchdogPID, alive, tc.wantAlive)
+					}
+				}
+			})
+		}
 	}
 }
 
