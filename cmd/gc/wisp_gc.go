@@ -1669,7 +1669,8 @@ func deleteExpiredBeadClosureFrom(store beads.Store, rootID string, prefetched *
 	if err := assertWorkflowDeleteSetLeavesNothingStrandedFor(store, ids, nestedRootCandidates(ids, rows, rootID)); err != nil {
 		return err
 	}
-	return deleteWorkflowBeadsBatchGuarded(store, ids)
+	_, err = deleteWorkflowBeadsBatchGuarded(context.Background(), store, ids)
+	return err
 }
 
 // nestedRootCandidates are the root and the closure members that could own

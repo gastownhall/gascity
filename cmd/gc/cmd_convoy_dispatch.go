@@ -3011,32 +3011,45 @@ func deleteWorkflowBeadsBatch(store beads.Store, ids []string) error {
 	if err := assertWorkflowDeleteSetLeavesNothingStranded(store, ids); err != nil {
 		return err
 	}
-	return deleteWorkflowBeadsBatchGuarded(store, ids)
+	_, err := deleteWorkflowBeadsBatchGuarded(context.Background(), store, ids)
+	return err
 }
 
 // deleteWorkflowBeadsBatchGuarded is deleteWorkflowBeadsBatch for a caller
-// that already ran the set-level strand guard.
-func deleteWorkflowBeadsBatchGuarded(store beads.Store, ids []string) error {
-	if len(ids) == 0 {
-		return nil
+// that already ran the set-level strand guard. It returns how many ids it
+// deleted, and it stops once ctx is canceled: it checks ctx before the batched
+// delete, which is one store call, and before each bead on the per-bead path.
+// A bead whose delete has started finishes: deleteWorkflowBeadUnguarded
+// completes it or restores its deps. The cancel is not an error; callers read
+// ctx.Err(). A failed batched delete counts nothing deleted.
+func deleteWorkflowBeadsBatchGuarded(ctx context.Context, store beads.Store, ids []string) (int, error) {
+	if len(ids) == 0 || ctx.Err() != nil {
+		return 0, nil
 	}
 	if cd, ok := store.(beads.BatchDeleter); ok {
 		// A policy/capability wrapper advertises BatchDeleter to forward it, but
 		// reports ErrBatchDeleteUnsupported when its own backing lacks the
 		// capability; treat that as "not batchable" and fall through to the
 		// per-bead path rather than surfacing it as a delete failure.
-		if err := cd.DeleteBatch(ids); !errors.Is(err, beads.ErrBatchDeleteUnsupported) {
-			return err
+		err := cd.DeleteBatch(ids)
+		if err == nil {
+			return len(ids), nil
+		}
+		if !errors.Is(err, beads.ErrBatchDeleteUnsupported) {
+			return 0, err
 		}
 	}
-	for _, id := range ids {
-		// Already guarded at the set level above; the per-bead guard would
-		// re-walk the same closure once per member.
+	for i, id := range ids {
+		if ctx.Err() != nil {
+			return i, nil
+		}
+		// The caller ran the set-level guard; the per-bead guard would re-walk
+		// the same closure once per member.
 		if err := deleteWorkflowBeadUnguarded(store, id); err != nil {
-			return err
+			return i, err
 		}
 	}
-	return nil
+	return len(ids), nil
 }
 
 // deleteWorkflowBead removes a single workflow bead after proving the delete

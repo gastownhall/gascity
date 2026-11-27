@@ -235,6 +235,12 @@ type CityRuntime struct {
 	// pass set before that read, zero after a pass that completed.
 	orderSweepWatchdogNotClosedDue     time.Time
 	orderSweepWatchdogNotClosedBackoff time.Duration
+	// orderTrackingRetentionFSPressure is the retention lane's FS-pressure
+	// episode. Only the retention lane's goroutine touches it.
+	orderTrackingRetentionFSPressure orderTrackingRetentionFSPressureEpisode
+	// orderTrackingRetentionWatchdogLast is the retention sweep's interval
+	// stamp. Only the retention lane's goroutine touches it, so it needs no
+	// lock.
 	orderTrackingRetentionWatchdogLast time.Time
 	nudgeMailSweepWatchdogLast         time.Time
 	wispIndexMigrationApplied          bool
@@ -1015,6 +1021,11 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// on its own lane with only the controller (pending_interaction_lane.go).
 	// Its event-log rebuild runs on that lane too, so it never delays a tick.
 	defer cr.startPendingInteractionLane(ctx)()
+	// The closed order-tracking retention sweep runs on its own lane
+	// (order_tracking_retention_lane.go), off dispatch and readiness. The
+	// deferred stop joins the lane before the deferred shutdown() closes the
+	// storage binding the sweep reads.
+	defer cr.startOrderTrackingRetentionLane(ctx)()
 	// Track pool instance liveness for death detection.
 	var prevPoolRunning map[string]bool
 	runTick := func(trigger string) {
@@ -2360,9 +2371,12 @@ func bulkDeleteMaxAge(_ *config.City) time.Duration {
 // runOrderTrackingRetentionWatchdog deletes closed order-tracking beads that
 // are past their TTL (defaulting to 7d) and beyond the retain-10 floor, at
 // most once every orderTrackingRetentionWatchdogInterval. It deletes at most
-// orderTrackingRetentionWatchdogDeleteBudget beads per invocation. The orders
-// lane runs it with its pass's config snapshot.
-func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(cfg *config.City, now time.Time) {
+// orderTrackingRetentionWatchdogDeleteBudget beads per invocation. The
+// retention lane (order_tracking_retention_lane.go) runs it with its pass's
+// config snapshot. Canceling ctx stops the sweep at its next step
+// (sweepClosedOrderTrackingRetentionBounded); the watchdog then logs how many
+// beads it deleted before the cancel.
+func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(ctx context.Context, cfg *config.City, now time.Time) {
 	if !cr.orderTrackingRetentionWatchdogLast.IsZero() &&
 		now.Sub(cr.orderTrackingRetentionWatchdogLast) < orderTrackingRetentionWatchdogInterval {
 		return
@@ -2391,11 +2405,18 @@ func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(cfg *config.City, now t
 
 	policy := orderTrackingRetentionPolicyForConfig(cfg)
 	deleted, sweepErr := sweepClosedOrderTrackingRetentionAcrossStoresBounded(
-		stores, now, policy, nil, orderTrackingRetentionWatchdogDeleteBudget)
+		ctx, stores, now, policy, nil, orderTrackingRetentionWatchdogDeleteBudget)
 	if err := errors.Join(storeErr, sweepErr); err != nil && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 	}
-	if deleted > 0 && cr.stderr != nil {
+	if cr.stderr == nil {
+		return
+	}
+	if ctx.Err() != nil {
+		fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: canceled after %d delete(s)\n", cr.logPrefix, deleted) //nolint:errcheck // best-effort stderr
+		return
+	}
+	if deleted > 0 {
 		fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: pruned %d closed bead(s)\n", cr.logPrefix, deleted) //nolint:errcheck // best-effort stderr
 	}
 }
