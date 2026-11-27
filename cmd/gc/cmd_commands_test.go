@@ -930,17 +930,17 @@ func TestE1LoneDashIsTransparentToEagerLazyDiscovery(t *testing.T) {
 		{
 			name:      "before binding with city",
 			args:      []string{"-", "--city", cityB, "backstage", "hello", "payload"},
-			wantExact: "selected-hello args:<-><--city><" + cityB + "><payload>\n",
+			wantExact: "selected-hello args:<-><payload>\n",
 		},
 		{
 			name:      "between binding and leaf with city",
 			args:      []string{"backstage", "-", "--city", cityB, "hello", "payload"},
-			wantExact: "selected-hello args:<-><--city><" + cityB + "><payload>\n",
+			wantExact: "selected-hello args:<-><payload>\n",
 		},
 		{
 			name:      "between intermediate and leaf with rig",
 			args:      []string{"backstage", "repo", "-", "--rig", targetRig, "sync", "payload"},
-			wantExact: "selected-sync args:<-><--rig><" + targetRig + "><payload>\n",
+			wantExact: "selected-sync args:<-><payload>\n",
 		},
 		{
 			name:         "before binding group help",
@@ -1020,13 +1020,13 @@ func TestE1GlobalJSONControlDoesNotBlockScopedPackResolution(t *testing.T) {
 			name:       "city success after binding",
 			args:       []string{"backstage", "--json", "--city", cityB, "hello", "payload"},
 			wantCode:   0,
-			wantStdout: "selected-hello args:<--city><" + cityB + "><--json><payload>\n",
+			wantStdout: "selected-hello args:<--json><payload>\n",
 		},
 		{
 			name:       "rig success before binding",
 			args:       []string{"--json=1", "--rig", targetRig, "backstage", "hello", "payload"},
 			wantCode:   0,
-			wantStdout: "selected-hello args:<--rig><" + targetRig + "><--json=1><payload>\n",
+			wantStdout: "selected-hello args:<--json=1><payload>\n",
 		},
 		{
 			name:          "selected missing schema fails despite ambient schema",
@@ -2015,12 +2015,12 @@ func TestE1LazyMissingTreeMatchesEagerFlagOwnership(t *testing.T) {
 		{
 			name: "namespace city remains root owned",
 			args: []string{"backstage", "--city", cityB, "hello", "payload"},
-			want: "city-b-hello args:<--city><" + cityB + "><payload>\n",
+			want: "city-b-hello args:<payload>\n",
 		},
 		{
 			name: "intermediate rig remains root owned",
 			args: []string{"backstage", "repo", "--rig=" + targetRig, "sync", "payload"},
-			want: "city-b-sync args:<--rig=" + targetRig + "><payload>\n",
+			want: "city-b-sync args:<payload>\n",
 		},
 		{
 			name: "leaf repeated scopes ending on the bound city pass through",
@@ -2059,9 +2059,10 @@ func TestE1LazyMissingTreeMatchesEagerFlagOwnership(t *testing.T) {
 
 // TestPackLeafScopeAfterLeafNeverSilentlyRetargets pins gc dolt status
 // --city <other-city> run from inside city A: the leaf's city is captured when
-// the tree is built, so a scope flag that only appears after the leaf must
-// either name that same city or be refused, never ignored while the command
-// runs against the ambient city.
+// the tree is built, so a --city that only appears after the leaf must either
+// name that same city or be refused, never ignored while the command runs
+// against the ambient city. A --rig after the leaf is the pack's own input and
+// reaches the script verbatim, whatever it names.
 func TestPackLeafScopeAfterLeafNeverSilentlyRetargets(t *testing.T) {
 	t.Setenv("GC_HOME", t.TempDir())
 	t.Setenv("GC_CITY", "")
@@ -2101,17 +2102,12 @@ func TestPackLeafScopeAfterLeafNeverSilentlyRetargets(t *testing.T) {
 		{name: "other city separate", args: []string{"backstage", "hello", "--city", cityB, "payload"}},
 		{name: "other city equals", args: []string{"backstage", "hello", "--city=" + cityB}},
 		{name: "other city after payload", args: []string{"backstage", "hello", "payload", "--city", cityB}},
-		{name: "rig of other city", args: []string{"backstage", "hello", "--rig=" + targetRig}},
 		{name: "empty city", args: []string{"backstage", "hello", "--city="}},
-		{name: "empty rig", args: []string{"backstage", "hello", "--rig", ""}},
-		{name: "rig that does not resolve", args: []string{"backstage", "hello", "--rig=missing-rig"}},
 		{name: "valued true help beside other city", args: []string{"backstage", "hello", "--help=true", "--city", cityB}},
-		{name: "malformed help beside unresolved rig", args: []string{"backstage", "hello", "-h=maybe", "--rig=missing-rig"}},
+		{name: "malformed help beside other city", args: []string{"backstage", "hello", "-h=maybe", "--city", cityB}},
 		{name: "same city then other city", args: []string{"backstage", "hello", "--city", cityA, "--city", cityB}},
-		{name: "bound city with rig of other city", args: []string{"backstage", "hello", "--city", cityA, "--rig=" + targetRig}},
-		{name: "bound city with rig that does not resolve", args: []string{"backstage", "hello", "--city", cityA, "--rig=missing-rig"}},
-		{name: "pre-leaf bound city with post-leaf rig of other city", args: []string{"--city", cityA, "backstage", "hello", "--rig=" + targetRig}},
-		{name: "pre-leaf bound city with post-leaf rig that does not resolve", args: []string{"--city", cityA, "backstage", "hello", "--rig=missing-rig"}},
+		{name: "other city beside a file-path rig", args: []string{"backstage", "hello", "--rig", "out/hero.rig.glb", "--city", cityB}},
+		{name: "pre-leaf bound city with post-leaf other city", args: []string{"--city", cityA, "backstage", "hello", "--city", cityB}},
 	}
 	for _, test := range refused {
 		t.Run("refuses "+test.name, func(t *testing.T) {
@@ -2160,9 +2156,43 @@ func TestPackLeafScopeAfterLeafNeverSilentlyRetargets(t *testing.T) {
 			want: "city-a-hello args:<--city><" + cityA + "><--rig=" + localRig + "><payload>\n",
 		},
 		{
+			// The pre-leaf --city selects the city and is consumed by gc;
+			// only the leaf's own arguments reach the script.
 			name: "pre-leaf bound city with post-leaf own rig",
 			args: []string{"--city", cityA, "backstage", "hello", "--rig=" + localRig, "payload"},
-			want: "city-a-hello args:<--city><" + cityA + "><--rig=" + localRig + "><payload>\n",
+			want: "city-a-hello args:<--rig=" + localRig + "><payload>\n",
+		},
+		{
+			// A leaf --rig is the pack's own input, never scope: a pack
+			// such as a model animator takes --rig <path>.glb.
+			name: "file-path rig is pack input",
+			args: []string{"backstage", "hello", "--rig", "out/hero.rig.glb", "payload"},
+			want: "city-a-hello args:<--rig><out/hero.rig.glb><payload>\n",
+		},
+		{
+			name: "rig named like another city's rig is pack input",
+			args: []string{"backstage", "hello", "--rig=" + targetRig},
+			want: "city-a-hello args:<--rig=" + targetRig + ">\n",
+		},
+		{
+			name: "unregistered rig name is pack input",
+			args: []string{"backstage", "hello", "--rig=missing-rig"},
+			want: "city-a-hello args:<--rig=missing-rig>\n",
+		},
+		{
+			name: "empty rig is pack input",
+			args: []string{"backstage", "hello", "--rig", ""},
+			want: "city-a-hello args:<--rig><>\n",
+		},
+		{
+			name: "bound city with unregistered rig",
+			args: []string{"backstage", "hello", "--city", cityA, "--rig=missing-rig"},
+			want: "city-a-hello args:<--city><" + cityA + "><--rig=missing-rig>\n",
+		},
+		{
+			name: "pre-leaf bound city with post-leaf rig named like another city's rig",
+			args: []string{"--city", cityA, "backstage", "hello", "--rig=" + targetRig, "payload"},
+			want: "city-a-hello args:<--rig=" + targetRig + "><payload>\n",
 		},
 	}
 	for _, test := range passed {
@@ -2234,6 +2264,11 @@ func TestDiscoveredCommandFallbackRefusesCrossCityScope(t *testing.T) {
 			name: "bound city runs",
 			args: []string{"backstage", "hello", "--city", cityA},
 			want: "city-a-hello args:<--city><" + cityA + ">\n",
+		},
+		{
+			name: "file-path rig passes through",
+			args: []string{"backstage", "hello", "--rig", "out/hero.rig.glb"},
+			want: "city-a-hello args:<--rig><out/hero.rig.glb>\n",
 		},
 		{
 			name: "after terminator passes through",
@@ -2574,9 +2609,10 @@ func TestE1InheritedCitySelectsScopedJSONSchema(t *testing.T) {
 }
 
 // TestE1ScopeLookingArgsAfterLeafOwnership pins who owns a --city or --rig after
-// a pack leaf: gc reads it as a scope selector, so a token that names the
-// leaf's own city reaches the script unchanged and any other token is refused
-// before the script runs. Everything after a literal "--" belongs to the script.
+// a pack leaf. gc reads a --city as a scope selector: one that names the leaf's
+// own city reaches the script unchanged and any other is refused before the
+// script runs. A --rig belongs to the pack and reaches the script verbatim.
+// Everything after a literal "--" belongs to the script.
 func TestE1ScopeLookingArgsAfterLeafOwnership(t *testing.T) {
 	cityA := setupPackExitCity(t)
 	cityB := setupPackExitCity(t)
@@ -2612,6 +2648,7 @@ func TestE1ScopeLookingArgsAfterLeafOwnership(t *testing.T) {
 		{
 			name: "rig equals value that does not resolve",
 			args: []string{"backstage", "hello", "--rig=child-rig"},
+			want: "args:<--rig=child-rig>\n",
 		},
 		{
 			name: "empty city equals value",
@@ -2620,6 +2657,7 @@ func TestE1ScopeLookingArgsAfterLeafOwnership(t *testing.T) {
 		{
 			name: "empty rig separate value",
 			args: []string{"backstage", "hello", "--rig", ""},
+			want: "args:<--rig><>\n",
 		},
 		{
 			name: "after terminator",
@@ -4452,6 +4490,54 @@ wait_timeout_seconds = 120
 			t.Errorf("env key %s appears %d times, want 1", key, n)
 		}
 	}
+}
+
+func TestPackCommandScopeAndLeafArguments(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_DIR", "")
+	t.Setenv("GC_RIG", "")
+	city := setupPackExitCity(t)
+	t.Setenv("GC_CITY_PATH", city)
+	t.Chdir(city)
+	script := "#!/bin/sh\nprintf 'city=<%s> path=<%s> rig=<%s> args:' \"$GC_CITY\" \"$GC_CITY_PATH\" \"$GC_RIG\"\nfor arg in \"$@\"; do printf '<%s>' \"$arg\"; done\nprintf '\\n'\n"
+	for _, command := range [][]string{{"hello"}, {"repo", "sync"}} {
+		path := filepath.Join(append([]string{city, "commands"}, command...)...)
+		if err := os.WriteFile(filepath.Join(path, "run.sh"), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name      string
+		args      []string
+		rig, tail string
+	}{
+		{"root helper scope", []string{"--city", city, "--rig", "scope-rig", "backstage", "hello", "payload"}, "scope-rig", "<payload>"},
+		{"false help and repeated scope", []string{"--city", city, "--rig=old", "backstage", "--help=false", "--rig", "scope-rig", "hello", "--rig=child"}, "scope-rig", "<--rig=child>"},
+		{"leaf helper input", []string{"--city", city, "backstage", "hello", "--rig", "input-rig"}, "", "<--rig><input-rig>"},
+		{"foundry leaf input", []string{"--city=" + city, "--rig=scope-rig", "backstage", "repo", "sync", "--rig", "input-rig"}, "scope-rig", "<--rig><input-rig>"},
+	} {
+		for _, scenario := range []string{"eager", "lazy"} {
+			t.Run(tc.name+"/"+scenario, func(t *testing.T) {
+				var stdout, stderr bytes.Buffer
+				code := runPackCommandScenario(t, scenario, tc.args, &stdout, &stderr)
+				want := "city=<" + city + "> path=<" + city + "> rig=<" + tc.rig + "> args:" + tc.tail + "\n"
+				if code != 0 || stdout.String() != want || stderr.Len() != 0 {
+					t.Fatalf("code=%d stdout=%q stderr=%q want=%q", code, stdout.String(), stderr.String(), want)
+				}
+			})
+		}
+	}
+	t.Run("explicit city clears ambient rig", func(t *testing.T) {
+		t.Setenv("GC_RIG", "other-city-rig")
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"--city", city, "backstage", "hello", "--rig", "input-rig"}, &stdout, &stderr)
+		want := "city=<" + city + "> path=<" + city + "> rig=<> args:<--rig><input-rig>\n"
+		if code != 0 || stdout.String() != want || stderr.Len() != 0 {
+			t.Fatalf("code=%d stdout=%q stderr=%q want=%q", code, stdout.String(), stderr.String(), want)
+		}
+	})
 }
 
 // nativeHelpScript answers --help itself and reports what it was given.
