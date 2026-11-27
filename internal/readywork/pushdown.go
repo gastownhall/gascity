@@ -231,6 +231,19 @@ func boundedRead(c compiled, q beads.ReadyQuery, order beads.ReadyOrder, cs *cro
 					usable = append(usable, b)
 				}
 			}
+			if c.inputs != nil {
+				own := -1
+				for i, candidate := range c.inputs.legs {
+					if beads.SameStore(candidate.Store, leg.Store) {
+						own = i
+						break
+					}
+				}
+				usable, err = c.inputs.filter(ctx, own, usable)
+				if err != nil {
+					return legResult{err: err}
+				}
+			}
 			kept := len(usable)
 			if cs != nil && kept >= limit {
 				blocked, err := cs.blockedRows(ctx, cs.legIndex(leg.Store), usable)

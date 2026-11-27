@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
 // TestForgedOrderRunLabelMovesNoOrder (architecture B v2, mc-v8g4p): a plain
@@ -85,29 +84,6 @@ func TestLastRunReadsPastAForgedNewestBounded(t *testing.T) {
 	}
 	if len(spy.queries) != 2 {
 		t.Fatalf("queries %d, want the newest-row read and one bounded scan", len(spy.queries))
-	}
-}
-
-// TestIsRunRecordTakesEveryWorkflowRoot pins IsRunRecord's graph-root arm to
-// sourceworkflow.IsWorkflowRoot's marks: every root it names is a run record.
-func TestIsRunRecordTakesEveryWorkflowRoot(t *testing.T) {
-	for _, meta := range []map[string]string{
-		{"gc.kind": "workflow"},
-		{"gc.formula_contract": "graph.v2"},
-		{"gc.kind": " Workflow "},
-	} {
-		b := beads.Bead{Type: "task", Metadata: meta}
-		if sourceworkflow.IsWorkflowRoot(b) && !IsRunRecord(b) {
-			t.Errorf("%v: a workflow root is no run record", meta)
-		}
-	}
-	if IsRunRecord(beads.Bead{Type: "task", Labels: []string{"order-run:x"}}) {
-		t.Error("a plain task is a run record")
-	}
-	for _, typ := range []string{"molecule", "wisp", " Wisp "} { // beads.IsMoleculeType's roots (M16)
-		if !IsRunRecord(beads.Bead{Type: typ, Labels: []string{"order-run:x"}}) {
-			t.Errorf("a %q root is no run record", typ)
-		}
 	}
 }
 

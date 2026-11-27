@@ -332,13 +332,15 @@ func TestProcessScopeCheckAbortsScopeOnFailure(t *testing.T) {
 	t.Parallel()
 
 	store := newStrictCloseStore()
+
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{Title: "workflow", Type: "molecule"})
 	body := mustCreateWorkflowBead(t, store, beads.Bead{
 		Title: "body",
 		Type:  "task",
 		Metadata: map[string]string{
 			"gc.kind":         "scope",
 			"gc.scope_role":   "body",
-			"gc.root_bead_id": "wf-1",
+			"gc.root_bead_id": workflow.ID,
 			"gc.step_ref":     "demo.body",
 		},
 	})
@@ -347,7 +349,7 @@ func TestProcessScopeCheckAbortsScopeOnFailure(t *testing.T) {
 		Type:   "task",
 		Status: "closed",
 		Metadata: map[string]string{
-			"gc.root_bead_id": "wf-1",
+			"gc.root_bead_id": workflow.ID,
 			"gc.scope_ref":    "body",
 			"gc.scope_role":   "member",
 			"gc.outcome":      "fail",
@@ -358,7 +360,7 @@ func TestProcessScopeCheckAbortsScopeOnFailure(t *testing.T) {
 		Type:  "task",
 		Metadata: map[string]string{
 			"gc.kind":         "scope-check",
-			"gc.root_bead_id": "wf-1",
+			"gc.root_bead_id": workflow.ID,
 			"gc.scope_ref":    "body",
 			"gc.scope_role":   "control",
 		},
@@ -369,7 +371,7 @@ func TestProcessScopeCheckAbortsScopeOnFailure(t *testing.T) {
 		Type:  "task",
 		Metadata: map[string]string{
 			"gc.kind":         "scope-check",
-			"gc.root_bead_id": "wf-1",
+			"gc.root_bead_id": workflow.ID,
 			"gc.scope_ref":    "body",
 			"gc.scope_role":   "control",
 		},
@@ -378,7 +380,7 @@ func TestProcessScopeCheckAbortsScopeOnFailure(t *testing.T) {
 		Title: "implement",
 		Type:  "task",
 		Metadata: map[string]string{
-			"gc.root_bead_id": "wf-1",
+			"gc.root_bead_id": workflow.ID,
 			"gc.scope_ref":    "body",
 			"gc.scope_role":   "member",
 		},
@@ -388,7 +390,7 @@ func TestProcessScopeCheckAbortsScopeOnFailure(t *testing.T) {
 		Type:  "task",
 		Metadata: map[string]string{
 			"gc.kind":         "cleanup",
-			"gc.root_bead_id": "wf-1",
+			"gc.root_bead_id": workflow.ID,
 			"gc.scope_ref":    "body",
 			"gc.scope_role":   "teardown",
 		},
@@ -466,13 +468,15 @@ func TestProcessScopeCheckSubjectSkipsFanoutBlocker(t *testing.T) {
 			t.Parallel()
 
 			store := beads.NewMemStore()
+
+			workflow := mustCreateWorkflowBead(t, store, beads.Bead{Title: "workflow", Type: "molecule"})
 			body := mustCreateWorkflowBead(t, store, beads.Bead{
 				Title: "body",
 				Type:  "task",
 				Metadata: map[string]string{
 					"gc.kind":         "scope",
 					"gc.scope_role":   "body",
-					"gc.root_bead_id": "wf-1",
+					"gc.root_bead_id": workflow.ID,
 					"gc.step_ref":     "demo.body",
 				},
 			})
@@ -481,7 +485,7 @@ func TestProcessScopeCheckSubjectSkipsFanoutBlocker(t *testing.T) {
 				Type:   "task",
 				Status: "closed",
 				Metadata: map[string]string{
-					"gc.root_bead_id": "wf-1",
+					"gc.root_bead_id": workflow.ID,
 					"gc.scope_ref":    "body",
 					"gc.scope_role":   "member",
 					"gc.outcome":      tc.sourceOutcome,
@@ -494,7 +498,7 @@ func TestProcessScopeCheckSubjectSkipsFanoutBlocker(t *testing.T) {
 				Status: "closed",
 				Metadata: map[string]string{
 					"gc.kind":         "fanout",
-					"gc.root_bead_id": "wf-1",
+					"gc.root_bead_id": workflow.ID,
 					"gc.scope_ref":    "body",
 					"gc.scope_role":   "control",
 					"gc.outcome":      "pass",
@@ -506,7 +510,7 @@ func TestProcessScopeCheckSubjectSkipsFanoutBlocker(t *testing.T) {
 				Type:  "task",
 				Metadata: map[string]string{
 					"gc.kind":         "scope-check",
-					"gc.root_bead_id": "wf-1",
+					"gc.root_bead_id": workflow.ID,
 					"gc.scope_ref":    "body",
 					"gc.scope_role":   "control",
 				},
@@ -560,6 +564,13 @@ func TestProcessScopeCheckSubjectSkipsCrossRootDrainGate(t *testing.T) {
 	t.Parallel()
 
 	store := beads.NewMemStore()
+	root := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "item workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind": "workflow",
+		},
+	})
 	predecessorRoot := mustCreateWorkflowBead(t, store, beads.Bead{
 		Title:  "predecessor item",
 		Type:   "task",
@@ -575,7 +586,7 @@ func TestProcessScopeCheckSubjectSkipsCrossRootDrainGate(t *testing.T) {
 		Metadata: map[string]string{
 			"gc.kind":         "scope",
 			"gc.scope_role":   "body",
-			"gc.root_bead_id": "wf-item",
+			"gc.root_bead_id": root.ID,
 			"gc.step_ref":     "develop.iteration.1",
 		},
 	})
@@ -584,7 +595,7 @@ func TestProcessScopeCheckSubjectSkipsCrossRootDrainGate(t *testing.T) {
 		Type:   "task",
 		Status: "closed",
 		Metadata: map[string]string{
-			"gc.root_bead_id": "wf-item",
+			"gc.root_bead_id": root.ID,
 			"gc.scope_ref":    "develop.iteration.1",
 			"gc.scope_role":   "member",
 			"gc.on_fail":      "abort_scope",
@@ -596,7 +607,7 @@ func TestProcessScopeCheckSubjectSkipsCrossRootDrainGate(t *testing.T) {
 		Type:  "task",
 		Metadata: map[string]string{
 			"gc.kind":         "scope-check",
-			"gc.root_bead_id": "wf-item",
+			"gc.root_bead_id": root.ID,
 			"gc.scope_ref":    "develop.iteration.1",
 			"gc.scope_role":   "control",
 		},
@@ -605,7 +616,7 @@ func TestProcessScopeCheckSubjectSkipsCrossRootDrainGate(t *testing.T) {
 		Title: "implement",
 		Type:  "task",
 		Metadata: map[string]string{
-			"gc.root_bead_id": "wf-item",
+			"gc.root_bead_id": root.ID,
 			"gc.scope_ref":    "develop.iteration.1",
 			"gc.scope_role":   "member",
 			"gc.on_fail":      "abort_scope",
@@ -703,13 +714,15 @@ func TestProcessScopeCheckAbortSkipsMemberBlockedOnInFlightControl(t *testing.T)
 	t.Parallel()
 
 	store := newStrictCloseStore()
+
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{Title: "workflow", Type: "molecule"})
 	body := mustCreateWorkflowBead(t, store, beads.Bead{
 		Title: "body",
 		Type:  "task",
 		Metadata: map[string]string{
 			"gc.kind":         "scope",
 			"gc.scope_role":   "body",
-			"gc.root_bead_id": "wf-1",
+			"gc.root_bead_id": workflow.ID,
 			"gc.step_ref":     "demo.body",
 		},
 	})
@@ -718,7 +731,7 @@ func TestProcessScopeCheckAbortSkipsMemberBlockedOnInFlightControl(t *testing.T)
 		Type:   "task",
 		Status: "closed",
 		Metadata: map[string]string{
-			"gc.root_bead_id": "wf-1",
+			"gc.root_bead_id": workflow.ID,
 			"gc.scope_ref":    "body",
 			"gc.scope_role":   "member",
 			"gc.outcome":      "fail",
@@ -729,7 +742,7 @@ func TestProcessScopeCheckAbortSkipsMemberBlockedOnInFlightControl(t *testing.T)
 		Type:  "task",
 		Metadata: map[string]string{
 			"gc.kind":         "scope-check",
-			"gc.root_bead_id": "wf-1",
+			"gc.root_bead_id": workflow.ID,
 			"gc.scope_ref":    "body",
 			"gc.scope_role":   "control",
 		},
@@ -739,7 +752,7 @@ func TestProcessScopeCheckAbortSkipsMemberBlockedOnInFlightControl(t *testing.T)
 		Title: "implement",
 		Type:  "task",
 		Metadata: map[string]string{
-			"gc.root_bead_id": "wf-1",
+			"gc.root_bead_id": workflow.ID,
 			"gc.scope_ref":    "body",
 			"gc.scope_role":   "member",
 		},
@@ -826,13 +839,15 @@ func TestProcessScopeCheckAbortSkipsMemberBlockedOnOutOfScopeOpenBead(t *testing
 	t.Parallel()
 
 	store := newStrictCloseStore()
+
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{Title: "workflow", Type: "molecule"})
 	body := mustCreateWorkflowBead(t, store, beads.Bead{
 		Title: "body",
 		Type:  "task",
 		Metadata: map[string]string{
 			"gc.kind":         "scope",
 			"gc.scope_role":   "body",
-			"gc.root_bead_id": "wf-1",
+			"gc.root_bead_id": workflow.ID,
 			"gc.step_ref":     "demo.body",
 		},
 	})
@@ -841,7 +856,7 @@ func TestProcessScopeCheckAbortSkipsMemberBlockedOnOutOfScopeOpenBead(t *testing
 		Type:   "task",
 		Status: "closed",
 		Metadata: map[string]string{
-			"gc.root_bead_id": "wf-1",
+			"gc.root_bead_id": workflow.ID,
 			"gc.scope_ref":    "body",
 			"gc.scope_role":   "member",
 			"gc.outcome":      "fail",
@@ -852,7 +867,7 @@ func TestProcessScopeCheckAbortSkipsMemberBlockedOnOutOfScopeOpenBead(t *testing
 		Type:  "task",
 		Metadata: map[string]string{
 			"gc.kind":         "scope-check",
-			"gc.root_bead_id": "wf-1",
+			"gc.root_bead_id": workflow.ID,
 			"gc.scope_ref":    "body",
 			"gc.scope_role":   "control",
 		},
@@ -862,7 +877,7 @@ func TestProcessScopeCheckAbortSkipsMemberBlockedOnOutOfScopeOpenBead(t *testing
 		Title: "implement",
 		Type:  "task",
 		Metadata: map[string]string{
-			"gc.root_bead_id": "wf-1",
+			"gc.root_bead_id": workflow.ID,
 			"gc.scope_ref":    "body",
 			"gc.scope_role":   "member",
 		},
@@ -1042,13 +1057,15 @@ func TestProcessScopeCheckAbortRefusesLegacyBodyBlockedOnControl(t *testing.T) {
 	t.Parallel()
 
 	store := newStrictCloseStore()
+
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{Title: "workflow", Type: "molecule"})
 	body := mustCreateWorkflowBead(t, store, beads.Bead{
 		Title: "body",
 		Type:  "task",
 		Metadata: map[string]string{
 			"gc.kind":         "scope",
 			"gc.scope_role":   "body",
-			"gc.root_bead_id": "wf-1",
+			"gc.root_bead_id": workflow.ID,
 			"gc.step_ref":     "demo.body",
 		},
 	})
@@ -1057,7 +1074,7 @@ func TestProcessScopeCheckAbortRefusesLegacyBodyBlockedOnControl(t *testing.T) {
 		Type:   "task",
 		Status: "closed",
 		Metadata: map[string]string{
-			"gc.root_bead_id": "wf-1",
+			"gc.root_bead_id": workflow.ID,
 			"gc.scope_ref":    "body",
 			"gc.scope_role":   "member",
 			"gc.outcome":      "fail",
@@ -1068,7 +1085,7 @@ func TestProcessScopeCheckAbortRefusesLegacyBodyBlockedOnControl(t *testing.T) {
 		Type:  "task",
 		Metadata: map[string]string{
 			"gc.kind":         "scope-check",
-			"gc.root_bead_id": "wf-1",
+			"gc.root_bead_id": workflow.ID,
 			"gc.scope_ref":    "body",
 			"gc.scope_role":   "control",
 		},
@@ -1094,6 +1111,8 @@ func TestProcessScopeCheckHardFailureOverridesClosedPassBody(t *testing.T) {
 	t.Parallel()
 
 	store := beads.NewMemStore()
+
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{Title: "workflow", Type: "molecule"})
 	body := mustCreateWorkflowBead(t, store, beads.Bead{
 		Title:  "body",
 		Type:   "task",
@@ -1101,7 +1120,7 @@ func TestProcessScopeCheckHardFailureOverridesClosedPassBody(t *testing.T) {
 		Metadata: map[string]string{
 			"gc.kind":         "scope",
 			"gc.scope_role":   "body",
-			"gc.root_bead_id": "wf-1",
+			"gc.root_bead_id": workflow.ID,
 			"gc.step_ref":     "demo.body",
 			"gc.outcome":      "pass",
 		},
@@ -1111,7 +1130,7 @@ func TestProcessScopeCheckHardFailureOverridesClosedPassBody(t *testing.T) {
 		Type:   "task",
 		Status: "closed",
 		Metadata: map[string]string{
-			"gc.root_bead_id":  "wf-1",
+			"gc.root_bead_id":  workflow.ID,
 			"gc.scope_ref":     "body",
 			"gc.scope_role":    "member",
 			"gc.outcome":       "fail",
@@ -1125,7 +1144,7 @@ func TestProcessScopeCheckHardFailureOverridesClosedPassBody(t *testing.T) {
 		Type:  "task",
 		Metadata: map[string]string{
 			"gc.kind":         "scope-check",
-			"gc.root_bead_id": "wf-1",
+			"gc.root_bead_id": workflow.ID,
 			"gc.scope_ref":    "body",
 			"gc.scope_role":   "control",
 		},
@@ -1159,18 +1178,19 @@ func TestProcessScopeCheckHardFailureOverridesClosedPassBody(t *testing.T) {
 // (downstream blocks on the subject's scope-check, not on the subject).
 func scopeCheckAbortScopeFixture(t *testing.T, store beads.Store, subjectMeta map[string]string) (control, futureMember, futureControl, body beads.Bead) {
 	t.Helper()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{Title: "workflow", Type: "molecule"})
 	body = mustCreateWorkflowBead(t, store, beads.Bead{
 		Title: "body",
 		Type:  "task",
 		Metadata: map[string]string{
 			"gc.kind":         "scope",
 			"gc.scope_role":   "body",
-			"gc.root_bead_id": "wf-1",
+			"gc.root_bead_id": workflow.ID,
 			"gc.step_ref":     "demo.body",
 		},
 	})
 	meta := map[string]string{
-		"gc.root_bead_id": "wf-1",
+		"gc.root_bead_id": workflow.ID,
 		"gc.scope_ref":    "body",
 		"gc.scope_role":   "member",
 	}
@@ -1188,7 +1208,7 @@ func scopeCheckAbortScopeFixture(t *testing.T, store beads.Store, subjectMeta ma
 		Type:  "task",
 		Metadata: map[string]string{
 			"gc.kind":         "scope-check",
-			"gc.root_bead_id": "wf-1",
+			"gc.root_bead_id": workflow.ID,
 			"gc.scope_ref":    "body",
 			"gc.scope_role":   "control",
 		},
@@ -1197,7 +1217,7 @@ func scopeCheckAbortScopeFixture(t *testing.T, store beads.Store, subjectMeta ma
 		Title: "implement",
 		Type:  "task",
 		Metadata: map[string]string{
-			"gc.root_bead_id": "wf-1",
+			"gc.root_bead_id": workflow.ID,
 			"gc.scope_ref":    "body",
 			"gc.scope_role":   "member",
 			"gc.on_fail":      "abort_scope",
@@ -1208,7 +1228,7 @@ func scopeCheckAbortScopeFixture(t *testing.T, store beads.Store, subjectMeta ma
 		Type:  "task",
 		Metadata: map[string]string{
 			"gc.kind":         "scope-check",
-			"gc.root_bead_id": "wf-1",
+			"gc.root_bead_id": workflow.ID,
 			"gc.scope_ref":    "body",
 			"gc.scope_role":   "control",
 		},
@@ -2116,13 +2136,15 @@ func TestProcessScopeCheckTreatsRetryAttemptFailureAsNonTerminalForScope(t *test
 	t.Parallel()
 
 	store := newStrictCloseStore()
+
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{Title: "workflow", Type: "molecule"})
 	body := mustCreateWorkflowBead(t, store, beads.Bead{
 		Title: "body",
 		Type:  "task",
 		Metadata: map[string]string{
 			"gc.kind":         "scope",
 			"gc.scope_role":   "body",
-			"gc.root_bead_id": "wf-1",
+			"gc.root_bead_id": workflow.ID,
 			"gc.step_ref":     "demo.body",
 		},
 	})
@@ -2131,7 +2153,7 @@ func TestProcessScopeCheckTreatsRetryAttemptFailureAsNonTerminalForScope(t *test
 		Type:  "task",
 		Metadata: map[string]string{
 			"gc.kind":         "retry",
-			"gc.root_bead_id": "wf-1",
+			"gc.root_bead_id": workflow.ID,
 			"gc.scope_ref":    "body",
 			"gc.scope_role":   "member",
 			"gc.step_ref":     "demo.review-codex",
@@ -2145,7 +2167,7 @@ func TestProcessScopeCheckTreatsRetryAttemptFailureAsNonTerminalForScope(t *test
 		Status: "closed",
 		Metadata: map[string]string{
 			"gc.kind":            "retry-run",
-			"gc.root_bead_id":    "wf-1",
+			"gc.root_bead_id":    workflow.ID,
 			"gc.scope_ref":       "body",
 			"gc.scope_role":      "member",
 			"gc.step_ref":        "demo.review-codex.run.1",
@@ -2161,7 +2183,7 @@ func TestProcessScopeCheckTreatsRetryAttemptFailureAsNonTerminalForScope(t *test
 		Type:  "task",
 		Metadata: map[string]string{
 			"gc.kind":         "scope-check",
-			"gc.root_bead_id": "wf-1",
+			"gc.root_bead_id": workflow.ID,
 			"gc.scope_ref":    "body",
 			"gc.scope_role":   "control",
 		},
@@ -11096,12 +11118,14 @@ func TestRetryControlPropagatesAttemptMetadata(t *testing.T) {
 	t.Parallel()
 
 	store := beads.NewMemStore()
+
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{Title: "workflow", Type: "molecule"})
 	retryControl := mustCreateWorkflowBead(t, store, beads.Bead{
 		Title: "review codex",
 		Type:  "task",
 		Metadata: map[string]string{
 			"gc.kind":             "retry",
-			"gc.root_bead_id":     "wf-1",
+			"gc.root_bead_id":     workflow.ID,
 			"gc.step_ref":         "demo.review-codex",
 			"gc.max_attempts":     "3",
 			"gc.on_exhausted":     "hard_fail",
@@ -11114,7 +11138,7 @@ func TestRetryControlPropagatesAttemptMetadata(t *testing.T) {
 		Type:   "task",
 		Status: "closed",
 		Metadata: map[string]string{
-			"gc.root_bead_id":    "wf-1",
+			"gc.root_bead_id":    workflow.ID,
 			"gc.step_ref":        "demo.review-codex.attempt.1",
 			"gc.logical_bead_id": retryControl.ID,
 			"gc.attempt":         "1",

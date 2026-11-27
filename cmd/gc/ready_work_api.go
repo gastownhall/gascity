@@ -216,5 +216,5 @@ func readyLegsBoundTo(ctx context.Context, cityPath string, cfg *config.City, le
 		}
 		bound[i] = leg
 	}
-	return bound, nil
+	return readyLegsWithClassHandles(bound), nil
 }

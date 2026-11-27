@@ -79,6 +79,7 @@ type Query struct {
 // touched. A malformed query must not cost a city-wide federated read to be told
 // it was malformed.
 type compiled struct {
+	inputs        *inputAdmissionGate
 	query         Query
 	assignee      string
 	excludeTypes  map[string]bool
