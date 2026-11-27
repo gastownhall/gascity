@@ -1208,7 +1208,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		cfg,
 		PoolDesiredCounts(computePoolDesiredStatesParkedAt(
-			cfg, poolWorkBeads, readyAssignedFlagsForBeads(dsResult.ReadyAssigned, poolWorkBeads, poolWorkRefs), openInfos, dsResult.ScaleCheckCounts, nil, poolDecisionTime, parked, nil)),
+			cfg, &assignedWorkDemand{Beads: poolWorkBeads, Ready: readyAssignedFlagsForBeads(dsResult.ReadyAssigned, poolWorkBeads, poolWorkRefs)}, openInfos, dsResult.ScaleCheckCounts, nil, poolDecisionTime, parked, nil)),
 		sessionBeads,
 		effectivePoolPartialRetentionTemplates(dsResult),
 	)

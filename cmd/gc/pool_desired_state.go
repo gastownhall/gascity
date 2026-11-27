@@ -332,7 +332,37 @@ func computePoolDesiredStatesAt(
 	decisionTime time.Time,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStatesParkedAt(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, scaleCheckDemand, decisionTime, nil, trace)
+	return computePoolDesiredStatesParkedAt(cfg, &assignedWorkDemand{Beads: assignedWorkBeads}, sessionInfos, scaleCheckCounts, scaleCheckDemand, decisionTime, nil, trace)
+}
+
+// assignedWorkDemand is the pass's assigned work: the beads the pool path
+// plans resumes for, and their store-scoped wake-demand readiness flags
+// (readyAssignedFlagsForBeads), index-aligned — Ready[i] applies to Beads[i].
+// A nil *assignedWorkDemand carries no assigned work. A nil Ready means the
+// caller already supplied actionable work; a non-nil Ready is authoritative:
+// an open bead whose flag is false or missing is not proven ready, so it
+// cannot plan a clean session for a wake_mode="fresh" agent's asleep
+// assignee.
+type assignedWorkDemand struct {
+	Beads []beads.Bead
+	Ready []bool
+}
+
+// beads is the work the pass assigned; a nil demand assigns none.
+func (w *assignedWorkDemand) beads() []beads.Bead {
+	if w == nil {
+		return nil
+	}
+	return w.Beads
+}
+
+// flags is the readiness of the assigned beads. A nil demand or a nil Ready
+// means the caller already supplied actionable work.
+func (w *assignedWorkDemand) flags() []bool {
+	if w == nil {
+		return nil
+	}
+	return w.Ready
 }
 
 // computePoolDesiredStatesParkedAt is computePoolDesiredStatesAt with the
@@ -340,16 +370,9 @@ func computePoolDesiredStatesAt(
 // Parked, accepted outside the nested caps (it takes no headroom from
 // anything, floors included) and left out of the pool's demand count. A seat
 // is parked here only when every request it makes is an open pin.
-//
-// ready is the store-scoped wake-demand readiness of assignedWorkBeads,
-// index-aligned (readyAssignedFlagsForBeads). A nil slice means the caller
-// already supplied actionable work. A non-nil slice is authoritative: an open
-// bead whose flag is false or missing is not proven ready, so it cannot plan a
-// clean session for a wake_mode="fresh" agent's asleep assignee.
 func computePoolDesiredStatesParkedAt(
 	cfg *config.City,
-	assignedWorkBeads []beads.Bead,
-	ready []bool,
+	work *assignedWorkDemand,
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 	scaleCheckDemand map[string]scaleCheckDemand,
@@ -357,6 +380,7 @@ func computePoolDesiredStatesParkedAt(
 	parked parkedSeats,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
+	assignedWorkBeads, ready := work.beads(), work.flags()
 	// Build reverse lookup: any identifier → session bead ID.
 	// Assignee on work beads may be a bead ID, session name, alias, or
 	// a prior alias preserved in alias_history. Resume-tier dispatch

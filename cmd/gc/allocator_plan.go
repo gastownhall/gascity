@@ -281,7 +281,7 @@ func (p *decidePass) computePoolDesired() {
 		poolCfg = &clone
 	}
 	p.parked = p.parkSeats(standIns)
-	p.poolStates = computePoolDesiredStatesParkedAt(poolCfg, p.poolWork, poolWorkReady, rows, p.merged.ScaleCheckCounts, p.merged.ScaleCheckDemand, p.in.Now, p.parked, nil)
+	p.poolStates = computePoolDesiredStatesParkedAt(poolCfg, &assignedWorkDemand{Beads: p.poolWork, Ready: poolWorkReady}, rows, p.merged.ScaleCheckCounts, p.merged.ScaleCheckDemand, p.in.Now, p.parked, nil)
 	p.poolDesired = retainScaleCheckPartialPoolDesired(p.cfg, PoolDesiredCounts(p.poolStates),
 		p.decidableSnapshot(), p.merged.PoolPartialRetention)
 	if p.poolDesired == nil {

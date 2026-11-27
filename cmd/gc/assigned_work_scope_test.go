@@ -1189,7 +1189,7 @@ func TestFreshWakeDemandUsesEachRowsOwnStoreReadiness(t *testing.T) {
 				t.Fatalf("flags = %v, want %v", flags, tc.wantFlags)
 			}
 			var reqs []SessionRequest
-			for _, ds := range computePoolDesiredStatesParkedAt(cfg, kept, flags, sessions, nil, nil, now, nil, nil) {
+			for _, ds := range computePoolDesiredStatesParkedAt(cfg, &assignedWorkDemand{Beads: kept, Ready: flags}, sessions, nil, nil, now, nil, nil) {
 				reqs = append(reqs, ds.Requests...)
 			}
 			if tc.wantTitle == "" {

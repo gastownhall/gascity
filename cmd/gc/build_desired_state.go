@@ -838,8 +838,7 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 		parked := parkSeatsForDemand(cfg, [][]session.Info{sessionBeads.OpenInfos()}, assignedWorkBeads, assignedWorkStoreRefs, readyAssigned, storePartial, poolDecisionTime.UTC())
 		poolDesiredStates := computePoolDesiredStatesParkedAt(
 			cfg,
-			poolWorkBeads,
-			readyAssignedFlagsForBeads(readyAssigned, poolWorkBeads, poolWorkRefs),
+			&assignedWorkDemand{Beads: poolWorkBeads, Ready: readyAssignedFlagsForBeads(readyAssigned, poolWorkBeads, poolWorkRefs)},
 			sessionBeads.OpenInfos(),
 			scaleCheckCounts,
 			scaleCheckDemandByTemplate,
@@ -2609,6 +2608,12 @@ type collectedDemand struct {
 	UnassignedRoutedPartial bool
 	// NamedPartials are defaultNamedSessionDemand's partial templates.
 	NamedPartials map[string]bool
+	// BlindSpawnAllowance is how many unnamed scale_check seats each listed
+	// template may still spawn (pool_spawn_churn.go): 0 while the template's
+	// spawn-churn hold stands, 1 while its probe seat is out. A template no
+	// key lists, and a nil map, mean no limit: the merge clamps a listed
+	// template's count to its named work beads plus the allowance.
+	BlindSpawnAllowance map[string]int
 }
 
 // mergedDemand is one pass's demand: the merged scale-check counts and
