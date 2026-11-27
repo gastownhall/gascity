@@ -306,6 +306,11 @@ func ProbeClaimAuthorityCapability(ctx context.Context, db ClaimAuthorityDB) (Cl
 
 	grants, err := db.QueryContext(ctx, "SHOW GRANTS")
 	if err != nil {
+		// Dolt denies SHOW GRANTS to a principal without access to the
+		// mysql database, and such a principal holds no TRIGGER either.
+		if strings.Contains(err.Error(), "Access denied") {
+			return capability, nil
+		}
 		return capability, fmt.Errorf("reading grants for claim authority: %w", err)
 	}
 	for grants.Next() {

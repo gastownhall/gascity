@@ -24,6 +24,7 @@ import (
 type claimAuthorityFixture struct {
 	store  *NativeDoltStore
 	db     *sql.DB
+	port   int
 	tables []string
 }
 
@@ -68,7 +69,7 @@ func newClaimAuthorityFixture(t *testing.T) claimAuthorityFixture {
 	if !capability.CanHost() {
 		t.Fatalf("a bd database on dolt sql-server as root cannot host the boundary: %s", capability.Reason())
 	}
-	return claimAuthorityFixture{store: store, db: db, tables: capability.Tables}
+	return claimAuthorityFixture{store: store, db: db, port: port, tables: capability.Tables}
 }
 
 // arm installs the triggers over one pinned session, as the controller does.
@@ -431,4 +432,118 @@ func TestClaimAuthorityPruneIsScopedToTheCityTag(t *testing.T) {
 	work := f.createRouted(t, false)
 	_, _, err := f.store.Claim(work.ID, ended)
 	assertClaimAuthorityRefusal(t, "claim by city A's ended session", err)
+}
+
+func (f claimAuthorityFixture) authorityRows(t *testing.T) int {
+	t.Helper()
+	var n int
+	if err := f.db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM `local_metadata` WHERE `key` LIKE 'gc.claim_authority.%'").Scan(&n); err != nil {
+		t.Fatalf("count authority rows: %v", err)
+	}
+	return n
+}
+
+func (f claimAuthorityFixture) triggerState(t *testing.T) ClaimAuthorityTriggerState {
+	t.Helper()
+	state, err := ReadClaimAuthorityTriggerState(t.Context(), f.db, f.tables)
+	if err != nil {
+		t.Fatalf("ReadClaimAuthorityTriggerState: %v", err)
+	}
+	return state
+}
+
+func (f claimAuthorityFixture) disarm(t *testing.T, force bool) (bool, error) {
+	t.Helper()
+	conn, err := f.db.Conn(t.Context())
+	if err != nil {
+		t.Fatalf("pin a connection: %v", err)
+	}
+	defer conn.Close() //nolint:errcheck // test cleanup
+	return DisarmClaimAuthorityGuarded(t.Context(), conn, force)
+}
+
+// AC-7: an off city on a store nobody armed, and an auto city whose principal
+// lacks TRIGGER, leave the store with no trigger and no rows; the read-only
+// inspection lists routed work held outside the authority set; once armed, no
+// reconcile in any mode drops the triggers, and the guarded disarm refuses
+// while an auto heartbeat is present or, without force, while none is.
+func TestClaimAuthorityOffAndIncapableStoresStayUnarmedAndOnlyDisarmRemoves(t *testing.T) {
+	f := newClaimAuthorityFixture(t)
+	alpha := testClaimAuthorityPublisher("alpha", ClaimAuthorityModeAuto)
+	const live = "rig/live"
+
+	stray := f.createRouted(t, false)
+	if _, _, err := f.store.Claim(stray.ID, absentClaimant); err != nil {
+		t.Fatalf("claim on the unarmed store: %v", err)
+	}
+	report := f.reconcile(t, testClaimAuthorityPublisher("alpha", ClaimAuthorityModeOff), true, live)
+	if report.Armed || f.triggerState(t).Armed() || f.authorityRows(t) != 0 {
+		t.Fatalf("off reconcile on an unarmed store = %+v, %d rows, want no trigger and no rows", report, f.authorityRows(t))
+	}
+
+	if _, err := f.db.ExecContext(t.Context(), "CREATE USER 'notrigger'@'%' IDENTIFIED BY 'pw'"); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	if _, err := f.db.ExecContext(t.Context(), "GRANT SELECT, INSERT, UPDATE, DELETE ON `beads`.* TO 'notrigger'@'%'"); err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	limited, err := sql.Open("mysql", fmt.Sprintf("notrigger:pw@tcp(127.0.0.1:%d)/beads", f.port))
+	if err != nil {
+		t.Fatalf("open limited connection: %v", err)
+	}
+	t.Cleanup(func() { _ = limited.Close() })
+	conn, err := limited.Conn(t.Context())
+	if err != nil {
+		t.Fatalf("pin limited connection: %v", err)
+	}
+	report, err = ReconcileClaimAuthority(t.Context(), conn, ClaimAuthorityReconcile{
+		Publisher: alpha, Entries: []ClaimAuthorityEntry{{Identity: live, Source: ClaimAuthoritySession}}, Now: time.Now().UTC(), Prune: true,
+	})
+	_ = conn.Close()
+	if err != nil {
+		t.Fatalf("auto reconcile without TRIGGER: %v", err)
+	}
+	if report.Armed || !strings.Contains(report.Skipped, "TRIGGER") || f.triggerState(t).Armed() || f.authorityRows(t) != 0 {
+		t.Fatalf("auto reconcile without TRIGGER = %+v, %d rows, want unarmed, no rows, skip naming TRIGGER", report, f.authorityRows(t))
+	}
+
+	inspection, err := InspectClaimAuthority(t.Context(), f.db, []ClaimAuthorityEntry{{Identity: live, Source: ClaimAuthoritySession}})
+	if err != nil {
+		t.Fatalf("InspectClaimAuthority: %v", err)
+	}
+	if len(inspection.Outside) != 1 || inspection.Outside[0].BeadID != stray.ID || inspection.Outside[0].Assignee != absentClaimant {
+		t.Fatalf("inspection outside holders = %+v, want only %s held by %s", inspection.Outside, stray.ID, absentClaimant)
+	}
+
+	f.reconcile(t, alpha, true, live)
+	for _, mode := range []string{ClaimAuthorityModeOff, ClaimAuthorityModeAuto, ClaimAuthorityModeRequire} {
+		f.reconcile(t, testClaimAuthorityPublisher("bravo", mode), true)
+		f.assertArmedCurrent(t, "after a "+mode+" reconcile")
+	}
+	f.reconcile(t, testClaimAuthorityPublisher("bravo", ClaimAuthorityModeOff), true)
+
+	if _, err := f.disarm(t, true); !errors.Is(err, ErrClaimAuthorityDisarmRefused) {
+		t.Fatalf("disarm while alpha advertises auto = %v, want ErrClaimAuthorityDisarmRefused even with force", err)
+	}
+	f.assertArmedCurrent(t, "after the refused disarm")
+	f.reconcile(t, testClaimAuthorityPublisher("alpha", ClaimAuthorityModeOff), true, live)
+	f.assertArmedCurrent(t, "after alpha switched to off")
+	if _, err := f.db.ExecContext(t.Context(), "DELETE FROM `local_metadata` WHERE `key` LIKE 'gc.claim_authority.%'"); err != nil {
+		t.Fatalf("wipe local_metadata: %v", err)
+	}
+	if _, err := f.disarm(t, false); !errors.Is(err, ErrClaimAuthorityDisarmRefused) {
+		t.Fatalf("disarm with no heartbeat and no force = %v, want ErrClaimAuthorityDisarmRefused", err)
+	}
+	f.assertArmedCurrent(t, "after the unforced disarm")
+	dropped, err := f.disarm(t, true)
+	if err != nil || !dropped {
+		t.Fatalf("forced disarm = %v, %v, want the triggers dropped", dropped, err)
+	}
+	if state := f.triggerState(t); state.Armed() {
+		t.Fatalf("after the forced disarm, triggers = %v, want none", state.Installed)
+	}
+	work := f.createRouted(t, false)
+	if _, _, err := f.store.Claim(work.ID, absentClaimant); err != nil {
+		t.Fatalf("claim on the disarmed store: %v", err)
+	}
 }
