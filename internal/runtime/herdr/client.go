@@ -1395,9 +1395,10 @@ func (endpointRefusal) Is(target error) bool { return target == errEndpointRefus
 
 func (r endpointRefusal) Unwrap() error { return r.error }
 
-// startServer launches the headless herdr server for this session (detached)
-// and waits for it to accept connections. Idempotent — no-op if already live.
-// An endpoint the connect refuses fails it at once, launched or not.
+// startServer launches the headless herdr server for this session as the
+// leader of its own Unix session and waits for it to accept connections.
+// Idempotent — no-op if already live. An endpoint the connect refuses fails
+// it at once, launched or not.
 //
 // It refuses a relative socket path before dialing, unlinking or launching
 // anything. Each process resolves such a path against its own working
@@ -1435,6 +1436,9 @@ func (c *client) startServer() error {
 	// stranded ephemeral pool spawns in $HOME (unprimed, re-prompted for trust).
 	// Empty cityRoot (city-less construction) leaves cwd inherited, as before.
 	cmd.Dir = c.cityRoot
+	// Lead a new session so herdr's remote attach sees a detached daemon
+	// rather than a server tied to gc's session (see serverSysProcAttr).
+	cmd.SysProcAttr = serverSysProcAttr()
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("herdr server start: %w", err)
 	}
