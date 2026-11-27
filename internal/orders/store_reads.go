@@ -279,15 +279,33 @@ func sweepTrackingBeads(live beads.LiveReader, statuses ...string) ([]beads.Bead
 // floor, and deletes the aged remainder. Names are resolved best-effort so an
 // unresolvable-name bead can be routed to the legacy retention bucket.
 func (s *Store) ClosedRunsForRetention() ([]OrderRun, error) {
+	return s.ClosedRunsCreatedBefore(time.Time{})
+}
+
+// ClosedRunsCreatedBefore lists CLOSED tracking beads created strictly before
+// createdBefore (newest-first, both tiers, live read). A zero createdBefore
+// lists every closed tracking bead.
+//
+// CreatedBefore is pushed to the backend. UpdatedBefore is not, so retention
+// uses this bound to skip the in-window corpus — about 25k rows at a 24h TTL
+// and ~1k closes/hour — and applies the updated-at reference time
+// in Go. A tracking bead is created at dispatch and updated at close, so
+// CreatedAt is at or before that reference time and this read is a superset
+// of the rows the cutoff can delete.
+func (s *Store) ClosedRunsCreatedBefore(createdBefore time.Time) ([]OrderRun, error) {
 	if s.store == (beads.OrdersStore{}) {
 		return nil, nil
 	}
-	list, err := beads.LiveFor(s.store).List(beads.ListQuery{
+	query := beads.ListQuery{
 		Status:   "closed",
 		Label:    labelOrderTracking,
 		Sort:     beads.SortCreatedDesc,
 		TierMode: beads.TierBoth,
-	})
+	}
+	if !createdBefore.IsZero() {
+		query.CreatedBefore = createdBefore
+	}
+	list, err := beads.LiveFor(s.store).List(query)
 	if err != nil {
 		return nil, err
 	}
