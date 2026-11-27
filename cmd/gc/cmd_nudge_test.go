@@ -9541,9 +9541,8 @@ func (c *queuedNoticeCity) pending(t *testing.T) []queuedNudge {
 }
 
 // runPoller runs the session's nudge poller on a goroutine until cond holds
-// (or 5s pass), then empties the queue so the poller exits, and returns its
-// stderr.
-func (c *queuedNoticeCity) runPoller(t *testing.T, cond func() bool) string {
+// (or 5s pass), then empties the queue so the poller exits.
+func (c *queuedNoticeCity) runPoller(t *testing.T, cond func() bool) {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -9572,7 +9571,6 @@ func (c *queuedNoticeCity) runPoller(t *testing.T, cond func() bool) string {
 	if !met {
 		t.Fatalf("poller never met the condition within 5s; stderr: %s", stderr.String())
 	}
-	return stderr.String()
 }
 
 // TestMailNotifyQueuedForBusyRecipientWakesItOnceAsleep: a mail notice that
@@ -9597,5 +9595,119 @@ func TestMailNotifyQueuedForBusyRecipientWakesItOnceAsleep(t *testing.T) {
 	})
 	if got := c.pokes.Load(); got != 1 {
 		t.Fatalf("pokes = %d, want exactly 1", got)
+	}
+}
+
+// TestSendMailNotifyToNotDormantSessionStartsItsPoller: a mail notice to a
+// managed row that is not yet asleep (its runtime gone, its row still active)
+// records no wake, and starts the session's nudge poller so something
+// watches the session into sleep and records the wake then.
+func TestSendMailNotifyToNotDormantSessionStartsItsPoller(t *testing.T) {
+	c := newMailNotifyWakeCity(t, true)
+	if err := c.mgr.Start(context.Background(), testOperatorIn(t, c.dir), c.id, "", runtime.Config{WorkDir: c.dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := c.fake.Stop(c.target.sessionName); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	var started []string
+	prev := startNudgePoller
+	startNudgePoller = func(_, _, sessionName string) error { started = append(started, sessionName); return nil }
+	t.Cleanup(func() { startNudgePoller = prev })
+	c.notify(t)
+	c.requireOneQueued(t)
+	if got := c.wakeRequest(t); got != "" {
+		t.Fatalf("wake_request = %q, want none on a row that is not asleep", got)
+	}
+	if len(started) != 1 || started[0] != c.target.sessionName {
+		t.Fatalf("pollers started = %q, want one for %q", started, c.target.sessionName)
+	}
+}
+
+// TestNudgePollWakesNotDormantRecipientOnceItSleeps: a poller that finds the
+// recipient of a queued notice not running while its row is still active
+// writes no wake and keeps the notice queued, and records the wake once a
+// later tick finds the row asleep.
+func TestNudgePollWakesNotDormantRecipientOnceItSleeps(t *testing.T) {
+	c := newQueuedNoticeCity(t)
+	c.stop(t) // the row stays active: stopping, not yet asleep
+	slept := false
+	c.runPoller(t, func() bool {
+		if !slept {
+			if c.observe.Load() < 20 {
+				return false
+			}
+			if got := c.wakeRequest(t); got != "" {
+				t.Errorf("wake_request = %q while the row is active, want none", got)
+			}
+			if n := len(c.pending(t)); n != 1 {
+				t.Errorf("pending = %d while the row is active, want the notice queued", n)
+			}
+			sleepUnheld(t, c.store, c.id)
+			slept = true
+			return false
+		}
+		return c.wakeRequest(t) == string(session.WakeCauseExplicit)
+	})
+	if got := c.pokes.Load(); got != 1 {
+		t.Fatalf("pokes = %d, want 1 for the wake recorded once the row slept", got)
+	}
+}
+
+// TestRequestDormantQueuedNudgeWake is the shared dormant-session wake arm
+// of the poller and the dispatcher over one queued mail notice whose
+// recipient's runtime has stopped.
+func TestRequestDormantQueuedNudgeWake(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		prepare     func(t *testing.T, c *queuedNoticeCity)
+		wantOutcome session.WakeRequestOutcome
+		wantWanted  bool
+		wantWake    string
+	}{
+		{
+			name:        "active row over a dead runtime is not dormant",
+			prepare:     func(*testing.T, *queuedNoticeCity) {},
+			wantOutcome: session.WakeNotDormant,
+			wantWanted:  true,
+		},
+		{
+			name:        "asleep unheld row is woken",
+			prepare:     func(t *testing.T, c *queuedNoticeCity) { sleepUnheld(t, c.store, c.id) },
+			wantOutcome: session.WakeRecorded,
+			wantWanted:  true,
+			wantWake:    string(session.WakeCauseExplicit),
+		},
+		{
+			name: "drained row is woken",
+			prepare: func(t *testing.T, c *queuedNoticeCity) {
+				sleepUnheld(t, c.store, c.id)
+				if err := c.store.SetMetadata(c.id, "state", string(session.StateDrained)); err != nil {
+					t.Fatalf("SetMetadata(state): %v", err)
+				}
+			},
+			wantOutcome: session.WakeRecorded,
+			wantWanted:  true,
+			wantWake:    string(session.WakeCauseExplicit),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newQueuedNoticeCity(t)
+			c.stop(t)
+			tc.prepare(t, c)
+			outcome, wanted, err := requestDormantQueuedNudgeWake(c.target, cliSessionFrontDoor(c.store, c.target.cfg, c.dir), time.Now())
+			if err != nil {
+				t.Fatalf("requestDormantQueuedNudgeWake: %v", err)
+			}
+			if outcome != tc.wantOutcome || wanted != tc.wantWanted {
+				t.Fatalf("outcome, wanted = %v, %v; want %v, %v", outcome, wanted, tc.wantOutcome, tc.wantWanted)
+			}
+			if got := c.wakeRequest(t); got != tc.wantWake {
+				t.Fatalf("wake_request = %q, want %q", got, tc.wantWake)
+			}
+			if n := len(c.pending(t)); n != 1 {
+				t.Fatalf("pending = %d, want the notice still queued", n)
+			}
+		})
 	}
 }

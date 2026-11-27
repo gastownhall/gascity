@@ -2421,6 +2421,9 @@ func deliverMailNotifyLegacy(target nudgeTarget, store beads.Store, sp runtime.P
 			return true, nil
 		case session.WakeNotDormant:
 			warnMailNotify("queued for %s; no wake was recorded because the session is not asleep (it is starting, draining, or its state is stale); it is delivered the next time the session runs", target.agentKey())
+			// The session's poller watches it into sleep and records the
+			// wake the notice declared then (pollDormantQueuedNudgeWake).
+			maybeStartNudgePoller(target)
 		}
 		if err := nudgePokeController(target.cityPath, reconcilekey.Session(target.sessionID)); err != nil {
 			warnMailNotify("warning: poke failed after managed wake: %v", err)
