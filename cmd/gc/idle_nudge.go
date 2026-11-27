@@ -121,7 +121,8 @@ const (
 //   - State is persisted on the session bead, so a restart cannot replay it.
 //   - Bounded per assignment: observe (grace) → nudge → backoff retries → give
 //     up. It never spams a tick and never loops forever.
-//   - Pool slots only.
+//   - Pool slots only, and never a control dispatcher's (isControlDispatcherSeat):
+//     it executes its control beads in place without claiming them.
 //
 // This is a thin predicate wrapper (poolClaimBackstop) over the shared
 // grace→nudge→backoff→give-up engine in nudge_backstop.go; the pacing,
@@ -517,7 +518,14 @@ func currentSessionAssigneeIdentities(sessionBead beads.Bead) []string {
 	return result
 }
 
+// governs is the pool seats the claim backstop paces: pool-managed rows and
+// collapsed canonical-singleton pool seats, except a control dispatcher's
+// (isControlDispatcherSeat), whose open, unassigned trigger is the control
+// step it is executing, not a claim it missed.
 func (p poolClaimBackstop) governs(s beads.Bead) bool {
+	if isControlDispatcherSeat(p.cfg, s) {
+		return false
+	}
 	return strings.TrimSpace(s.Metadata["pool_managed"]) == "true" || isCollapsedCanonicalSingletonPoolBead(p.cfg, s)
 }
 
@@ -953,6 +961,17 @@ func heldClaimNudgeFor(cfg *config.City, session beads.Bead, beadID string) stri
 		return fmt.Sprintf(defaultHeldClaimNudge, strings.TrimSpace(beadID))
 	}
 	return nudge
+}
+
+// isControlDispatcherSeat reports whether row's configured agent is the
+// control dispatcher. The dispatcher executes routed control beads in place:
+// ProcessControl requires them open and never claims them, so the open,
+// unassigned trigger the pool pace-keepers read as a missed claim is its
+// normal executing state. A row whose agent the config does not name is
+// not a dispatcher seat.
+func isControlDispatcherSeat(cfg *config.City, row beads.Bead) bool {
+	agent := findAgentByTemplate(cfg, normalizedSessionTemplate(row, cfg))
+	return agent != nil && isWorkflowServeControlDispatcherAgent(*agent)
 }
 
 func configuredClaimNudgeFor(cfg *config.City, session beads.Bead) (string, bool) {

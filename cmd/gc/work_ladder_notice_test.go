@@ -18,6 +18,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -783,6 +784,73 @@ func TestWorkLadderWithdrawsItsNoticeWhenItsGateHolds(t *testing.T) {
 			t.Fatalf("entry %+v, want withdrawn on the lane's close", e)
 		}
 	})
+}
+
+// ga-mpd7gl (gascity#9382). A seat that becomes a control dispatcher's while
+// its cell still holds what an earlier governed pass left, a pending release
+// and a pending notice, is stood down under the reason it is excluded for:
+// the next pass drops the release (or the hook would refuse that claim for
+// good), withdraws the notice as held for "control_dispatcher", and does
+// nothing else: no nudge, no release, no recycle.
+func TestWorkLadderStandsDownControlDispatcherRelease(t *testing.T) {
+	standDownInheritedCell(t, "control_dispatcher", func(lc *ladderLaneCity) {
+		lc.env.Cfg.Agents[0].Name = config.ControlDispatcherAgentName
+		lc.setRow(map[string]string{"template": config.ControlDispatcherAgentName})
+	})
+}
+
+// gascity#8152, unchanged by ga-mpd7gl: a seat whose agent turns one_shot is
+// still stood down as "one_shot", dropping its inherited release and
+// withdrawing its pending notice under that reason.
+func TestWorkLadderStandsDownOneShotSeatAsOneShot(t *testing.T) {
+	standDownInheritedCell(t, "one_shot", func(lc *ladderLaneCity) {
+		lc.env.Cfg.Agents[0].Lifecycle = config.AgentLifecycleOneShot
+	})
+}
+
+// standDownInheritedCell gives a governed seat a pending notice and a pending
+// release, excludes it from the ladder by exclude, and checks that the next
+// pass stands it down under reason: the release dropped, the notice withdrawn
+// as held for reason, and no nudge, release or recycle.
+func standDownInheritedCell(t *testing.T, reason string, exclude func(lc *ladderLaneCity)) {
+	t.Helper()
+	lc := newLadderLaneCity(t, "message")
+	id := lc.startedClaim()
+	lc.at(0)
+	lc.at(halfPast(1))
+	op := lc.onlyOp()
+	key := lc.entry(id).Key
+	cell := lc.cell()
+	cell.Release = &workladder.ReleaseMark{Key: key, Gen: 7, At: lc.now}
+	lc.setRow(map[string]string{session.WorkLadderKey: workladder.EncodeLadder(cell)})
+	if !session.WorkLadderReleases(lc.row().Metadata[session.WorkLadderKey], key.Store, id) {
+		t.Fatal("the hook does not see the pending release")
+	}
+	exclude(lc)
+	if got := ladderExclusion(lc.env.Cfg, lc.row()); got != reason {
+		t.Fatalf("ladderExclusion = %q, want %s", got, reason)
+	}
+	nudges, released, posted := lc.nudges(), len(lc.events(events.WorkReleased)), len(lc.posted)
+	lc.at(2 * time.Minute)
+	if session.WorkLadderReleases(lc.row().Metadata[session.WorkLadderKey], key.Store, id) {
+		t.Fatalf("the pending release outlived the %s exclusion", reason)
+	}
+	got := lc.op(op.ID)
+	if got.Status != opjournal.StatusClosed || got.Cancel.By != ladderNoticePrincipal || !strings.HasSuffix(got.Cancel.Reason, "holds the seat: "+reason) {
+		t.Fatalf("notice %s cancel %+v, want withdrawn by the ladder as held for %s", got.Status, got.Cancel, reason)
+	}
+	if ops := lc.ladderOps(); len(ops) != 0 {
+		t.Fatalf("open ladder notices %+v, want none proposed for an excluded seat", ops)
+	}
+	if lc.nudges() != nudges {
+		t.Fatalf("nudges %d, want %d: none in the %s pass", lc.nudges(), nudges, reason)
+	}
+	if rel := lc.events(events.WorkReleased); len(rel) != released {
+		t.Fatalf("work.released = %+v, want none in the %s pass", rel, reason)
+	}
+	if len(lc.posted) != posted {
+		t.Fatalf("posted %+v, want no recycles", lc.posted)
+	}
 }
 
 func TestWorkLadderWithdrawsTheNoticeOfWorkThatEnded(t *testing.T) {

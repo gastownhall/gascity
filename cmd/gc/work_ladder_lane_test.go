@@ -788,6 +788,38 @@ func TestWorkLadderRecyclesAnUnclaimedTrigger(t *testing.T) {
 	}
 }
 
+// ga-mpd7gl (gascity#9382): the control dispatcher executes the control bead
+// routed to it in place without claiming it, so its seat's trigger stays
+// open and unassigned for the whole step. The same never-claimed trigger
+// TestWorkLadderRecyclesAnUnclaimedTrigger nudges and recycles must, on a
+// dispatcher's seat, see none of it: no nudge, no recycle, no escalation or
+// release, and no cell write.
+func TestWorkLadderExcludesControlDispatcherSeat(t *testing.T) {
+	c := newLadderCity(t)
+	c.env.Cfg.Agents[0].Name = config.ControlDispatcherAgentName
+	b, err := c.work.Create(beads.Bead{Title: "check being executed", Type: "task", Metadata: map[string]string{
+		"gc.kind": "check", beadmeta.RoutedToMetadataKey: config.ControlDispatcherAgentName,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.trigger = b.ID
+	c.setRow(map[string]string{"template": config.ControlDispatcherAgentName, beadmeta.TriggerBeadIDMetadataKey: b.ID})
+	if !isControlDispatcherSeat(c.env.Cfg, c.row()) {
+		t.Fatalf("precondition: seat %+v is not a control dispatcher's", c.row().Metadata)
+	}
+	c.run(time.Hour, 30*time.Second, nil)
+	if len(c.nudgedAt) != 0 || len(c.posted) != 0 {
+		t.Fatalf("nudges %v, posted %+v; want none for a control dispatcher's seat", c.nudgedAt, c.posted)
+	}
+	if esc, rel := c.events(events.WorkEscalated), c.events(events.WorkReleased); len(esc) != 0 || len(rel) != 0 {
+		t.Fatalf("work.escalated %+v, work.released %+v; want none", esc, rel)
+	}
+	if meta := c.row().Metadata[session.WorkLadderKey]; meta != "" {
+		t.Fatalf("work_ladder cell = %q, want unwritten: a dispatcher seat is not the ladder's", meta)
+	}
+}
+
 // A recycle, and a nudge, re-read the trigger live first: one the agent
 // claimed since the allocation was taken is neither recycled nor nudged,
 // however long a stale allocation still shows it open.

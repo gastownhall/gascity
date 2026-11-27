@@ -606,31 +606,40 @@ func TestNudgeStalledPoolClaims_RigPoolWithoutNudgeGetsTheDefault(t *testing.T) 
 // work it never claims, its agent quiet: the 2026-10-05 shape.
 func wedgedSlotEnv(t *testing.T, assignee string) (*reconcilerTestEnv, beads.Bead, beads.Bead) {
 	t.Helper()
+	return wedgedSlotEnvFor(t, "worker", assignee, map[string]string{
+		"gc.routed_to": "worker", "gc.session_affinity": "require", "gc.continuation_group": "main",
+	})
+}
+
+// wedgedSlotEnvFor is wedgedSlotEnv for a pool of one of agent name (min 0,
+// max 1), whose seat, session template and runtime are all named name, bound
+// to an open trigger carrying workMeta. An assignee of "self" is the seat's
+// session bead ID.
+func wedgedSlotEnvFor(t *testing.T, name, assignee string, workMeta map[string]string) (*reconcilerTestEnv, beads.Bead, beads.Bead) {
+	t.Helper()
 	env := newReconcilerTestEnv(t)
-	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1), StartCommand: "true"}}}
-	env.addDesired("worker", "worker", false)
-	session := env.createSessionBead("worker", "worker")
+	env.cfg = &config.City{Agents: []config.Agent{{Name: name, MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1), StartCommand: "true"}}}
+	env.addDesired(name, name, false)
+	session := env.createSessionBead(name, name)
 	if assignee == "self" {
 		assignee = session.ID
 	}
-	work, err := env.store.Create(beads.Bead{Title: "step", Type: "task", Assignee: assignee, Metadata: map[string]string{
-		"gc.routed_to": "worker", "gc.session_affinity": "require", "gc.continuation_group": "main",
-	}})
+	work, err := env.store.Create(beads.Bead{Title: "step", Type: "task", Assignee: assignee, Metadata: workMeta})
 	if err != nil {
 		t.Fatal(err)
 	}
 	env.markSessionActive(&session)
 	env.setSessionMetadata(&session, map[string]string{"pool_managed": "true", testTriggerBeadIDKey: work.ID, "instance_token": "tok-1"})
-	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "true"}); err != nil {
+	if err := env.sp.Start(context.Background(), name, runtime.Config{Command: "true"}); err != nil {
 		t.Fatal(err)
 	}
 	return env, session, work
 }
 
 // runWedgedSlot runs the claim backstop and the legacy reconciler for ticks
-// one-minute ticks, the agent quiet throughout, beginning each requested
-// drain on the test clock; it reports the drains requested.
-func runWedgedSlot(t *testing.T, env *reconcilerTestEnv, work beads.Bead, ticks int) int {
+// one-minute ticks, the agent on runtime name quiet throughout, beginning
+// each requested drain on the test clock; it reports the drains requested.
+func runWedgedSlot(t *testing.T, env *reconcilerTestEnv, name string, work beads.Bead, ticks int) int {
 	t.Helper()
 	drains := 0
 	request := func(b beads.Bead) error {
@@ -640,7 +649,7 @@ func runWedgedSlot(t *testing.T, env *reconcilerTestEnv, work beads.Bead, ticks 
 	}
 	var out bytes.Buffer
 	for tick := 0; tick < ticks; tick++ {
-		env.sp.SetActivity("worker", env.clk.Now().Add(-time.Hour))
+		env.sp.SetActivity(name, env.clk.Now().Add(-time.Hour))
 		raw, err := loadSessionBeads(env.store)
 		if err != nil {
 			t.Fatal(err)
@@ -660,7 +669,7 @@ func runWedgedSlot(t *testing.T, env *reconcilerTestEnv, work beads.Bead, ticks 
 // runtime stops; it is not drained again.
 func TestWedgedPoolSlotIsRecycledWhileRoutedWorkWaits(t *testing.T) {
 	env, session, work := wedgedSlotEnv(t, "")
-	drains := runWedgedSlot(t, env, work, 60)
+	drains := runWedgedSlot(t, env, "worker", work, 60)
 	if got := env.sp.CountCalls("Nudge", "worker"); got != idleClaimNudgeMaxAttempts {
 		t.Fatalf("nudges = %d, want %d before the slot is given up on", got, idleClaimNudgeMaxAttempts)
 	}
@@ -676,8 +685,58 @@ func TestWedgedPoolSlotIsRecycledWhileRoutedWorkWaits(t *testing.T) {
 // continuation backstop's to pace.
 func TestPinnedTriggerSlotIsNotDrainedInALoop(t *testing.T) {
 	env, _, work := wedgedSlotEnv(t, "self")
-	if drains := runWedgedSlot(t, env, work, 60); drains != 0 {
+	if drains := runWedgedSlot(t, env, "worker", work, 60); drains != 0 {
 		t.Fatalf("drains %d, want none for a pinned trigger", drains)
+	}
+}
+
+// ga-mpd7gl (gascity#9382): the control dispatcher executes the control bead
+// routed to it in place, never claiming it, so the check its seat runs stays
+// open and unassigned for the whole step, named by the seat's trigger. The
+// claim backstop must not read that as a missed claim: a demand-only
+// singleton dispatcher whose quiet seat is executing a check gets no nudge,
+// no idle_claim_nudge_* mark and no drain, and keeps running.
+func TestControlDispatcherExecutingAControlStepIsNotDrained(t *testing.T) {
+	name := config.ControlDispatcherAgentName
+	env, session, check := wedgedSlotEnvFor(t, name, "", map[string]string{"gc.kind": "check", "gc.routed_to": name})
+	if !isControlDispatcherSeat(env.cfg, session) {
+		t.Fatalf("precondition: seat %+v is not a control dispatcher's", session.Metadata)
+	}
+	drains := runWedgedSlot(t, env, name, check, 60)
+	if got := env.sp.CountCalls("Nudge", name); got != 0 {
+		t.Fatalf("nudges = %d, want none: the dispatcher reads no prompt", got)
+	}
+	if drains != 0 {
+		t.Fatalf("drains %d, want none while the dispatcher executes its step", drains)
+	}
+	cur, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, value := range cur.Metadata {
+		if strings.HasPrefix(key, "idle_claim_nudge") {
+			t.Fatalf("session metadata %s = %q, want no claim-backstop mark on a dispatcher seat", key, value)
+		}
+	}
+	if !env.sp.IsRunning(name) {
+		t.Fatalf("runtime stopped (state %s/%s), want the dispatcher still executing", cur.Metadata["state"], cur.Metadata["sleep_reason"])
+	}
+
+	// The step closes its check and no control work is left: pool demand
+	// drops to zero and the reconciler drains the idle dispatcher as before.
+	closed := "closed"
+	if err := env.store.Update(check.ID, beads.UpdateOpts{Status: &closed}); err != nil {
+		t.Fatal(err)
+	}
+	delete(env.desiredState, name)
+	raw, err := loadSessionBeads(env.store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.reconcile(raw)
+	if ds := env.dt.get(session.ID); ds == nil {
+		cur, _ := env.store.Get(session.ID)
+		t.Fatalf("no drain (state %s/%s, running %v), want the dispatcher drained once its demand is gone", cur.Metadata["state"], cur.Metadata["sleep_reason"], env.sp.IsRunning(name))
 	}
 }
 
@@ -1271,5 +1330,34 @@ func TestNudgeStalledPoolClaims_IgnoresPlainNamedSession(t *testing.T) {
 	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, clk.Now(), live, &out)
 	if got := sp.CountCalls("Nudge", name); got != 0 {
 		t.Fatalf("Nudge calls = %d, want 0 for a plain named session", got)
+	}
+}
+
+// isControlDispatcherSeat names a seat by its configured agent: the control
+// dispatcher under any rig or binding, never a worker, a look-alike name, or
+// a template the config does not name.
+func TestIsControlDispatcherSeat(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{
+		{Name: config.ControlDispatcherAgentName},
+		{Name: config.ControlDispatcherAgentName, BindingName: "core"},
+		{Name: config.ControlDispatcherAgentName, BindingName: "core", Dir: "scrolls"},
+		{Name: "worker"},
+		{Name: config.ControlDispatcherAgentName + "-2"},
+	}}
+	for _, tc := range []struct {
+		template string
+		want     bool
+	}{
+		{config.ControlDispatcherAgentName, true},
+		{"core." + config.ControlDispatcherAgentName, true},
+		{"scrolls/core." + config.ControlDispatcherAgentName, true},
+		{"worker", false},
+		{config.ControlDispatcherAgentName + "-2", false},
+		{"unconfigured", false},
+	} {
+		row := beads.Bead{Type: sessionBeadType, Metadata: map[string]string{"template": tc.template, "session_name": "s"}}
+		if got := isControlDispatcherSeat(cfg, row); got != tc.want {
+			t.Errorf("isControlDispatcherSeat(template %q) = %v, want %v", tc.template, got, tc.want)
+		}
 	}
 }
