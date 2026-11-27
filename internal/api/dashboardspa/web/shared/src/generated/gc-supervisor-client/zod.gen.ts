@@ -47,10 +47,23 @@ export const zAgentMapping = z.object({
     parent_tool_use_id: z.string()
 });
 
+export const zAgentPatchMerge = z.object({
+    clear_provider: z.boolean().optional(),
+    delete: z.boolean().optional(),
+    dir: z.string().optional(),
+    name: z.string().min(1),
+    option_defaults: z.record(z.string(), z.string()).optional(),
+    provider: z.string().optional(),
+    remove_options: z.array(z.string()).nullish(),
+    revision: z.string().min(1),
+    rig: z.string().optional()
+});
+
 export const zAgentPatchSetInputBody = z.object({
     dir: z.string().optional(),
     env: z.record(z.string(), z.string()).optional(),
     name: z.string().optional(),
+    option_defaults: z.record(z.string(), z.string()).optional(),
     provider: z.string().optional(),
     rig: z.string().optional(),
     scope: z.string().optional(),
@@ -1474,6 +1487,12 @@ export const zAgentPatch = z.object({
     Upstream: z.string().nullable(),
     WakeMode: z.string().nullable(),
     WorkDir: z.string().nullable()
+});
+
+export const zAgentPatchMergeResult = z.object({
+    after: zAgentPatch.optional(),
+    before: zAgentPatch.optional(),
+    revision: z.string()
 });
 
 export const zListBodyAgentPatch = z.object({
@@ -3458,6 +3477,12 @@ export const zSessionWakeRefusedPayload = z.object({
     wake_request: z.string()
 });
 
+export const zSessionWokePayload = z.object({
+    model: z.string().optional(),
+    provider: z.string().optional(),
+    provider_kind: z.string().optional()
+});
+
 export const zSlingBatchSummary = z.object({
     container_type: z.string().optional(),
     failed: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
@@ -4180,6 +4205,7 @@ export const zEventPayload = z.union([
     zSessionSubmitSucceededPayload,
     zSessionUnknownStatePayload,
     zSessionWakeRefusedPayload,
+    zSessionWokePayload,
     zStorageBindingOutcomePayload,
     zStorageRigPayload,
     zStoreDiskCriticalPayload,
@@ -6221,7 +6247,7 @@ export const zTypedEventStreamEnvelopeSessionWoke = z.object({
     actor: z.string(),
     depends_on_step_ids: z.array(z.string()).optional(),
     message: z.string().optional(),
-    payload: zNoPayload,
+    payload: zSessionWokePayload,
     run_id: z.string().optional(),
     seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     session_id: z.string().optional(),
@@ -8869,7 +8895,7 @@ export const zTypedTaggedEventStreamEnvelopeSessionWoke = z.object({
     city: z.string(),
     depends_on_step_ids: z.array(z.string()).optional(),
     message: z.string().optional(),
-    payload: zNoPayload,
+    payload: zSessionWokePayload,
     run_id: z.string().optional(),
     seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     session_id: z.string().optional(),
@@ -10975,6 +11001,21 @@ export const zGetV0CityByCityNamePatchesAgentsPath = z.object({
  * OK
  */
 export const zGetV0CityByCityNamePatchesAgentsResponse = zListBodyAgentPatch;
+
+export const zPatchV0CityByCityNamePatchesAgentsBody = zAgentPatchMerge;
+
+export const zPatchV0CityByCityNamePatchesAgentsHeaders = z.object({
+    'X-GC-Request': z.string().min(1)
+});
+
+export const zPatchV0CityByCityNamePatchesAgentsPath = z.object({
+    cityName: z.string().min(1).regex(/\S/)
+});
+
+/**
+ * OK
+ */
+export const zPatchV0CityByCityNamePatchesAgentsResponse = zAgentPatchMergeResult;
 
 export const zPutV0CityByCityNamePatchesAgentsBody = zAgentPatchSetInputBody;
 

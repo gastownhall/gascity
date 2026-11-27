@@ -34,7 +34,7 @@ gc [flags]
 | [gc build-image](#gc-build-image) | Build a prebaked agent container image |
 | [gc cities](#gc-cities) | List registered cities |
 | [gc completion](#gc-completion) | Generate the autocompletion script for the specified shell |
-| [gc config](#gc-config) | Inspect and validate city configuration |
+| [gc config](#gc-config) | Inspect, validate, and update city configuration |
 | [gc context](#gc-context) | Manage named remote cities (~/.gc/contexts.toml) |
 | [gc converge](#gc-converge) | Manage convergence loops (bounded iterative refinement) |
 | [gc convoy](#gc-convoy) | Manage convoys — graphs of related work |
@@ -883,7 +883,8 @@ Inspect, validate, and debug the resolved city configuration.
 
 The config system supports multi-file composition with includes,
 packs, patches, and overrides. Use "show" to dump the resolved
-config and "explain" to see where each value originated.
+config and "explain" to see where each value originated. Use "agent-patch"
+to merge provider and model defaults with a revision precondition.
 
 ```
 gc config
@@ -891,8 +892,45 @@ gc config
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc config agent-patch](#gc-config-agent-patch) | Read or merge provider defaults for an exact singleton agent |
 | [gc config explain](#gc-config-explain) | Show resolved config with provenance annotations |
 | [gc config show](#gc-config-show) | Dump the resolved city configuration as TOML |
+
+## gc config agent-patch
+
+Read a raw agent patch and its revision, or merge provider/model defaults.
+
+Writes require --revision from a previous read ("absent" for a missing patch).
+Other patch fields survive. --clear-provider and --remove-option expose the
+underlying defaults; --delete restores an absent patch, guarded by its revision.
+Use the returned before patch to restore prior values with a new revision.
+
+Changes apply at the next start. Existing config drift may restart an idle
+session; hand off work first. Named sessions must have an empty work queue.
+Targets must have max_active_sessions=1 and at most one named identity.
+This command requires a running mutable city API.
+
+```
+gc config agent-patch <agent> [flags]
+```
+
+**Example:**
+
+```
+gc config agent-patch worker --json
+gc config agent-patch worker --revision absent --provider fallback --option model=fast
+gc config agent-patch worker --revision <revision> --clear-provider --remove-option model
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--clear-provider` | bool |  | remove only the patch's provider override |
+| `--delete` | bool |  | remove the entire patch using its expected revision |
+| `--json` | bool |  | emit the revision and before/after patches as JSON |
+| `--option` | stringArray |  | provider option key=value (repeatable; model selects the model) |
+| `--provider` | string |  | provider name for the next start |
+| `--remove-option` | stringArray |  | remove an option key from this patch (repeatable) |
+| `--revision` | string |  | expected content revision; absent creates a missing patch |
 
 ## gc config explain
 

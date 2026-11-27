@@ -228,7 +228,8 @@
               "storage-snapshot",
               "storage-snapshot-restore",
               "storage-split",
-              "analyze-work-record"
+              "analyze-work-record",
+              "config-agent-patch"
             ]
           },
           "event_id": {

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "ok", "revision"],
+  "properties": {
+    "schema_version": {"const": "1"},
+    "ok": {"const": true},
+    "before": {"type": "object"},
+    "after": {"type": "object"},
+    "revision": {"type": "string", "minLength": 1}
+  },
+  "additionalProperties": false
+}

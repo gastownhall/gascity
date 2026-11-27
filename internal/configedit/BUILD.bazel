@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "configedit",
     srcs = [
+        "agent_patch_merge.go",
         "configedit.go",
         "formulas.go",
     ],
@@ -21,6 +22,7 @@ go_library(
 go_test(
     name = "configedit_test",
     srcs = [
+        "agent_patch_merge_test.go",
         "configedit_linux_test.go",
         "configedit_test.go",
         "formulas_test.go",

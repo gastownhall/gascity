@@ -272,6 +272,7 @@ go_library(
         "schemas/worktree/verify/result.schema.json",
         "schemas/beads/city/migrate-proxied/result.schema.json",
         "schemas/agent/is-foreign/result.schema.json",
+        "schemas/config/agent-patch/result.schema.json",
         "schemas/context/list/result.schema.json",
         "schemas/context/show/result.schema.json",
         "schemas/extmsg/bind/result.schema.json",

@@ -176,6 +176,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityGet(sm, "/patches/agent/{dir}/{base}", (*Server).humaHandleAgentPatchGetQualified, errorStatuses(http.StatusNotFound))
 	cityGet(sm, "/patches/agent/{base}", (*Server).humaHandleAgentPatchGet, errorStatuses(http.StatusNotFound))
 	cityPut(sm, "/patches/agents", (*Server).humaHandleAgentPatchSet, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusNotImplemented))
+	cityPatch(sm, "/patches/agents", (*Server).humaHandleAgentPatchMerge, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented))
 	cityDelete(sm, "/patches/agent/{dir}/{base}", (*Server).humaHandleAgentPatchDeleteQualified, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusNotImplemented))
 	cityDelete(sm, "/patches/agent/{base}", (*Server).humaHandleAgentPatchDelete, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusNotImplemented))
 	// Patches — rig.

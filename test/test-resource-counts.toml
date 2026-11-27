@@ -722,6 +722,11 @@ resource = "subprocess"
 calls = 7
 
 [[count]]
+path = "cmd/gc/config_agent_patch_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
 path = "cmd/gc/control_dispatch_sigterm_test.go"
 resource = "subprocess"
 calls = 1

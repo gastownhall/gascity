@@ -43,12 +43,13 @@ func loadCityConfigWithBuiltinPacks(cityPath string, includes ...string) (*confi
 func newConfigCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "config",
-		Short: "Inspect and validate city configuration",
+		Short: "Inspect, validate, and update city configuration",
 		Long: `Inspect, validate, and debug the resolved city configuration.
 
 The config system supports multi-file composition with includes,
 packs, patches, and overrides. Use "show" to dump the resolved
-config and "explain" to see where each value originated.`,
+config and "explain" to see where each value originated. Use "agent-patch"
+to merge provider and model defaults with a revision precondition.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return cmd.Help()
@@ -56,6 +57,7 @@ config and "explain" to see where each value originated.`,
 	}
 	cmd.AddCommand(newConfigShowCmd(stdout, stderr))
 	cmd.AddCommand(newConfigExplainCmd(stdout, stderr))
+	cmd.AddCommand(newConfigAgentPatchCmd(stdout, stderr))
 	return cmd
 }
 

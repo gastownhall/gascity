@@ -3663,6 +3663,35 @@ func (cs *controllerState) SetAgentPatch(patch config.AgentPatch) error {
 	})
 }
 
+// MergeAgentPatch publishes an exact, revision-guarded provider-default edit.
+// The mutation writes config only; runtime drift is handled by reconciliation.
+func (cs *controllerState) MergeAgentPatch(change configedit.AgentPatchMerge) (configedit.AgentPatchMergeResult, error) {
+	var result configedit.AgentPatchMergeResult
+	err := cs.mutateAndPoke(func() error {
+		patchTarget := config.AgentPatch{Dir: change.Dir, Rig: change.Rig, Name: change.Name}
+		if err := patchTarget.Validate(); err != nil {
+			return fmt.Errorf("%w: %w", configedit.ErrValidation, err)
+		}
+		if store := cs.Stores().Sessions(); !beads.IsNilStore(store) {
+			target := patchTarget.TargetQualifiedName()
+			rows, err := session.NewStore(store).List("", target)
+			if err != nil {
+				return fmt.Errorf("checking override session scope: %w", err)
+			}
+			if len(rows) > 1 {
+				return fmt.Errorf("%w: %q has %d open session identities", configedit.ErrPatchScope, target, len(rows))
+			}
+		}
+		var err error
+		result, err = cs.editor.MergeAgentPatch(change)
+		return err
+	})
+	if err != nil {
+		return configedit.AgentPatchMergeResult{}, err
+	}
+	return result, nil
+}
+
 // DeleteAgentPatch removes an agent patch from city.toml.
 func (cs *controllerState) DeleteAgentPatch(name string) error {
 	return cs.mutateAndPoke(func() error {

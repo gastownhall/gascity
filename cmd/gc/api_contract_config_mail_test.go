@@ -152,6 +152,14 @@ func contractConfigFamily(t *testing.T, h *contractHarness) {
 	if env := mustJSON(t, "get agent patch", aget.JSON200, aget).Env; env == nil || (*env)["CONTRACT"] != "1" {
 		t.Fatalf("agent patch env = %v, want CONTRACT=1: %s", env, contractBody(aget))
 	}
+	// A multi-session agent cannot receive a singleton provider override.
+	amerge, err := c.PatchV0CityByCityNamePatchesAgentsWithResponse(ctx, city,
+		&genclient.PatchV0CityByCityNamePatchesAgentsParams{XGCRequest: contractCSRF},
+		genclient.PatchV0CityByCityNamePatchesAgentsJSONRequestBody{Name: contractAgent, Revision: aget.HTTPResponse.Header.Get("X-GC-Patch-Revision"), OptionDefaults: &map[string]string{"model": "contract-model"}})
+	expectStatus(t, "reject multi-session agent patch merge", amerge, err, http.StatusConflict)
+	if problem := mustJSON(t, "agent patch merge scope conflict", amerge.ApplicationproblemJSON409, amerge); problem.Code == nil || *problem.Code != "patch-scope-conflict" {
+		t.Fatalf("agent patch merge scope error = %s", contractBody(amerge))
+	}
 	adel, err := c.DeleteV0CityByCityNamePatchesAgentByBaseWithResponse(ctx, city, contractAgent,
 		&genclient.DeleteV0CityByCityNamePatchesAgentByBaseParams{XGCRequest: contractCSRF})
 	expectStatus(t, "delete agent patch", adel, err, http.StatusOK)

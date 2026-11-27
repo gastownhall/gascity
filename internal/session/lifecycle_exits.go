@@ -3,7 +3,10 @@ package session
 import (
 	"maps"
 	"strconv"
+	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // Exit classification for dead sessions, extracted from the reconciler's
@@ -244,6 +247,56 @@ func ConversationResetPatch(clearStartedConfigHash bool, _ time.Time) MetadataPa
 		// wake failure re-primes; a churn keeps the hash and its markers.
 		clearPrimingMarkers(patch)
 	}
+	return patch
+}
+
+// ProviderSwitchResetPatch clears continuation state that belongs to a
+// different provider family. The caller applies it only after the runtime
+// stops, atomically with the new provider projection. Same-family model or
+// account changes keep their conversation, and legacy unknown families keep
+// their existing recovery behavior.
+func ProviderSwitchResetPatch(previousFamily, nextFamily string) MetadataPatch {
+	previousFamily, nextFamily = strings.TrimSpace(previousFamily), strings.TrimSpace(nextFamily)
+	if previousFamily == "" || nextFamily == "" || previousFamily == nextFamily {
+		return nil
+	}
+	patch := ConversationResetPatch(true, time.Time{})
+	patch[beadmeta.BrainParentSIDMetadataKey] = ""
+	return patch
+}
+
+// ProviderLaunchConfig is the resolved launch projection of a stopped session.
+// Family is canonical even when Kind is omitted for a builtin provider.
+type ProviderLaunchConfig struct {
+	Name, Family, Kind, Ancestor, Command string
+	Resume                                ProviderResume
+}
+
+// ProviderLaunchConfigPatch refreshes a stopped session's launch and delivery
+// metadata, clearing incompatible continuation state on a family change. The
+// caller must confirm the old runtime stopped before applying the patch.
+func ProviderLaunchConfigPatch(info Info, next ProviderLaunchConfig) MetadataPatch {
+	patch := ProviderSwitchResetPatch(ProviderFamilyFromInfo(info, ""), next.Family)
+	if patch == nil {
+		patch = MetadataPatch{}
+	}
+	set := func(key, prior, value string) {
+		if prior != value {
+			patch[key] = value
+		}
+	}
+	if next.Name != "" {
+		set("provider", info.Provider, next.Name)
+	}
+	if next.Command != "" {
+		set("command", info.Command, next.Command)
+	}
+	set("provider_kind", info.ProviderKind, next.Kind)
+	set("builtin_ancestor", info.BuiltinAncestor, next.Ancestor)
+	set("resume_flag", info.ResumeFlag, next.Resume.ResumeFlag)
+	set("resume_style", info.ResumeStyle, next.Resume.ResumeStyle)
+	set("resume_command", info.ResumeCommand, next.Resume.ResumeCommand)
+	set("session_id_flag", info.SessionIDFlag, next.Resume.SessionIDFlag)
 	return patch
 }
 

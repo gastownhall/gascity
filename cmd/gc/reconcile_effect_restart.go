@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"maps"
 	"strings"
 	"time"
 
@@ -273,19 +274,20 @@ func driftRestartStep(v txView) txStep {
 }
 
 // driftRestartPatch is legacy's restart-in-place reset to start-pending: a
-// resumable conversation (its key and stored hash) is kept, so the start
+// resumable conversation in the same provider family is kept, so the start
 // resumes it; otherwise the key is rotated as the provider takes one, or
 // cleared; the deferral stamps clear.
 func driftRestartPatch(tp TemplateParams, row session.Info, now time.Time) session.MetadataPatch {
+	patch := stoppedProviderLaunchPatch(row, tp)
 	key, hash := strings.TrimSpace(row.SessionKey), strings.TrimSpace(row.StartedConfigHash)
-	preserve, next, clearKey := key != "" && hash != "", key, false
+	preserve, next, clearKey := key != "" && hash != "" && patch["continuation_reset_pending"] != "true", key, false
 	if !preserve {
 		next, clearKey = "", !restartKeyMints(tp, row)
 		if !clearKey {
 			next, _ = session.GenerateSessionKey() // a mint error leaves the key, as legacy's
 		}
 	}
-	patch := session.ConfigDriftRestartPatch(next, now)
+	maps.Copy(patch, session.ConfigDriftRestartPatch(next, now))
 	if clearKey {
 		patch["session_key"] = ""
 	}

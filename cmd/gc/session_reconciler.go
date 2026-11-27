@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -6936,7 +6937,7 @@ func namedSessionActiveUseReasonInfo(info sessionpkg.Info, sp runtime.Provider, 
 // resetConfiguredNamedSessionForConfigDriftInfo repairs a configured-named
 // session whose config drifted, reading the session off the typed Info snapshot.
 //
-// It preserves resume-eligible prior conversation metadata (session_key +
+// Within one provider family it preserves resume-eligible conversation metadata (session_key +
 // started_config_hash, via Info.SessionKey / Info.StartedConfigHash) when
 // transitioning straight back into creating, so the next wake builds
 // `--resume <prior-key>` instead of rotating the key. When the key cannot be
@@ -6973,16 +6974,16 @@ func resetConfiguredNamedSessionForConfigDriftInfo(
 	if alive && sp != nil && sessionName != "" {
 		if err := controllerKillSessionRow(cityPath, store, sp, nil, info); err != nil {
 			fmt.Fprintf(stderr, "session reconciler: stopping config-drift named session %s: %v\n", sessionName, err) //nolint:errcheck
-			if errors.Is(err, sessionpkg.ErrRuntimeLeaseBusy) || errors.Is(err, sessionpkg.ErrKillPremiseMoved) {
-				return nil // another holder moved or holds it: decide again next tick
-			}
+			// No confirmed stop: keep the old runtime's launch metadata.
+			return nil
 		}
 	}
 	nextSessionState := sessionpkg.State(nextState)
+	providerPatch := stoppedProviderLaunchPatch(info, tp)
 	priorSessionKey := strings.TrimSpace(info.SessionKey)
 	priorStartedConfigHash := strings.TrimSpace(info.StartedConfigHash)
 	preserveResume := (nextSessionState == sessionpkg.StateStartPending || nextSessionState == sessionpkg.StateCreating) &&
-		priorSessionKey != "" && priorStartedConfigHash != ""
+		priorSessionKey != "" && priorStartedConfigHash != "" && providerPatch["continuation_reset_pending"] != "true"
 
 	// Rotation is a provider capability, not an unconditional mint. Only a
 	// provider with session_id_flag can be told "create a conversation with
@@ -7000,7 +7001,8 @@ func resetConfiguredNamedSessionForConfigDriftInfo(
 		rotatedSessionKey = newKey
 		clearSessionKey = hasCapability && newKey == ""
 	}
-	batch := sessionpkg.ConfigDriftResetPatch(nextSessionState, rotatedSessionKey, now)
+	batch := providerPatch
+	maps.Copy(batch, sessionpkg.ConfigDriftResetPatch(nextSessionState, rotatedSessionKey, now))
 	if clearSessionKey {
 		// ConfigDriftResetPatch only writes session_key when non-empty, so an
 		// intentional clear must be stated explicitly — the same contract the

@@ -174,6 +174,12 @@ leave that conversation terminal instead of recreating its alias and runtime.
 
 ## Committed conversation recovery
 
+A provider-family change at a stopped-session configuration refresh clears
+the incompatible conversation key and resume history while retaining session
+identity. Use `ProviderSwitchResetPatch` for that reset. A committed running
+session retains its old command and delivery family until it stops; config
+edits reach the next start through the existing drift policy.
+
 Use the session-owned `PreserveConversationOnRuntimeLoss` policy when healing
 a lost process, and `HasStartedManualConversation` where a reaper, a wake
 failure or churn would discard a conversation. A committed manual conversation
