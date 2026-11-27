@@ -39,6 +39,18 @@ func ResolveSessionIDAllowClosed(store beads.SessionStore, identifier string) (s
 	return resolveSessionID(store, identifier, true)
 }
 
+// ResolveSessionIDByLiveIdentifier is ResolveSessionID without its first step,
+// the direct bead ID lookup: it resolves only open exact session_name matches,
+// then open exact current alias matches. It is for a caller that has already
+// looked the identifier up as a bead ID and found no session there, so the
+// lookup is not repeated.
+func ResolveSessionIDByLiveIdentifier(store beads.SessionStore, identifier string) (string, error) {
+	if store == (beads.SessionStore{}) {
+		return "", fmt.Errorf("session store unavailable")
+	}
+	return resolveSessionIDByName(store, identifier, false)
+}
+
 // ResolveSessionIDByExactID resolves only direct bead ID matches.
 func ResolveSessionIDByExactID(store beads.SessionStore, identifier string) (string, error) {
 	_, id, err := ResolveSessionBeadByExactID(store, identifier)
