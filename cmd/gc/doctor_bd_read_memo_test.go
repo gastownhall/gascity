@@ -63,6 +63,10 @@ func (f *fixtureBd) run(_ string, name string, args ...string) ([]byte, error) {
 		return f.match(true, args[3:], strings.Split(args[2], " AND "))
 	case "ready":
 		return []byte("[]"), nil
+	case "dep":
+		// pool-idle-routed-work reads each candidate's dependencies; the
+		// fixture rows have none.
+		return []byte("[]"), nil
 	case "update":
 		return nil, f.update(args[1:])
 	}
