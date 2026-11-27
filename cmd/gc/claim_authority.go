@@ -19,9 +19,11 @@ import (
 
 // claimAuthorityEntries is the set of identities this city vouches for on
 // routed work: every assignee identity of an open session (the identities the
-// orphan sweep's openSessionOwnsWork accepts). It is the city's side of the
-// claim-authority boundary: an armed store refuses a routed claim by anyone
-// outside it.
+// orphan sweep's openSessionOwnsWork accepts), every assignee form of a
+// configured named session whether or not it runs (the forms
+// assigneePreservesNamedSessionRoute accepts), and [beads]
+// claim_authority_allow. It is the city's side of the claim-authority
+// boundary: an armed store refuses a routed claim by anyone outside it.
 func claimAuthorityEntries(cfg *config.City, openSessions []session.Info) []beads.ClaimAuthorityEntry {
 	seen := map[string]bool{}
 	var out []beads.ClaimAuthorityEntry
@@ -40,6 +42,15 @@ func claimAuthorityEntries(cfg *config.City, openSessions []session.Info) []bead
 		for _, identity := range sessionBeadAssigneeIdentitiesForConfigInfo(info, cfg) {
 			add(identity, beads.ClaimAuthoritySession)
 		}
+	}
+	if cfg == nil {
+		return out
+	}
+	for _, form := range namedSessionAssigneeForms(cfg, cfg.EffectiveCityName()) {
+		add(form, beads.ClaimAuthorityNamed)
+	}
+	for _, identity := range cfg.Beads.ClaimAuthorityAllow {
+		add(identity, beads.ClaimAuthorityAllow)
 	}
 	return out
 }
