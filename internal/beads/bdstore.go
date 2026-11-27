@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
-	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -96,7 +95,7 @@ func ExecCommandRunnerWithEnvContextWithoutAmbientBeads(ctx context.Context, env
 }
 
 func execCommandRunnerWithEnv(parent context.Context, env map[string]string, withoutAmbientBeads bool) CommandRunner {
-	return execCommandRunner(parent, env, withoutAmbientBeads, processEnvSnapshotExcludingNativeDoltOpen)
+	return execCommandRunner(parent, env, withoutAmbientBeads, processEnvSnapshotExcludingNativeDoltOpen, processBDExecGate())
 }
 
 // ExecCommandRunnerWithExactEnvContext is like ExecCommandRunnerWithEnvContext,
@@ -106,10 +105,13 @@ func execCommandRunnerWithEnv(parent context.Context, env map[string]string, wit
 // invariant than the WithoutAmbientBeads pair, which strips only BEADS_*:
 // here the mutation runs in exactly the environment the query ran in.
 func ExecCommandRunnerWithExactEnvContext(ctx context.Context, env map[string]string) CommandRunner {
-	return execCommandRunner(ctx, env, false, func() []string { return nil })
+	return execCommandRunner(ctx, env, false, func() []string { return nil }, processBDExecGate())
 }
 
-func execCommandRunner(parent context.Context, env map[string]string, withoutAmbientBeads bool, baseEnvFn func() []string) CommandRunner {
+// execCommandRunner builds the runner every exported constructor returns. Each
+// bd child is admitted through gate immediately before it spawns; any other
+// command runs at once.
+func execCommandRunner(parent context.Context, env map[string]string, withoutAmbientBeads bool, baseEnvFn func() []string, gate *bdExecGate) CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
 		baseEnv := baseEnvFn()
 		execName := name
@@ -136,17 +138,6 @@ func execCommandRunner(parent context.Context, env map[string]string, withoutAmb
 			defer slowTimer.Stop()
 		}
 
-		cmd := exec.CommandContext(ctx, execName, args...)
-		if err := execenv.CheckBatchFileArgs(cmd); err != nil {
-			trace("refused", err)
-			return nil, fmt.Errorf("running %s: %w", name, err)
-		}
-		cmd.WaitDelay = 2 * time.Second
-		prepareCommandForTimeout(cmd)
-		cmd.Dir = dir
-		cmd.Cancel = func() error {
-			return killCommandTree(cmd)
-		}
 		overrides := env
 		if withoutAmbientBeads {
 			baseEnv = envWithoutPrefix(baseEnv, beadsEnvPrefix)
@@ -157,19 +148,49 @@ func execCommandRunner(parent context.Context, env map[string]string, withoutAmb
 				}
 			}
 		}
-		cmd.Env = execEnvFor(name, baseEnv, overrides, func() bool {
-			return bdReadsStandardOTELEnv(ctx, execName)
-		})
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		out, err := cmd.Output()
+		spec := bdChildSpec{
+			name: name,
+			path: execName,
+			dir:  dir,
+			args: args,
+			env: execEnvFor(name, baseEnv, overrides, func() bool {
+				return bdReadsStandardOTELEnv(ctx, execName)
+			}),
+		}
 
-		recordBDExecTelemetry(name, dir, args, start, out, stderr.String(), err)
+		if name == "bd" && bdCommandCoalesces(args) {
+			out, status, traceErr, resultErr := gate.coalescer.do(parent, ctx, spec, timeout, start)
+			trace(status, traceErr)
+			return out, resultErr
+		}
+
+		var waited time.Duration
+		release := func() {}
+		if name == "bd" {
+			admitStart := time.Now()
+			var admitErr error
+			release, admitErr = gate.acquire(ctx, bdCommandIsRead(args))
+			waited = time.Since(admitStart)
+			if admitErr != nil {
+				slotErr := gate.slotWaitError(parent, admitErr, timeout, start)
+				recordBDExecTelemetry(name, dir, args, start, nil, "", slotErr, bdTraceExtra{waitMs: waited.Milliseconds()})
+				trace("slot-wait", slotErr)
+				return nil, slotErr
+			}
+		}
+		res := runBDChild(ctx, spec, nil)
+		release()
+		if res.refused != nil {
+			trace("refused", res.refused)
+			return nil, fmt.Errorf("running %s: %w", name, res.refused)
+		}
+
+		recordBDExecTelemetry(name, dir, args, start, res.out, res.stderr, res.err, bdTraceExtra{waitMs: waited.Milliseconds()})
 
 		status, traceErr, resultErr := classifyBDExecResult(
-			parent, ctx, name, timeout, start, out, stderr.String(), err)
+			parent, ctx, name, timeout, start, res.out, res.stderr, res.err)
 		trace(status, traceErr)
-		return out, resultErr
+		return res.out, resultErr
 	}
 }
 
@@ -225,7 +246,7 @@ func newBDExecTrace(start time.Time, dir, name string, args []string) func(statu
 // failure was not an *exec.ExitError (for example a context kill or a spawn
 // failure). It is independent of the legacy line-format trace (gated by
 // GC_BD_TRACE_JSON, not GC_BD_TRACE).
-func recordBDExecTelemetry(name, dir string, args []string, start time.Time, out []byte, stderr string, err error) {
+func recordBDExecTelemetry(name, dir string, args []string, start time.Time, out []byte, stderr string, err error, extra bdTraceExtra) {
 	if name != "bd" {
 		return
 	}
@@ -238,7 +259,7 @@ func recordBDExecTelemetry(name, dir string, args []string, start time.Time, out
 			traceExit = -1
 		}
 	}
-	TraceBDCall("go:bdstore.runner", dir, args, start, traceExit, err)
+	traceBDCall("go:bdstore.runner", dir, args, start, traceExit, err, extra)
 	telemetry.RecordBDCall(context.Background(),
 		args, float64(time.Since(start).Milliseconds()),
 		err, out, stderr)
@@ -422,14 +443,10 @@ func bdCommandTimeoutFor(name string, args []string) time.Duration {
 	if len(args) >= 2 && args[0] == "create" && args[1] == "--graph" {
 		return bdGraphApplyCommandTimeout
 	}
-	switch args[0] {
-	case "count", "list", "ready", "show", "sql", "stats", "version":
-		return bdReadCommandTimeout
-	case "query":
-		return bdQueryCommandTimeout
-	default:
-		return bdCommandTimeout
+	if verb, ok := bdVerbs[args[0]]; ok {
+		return *verb.timeout
 	}
+	return bdCommandTimeout
 }
 
 // bdStdoutErrorDetail extracts a human-readable error description from

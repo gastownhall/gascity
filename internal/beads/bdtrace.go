@@ -248,6 +248,15 @@ func captureBDTraceCallers() []string {
 	return out
 }
 
+// bdTraceCallersIfEnabled captures the current goroutine's caller frames when
+// the JSON trace is enabled, for a record written later on another goroutine.
+func bdTraceCallersIfEnabled() []string {
+	if strings.TrimSpace(os.Getenv("GC_BD_TRACE_JSON")) == "" {
+		return nil
+	}
+	return captureBDTraceCallers()
+}
+
 // TraceBDCall appends a JSONL record describing one bd subprocess
 // invocation to the file pointed to by the GC_BD_TRACE_JSON env var. When
 // GC_BD_TRACE_JSON is unset the call is a no-op.
@@ -266,6 +275,26 @@ func captureBDTraceCallers() []string {
 // enable one, the other, or both independently. When GC_BD_TRACE_JSON
 // is unset, TraceBDCall returns immediately and is effectively a no-op.
 func TraceBDCall(source, dir string, args []string, start time.Time, exitCode int, err error) {
+	if strings.TrimSpace(os.Getenv("GC_BD_TRACE_JSON")) == "" {
+		return
+	}
+	traceBDCall(source, dir, args, start, exitCode, err, bdTraceExtra{callers: captureBDTraceCallers()})
+}
+
+// bdTraceExtra carries the exec-gate fields of one JSON trace record.
+type bdTraceExtra struct {
+	// waitMs is how long the call queued for a bd exec slot.
+	waitMs int64
+	// waiters is how many callers shared the child's output; zero for a call
+	// that was not coalesced.
+	waiters int
+	// callers are the caller frames to attribute the record to; nil captures
+	// the current goroutine's frames.
+	callers []string
+}
+
+// traceBDCall writes one JSON trace record when GC_BD_TRACE_JSON is set.
+func traceBDCall(source, dir string, args []string, start time.Time, exitCode int, err error, extra bdTraceExtra) {
 	path := strings.TrimSpace(os.Getenv("GC_BD_TRACE_JSON"))
 	if path == "" {
 		return
@@ -280,7 +309,10 @@ func TraceBDCall(source, dir string, args []string, start time.Time, exitCode in
 	if err != nil {
 		errMsg = err.Error()
 	}
-	callers := captureBDTraceCallers()
+	callers := extra.callers
+	if callers == nil {
+		callers = captureBDTraceCallers()
+	}
 	scope := classifyTraceScope(callers)
 	tickTrigger := ""
 	if p := reconcilerTickTrigger.Load(); p != nil {
@@ -301,6 +333,8 @@ func TraceBDCall(source, dir string, args []string, start time.Time, exitCode in
 		Args        []string `json:"args"`
 		Dir         string   `json:"dir,omitempty"`
 		DurMs       int64    `json:"dur_ms"`
+		WaitMs      int64    `json:"wait_ms,omitempty"`
+		Waiters     int      `json:"waiters,omitempty"`
 		ExitCode    int      `json:"exit_code"`
 		Err         string   `json:"err,omitempty"`
 		PID         int      `json:"pid"`
@@ -315,6 +349,8 @@ func TraceBDCall(source, dir string, args []string, start time.Time, exitCode in
 		Args:        args,
 		Dir:         dir,
 		DurMs:       time.Since(start).Milliseconds(),
+		WaitMs:      extra.waitMs,
+		Waiters:     extra.waiters,
 		ExitCode:    exitCode,
 		Err:         errMsg,
 		PID:         os.Getpid(),
