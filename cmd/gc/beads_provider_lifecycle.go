@@ -2526,6 +2526,11 @@ func healthBeadsProviderContext(ctx context.Context, cityPath string, waitForSco
 						return err
 					}
 				}
+				// The durable check covers recoveries decided by other
+				// processes (separate health ticks, bd transport retries).
+				if cooldownErr := managedDoltRecoveryCooldownForCity(cityPath, now, providerRecoverCooldown()); cooldownErr != nil {
+					return fmt.Errorf("%w; recovery skipped: %w", err, cooldownErr)
+				}
 				lastBeadsProviderRecover.Store(cityKey, now)
 			}
 			if recErr := runProviderOpWithEnvContext(ctx, script, providerEnv, "recover"); recErr != nil {
@@ -2549,6 +2554,7 @@ func healthBeadsProviderContext(ctx context.Context, cityPath string, waitForSco
 			if err := reconcileHealthyManagedRuntimePublication(ctx, cityPath, waitForScopes, deps); err != nil {
 				return err
 			}
+			noteManagedDoltStreakAfterProviderHealth(cityPath, currentManagedDoltPort(cityPath), managedDoltUserFromEnv(providerEnv), defaultManagedDoltRecoveryOps())
 		}
 		return nil
 	}

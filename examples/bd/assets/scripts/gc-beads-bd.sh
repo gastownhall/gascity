@@ -2844,9 +2844,11 @@ load_recover_managed_from_gc() {
     GC_RECOVER_PORT="$DOLT_PORT"
     GC_RECOVER_HEALTHY="false"
     GC_RECOVER_RESTARTED="false"
+    GC_RECOVER_DEFERRED="false"
     [ -n "$gc_bin" ] || return 1
     GC_RECOVER_MANAGED_USED="true"
-    output=$("$gc_bin" dolt-state recover-managed --city "$GC_CITY_PATH" --host "$DOLT_HOST" --port "$DOLT_PORT" --user "$DOLT_USER" --log-level "$DOLT_LOGLEVEL" --timeout-ms 30000 </dev/null 2>/dev/null)
+    # The helper's stderr carries its restart/deferral reason; keep it visible.
+    output=$("$gc_bin" dolt-state recover-managed --city "$GC_CITY_PATH" --host "$DOLT_HOST" --port "$DOLT_PORT" --user "$DOLT_USER" --log-level "$DOLT_LOGLEVEL" --timeout-ms 30000 </dev/null)
     status=$?
     while IFS="$(printf '	')" read -r key value; do
         case "$key" in
@@ -2880,6 +2882,10 @@ load_recover_managed_from_gc() {
                 ;;
             restarted)
                 GC_RECOVER_RESTARTED="$value"
+                parsed=true
+                ;;
+            deferred)
+                GC_RECOVER_DEFERRED="$value"
                 parsed=true
                 ;;
         esac
@@ -5184,6 +5190,9 @@ op_recover() {
             echo "detected read-only dolt server — restarting" >&2
         fi
         DOLT_PORT="$GC_RECOVER_PORT"
+        if [ "$GC_RECOVER_DEFERRED" = "true" ]; then
+            die "dolt recovery deferred by gc helper: the server was left running (decision recorded in dolt.log when writable)"
+        fi
         die "dolt recovery via gc helper failed"
     fi
 

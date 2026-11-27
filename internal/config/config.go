@@ -2954,6 +2954,19 @@ type DaemonConfig struct {
 	// that budget can be cut short on that path even though the direct
 	// stop/unregister path always honors the full grace.
 	DoltStopTimeout string `toml:"dolt_stop_timeout,omitempty" jsonschema:"default=30s"`
+	// DoltUnresponsiveRestartAfter is how long a managed dolt server that still
+	// accepts TCP connections must keep failing SQL probes, as the same
+	// verified server incarnation with no healthy observation in between,
+	// before automatic recovery may restart it. A failure that comes more than
+	// this window after the previous failed probe, or more than two minutes
+	// after it when the window is shorter, starts a fresh window instead of
+	// extending the streak. A single timed-out probe never restarts a
+	// listening server under a positive window. Duration string
+	// (e.g., "180s", "5m"). Defaults to "180s". "0s" removes the delay for a
+	// positively observed listening server; it never authorizes a restart
+	// from an inconclusive observation. Negative or malformed values are
+	// rejected, and recovery then refuses to stop the server.
+	DoltUnresponsiveRestartAfter string `toml:"dolt_unresponsive_restart_after,omitempty" jsonschema:"default=180s"`
 	// DoltStartAddressInUseRetryWindow is how long the managed dolt start
 	// path waits on the originally requested port when dolt reports it in
 	// use ("address already in use", or "Port N already in use." from dolt
@@ -3371,6 +3384,32 @@ const DefaultDoltStopTimeout = 30 * time.Second
 // upstream rather than silently overriding it here.
 func (d *DaemonConfig) DoltStopTimeoutDuration() time.Duration {
 	return durationOr(d.DoltStopTimeout, DefaultDoltStopTimeout)
+}
+
+// DefaultDoltUnresponsiveRestartAfter is the continuous-unresponsiveness
+// window that gates automatic restart of a still-listening managed dolt
+// server when [daemon].dolt_unresponsive_restart_after is unset.
+const DefaultDoltUnresponsiveRestartAfter = 180 * time.Second
+
+// DoltUnresponsiveRestartAfterDuration returns the continuous-unresponsiveness
+// window for a still-listening managed dolt server. Empty selects
+// DefaultDoltUnresponsiveRestartAfter; zero disables the delay. Unlike the
+// other daemon durations it does not fall back on malformed or negative
+// input: the caller is deciding whether to stop a live server, so a broken
+// setting is an error rather than a silently chosen policy.
+func (d *DaemonConfig) DoltUnresponsiveRestartAfterDuration() (time.Duration, error) {
+	raw := strings.TrimSpace(d.DoltUnresponsiveRestartAfter)
+	if raw == "" {
+		return DefaultDoltUnresponsiveRestartAfter, nil
+	}
+	dur, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("[daemon] dolt_unresponsive_restart_after = %q is not a valid duration: %w", d.DoltUnresponsiveRestartAfter, err)
+	}
+	if dur < 0 {
+		return 0, fmt.Errorf("[daemon] dolt_unresponsive_restart_after must not be negative: got %q", d.DoltUnresponsiveRestartAfter)
+	}
+	return dur, nil
 }
 
 // DefaultDoltStartAddressInUseRetryWindow is the per-port retry window used
