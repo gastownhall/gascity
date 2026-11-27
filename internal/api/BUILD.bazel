@@ -436,6 +436,7 @@ go_test(
         "hangbudget_test.go",
         "huma_handlers_beads_class_flip_test.go",
         "huma_handlers_mail_telemetry_test.go",
+        "huma_handlers_run_cancel_drain_units_test.go",
         "huma_handlers_run_cancel_test.go",
         "huma_handlers_run_launch_test.go",
         "huma_handlers_runs_test.go",

@@ -168,6 +168,11 @@ const (
 // ties the contract together.
 const CheckModeExec = "exec"
 
+// SyntheticKindDrainUnitConvoy is the SyntheticKindMetadataKey
+// ("gc.synthetic_kind") value of the unit convoy a drain mints for each
+// manifest row.
+const SyntheticKindDrainUnitConvoy = "drain-unit-convoy"
+
 // Values of ScopeKindMetadataKey ("gc.scope_kind").
 const (
 	ScopeKindCity = "city"

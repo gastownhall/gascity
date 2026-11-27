@@ -36,14 +36,13 @@ const (
 	drainPredecessorFailedCloseReason = "drain failed: a blocking predecessor closed with a failed outcome"
 	// drainUnitConvoySyntheticKind is the gc.synthetic_kind of the unit
 	// convoys a drain mints, one per manifest row.
-	drainUnitConvoySyntheticKind = "drain-unit-convoy"
+	drainUnitConvoySyntheticKind = beadmeta.SyntheticKindDrainUnitConvoy
 )
 
 // DrainUnitRetiredCloseReason is stamped as close_reason on each unit convoy
-// retired because its drain control reached a terminal state. It is prose
-// rather than a token for the same reason as drainPredecessorFailedCloseReason:
-// bd rejects close reasons shorter than 20 characters.
-const DrainUnitRetiredCloseReason = "drain unit retired: its drain control reached a terminal state"
+// retired because its drain control reached a terminal state, by the drain's
+// own close and by the workflow finalizer alike.
+const DrainUnitRetiredCloseReason = sourceworkflow.DrainUnitRetiredCloseReason
 
 type drainManifest struct {
 	Version        int                `json:"version"`
@@ -1249,14 +1248,10 @@ func retireDrainRowUnitConvoys(store beads.GraphStore, drainID string, row drain
 // its row's own verdict. A row that never reached one (skipped, or stopped
 // short by a terminal failure) closes skipped.
 func drainUnitRetiredOutcome(status string) string {
-	switch status {
-	case "succeeded":
-		return beadmeta.OutcomePass
-	case "failed":
-		return beadmeta.OutcomeFail
-	default:
-		return beadmeta.OutcomeSkipped
+	if verdict, ok := sourceworkflow.DrainRowVerdict(status); ok {
+		return verdict
 	}
+	return beadmeta.OutcomeSkipped
 }
 
 // drainUnitRetiredMetadata is the metadata a unit convoy retires with: outcome
@@ -1281,7 +1276,8 @@ func DrainUnitConvoyControlID(bead beads.Bead) string {
 // retirement. It reports whether unit, an open drain unit convoy, is due to
 // retire because control, the drain control unit names
 // (DrainUnitConvoyControlID), has closed, and the gc.outcome it retires with:
-// the verdict of its row in the control's manifest. The close carries
+// the verdict of its row in the control's manifest
+// (sourceworkflow.DrainUnitVerdicts). The close carries
 // DrainUnitRetiredCloseReason.
 //
 // A drain retires its own units when it closes itself (closeDrainControl), but
@@ -1299,21 +1295,11 @@ func DrainUnitConvoyRetirement(unit, control beads.Bead) (string, bool, error) {
 		control.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindDrain {
 		return "", false, nil
 	}
-	raw := control.Metadata[drainManifestMetadataKey]
-	if strings.TrimSpace(raw) == "" {
-		return beadmeta.OutcomeSkipped, true, nil
-	}
-	manifest, err := parseDrainManifest(raw)
+	verdicts, err := sourceworkflow.ReadDrainUnitVerdicts(control)
 	if err != nil {
-		return "", false, fmt.Errorf("drain unit convoy %s: parsing the manifest of its drain %s: %w", unit.ID, controlID, err)
+		return "", false, fmt.Errorf("drain unit convoy %s: %w", unit.ID, err)
 	}
-	unitKey := strings.TrimSpace(unit.Metadata[beadmeta.DrainUnitKeyMetadataKey])
-	for _, row := range manifest.Rows {
-		if row.UnitConvoyID == unit.ID || (unitKey != "" && row.UnitKey == unitKey) {
-			return drainUnitRetiredOutcome(row.Status), true, nil
-		}
-	}
-	return beadmeta.OutcomeSkipped, true, nil
+	return verdicts.OutcomeOr(unit, beadmeta.OutcomeSkipped), true, nil
 }
 
 // drainValidationClosedError reports a drain that failed validation while its
