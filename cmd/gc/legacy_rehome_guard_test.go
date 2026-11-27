@@ -242,3 +242,57 @@ func TestCanonicalizeLegacyAssignedWorkLeavesForeignInFlightOnSharedRigLeg(t *te
 		}
 	})
 }
+
+// AC-4
+
+// TestCanonicalizeLegacyRoutedWorkRehomesOwnMintedBindingOnSharedRigLeg: a
+// binding this city mints on the rig is its own legacy spelling, from each of
+// the three sources cityMintsBindingOnRig reads, and re-homes exactly once.
+func TestCanonicalizeLegacyRoutedWorkRehomesOwnMintedBindingOnSharedRigLeg(t *testing.T) {
+	const legacy, canonical = "R/b.name", "R/name"
+	minter := poolAgent("other", "R", intPtr(1), 0)
+	minter.BindingName = "b"
+	cases := map[string]*config.City{
+		"city import": {
+			Imports: map[string]config.Import{"b": {Source: "./packs/b"}},
+			Agents:  []config.Agent{poolAgent("name", "R", intPtr(3), 0)},
+		},
+		"rig import on R": {
+			Rigs:   []config.Rig{{Name: "R", Imports: map[string]config.Import{"b": {Source: "./packs/b"}}}},
+			Agents: []config.Agent{poolAgent("name", "R", intPtr(3), 0)},
+		},
+		"agent binding on R": {
+			Agents: []config.Agent{poolAgent("name", "R", intPtr(3), 0), minter},
+		},
+	}
+	for name, cfg := range cases {
+		t.Run(name, func(t *testing.T) {
+			wb := workBead("wb-1", legacy, "", "open", 2)
+			mem := beads.NewMemStoreFrom(0, []beads.Bead{wb}, nil)
+			store := &updateCountingStore{Store: mem}
+			refs := []string{"rig:R"}
+
+			report := canonicalizeLegacyBoundUnassignedRoutedWork(cfg, []beads.Bead{wb}, []beads.Store{store}, refs, io.Discard)
+
+			rehomed := mustGetBead(t, mem, "wb-1")
+			if got := rehomed.Metadata[beadmeta.RoutedToMetadataKey]; got != canonical {
+				t.Fatalf("gc.routed_to = %q, want %q", got, canonical)
+			}
+			want := legacyRehomeReport{Rehomed: []legacyRehomeRow{{
+				ID: "wb-1", Leg: "rig:R",
+				Changes: []legacyRehomeChange{{Field: beadmeta.RoutedToMetadataKey, From: legacy, To: canonical}},
+			}}}
+			if !reflect.DeepEqual(report, want) {
+				t.Errorf("report = %+v, want %+v", report, want)
+			}
+
+			again := canonicalizeLegacyBoundUnassignedRoutedWork(cfg, []beads.Bead{rehomed}, []beads.Store{store}, refs, io.Discard)
+			if store.updates != 1 {
+				t.Errorf("Update calls = %d, want 1 (second pass writes nothing)", store.updates)
+			}
+			if len(again.Rehomed)+len(again.Refused) != 0 {
+				t.Errorf("second pass report = %+v, want empty", again)
+			}
+		})
+	}
+}
