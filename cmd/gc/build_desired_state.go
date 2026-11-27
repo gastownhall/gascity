@@ -815,6 +815,9 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 				fmt.Fprintf(stderr, "buildDesiredState: %v (using named demand=false)\n", err) //nolint:errcheck
 			}
 		}
+		// A template whose blind seats keep churning spawns none for a while
+		// (pool_spawn_churn.go).
+		collected.BlindSpawnAllowance = poolSpawnChurnGuardFor(cityPath).allowance()
 		merged := mergeCollectedDemand(cfg, collected)
 		scaleCheckCounts, scaleCheckDemandByTemplate = merged.ScaleCheckCounts, merged.ScaleCheckDemand
 		poolScaleCheckPartialTemplates = merged.PoolScaleCheckPartial
