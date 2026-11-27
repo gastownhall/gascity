@@ -23,29 +23,30 @@ var ErrClaimGenerationReserved = errors.New("claim exact: onSuccess.Metadata mus
 // the bead's current value exactly.
 type ClaimExactPreconditions struct {
 	Status            *string
+	Assignee          *string
 	RoutedTo          *string
 	RootBeadID        *string
+	StepID            *string
 	ContinuationGroup *string
 }
 
-// ClaimExactOutcome classifies how ClaimExact resolved. It is always paired
-// with a nil error; a non-nil error means the call could not be confirmed as a
-// clean win (unknown bead, store without conditional-write support, an
-// unsupported onSuccess field) and the outcome is "". On error the returned
-// bead is the freshest snapshot this call held: a re-Get after a failed
-// write, or the pre-write Get snapshot. It is the zero Bead only when the
-// reserved-key guard rejected the call before any read, or when the initial
-// Get itself failed — check for that before inspecting it.
+// ClaimExactOutcome classifies how ClaimExact resolved. A non-nil error
+// normally leaves the outcome empty. If the write succeeded and only the
+// canonical readback failed, the outcome is ClaimExactClaimed alongside
+// the error: callers must not try another claim. On error the returned bead
+// is the freshest available snapshot, possibly the pre-write snapshot or
+// zero if the first read never succeeded.
 type ClaimExactOutcome string
 
 const (
 	// ClaimExactClaimed means the preconditions matched and a single
 	// revision-fenced UpdateIfMatch atomically advanced the generation
 	// transition and applied onSuccess together; no other write could have
-	// interleaved between the two.
+	// interleaved between the two. A non-nil error means the write
+	// committed but its canonical readback failed.
 	ClaimExactClaimed ClaimExactOutcome = "claimed"
-	// ClaimExactPreconditionFailed means the bead's current status, routing,
-	// or workflow root/group identity did not match want. No write was
+	// ClaimExactPreconditionFailed means the bead's current status, assignee, routing,
+	// or workflow root/step/group identity did not match want. No write was
 	// attempted.
 	ClaimExactPreconditionFailed ClaimExactOutcome = "precondition_failed"
 	// ClaimExactStale means the bead's claim generation was not exactly
@@ -68,7 +69,7 @@ const (
 )
 
 // ClaimExact claims the single bead id only when want's fields match the
-// bead's current status/routing/root/group and the bead's current
+// bead's current status/assignee/routing/root/step/group and the bead's current
 // beadmeta.ClaimGenerationMetadataKey equals fromGeneration. On a match it
 // atomically advances the generation key by one AND applies onSuccess
 // (typically execution identity: Assignee, DirectSessionID/SessionName
@@ -97,11 +98,18 @@ const (
 // onSuccess.Metadata must not set beadmeta.ClaimGenerationMetadataKey; doing
 // so returns ErrClaimGenerationReserved without writing anything.
 func ClaimExact(store beads.MoleculeTarget, id string, want ClaimExactPreconditions, fromGeneration string, onSuccess beads.UpdateOpts) (beads.Bead, ClaimExactOutcome, error) {
+	writer, _ := beads.As[beads.ConditionalWriter](store)
+	return ClaimExactWithWriter(store.Get, writer, id, want, fromGeneration, onSuccess)
+}
+
+// ClaimExactWithWriter is ClaimExact for a store whose conditional writer is
+// supplied separately from its read interface.
+func ClaimExactWithWriter(get func(string) (beads.Bead, error), writer beads.ConditionalWriter, id string, want ClaimExactPreconditions, fromGeneration string, onSuccess beads.UpdateOpts) (beads.Bead, ClaimExactOutcome, error) {
 	if _, reserved := onSuccess.Metadata[beadmeta.ClaimGenerationMetadataKey]; reserved {
 		return beads.Bead{}, "", fmt.Errorf("claim exact %q: %w", id, ErrClaimGenerationReserved)
 	}
 
-	b, err := store.Get(id)
+	b, err := get(id)
 	if err != nil {
 		return beads.Bead{}, "", fmt.Errorf("claim exact %q: %w", id, err)
 	}
@@ -119,24 +127,30 @@ func ClaimExact(store beads.MoleculeTarget, id string, want ClaimExactPreconditi
 		return b, "", fmt.Errorf("claim exact %q: %w", id, err)
 	}
 
-	writer, ok := beads.As[beads.ConditionalWriter](store)
-	if !ok {
+	if writer == nil {
 		return b, "", fmt.Errorf("claim exact %q: %w", id, beads.ErrConditionalWriteUnsupported)
 	}
 
 	effects := claimEffectsWithGeneration(onSuccess, toGeneration)
 	if err := writer.UpdateIfMatch(id, b.Revision, effects); err != nil {
 		if beads.IsPreconditionFailed(err) {
-			return bestEffortGet(store, id, b), ClaimExactStale, nil
+			return bestEffortRead(get, id, b), ClaimExactStale, nil
 		}
-		return bestEffortGet(store, id, b), "", fmt.Errorf("claim exact %q: applying claim effects: %w", id, err)
+		return bestEffortRead(get, id, b), "", fmt.Errorf("claim exact %q: applying claim effects: %w", id, err)
 	}
 
-	final, err := store.Get(id)
+	final, err := get(id)
 	if err != nil {
-		return b, "", fmt.Errorf("claim exact %q: re-read after claim: %w", id, err)
+		return b, ClaimExactClaimed, fmt.Errorf("claim exact %q: re-read after claim: %w", id, err)
 	}
 	return final, ClaimExactClaimed, nil
+}
+
+func bestEffortRead(get func(string) (beads.Bead, error), id string, fallback beads.Bead) beads.Bead {
+	if fresh, err := get(id); err == nil {
+		return fresh
+	}
+	return fallback
 }
 
 // claimEffectsWithGeneration returns a copy of onSuccess with
@@ -154,25 +168,20 @@ func claimEffectsWithGeneration(onSuccess beads.UpdateOpts, toGeneration string)
 	return effects
 }
 
-// bestEffortGet re-reads id and returns the fresh snapshot, falling back to
-// fallback if the re-read itself fails. It is only used on error paths where
-// the caller already has a reasonably fresh bead in hand and a failed re-read
-// should not turn into an empty, uninformative zero value.
-func bestEffortGet(store beads.MoleculeTarget, id string, fallback beads.Bead) beads.Bead {
-	if fresh, err := store.Get(id); err == nil {
-		return fresh
-	}
-	return fallback
-}
-
 func claimExactPreconditionsMatch(b beads.Bead, want ClaimExactPreconditions) bool {
 	if want.Status != nil && b.Status != *want.Status {
+		return false
+	}
+	if want.Assignee != nil && b.Assignee != *want.Assignee {
 		return false
 	}
 	if want.RoutedTo != nil && b.Metadata[beadmeta.RoutedToMetadataKey] != *want.RoutedTo {
 		return false
 	}
 	if want.RootBeadID != nil && b.Metadata[beadmeta.RootBeadIDMetadataKey] != *want.RootBeadID {
+		return false
+	}
+	if want.StepID != nil && b.Metadata[beadmeta.StepIDMetadataKey] != *want.StepID {
 		return false
 	}
 	if want.ContinuationGroup != nil && b.Metadata[beadmeta.ContinuationGroupMetadataKey] != *want.ContinuationGroup {

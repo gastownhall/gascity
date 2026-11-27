@@ -561,6 +561,11 @@ func (r *hookClaimClassRoute) claim(beadID, assignee string) (beads.Bead, bool, 
 		r.graph.Get)
 }
 
+func (r *hookClaimClassRoute) claimExact(candidate beads.Bead, assignee, sessionID string) (beads.Bead, bool, error) {
+	writer, _ := beads.As[beads.ConditionalWriter](r.class)
+	return hookClaimExactThroughStore(r.graph.Get, writer, candidate, assignee, sessionID)
+}
+
 // listContinuation reads a continuation group out of the binding and records
 // every member as resident, so the per-sibling assignment that follows does not
 // re-probe (or re-fail) one bd subprocess at a time.
@@ -632,16 +637,11 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 	route.readLeg = base.ReadWorkMeta
 	ops.ClassRoute = route
 
-	ops.Claim = func(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
-		if route.knownResident(beadID) {
-			return route.claim(beadID, assignee)
-		}
-		// The work-scope claim is the first leg of the escalation: a
-		// not-found here is the signal to probe the binding. It is a bd
-		// subprocess, not a store read, so it declares no leg (a test double
-		// that reads a store declares its own: beadstest.FederatedLeg).
-		claimed, ok, err := base.Claim(ctx, dir, env, beadID, assignee)
-		leg := hookStore{dir: dir, env: env}
+	// Both work-scope claim primitives use the bd subprocess, so neither
+	// declares an in-process read leg. Test doubles that read a store declare
+	// their own. Escalate to the binding only after proving work-scope absence.
+	claimWorkFirst := func(ctx context.Context, dir string, env []string, beadID, assignee string, attempt, onBinding func() (beads.Bead, bool, error)) (beads.Bead, bool, error) {
+		claimed, ok, err := attempt()
 		if ok {
 			// The work store's CAS COMMITTED. Its error, if any, is the
 			// canonical readback failing on a bead this session now owns HERE —
@@ -651,15 +651,40 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 			// the work store's answer is returned exactly as it came back.
 			return claimed, ok, err
 		}
-		routed, probeErr := route.routes(ctx, leg, beadID, assignee, err)
+		routed, probeErr := route.routes(ctx, hookStore{dir: dir, env: env}, beadID, assignee, err)
 		switch {
 		case probeErr != nil:
 			return beads.Bead{}, false, probeErr
 		case routed:
-			return route.claim(beadID, assignee)
+			return onBinding()
 		default:
 			return claimed, ok, err
 		}
+	}
+
+	ops.Claim = func(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
+		if route.knownResident(beadID) {
+			return route.claim(beadID, assignee)
+		}
+		return claimWorkFirst(ctx, dir, env, beadID, assignee,
+			func() (beads.Bead, bool, error) { return base.Claim(ctx, dir, env, beadID, assignee) },
+			func() (beads.Bead, bool, error) { return route.claim(beadID, assignee) })
+	}
+
+	// The exact claim is a claim, so it escalates on the same terms as ops.Claim
+	// through the same work-scope leg. Without it a graph step resident in a
+	// relocated binding that is not yet memoized resident was answered
+	// ErrNotFound by the work store and never reached the binding the reader
+	// served it from.
+	ops.ClaimExact = func(ctx context.Context, dir string, env []string, candidate beads.Bead, assignee, sessionID string) (beads.Bead, bool, error) {
+		if route.knownResident(candidate.ID) {
+			return route.claimExact(candidate, assignee, sessionID)
+		}
+		return claimWorkFirst(ctx, dir, env, candidate.ID, assignee,
+			func() (beads.Bead, bool, error) {
+				return base.ClaimExact(ctx, dir, env, candidate, assignee, sessionID)
+			},
+			func() (beads.Bead, bool, error) { return route.claimExact(candidate, assignee, sessionID) })
 	}
 
 	ops.StampWorkMeta = func(ctx context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error {
