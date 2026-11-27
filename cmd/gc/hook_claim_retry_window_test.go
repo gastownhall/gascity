@@ -491,3 +491,132 @@ func TestFederatedClaimLostCASFallsThroughToLaterLeg(t *testing.T) {
 		t.Fatal("drain was acknowledged although the later leg's work was claimed")
 	}
 }
+
+// Claim-path reads stop at the invocation read deadline (InvokedAt + window -
+// reserve). A read that answers at or after it, or would start after it, is a
+// timed-out read: exit 2 with the store-unavailable token, a work-query-failure
+// event naming the leg that was cut, no drain, and never a window refusal.
+func TestClaimReadsStopAtTheInvocationReadBudget(t *testing.T) {
+	cases := []struct {
+		name string
+		// cost of every read; work is only in the last leg.
+		cost time.Duration
+		// primaryFree makes the agent's own (empty) leg answer instantly.
+		primaryFree bool
+		window      time.Duration
+		rigs        []string
+		// cutLeg is the rig whose work-query-failure event must be recorded.
+		cutLeg string
+		// unread lists legs the runner must never be called for.
+		unread []string
+	}{
+		{name: "late answer on the last leg", cost: 60 * time.Second, rigs: []string{"alpha", "beta"}, cutLeg: "beta"},
+		{name: "budget spent before a leg starts", cost: 80 * time.Second, rigs: []string{"alpha", "beta"}, cutLeg: "beta", unread: []string{"/rig-beta"}},
+		// A 12s override leaves a 6s budget (reserve = window/2), which the
+		// rig leg's 7s read overruns.
+		{name: "override window below the mutation reserve", cost: 7 * time.Second, primaryFree: true, window: 12 * time.Second, rigs: []string{"alpha"}, cutLeg: "alpha"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withProductionClaimRetryPacing(t)
+			b := newBudgetClaimHarness()
+			stores := budgetLegs(tc.rigs...)
+			if tc.primaryFree {
+				b.leg("/city", 0, budgetEmpty)
+			}
+			for _, st := range stores[:len(stores)-1] {
+				if _, scripted := b.costs[st.dir]; !scripted {
+					b.leg(st.dir, tc.cost, budgetEmpty)
+				}
+			}
+			last := stores[len(stores)-1]
+			b.leg(last.dir, tc.cost, hookRunnerAnswer{out: routedRowJSON("work-1")})
+			ops := b.ops()
+			if tc.window > 0 {
+				ops.ClaimWindow = tc.window
+			}
+
+			code, stdout, stderr := b.claim(stores, ops)
+
+			if code != 2 || !strings.Contains(stderr, hookStoreUnavailableToken) {
+				t.Fatalf("exit = %d, want 2 with %s; reads=%v starts=%v stderr=%s", code, hookStoreUnavailableToken, b.reads, b.clock.readStarts, stderr)
+			}
+			if len(b.windowExpired) != 0 {
+				t.Fatalf("a read that ran out of budget was reported as a window refusal: %+v", b.windowExpired)
+			}
+			if len(b.claims) != 0 {
+				t.Fatalf("claims = %v, want none: an answer past the read deadline must not reach a CAS", b.claims)
+			}
+			if stdout != "" || b.drained {
+				t.Fatalf("stdout = %q, drained = %v; want no drain result and drain-ack unconsumed", stdout, b.drained)
+			}
+			named := false
+			for _, ev := range b.events {
+				if strings.Contains(ev.Message, fmt.Sprintf("rig %q", tc.cutLeg)) {
+					named = true
+				}
+			}
+			if !named {
+				t.Fatalf("no work-query-failure event names rig %q; events=%+v", tc.cutLeg, b.events)
+			}
+			for _, dir := range tc.unread {
+				if b.calls[dir] != 0 {
+					t.Fatalf("leg %s was read %d time(s) after the read budget was spent", dir, b.calls[dir])
+				}
+			}
+		})
+	}
+}
+
+// A claim whose override window leaves a budget the read fits in still claims:
+// the reserve never eats the whole window.
+func TestClaimReadBudgetUnderAWindowOverrideStillClaims(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		window time.Duration
+		cost   time.Duration
+	}{
+		{name: "window below the reserve keeps half", window: 12 * time.Second, cost: 5 * time.Second},
+		{name: "window above the reserve keeps window minus reserve", window: 30 * time.Second, cost: 19 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withProductionClaimRetryPacing(t)
+			b := newBudgetClaimHarness()
+			stores := budgetLegs()
+			b.leg("/city", tc.cost, hookRunnerAnswer{out: routedRowJSON("work-1")})
+			ops := b.ops()
+			ops.ClaimWindow = tc.window
+
+			code, _, stderr := b.claim(stores, ops)
+
+			if code != 0 || len(b.claims) != 1 {
+				t.Fatalf("exit = %d, claims = %v; want the read inside the budget claimed; stderr=%s", code, b.claims, stderr)
+			}
+		})
+	}
+}
+
+// In production the read deadline is also the parent of each work-query
+// subprocess, so a read still running when the budget runs out is killed there,
+// not at its own later hookWorkQueryTimeout, and its error says which fired.
+func TestClaimReadContextKillsAReadAtTheReadDeadline(t *testing.T) {
+	ops := hookClaimOps{InvokedAt: time.Now(), ClaimWindow: 400 * time.Millisecond}
+	ctx, cancel := ops.claimReadContext()
+	defer cancel()
+
+	started := time.Now()
+	_, err := shellWorkQueryWithEnvContext(ctx, "sleep 30", t.TempDir(), nil)
+
+	if elapsed := time.Since(started); elapsed > 10*time.Second {
+		t.Fatalf("read ran %s, want it killed at the ~200ms read deadline", elapsed)
+	}
+	if !errors.Is(err, errHookClaimReadBudgetSpent) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want the read-budget cut (wrapping context.DeadlineExceeded)", err)
+	}
+	if !strings.Contains(err.Error(), "timed out after the invocation's claim read deadline") {
+		t.Fatalf("err = %q, want it to name the claim read deadline", err)
+	}
+	if !workQueryStoreUnavailable(err) {
+		t.Fatalf("err = %v, want it classified store-unavailable like any timed-out read", err)
+	}
+}
