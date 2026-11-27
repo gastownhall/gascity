@@ -147,8 +147,8 @@ type gcShape struct {
 	stores map[string]beads.Store
 }
 
-// roots are the production readers for the shape, as tickWispGC and the
-// work lane build them.
+// roots are the production readers for the shape, as the wisp GC lane's
+// purge and the work lane build them.
 func (s gcShape) roots() wispGCRoots {
 	if s.legs == nil {
 		return wispGCGraphRoots(s.epoch, s.graph)
@@ -556,12 +556,12 @@ func gcRefHasLabel(labels []string, want string) bool {
 	return false
 }
 
-// TestTickWispGCReadsHoldersThroughTheCensusLegs: the tick hands the GC the
-// census legs' readers on a city whose routes relocate graph, so the holder
-// guard reads a rig's holders: a stepless wisp whose only source, in the rig,
-// is terminal closes. Without the rig's reader the guard would answer "held"
-// and keep it open forever.
-func TestTickWispGCReadsHoldersThroughTheCensusLegs(t *testing.T) {
+// TestWispGCLane_ReadsHoldersThroughTheCensusLegs: the wisp GC lane's purge
+// hands the GC the census legs' readers on a city whose routes relocate
+// graph, so the holder guard reads a rig's holders: a stepless wisp whose only
+// source, in the rig, is terminal closes. Without the rig's reader the guard
+// would answer "held" and keep it open forever.
+func TestWispGCLane_ReadsHoldersThroughTheCensusLegs(t *testing.T) {
 	cr, e := laneRuntime(t, true)
 	graph := e.graphStore()
 	root := fedCreate(t, graph, beads.Bead{Title: "stepless wisp", Type: "molecule", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWisp}})
@@ -577,7 +577,9 @@ func TestTickWispGCReadsHoldersThroughTheCensusLegs(t *testing.T) {
 		// A negative idle TTL puts the cutoff ahead of now: the root just
 		// created counts as idle, with no wait.
 		withCloseAbandonedTTL(t, -time.Hour, func() {
-			cr.tickWispGC(&tickPass{})
+			if !runLanePass(cr, true) {
+				t.Fatalf("the woken wisp GC lane did not purge; stderr: %s", cr.stderr.(*bytes.Buffer).String())
+			}
 		})
 	})
 	if got, err := graph.Get(root.ID); err == nil && got.Status != "closed" {

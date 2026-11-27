@@ -640,3 +640,36 @@ func TestCityRuntimeTickFSPressureSkipCompletesAndDrainsConvergence(t *testing.T
 		t.Errorf("FS-pressure-skipped tick trace completion = %q, want %q", got, TraceCompletionCompleted)
 	}
 }
+
+// Kills: a deferred wake that purges inside an FS-pressure episode, and a lane
+// gate of its own that delays the purge past the tick's forced escape. While
+// the tick's gate skips ticks, a woken wisp GC lane pass starts no purge; the
+// tick the gate forces through wakes the lane, and that wake purges at once.
+func TestWispGCLane_StartsNoPurgeWhileTheTickShedsFSPressure(t *testing.T) {
+	withFakePressureFile(t, []byte(samplePressureHigh), nil)
+	t.Setenv(fsPressureThresholdEnv, "")
+	var runs atomic.Int32
+	cr, _, _ := newWispGCLaneRuntime(t, countingWispGC{runs: &runs})
+	lane := cr.wispGCLaneOf()
+
+	for skip := 1; skip <= maxConsecutiveFSPressureSkips; skip++ {
+		runBareTick(cr, "patrol")
+		if n := drainWispGCWakes(lane); n != 0 {
+			t.Fatalf("FS-pressure-skipped tick %d woke the wisp GC lane %d time(s), want 0", skip, n)
+		}
+		if runLanePass(cr, true) {
+			t.Fatalf("a deferred wake purged after FS-pressure-skipped tick %d", skip)
+		}
+	}
+
+	runBareTick(cr, "patrol")
+	if n := drainWispGCWakes(lane); n != 1 {
+		t.Fatalf("the tick the FS-pressure gate forced through woke the wisp GC lane %d time(s), want 1", n)
+	}
+	if !runLanePass(cr, true) {
+		t.Fatal("the forced tick's wake did not purge")
+	}
+	if got := runs.Load(); got != 1 {
+		t.Fatalf("purges = %d, want 1, from the forced tick's wake", got)
+	}
+}
