@@ -288,11 +288,18 @@ func runPostStartAttemptWith(ctx context.Context, t *testing.T, item preparedSta
 }
 
 // requireBeadUnchanged fails if the bead differs from want: a late answer from
-// an abandoned provider call must not write anything.
+// an abandoned provider call must not write anything. The runtime-owner record
+// (SESSION-START-029) is exempt: it is the start's own synchronous write after
+// its provider Start, so against an at-arm snapshot it legitimately appears,
+// and no commit or release path ever writes it.
 func requireBeadUnchanged(t *testing.T, store beads.Store, want beads.Bead) {
 	t.Helper()
 	got := mustGetBead(t, store, want.ID)
-	if got.Status != want.Status || !maps.Equal(got.Metadata, want.Metadata) {
+	gotMeta := maps.Clone(got.Metadata)
+	wantMeta := maps.Clone(want.Metadata)
+	delete(gotMeta, "runtime_owner")
+	delete(wantMeta, "runtime_owner")
+	if got.Status != want.Status || !maps.Equal(gotMeta, wantMeta) {
 		t.Fatalf("bead %s changed after the abandoned call returned: status=%q metadata=%#v, want status=%q metadata=%#v", want.ID, got.Status, got.Metadata, want.Status, want.Metadata)
 	}
 }

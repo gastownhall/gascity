@@ -50,6 +50,7 @@ var effectBannedMethods = []string{
 	"StopUnattendedSession", "StopForCleanup",
 	"SetContentHold", "ContentHoldItem", "ClearContentHold",
 	"MintIncarnation", "ConfirmIncarnation", // the Manager's and legacy's mint: a v2 effect mints in its own CAS section
+	"RecordRuntimeOwner", "RecordAdoptedRuntimeOwners", // legacy's runtime-owner record (SESSION-START-029), a blind write
 	"NewStore", // session.NewStore: the raw session front door
 }
 

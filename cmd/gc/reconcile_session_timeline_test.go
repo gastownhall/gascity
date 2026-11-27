@@ -360,7 +360,10 @@ func (n normalizer) view(o, prev parityOutcome, sp *simProvider) map[string]stri
 // masked; the other breakdown fields as they are.
 func goldenShown(aspect, v string) string {
 	key := aspect[strings.LastIndex(aspect, ":")+1:]
-	if v != "" && (strings.HasSuffix(key, "_hash") || strings.HasSuffix(key, "drift_deferred_key") || key == "core_hash_breakdown.Env") {
+	// The runtime-owner record (SESSION-START-029) carries the recording
+	// process's uid and boot id, which no golden can pin; its presence is
+	// the fact, not its value.
+	if v != "" && (strings.HasSuffix(key, "_hash") || strings.HasSuffix(key, "drift_deferred_key") || key == "runtime_owner" || key == "core_hash_breakdown.Env") {
 		return "<changed>"
 	}
 	return v
@@ -570,6 +573,12 @@ const timelineGoldenBaseline = "O7 baseline: legacy at 72115d84b4 (TL)"
 // every FingerprintExtra key.
 const timelineFingerprintV7 = "fix #8079 (mc-vg1pe): FingerprintVersion v7 moves the stored hash prefix only (owner ruling 2026-10-18; also mc-lmixa)"
 
+// timelineRuntimeOwnerRecord admits the runtime-owner fence record
+// (SESSION-START-029, #5870) in legacy's outcomes: each started row gains
+// its runtime_owner key, whose value (the recording process's uid and boot
+// id) the golden masks as <changed>.
+const timelineRuntimeOwnerRecord = "fix #5870 (ga-tw56q6): the runtime-owner fence record (SESSION-START-029) moves each started row by its runtime_owner key"
+
 // timelineUsageCloseMarker admits the usage close marker in legacy's outcomes:
 // each section moved by the usage_close_pending and usage_closed_at keys
 // session.ClosePatch now writes beside closed_at on a close.
@@ -645,6 +654,19 @@ var timelineGoldenRulings = []goldenRuling{
 	{"suspend, then wake", timelineGoldenBaseline, "14a789f280e4"},
 	{"suspend, then wake", "fix #7417 (mc-esqo7)", "ff88e0c7b075"},
 	{"suspend, then wake", timelineFingerprintV7, "fc327803a54e"},
+	{"a crash 29s after wake", timelineRuntimeOwnerRecord, "66793c63ef0b"},
+	{"a crash 5m0s after wake", timelineRuntimeOwnerRecord, "018552c8fe2a"},
+	{"a live drift on a seat", timelineRuntimeOwnerRecord, "aa7e14f9c22c"},
+	{"a managed suspend drains, then wake", timelineRuntimeOwnerRecord, "3030fda33084"},
+	{"a manual create read between its two writes", timelineRuntimeOwnerRecord, "e16c5b29f586"},
+	{"a provider swap stops the runtime", timelineRuntimeOwnerRecord, "003be8d0e1e0"},
+	{"a quarantine, then a kill fence, expires", timelineRuntimeOwnerRecord, "9ded7cba92fa"},
+	{"a waiter sleeps", timelineRuntimeOwnerRecord, "fa2dbcca11bb"},
+	{"an idle named session holding assigned work defers until its streak is exhausted", timelineRuntimeOwnerRecord, "3b5c1e04b81c"},
+	{"drift deferrals through time", timelineRuntimeOwnerRecord, "578f10e123e5"},
+	{"idle, then sleep, then the next pass", timelineRuntimeOwnerRecord, "e13d1cece8d9"},
+	{"kill a seat holding a ready claim", timelineRuntimeOwnerRecord, "6697dd6db592"},
+	{"suspend, then wake", timelineRuntimeOwnerRecord, "8256e19cd092"},
 }
 
 func goldenDigest(section string) string {
@@ -827,11 +849,47 @@ func TestTimelineGoldenNeedsARuling(t *testing.T) {
 	}
 }
 
+// runtimeOwnerSteps names, per timeline fixture, each step and row whose
+// legacy start records the runtime-owner fence (SESSION-START-029), as
+// "<step>|<row>": legacy's start runs through the session Manager, which
+// writes the record after its provider Start, while v2's starts are the
+// allocator's arms and effects, which write none yet, so every tick from
+// legacy's first start on shows the runtime-owner-record finding.
+var runtimeOwnerSteps = map[string][]string{
+	"a crash 29s after wake":                      {"crash|gc-1"},
+	"a crash 5m0s after wake":                     {"crash|gc-1"},
+	"a live drift on a seat":                      {"seed|gc-1", "the live hash drifts|gc-1"},
+	"a managed suspend drains, then wake":         {"wake|gc-1", "the next pass|gc-1"},
+	"a manual create read between its two writes": {"its session_name lands|gc-1"},
+	"an idle named session holding assigned work defers until its streak is exhausted": {"idle past idle_timeout|gc-c"},
+	"a provider swap stops the runtime":                                                {"swap|gc-1", "the next pass|gc-1"},
+	"a quarantine, then a kill fence, expires":                                         {"the kill fence expires|gc-1"},
+	"a waiter sleeps":                      {"the wait turns ready|gc-1"},
+	"drift deferrals through time":         {"seed|gc-1", "deferral keys left on the converged seat|gc-1", "attached, then drifted|gc-1", "detached inside five minutes|gc-1"},
+	"idle, then sleep, then the next pass": {"the sleep policy changes|gc-c"},
+	"kill a seat holding a ready claim":    {"past the kill grace|gc-1"},
+	"suspend, then wake":                   {"wake|gc-1", "the next pass|gc-1"},
+}
+
 // timelineFixtures are the clock-dependent families of ARCH-RESTRUCTURE
 // §3.6, each group's own: the stability clears and accrual, then the idle
 // and drain timers, then the operator verbs.
 func timelineFixtures() []timelineFixture {
-	return slices.Concat(stabilityTimeline(), idleTimeline(), operatorTimeline(), baselineTimeline(), driftTimeline(), manualCreateTimeline(), idleTimeoutTimeline())
+	fixtures := slices.Concat(stabilityTimeline(), idleTimeline(), operatorTimeline(), baselineTimeline(), driftTimeline(), manualCreateTimeline(), idleTimeoutTimeline())
+	for i := range fixtures {
+		pairs, ok := runtimeOwnerSteps[fixtures[i].Name]
+		if !ok {
+			continue
+		}
+		explain := make(map[string]string, len(fixtures[i].Explain)+len(pairs))
+		maps.Copy(explain, fixtures[i].Explain)
+		for _, pair := range pairs {
+			step, row, _ := strings.Cut(pair, "|")
+			explain["@"+step+" row:"+row+":*owner"] = "runtime-owner-record"
+		}
+		fixtures[i].Explain = explain
+	}
+	return fixtures
 }
 
 // manualCreateTimeline is staging J45 through time (v5.9r; SESS-065): a

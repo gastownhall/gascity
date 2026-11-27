@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/clock"
@@ -311,6 +312,27 @@ func runAdoptionBarrier(
 	// Step 4: Barrier gate — all running sessions must have beads.
 	passed := result.Skipped == 0 && !partialList
 	return result, passed
+}
+
+// recordAdoptedRuntimeOwners records the runtime owner (SESSION-START-029) of
+// each session found running whose row holds no record naming a root still
+// alive in this boot, under any uid (session.Store.RecordAdoptedRuntimeOwners):
+// every runtime a restart that deploys the fence adopts, which no start has
+// recorded, and one whose record failed or names only dead roots. Without it,
+// a later start under another uid sees no live record for such a runtime and
+// starts a second one beside it. Only the legacy reconciler's callers run it:
+// v2's starts write no record, so a v2 city's fence holds no current record a
+// backfill could complete. The report names how long the pass took: it scans
+// the process table once per session it records, before the first tick.
+func recordAdoptedRuntimeOwners(sessFront *sessionpkg.Store, sp runtime.Provider, cityPath string, stdout, stderr io.Writer) {
+	began := time.Now()
+	recorded, err := sessFront.RecordAdoptedRuntimeOwners(sp, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "recording the runtime owner of adopted sessions: %v\n", err) //nolint:errcheck
+	}
+	if recorded > 0 {
+		fmt.Fprintf(stdout, "Recorded the runtime owner of %d adopted session(s) in %s.\n", recorded, time.Since(began).Round(time.Millisecond)) //nolint:errcheck
+	}
 }
 
 // stampAdoptedRuntime writes an adopted runtime's identity to the runtime

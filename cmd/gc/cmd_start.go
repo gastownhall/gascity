@@ -1097,13 +1097,16 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		// Run adoption barrier before sync. The adoption barrier is purely
 		// session-class, so route it through the session coordination-class store,
 		// the same way the reconcile cascade's session arm routes via sessStore below.
-		result, passed := runAdoptionBarrier(cityPath, cliSessionFrontDoor(store, cfg, cityPath), sp, cfg, cityName, clock.Real{}, stderr, false)
+		sessFront := cliSessionFrontDoor(store, cfg, cityPath)
+		result, passed := runAdoptionBarrier(cityPath, sessFront, sp, cfg, cityName, clock.Real{}, stderr, false)
 		if result.Adopted > 0 {
 			fmt.Fprintf(stdout, "Adopted %d running session(s) into bead store.\n", result.Adopted) //nolint:errcheck
 		}
 		if !passed && result.Skipped > 0 {
 			fmt.Fprintf(stderr, "adoption barrier: %d session(s) failed bead creation\n", result.Skipped) //nolint:errcheck
 		}
+		// The one-shot pass reconciles with the legacy reconciler.
+		recordAdoptedRuntimeOwners(sessFront, sp, cityPath, stdout, stderr)
 	} else {
 		// No persistent store — use in-memory store for one-shot reconciliation.
 		// Beads won't be persisted, but the reconciler still manages lifecycle.

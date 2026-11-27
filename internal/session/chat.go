@@ -450,6 +450,8 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	// launch, whose death its Start reported or a cached read took for gone:
 	// the start converges on it, as on one it finds up before its mint
 	// (ensureRunningOn), and like that converge reads no token (ga-9yerfq).
+	// That launch is this start's runtime, so the start records it as its
+	// own (SESSION-START-029).
 	if inc != nil {
 		upAndAlive, err := m.leasedLiveness(id, sessName, cfg.ProcessNames)
 		if err != nil {
@@ -459,6 +461,7 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 			return false, fmt.Errorf("fresh start after stale key: %w", err)
 		}
 		if upAndAlive {
+			m.recordRuntimeOwner(id)
 			return true, nil
 		}
 	}
@@ -511,6 +514,7 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	if inc != nil {
 		*inc = next
 	}
+	m.recordRuntimeOwner(id)
 	// The relaunch replaced the launch turn came from: its own first turn,
 	// if it handed one back, is the one that stands.
 	*turn = m.takeStartupTurn(sessName, cfg.Env[runtime.InstanceTokenEnv])
@@ -1028,6 +1032,7 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 			}
 		} else {
 			started = true
+			m.recordRuntimeOwner(id)
 			turn = m.takeStartupTurn(sessName, minted.Fence().Token)
 		}
 		if started {
@@ -1370,6 +1375,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 		}
 	} else {
 		started = true
+		m.recordRuntimeOwner(id)
 		turn = m.takeStartupTurn(sessName, inc.Fence().Token)
 	}
 	if started && b.Metadata["session_key"] != "" {

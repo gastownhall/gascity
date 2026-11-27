@@ -7982,6 +7982,9 @@ func relaunchAgentForLaunchDrift(
 		}
 		return false, relaunchAbortResidueFold(preparedInfo, sessFront, hadResumeKeyBeforePrepare)
 	}
+	// The relaunch replaced the runtime's root process, the one the record
+	// of its last start names: record the new one (SESSION-START-029).
+	sessFront.RecordRuntimeOwner(sp, cityPath, info.ID)
 	fmt.Fprintf(stdout, "Launch-only config change for '%s', relaunched agent in warm box\n", tp.DisplayName()) //nolint:errcheck
 	// The relaunch started a committed manual conversation fresh.
 	if prepared.conversationReset {

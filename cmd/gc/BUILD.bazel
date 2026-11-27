@@ -2269,6 +2269,7 @@ go_test(
         "runtime_lease_kill_test.go",
         "runtime_lease_reopen_test.go",
         "runtime_observation_cache_test.go",
+        "runtime_owner_fence_test.go",
         "runtime_ownerless_reap_test.go",
         "runtime_profiles_matrix_test.go",
         "runtime_registry_test.go",

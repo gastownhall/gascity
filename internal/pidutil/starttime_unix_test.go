@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -62,5 +63,25 @@ func TestPSStartTimeIsBounded(t *testing.T) {
 	_, _ = psStartTime(os.Getpid())
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("psStartTime took %s, want a bounded timeout", elapsed)
+	}
+}
+
+// TestAliveWithStartTimeKeepsHiddenProcessAlive pins the answer the
+// runtime-owner fence in internal/session (#5870) relies on for another
+// uid's recorded roots: a process whose probe answers EPERM — a hidden
+// /proc entry under hidepid, or simply a process of another uid — is
+// alive, and the unreadable identity keeps that answer rather than
+// inventing a death. A caller deciding whether a recorded runtime still
+// lives must never be told a process it cannot read is gone.
+func TestAliveWithStartTimeKeepsHiddenProcessAlive(t *testing.T) {
+	// Above any pid_max, so no process holds it: its /proc entry is absent,
+	// as a hidden one reads, and its start time is unreadable.
+	const gone = 1 << 30
+	prev := probeSignal
+	probeSignal = func(_ int, _ syscall.Signal) error { return syscall.EPERM }
+	t.Cleanup(func() { probeSignal = prev })
+
+	if !AliveWithStartTime(gone, "x") {
+		t.Fatal("AliveWithStartTime = false for a process whose probe answers EPERM; it must stay alive")
 	}
 }
