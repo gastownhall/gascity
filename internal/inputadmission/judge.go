@@ -285,14 +285,17 @@ func (j *Judge) root(own int, rootID string, row beads.Bead) (beads.Bead, bool, 
 }
 
 // probe reads id from the first source that holds it, preferring the serving
-// source, and returns the source's index, or -1 when no source holds it.
+// source, and returns the source's index, or -1 when no source holds it. Each
+// leg is a by-id residence probe — the row may be of the other leg's class on
+// a split city, and the next source covers the miss — so it runs under
+// beads.FederatedGet (reviewedMarkers).
 func (j *Judge) probe(own int, id string) (beads.Bead, int, error) {
 	for _, i := range j.sourceOrder(own) {
 		src := j.sources[i]
 		if src.empty() {
 			continue
 		}
-		b, err := src.Live.Get(id)
+		b, err := beads.FederatedGet(src.Work, id)
 		if err == nil {
 			return b, i, nil
 		}

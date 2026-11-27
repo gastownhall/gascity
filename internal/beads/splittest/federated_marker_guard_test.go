@@ -59,6 +59,10 @@ var reviewedMarkers = map[string]reviewedMarker{
 		"federated", 1,
 		"first-owner attachment probe (S3a): graph store or, for a v1 poured molecule, the work store",
 	},
+	"internal/inputadmission/judge.go (*Judge).probe": {
+		"federated", 1,
+		"input admission's by-id residence probe (#8832): a root, convoy member, prerequisite copy or ancestry link is read from whichever federated leg holds it, the serving leg first, so the next leg covers the miss",
+	},
 
 	// Relic legs: graph rows read from city and rig scope stores (S4).
 	"cmd/gc/cmd_convoy_dispatch.go findBeadScopeAcrossStores":                 {"relic", 2, "control-bead scope probe over the city and rig ledgers before the binding"},

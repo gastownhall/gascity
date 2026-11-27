@@ -1754,6 +1754,7 @@ internal/dispatch/runtime.go	walkSourceBeadChain	unwrap	1
 internal/doctor/checks.go	NewRigBeadsCheck	raw-param	1
 internal/doctor/checks.go	RigBeadsCheck	raw-field	1
 internal/doctor/checks_proxied_endpoint.go	rigProxiedStoreMessage	raw-param	1
+internal/inputadmission/judge.go	Judge.probe	read-marker	1
 internal/orders/store.go	Store.mixedLegStores	raw-result	1
 internal/orders/store.go	Store.mixedLegStores	unwrap	6
 internal/orders/store_reads.go	Store.HasOpenWork	raw-param	1

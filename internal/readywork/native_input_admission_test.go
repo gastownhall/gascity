@@ -207,6 +207,63 @@ func TestNativeInputAdmissionWithholdsOnSplitStores(t *testing.T) {
 	}
 }
 
+// TestNativeInputAdmissionPrerequisiteWithholdsAndReleases covers AC-3: a
+// ready-blocking prerequisite authored AFTER the workflow was materialized — a
+// blocks edge from the input to an open target, no workflow bead edited —
+// withholds the step, and closing the target re-admits it: the edge and the
+// target's copies are judged live on every read. On the split city the target
+// sits beside the input in the work store (a dep row cannot reference another
+// store's id namespace), so the step in the graph store is judged from input
+// facts the graph never holds.
+func TestNativeInputAdmissionPrerequisiteWithholdsAndReleases(t *testing.T) {
+	withholds := func(t *testing.T, fx inputFixture) {
+		t.Helper()
+		rows, err := Read(fx.legs(), fx.routedQuery())
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		if containsID(rows, fx.step.ID) {
+			t.Fatalf("Ready contains graph-step %s whose input waits on an open prerequisite; want it withheld", fx.step.ID)
+		}
+	}
+	admits := func(t *testing.T, fx inputFixture) {
+		t.Helper()
+		rows, err := Read(fx.legs(), fx.routedQuery())
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		if !containsID(rows, fx.step.ID) {
+			t.Fatalf("Ready omits graph-step %s whose input's prerequisite target is closed; want it admitted", fx.step.ID)
+		}
+	}
+	t.Run("target in the work store unified", func(t *testing.T) {
+		store := beads.NewMemStore()
+		fx := materializeInputWorkflow(t, store, nil)
+		target := mustCreate(t, store, beads.Bead{Title: "prerequisite target", Type: "task"})
+		if err := store.DepAdd(fx.input.ID, target.ID, "blocks"); err != nil {
+			t.Fatalf("DepAdd blocks: %v", err)
+		}
+		withholds(t, fx)
+		if err := store.Close(target.ID); err != nil {
+			t.Fatalf("closing prerequisite target: %v", err)
+		}
+		admits(t, fx)
+	})
+	t.Run("target beside the input split", func(t *testing.T) {
+		work, binding := splittest.NewSplitStores(t)
+		fx := materializeInputWorkflow(t, work, binding)
+		target := mustCreate(t, work, beads.Bead{Title: "prerequisite target", Type: "task"})
+		if err := work.DepAdd(fx.input.ID, target.ID, "blocks"); err != nil {
+			t.Fatalf("DepAdd blocks: %v", err)
+		}
+		withholds(t, fx)
+		if err := work.Close(target.ID); err != nil {
+			t.Fatalf("closing prerequisite target: %v", err)
+		}
+		admits(t, fx)
+	})
+}
+
 // TestNativeInputAdmissionOpenInputStaysEligible covers AC-2: an input that is
 // open with no unsatisfied ready-blocking dependency does not withhold its
 // workflow's step, and neither does an in_progress input — existing ownership
