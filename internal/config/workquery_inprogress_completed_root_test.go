@@ -166,6 +166,17 @@ func (r workflowRootRun) ids(t *testing.T) []string {
 	return workQueryOutputIDOrder(t, strings.TrimSpace(r.stdout))
 }
 
+// memberReads returns the logged calls that read a workflow's members.
+func (r workflowRootRun) memberReads() []string {
+	var reads []string
+	for _, call := range r.calls {
+		if strings.Contains(call, "gc.root_bead_id=") {
+			reads = append(reads, call)
+		}
+	}
+	return reads
+}
+
 func runWorkflowRootQuery(t *testing.T, command string, env map[string]string, fake workflowRootFake) workflowRootRun {
 	t.Helper()
 	requireJQ(t)
@@ -371,6 +382,29 @@ func TestInProgressTierServesWorkflowRootWhenMemberReadFails(t *testing.T) {
 				}
 				if !strings.Contains(run.stderr, "gc work query: workflow member read for "+root) {
 					t.Fatalf("no diagnostic naming the root on a %s member read; stderr=%q", failure, run.stderr)
+				}
+			})
+		}
+	}
+}
+
+// TestInProgressTierSkipsMemberReadForNonWorkflowCandidate covers AC-6: the
+// member read costs a store round trip, so only a candidate whose trimmed
+// gc.kind is workflow pays it.
+func TestInProgressTierSkipsMemberReadForNonWorkflowCandidate(t *testing.T) {
+	for _, kind := range []string{"task", "", "workflow-finalize", "scope"} {
+		row := `{"id":"cand-1","status":"in_progress","assignee":"sess-1","metadata":{"gc.kind":"` + kind + `"}}`
+		for _, form := range inProgressTierForms() {
+			t.Run("kind="+kind+"/"+form.name, func(t *testing.T) {
+				run := runInProgressTierForm(t, form, workflowRootFake{
+					inProgress: jsonRows(row),
+					members:    jsonRows(memberJSON("step-a", "cand-1", "closed", "task")),
+				})
+				if ids := run.ids(t); len(ids) != 1 || ids[0] != "cand-1" {
+					t.Fatalf("non-workflow candidate was not served: %v (stdout %q)", ids, run.stdout)
+				}
+				if reads := run.memberReads(); len(reads) != 0 {
+					t.Fatalf("non-workflow candidate (kind %q) issued member reads: %v", kind, reads)
 				}
 			})
 		}
