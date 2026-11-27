@@ -35,6 +35,7 @@ go_test(
     ],
     embed = [":readywork"],
     deps = [
+        "//internal/beadmeta",
         "//internal/beads",
         "//internal/beads/beadstest",
         "//internal/beads/splittest",

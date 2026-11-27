@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 )
@@ -366,6 +367,83 @@ func TestNativeInputAdmissionOpenInputStaysEligible(t *testing.T) {
 		}
 		if !containsID(rows, fx.step.ID) {
 			t.Fatalf("Ready omits graph-step %s whose input is in_progress (existing ownership); want it admitted", fx.step.ID)
+		}
+	})
+}
+
+// TestNativeInputAdmissionServesControlKindRowsWithHeldInput covers AC-7's
+// control arm: a control-kind row is dispatcher bookkeeping, never a subject of
+// input admission, so a held input on its workflow's convoy withholds nothing —
+// check, drain and finalization keep running through a park exactly as before
+// the gate existed.
+func TestNativeInputAdmissionServesControlKindRowsWithHeldInput(t *testing.T) {
+	for _, kind := range []string{beadmeta.KindCheck, beadmeta.KindDrain, beadmeta.KindWorkflowFinalize} {
+		t.Run(kind, func(t *testing.T) {
+			store := beads.NewMemStore()
+			fx := materializeInputWorkflow(t, store, nil)
+			if err := store.Update(fx.input.ID, beads.UpdateOpts{Labels: []string{"hold:external"}}); err != nil {
+				t.Fatalf("holding input: %v", err)
+			}
+			control := mustCreate(t, store, beads.Bead{
+				Title: "control row",
+				Type:  "task",
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey:       kind,
+					beadmeta.RootBeadIDMetadataKey: fx.root.ID,
+					beadmeta.RoutedToMetadataKey:   "gascity/pool",
+				},
+			})
+			rows, err := Read(fx.legs(), fx.routedQuery())
+			if err != nil {
+				t.Fatalf("Read: %v", err)
+			}
+			if !containsID(rows, control.ID) {
+				t.Fatalf("Ready omits %s control row %s whose workflow input is held; control kinds are never judged", kind, control.ID)
+			}
+			if containsID(rows, fx.step.ID) {
+				t.Fatalf("Ready contains graph-step %s whose input is held; want only the control row served", fx.step.ID)
+			}
+		})
+	}
+}
+
+// TestNativeInputAdmissionServesStoppedWorkflowRows covers AC-7's stopped arm:
+// once a workflow has settled or been canceled, its remaining rows belong to
+// the stop gates and the teardown tail, so a held input withholds nothing —
+// the rows stay visible to whatever closes them, exactly as before the gate.
+func TestNativeInputAdmissionServesStoppedWorkflowRows(t *testing.T) {
+	t.Run("closed root", func(t *testing.T) {
+		store := beads.NewMemStore()
+		fx := materializeInputWorkflow(t, store, nil)
+		if err := store.Update(fx.input.ID, beads.UpdateOpts{Labels: []string{"hold:external"}}); err != nil {
+			t.Fatalf("holding input: %v", err)
+		}
+		if err := store.Close(fx.root.ID); err != nil {
+			t.Fatalf("closing root: %v", err)
+		}
+		rows, err := Read(fx.legs(), fx.routedQuery())
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		if !containsID(rows, fx.step.ID) {
+			t.Fatalf("Ready omits teardown-tail step %s of a settled workflow whose input is held; the tail must keep running", fx.step.ID)
+		}
+	})
+	t.Run("cancel requested", func(t *testing.T) {
+		store := beads.NewMemStore()
+		fx := materializeInputWorkflow(t, store, nil)
+		if err := store.Update(fx.input.ID, beads.UpdateOpts{Labels: []string{"hold:external"}}); err != nil {
+			t.Fatalf("holding input: %v", err)
+		}
+		if err := store.Update(fx.root.ID, beads.UpdateOpts{Metadata: map[string]string{beadmeta.CancelRequestedMetadataKey: "1"}}); err != nil {
+			t.Fatalf("stamping cancel intent: %v", err)
+		}
+		rows, err := Read(fx.legs(), fx.routedQuery())
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		if !containsID(rows, fx.step.ID) {
+			t.Fatalf("Ready omits step %s of a cancel-requested workflow whose input is held; the stop gate must keep seeing it", fx.step.ID)
 		}
 	})
 }
