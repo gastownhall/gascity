@@ -28,6 +28,7 @@ import (
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionk8s "github.com/gastownhall/gascity/internal/runtime/k8s"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/spf13/cobra"
@@ -429,14 +430,46 @@ func controlDispatchOptions(cityPath, storePath string, graph beads.GraphStore, 
 // instead of surfacing only when a retry first recycles a session. It builds the
 // provider from config alone, without the session snapshot the recycle path
 // reads, so it costs no bd call.
+//
+// Inside a pod the k8s provider generated, constructing the k8s or hybrid
+// provider checks nothing (it is the client-free pod-local provider), so the
+// dispatcher first validates the selection statically: see
+// validateMarkedDispatchSessionProvider.
 func validateDispatchSessionProviderConfig(cfg *config.City, cityPath string) error {
 	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
+	if sessionk8s.PodSession() != "" {
+		if err := validateMarkedDispatchSessionProvider(ctx); err != nil {
+			return fmt.Errorf("control dispatcher: session provider config is invalid (retry session recycling would fail): %w", err)
+		}
+	}
 	sp, err := newSessionProviderFromContext(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("control dispatcher: session provider config is invalid (retry session recycling would fail): constructing session provider: %w", err)
 	}
 	if sp == nil {
 		return fmt.Errorf("control dispatcher: session provider config is invalid: no provider for %q", ctx.providerName)
+	}
+	return nil
+}
+
+// validateMarkedDispatchSessionProvider statically validates the session
+// provider selection of a dispatcher running inside a generated k8s pod: the
+// selected name must resolve in the city's composed runtime registry rather
+// than fall back to tmux, and a k8s or hybrid selection's pod-creation
+// settings must parse. It reads no Kubernetes API.
+func validateMarkedDispatchSessionProvider(ctx sessionProviderContext) error {
+	reg, err := runtimeRegistryForCity(ctx.cfg)
+	if err != nil {
+		return err
+	}
+	if !reg.Resolves(ctx.providerName) {
+		return fmt.Errorf("session provider %q names no registered runtime", ctx.providerName)
+	}
+	switch ctx.providerName {
+	case "k8s", "hybrid":
+		if err := sessionk8s.ValidateStaticConfig(); err != nil {
+			return fmt.Errorf("session provider %q: %w", ctx.providerName, err)
+		}
 	}
 	return nil
 }

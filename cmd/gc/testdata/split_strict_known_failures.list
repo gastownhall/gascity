@@ -239,8 +239,6 @@ TestRunControlDispatcherRetryEvalRecyclesPooledSession	fails under the gate: run
 TestRunControllerLatchesSessionReconciler	fails under the gate: v2 planner did not boot within the hang budget (1m0s):
 TestRunTickPhases_SharesOneSeatWorkAcrossSessionPhases	fails under the gate: the tick's SeatWork does not read the controller's city work store as its work leg
 TestRunWorkflowReopenSourceConflictPropagatesExitCode	fails under the gate: run(...) returned 0, want 3; stdout=result=reopened source_bead_id=tc-1
-TestRuntimeDrainModeSwitch	fails under the gate: get gcg-1: bead "gcg-1" is not in this store: bead not found
-TestRuntimeUndrainModeSwitch	fails under the gate: get gcg-1: bead "gcg-1" is not in this store: bead not found
 TestSessionStartMailRefusesAClosedOwnSession	fails under the gate: session beads = 0, want 1
 TestSessionStartWithoutAProvenSessionServesNothingForAClosedSession	fails under the gate: session beads = 0, want 1
 TestSessionsBeadStoreIsWorkStoreWhenNothingRelocates	fails under the gate: default backend: cr.sessionsBeadStore().Store must be the identical value cr.cityBeadStore() returns

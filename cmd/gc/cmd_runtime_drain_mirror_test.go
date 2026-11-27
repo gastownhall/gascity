@@ -89,7 +89,7 @@ func TestFinishRuntimeDrainAckWarnsWhenOnlyTheMirrorFailed(t *testing.T) {
 
 	sp := mirrorFailingProvider{Fake: runtime.NewFake()}
 	var stdout, stderr bytes.Buffer
-	code := finishRuntimeDrainAck(&providerDrainOps{sp: sp}, t.TempDir(), "worker", "worker", "", false, &stdout, &stderr)
+	code := finishRuntimeDrainAck(&providerDrainOps{sp: sp}, t.TempDir(), sessionRuntimeTarget{display: "worker", sessionName: "worker"}, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -115,7 +115,7 @@ func TestFinishRuntimeDrainAckFailsWhenAnotherAckWriteFailed(t *testing.T) {
 
 	sp := mirrorFailingProvider{Fake: runtime.NewFake(), hardFailKey: reconcilerDrainAckSourceKey}
 	var stdout, stderr bytes.Buffer
-	code := finishRuntimeDrainAck(&providerDrainOps{sp: sp}, t.TempDir(), "worker", "worker", "", false, &stdout, &stderr)
+	code := finishRuntimeDrainAck(&providerDrainOps{sp: sp}, t.TempDir(), sessionRuntimeTarget{display: "worker", sessionName: "worker"}, false, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1; stderr: %s", code, stderr.String())
 	}

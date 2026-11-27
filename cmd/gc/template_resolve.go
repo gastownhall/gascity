@@ -35,6 +35,7 @@ import (
 	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionk8s "github.com/gastownhall/gascity/internal/runtime/k8s"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
@@ -645,6 +646,12 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	for key, val := range processenv.ControllerOnlyEnvOverlay() {
 		env[key] = val
 	}
+	// The k8s pod session marker belongs to the k8s provider, which sets it in
+	// the pods it generates. Pin it empty after every configurable layer so an
+	// inherited or config-authored value cannot make a local session's gc
+	// commands serve the pod-local provider; the pod builder replaces this
+	// empty copy with its own value.
+	env[sessionk8s.PodSessionEnv] = ""
 
 	// Step 11: Expand session setup templates. configDir was resolved ahead
 	// of Step 9 so the prompt's {{.ConfigDir}} and this SessionSetupContext
@@ -1074,6 +1081,10 @@ func applyTemplateProgramStatus(cfg *runtime.Config, tp TemplateParams) {
 	maps.Copy(cfg.Env, tp.ProgramStatusEnv)
 	cfg.Env[execenv.UsageMetricsDisableEnv] = execenv.UsageMetricsDisableValue
 	maps.Copy(cfg.Env, processenv.ControllerOnlyEnvOverlay())
+	// Same last-writer pin as resolveTemplate's: the pod session marker is
+	// provider-owned, so this late env write clears any copy a program-status
+	// key or the template env carried.
+	cfg.Env[sessionk8s.PodSessionEnv] = ""
 }
 
 // logOversizedPromptDelivery emits the one structured launch-log record

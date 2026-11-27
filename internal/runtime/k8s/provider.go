@@ -1031,7 +1031,7 @@ func remoteStageCityName(cityName, ctrlCity string) string {
 // remoteStageEnv marks the processes started from a pod's environment as a
 // remote stage of ctrlCity, or nothing without a controller city: the
 // entrypoint, the agent and its tmux server (re-exported through su for
-// LINUX_USERNAME pods: suRemoteStageExports), and kubectl exec'd commands. A
+// LINUX_USERNAME pods: suPodExports), and kubectl exec'd commands. A
 // process started with a deliberately cleared environment relies on the
 // on-disk record.
 func remoteStageEnv(cityName, ctrlCity string) []corev1.EnvVar {

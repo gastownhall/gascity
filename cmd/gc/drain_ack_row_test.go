@@ -253,20 +253,19 @@ func preE3DoRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID s
 	return 0
 }
 
-// drainAckCity is a temp city on a file store with conditional writes
-// required, holding the awake session row "worker" (generation 3, token
-// tok-a). reconciler is its [daemon] session_reconciler.
 // freshDrainAckRow reads row id of drainAckCity's city through a freshly
-// opened store handle.
+// opened handle on the city's session leg, where drain-ack itself reads the
+// row (openCitySessionLeg): under the split-strict gate the city's work store
+// hides session rows.
 func freshDrainAckRow(t *testing.T, city, id string) beads.Bead {
 	t.Helper()
 	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(city, io.Discard)
 	if err != nil {
 		t.Fatalf("load city: %v", err)
 	}
-	store, err := openCityStoreAtWithConfig(city, cfg)
+	store, err := openCitySessionLeg(city, cfg)
 	if err != nil {
-		t.Fatalf("open store: %v", err)
+		t.Fatalf("open session leg: %v", err)
 	}
 	b, err := store.Get(id)
 	if err != nil {
@@ -275,6 +274,9 @@ func freshDrainAckRow(t *testing.T, city, id string) beads.Bead {
 	return b
 }
 
+// drainAckCity is a temp city on a file store with conditional writes
+// required, holding the awake session row "worker" (generation 3, token
+// tok-a). reconciler is its [daemon] session_reconciler.
 func drainAckCity(t *testing.T, reconciler string) (string, beads.Store, string) {
 	t.Helper()
 	return drainAckCityWith(t, reconciler, "")

@@ -111,6 +111,17 @@ func TestOpsFailpointIsALeakVector(t *testing.T) {
 	}
 }
 
+// TestK8sPodSessionMarkerIsALeakVector pins GC_K8S_POD_SESSION into
+// LeakVectorVars: it names the session of the generated pod a process runs
+// in, and a value leaked from a pod's shell would make every k8s or hybrid
+// provider selection in a test build the pod-local provider, so the scrub
+// must own it.
+func TestK8sPodSessionMarkerIsALeakVector(t *testing.T) {
+	if !slices.Contains(testenv.LeakVectorVars, "GC_K8S_POD_SESSION") {
+		t.Error("GC_K8S_POD_SESSION missing from LeakVectorVars; an ambient value would turn a test's k8s or hybrid provider selection into the pod-local provider")
+	}
+}
+
 // TestInitPassthroughPreservesNamed verifies that GC_TESTENV_PASSTHROUGH
 // preserves the named leak-vector vars, scrubs the rest, and unsets itself.
 func TestInitPassthroughPreservesNamed(t *testing.T) {
