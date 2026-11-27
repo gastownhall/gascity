@@ -1090,7 +1090,21 @@ onto the scope body (so diagnostics survive), and closes the body with
 `gc.outcome = fail`. When the failing member closed with
 `gc.failure_class = hard`, the body also keeps that failure record:
 `gc.failure_class = hard`, the member's `gc.failure_reason`, and
-`gc.failure_subject` naming the member. The worker-result contract for `abort_scope` members
+`gc.failure_subject` naming the member. Work a worker has already claimed
+is not skipped: only its worker closes it. A claimed member keeps its
+scope-check. Claimed work with no scope-check of its own in the scope (a
+`retry` step's first attempt, or work inside a `ralph` step's iteration) is
+held through its step instead: the orchestrator skips the step's control
+bead, so it starts no further attempt or iteration, and keeps the step's own
+scope-check open, now also waiting on the claimed work. While claimed work
+runs, the body stays open carrying `gc.outcome = fail` and the failure
+record; the scope-check that waits on the last claimed work to close settles
+the body with `gc.outcome = fail`, the failure record recomputed over every
+closed member. A member that passes after the abort keeps its own
+`gc.outcome = pass` and contributes only its non-`gc.*` metadata to the
+body, never `gc.output_json`. Claimed work released unfinished (its session
+died) returns to the queue and can run again; the body settles once it
+closes. The worker-result contract for `abort_scope` members
 is **fail-closed**: a member that closes with `gc.outcome = fail` counts
 as failed, and so does a member that declared `abort_scope` and closed
 with a missing or unknown `gc.outcome` — only `pass` and `skipped` do not

@@ -3,7 +3,6 @@ package dispatch
 import (
 	"context"
 	"encoding/json"
-	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -25,11 +24,15 @@ import (
 // that closed body as a finished iteration and mints iteration N+1 beside
 // the still-running sibling.
 //
-// The fix scores every ralph verdict behind a drain gate: block on each
-// still-running iteration member and defer with ErrControlPending. These
-// tests pin the gate from the #2519 shape: a ralph over two independent
-// workers, an exec check that always fails, one worker claimed before its
-// sibling fails.
+// The scope abort now leaves a claimed sibling to its worker and keeps the
+// iteration body open, recording gc.outcome=fail, until the sibling's own
+// scope-check settles it; the ralph control is not ready while the body is
+// open. The ralph drain gate stays as defense for ledgers written before
+// that, and for claimed work no scope-check of the aborted scope waits on:
+// every ralph verdict blocks on each still-running iteration member and
+// defers with ErrControlPending. These tests pin the hold from the #2519 shape: a ralph
+// over two independent workers, an exec check that always fails, one worker
+// claimed before its sibling fails.
 
 // compiledRalphDrainFormula is the #2519 ralph: a loop over two workers.
 const compiledRalphDrainFormula = `formula = "ralph-iteration-drain"
@@ -60,8 +63,8 @@ title = "Worker B"
 // compiledRalphDrainFanoutFormula gives worker A an on_complete fanout. A
 // failing close routes the scope through the fanout's forced settle — the one
 // body close every store takes, including the bd close policy that refuses
-// the unforced abort — so this shape lands the closed-body-while-sibling-runs
-// state on every store.
+// the unforced abort — which defers its body close over the claimed sibling
+// on every store, exactly as the unforced abort does.
 const compiledRalphDrainFanoutFormula = `formula = "ralph-iteration-drain"
 version = 2
 contract = "graph.v2"
@@ -262,7 +265,7 @@ func drainClaimed(t *testing.T, store beads.Store, b beads.Bead) {
 }
 
 // drainServeHeld serves cycles until one makes no progress and no errors. The
-// abort that closes the body is progress; the held verdict (an ErrControlPending
+// abort that records the body's failure is progress; the held verdict (an ErrControlPending
 // pass, then the control parked behind its drain edge) is idle. The control
 // stays open with no attempt spent, so the hold state is the first idle cycle.
 func drainServeHeld(t *testing.T, fx crashFixture) {
@@ -282,8 +285,11 @@ func drainServeHeld(t *testing.T, fx crashFixture) {
 
 // TestCompiledRalphIterationDrainControlBlocksLiveMember pins AC-2: through
 // the hold, the ralph control stays open with no attempt spent — no
-// gc.attempt_log, no check has fired — parked behind a blocks edge on the
-// claimed member, which keeps running with its assignee.
+// gc.attempt_log, no check has fired — while the claimed member keeps running
+// with its assignee. The deferred abort holds it behind the open iteration
+// body. On a ledger written before that deferral, whose abort closed the body
+// while the member ran, the drain gate holds it instead, parked behind a
+// blocks edge on the claimed member.
 func TestCompiledRalphIterationDrainControlBlocksLiveMember(t *testing.T) {
 	t.Parallel()
 	for _, tc := range drainUnforcedAbortStores() {
@@ -299,24 +305,45 @@ func TestCompiledRalphIterationDrainControlBlocksLiveMember(t *testing.T) {
 			}
 
 			drainServeHeld(t, fx.crashFixture)
+			drainRequireControlHeld(t, fx.store)
+			body := drainBeadByRefSuffix(t, drainStoreAll(t, fx.store), "loop.iteration.1")
+			if body.Status != "open" || body.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail {
+				t.Fatalf("iteration body = %s/%s, want open/fail: the abort defers the body close while worker B runs", body.Status, body.Metadata[beadmeta.OutcomeMetadataKey])
+			}
 
-			all = drainStoreAll(t, fx.store)
-			control := drainBeadByRefSuffix(t, all, ".loop")
-			if control.Status != "open" {
-				t.Fatalf("ralph control status = %s, want open (no verdict yet)", control.Status)
+			// The ledger an abort wrote before the deferral: the body closed
+			// while worker B still runs.
+			if err := forceCloseScopeBody(beadstest.Graph(fx.store), body.ID, map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail}); err != nil {
+				t.Fatalf("closing the iteration body as a pre-deferral abort did: %v", err)
 			}
-			if log := control.Metadata[beadmeta.AttemptLogMetadataKey]; log != "" {
-				t.Errorf("ralph control gc.attempt_log = %s, want empty: the check must not fire before the iteration drains", log)
-			}
-			bAfter := drainBeadByID(t, fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.1.b").ID)
-			if bAfter.Status != "in_progress" || bAfter.Assignee != "pool-worker" {
-				t.Errorf("worker B = %s/%s, want still claimed in_progress by pool-worker", bAfter.Status, bAfter.Assignee)
-			}
+			drainServeHeld(t, fx.crashFixture)
+			control := drainRequireControlHeld(t, fx.store)
+			bAfter := drainBeadByRefSuffix(t, drainStoreAll(t, fx.store), "loop.iteration.1.b")
 			if !drainBlocksOn(t, fx.store, control, bAfter.ID) {
 				t.Errorf("ralph control %s has no blocks edge on the live member %s", control.ID, bAfter.ID)
 			}
 		})
 	}
+}
+
+// drainRequireControlHeld asserts the hold: the ralph control is open with no
+// attempt spent and worker B is still claimed by its pool worker. It returns
+// the control.
+func drainRequireControlHeld(t *testing.T, store beads.Store) beads.Bead {
+	t.Helper()
+	all := drainStoreAll(t, store)
+	control := drainBeadByRefSuffix(t, all, ".loop")
+	if control.Status != "open" {
+		t.Fatalf("ralph control status = %s, want open (no verdict yet)", control.Status)
+	}
+	if log := control.Metadata[beadmeta.AttemptLogMetadataKey]; log != "" {
+		t.Errorf("ralph control gc.attempt_log = %s, want empty: the check must not fire before the iteration drains", log)
+	}
+	b := drainBeadByRefSuffix(t, all, "loop.iteration.1.b")
+	if b.Status != "in_progress" || b.Assignee != "pool-worker" {
+		t.Errorf("worker B = %s/%s, want still claimed in_progress by pool-worker", b.Status, b.Assignee)
+	}
+	return control
 }
 
 // drainBlocksOn reports whether blocker carries a blocks edge on targetID.
@@ -460,9 +487,9 @@ func TestCompiledRalphIterationDrainHardFailAfterMemberCloses(t *testing.T) {
 // TestCompiledRalphIterationDrainForcedSettleHoldsNextIteration pins the
 // forced-settle route to the same defect: an on_complete fanout on the failed
 // worker settles the iteration scope through the forced close every store
-// takes — the bd close policy included — so the body closes failed while the
-// claimed sibling runs. The drain gate still holds the verdict, and exactly
-// one iteration 2 exists once the sibling closes.
+// takes — the bd close policy included. The settle defers the body close while
+// the claimed sibling runs, the verdict holds, and exactly one iteration 2
+// exists once the sibling closes.
 func TestCompiledRalphIterationDrainForcedSettleHoldsNextIteration(t *testing.T) {
 	t.Parallel()
 	for _, tc := range drainForcedSettleStores() {
@@ -483,8 +510,8 @@ func TestCompiledRalphIterationDrainForcedSettleHoldsNextIteration(t *testing.T)
 				t.Fatalf("worker A's fanout = %s/%s, want closed/fail: the settle this control drove is the route that closed the body", fanout.Status, fanout.Metadata[beadmeta.OutcomeMetadataKey])
 			}
 			body := drainBeadByRefSuffix(t, all, "loop.iteration.1")
-			if body.Status != "closed" || body.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail {
-				t.Fatalf("iteration body = %s/%s, want settled closed/fail while worker B still runs", body.Status, body.Metadata[beadmeta.OutcomeMetadataKey])
+			if body.Status != "open" || body.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail {
+				t.Fatalf("iteration body = %s/%s, want open/fail: the settle defers the body close while worker B still runs", body.Status, body.Metadata[beadmeta.OutcomeMetadataKey])
 			}
 			drainRequireNoIteration(t, all, 2)
 
@@ -667,8 +694,8 @@ func TestCompiledRalphIterationDrainDrainedIterationVerdictsUnchanged(t *testing
 // TestCompiledRalphIterationDrainHoldsNextIteration pins AC-1: when worker A
 // of iteration 1 fails — with a transient failure class, or a bare close the
 // abort_scope contract counts as failed — while worker B is claimed and
-// running, the abort closes the iteration body, but no iteration 2 bead
-// exists until the check has a definitive result.
+// running, the abort records the iteration's failure, but no iteration 2
+// bead exists until the check has a definitive result.
 func TestCompiledRalphIterationDrainHoldsNextIteration(t *testing.T) {
 	t.Parallel()
 	for _, tc := range drainUnforcedAbortStores() {
@@ -699,11 +726,11 @@ func TestCompiledRalphIterationDrainHoldsNextIteration(t *testing.T) {
 
 // TestCrashInjectionCompiledRalphIterationDrain proves the drain gate is
 // crash-safe and idempotent over its own write window: a dispatcher killed
-// at, or failing, any store write of the abort that closes the body, the gate
-// pass that parks the control, and the verdict that ends iteration 1
-// converges on the uninterrupted end state — the aborted iteration drains,
-// exactly one iteration 2 follows, the control carries its drain edge, and
-// the loop exhausts as before the gate. The unforced route (MemStore) and the
+// at, or failing, any store write of the abort that defers the body close,
+// the settle that closes it once worker B closes, and the verdict that ends
+// iteration 1 converges on the uninterrupted end state — the aborted
+// iteration drains with worker B closed by its worker, exactly one iteration
+// 2 follows, and the loop exhausts as before the gate. The unforced route (MemStore) and the
 // forced-settle route (the bd close-policy double) are both covered.
 //
 // The fault window stops at the first attach create: molecule's
@@ -766,8 +793,12 @@ func iterationDrainCrashScenario(t *testing.T, name string, tc drainStoreCase, f
 				t.Fatalf("uninterrupted run: ralph gc.failed_attempt = %q, want 3", got)
 			}
 			b := ledgerBeadByRefSuffix(t, ledger, "loop.iteration.1.b")
-			if !slices.Contains(control.Blocks, "blocks:"+b.ID) {
-				t.Errorf("uninterrupted run: ralph control has no drain edge on %s", b.ID)
+			if b.Status != "closed" || b.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass {
+				t.Errorf("uninterrupted run: worker B = %s/%s, want closed/pass by its worker", b.Status, b.Metadata[beadmeta.OutcomeMetadataKey])
+			}
+			body1 := ledgerBeadByRefSuffix(t, ledger, "loop.iteration.1")
+			if body1.Status != "closed" || body1.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail {
+				t.Errorf("uninterrupted run: iteration 1 = %s/%s, want closed/fail", body1.Status, body1.Metadata[beadmeta.OutcomeMetadataKey])
 			}
 			body2 := ledgerBeadByRefSuffix(t, ledger, "loop.iteration.2")
 			if body2.Status != "closed" {

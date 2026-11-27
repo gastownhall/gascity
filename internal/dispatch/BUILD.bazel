@@ -89,6 +89,7 @@ go_test(
         "root_view_test.go",
         "runtime_ralph_finalize_test.go",
         "runtime_test.go",
+        "scope_abort_claimed_test.go",
         "scope_settle_test.go",
         "scope_skip_bd_batch_test.go",
         "scope_skip_compat_test.go",
