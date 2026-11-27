@@ -175,8 +175,13 @@ still_held() {
 EVENTS="$(gc events --type bead.closed --since "$LOOKBACK" 2>/dev/null)" || exit 0
 [ -n "$EVENTS" ] || exit 0
 
+# Normalize the payload shape: the API envelope wraps the bead under
+# .payload.bead, while the `gc events` local fallback passes the stored raw
+# snapshot through, so the bead fields sit directly under .payload (#5968).
+# Same normalization as nudge-on-route.sh and notify-on-human-gate-creation.sh.
 BLOCKERS="$(printf '%s\n' "$EVENTS" \
-    | jq -r '.payload.bead.id // empty' 2>/dev/null | sort -u)" || BLOCKERS=""
+    | jq -r '(.payload.bead // .payload) as $b | $b.id // empty' 2>/dev/null \
+    | sort -u)" || BLOCKERS=""
 [ -n "$BLOCKERS" ] || exit 0
 
 # Load dedup state (object mapping "<blocker>|<dependent>" -> ISO timestamp).
