@@ -1167,6 +1167,10 @@ var (
 // A failed secondary store with no work anywhere is an error here too
 // (hookSecondaryStoreFailure), so it gets the same bounded retry. noted is
 // forwarded to bestStoreWithWork.
+//
+// The claim loop passes its answer set's read as run (hookStoreAnswers), and a
+// failed read is never saved, so each retry runs only the stores whose latest
+// read failed; the stores that answered are ranked from their saved answers.
 func selectStoreWithWorkRetrying(workQuery string, stores []hookStore, primary hookStore, run hookStoreRunner, ops *hookClaimOps, noted ...hookStoreFailureNote) (string, hookStore, error) {
 	out, selected, err := bestStoreWithWork(workQuery, stores, primary, run, noted...)
 	for attempt := 0; err != nil && attempt < hookClaimQueryRetryAttempts; attempt++ {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -145,4 +146,54 @@ func TestClaimHookWorkEmptiedSelectionFallsBackWithoutAFullPass(t *testing.T) {
 		t.Fatalf("claim env = %v, want rigb's env", claimEnv)
 	}
 	assertStoreReads(t, h, map[string]int{"/city": 1, "/riga": 2, "/rigb": 2})
+}
+
+// AC-3: a retried read failure re-runs only the store whose read failed; the
+// stores that already answered are not read again. A read that recovers is
+// claimed (after its claim-time re-read), and one that never recovers keeps
+// the failed-read contract: non-zero exit, no result, no drain-ack, and one
+// failure event naming the store.
+func TestClaimHookWorkReadRetryRereadsOnlyFailedStores(t *testing.T) {
+	readErr := errors.New("bd ready: exit status 1")
+	t.Run("transient", func(t *testing.T) {
+		withFastClaimRetries(t)
+		stores := answerReuseStores()[:3]
+		h := newFailureHookHarness()
+		h.script("/riga",
+			hookRunnerAnswer{err: readErr},
+			hookRunnerAnswer{out: routedRowJSON("ra-1")},
+		)
+
+		result, code, stderr := runAnswerReuseClaim(t, h, stores, h.ops())
+
+		if code != 0 {
+			t.Fatalf("exit = %d, want 0 after the read recovered; stderr=%s", code, stderr)
+		}
+		if result.Action != "work" || result.BeadID != "ra-1" {
+			t.Fatalf("result = %+v, want the recovered riga row claimed", result)
+		}
+		assertStoreReads(t, h, map[string]int{"/city": 1, "/riga": 3, "/rigb": 1})
+	})
+	t.Run("persistent", func(t *testing.T) {
+		withFastClaimRetries(t)
+		stores := answerReuseStores()[:3]
+		h := newFailureHookHarness()
+		h.script("/riga", hookRunnerAnswer{err: readErr})
+
+		result, code, stderr := runAnswerReuseClaim(t, h, stores, h.ops())
+
+		if code != 1 {
+			t.Fatalf("exit = %d, want 1 for a persistent secondary read failure; stderr=%s", code, stderr)
+		}
+		if result.Action != "" || h.drained {
+			t.Fatalf("result = %+v drained = %v, want no result and no drain-ack", result, h.drained)
+		}
+		if !strings.HasPrefix(stderr, "gc hook --claim: ") || !strings.Contains(stderr, "exit status 1") || strings.Contains(stderr, hookStoreUnavailableToken) {
+			t.Fatalf("stderr = %q, want the ordinary failed-read report without the store-unavailable token", stderr)
+		}
+		if len(h.events) != 1 || !strings.Contains(h.events[0].Message, `rig "riga"`) {
+			t.Fatalf("events = %+v, want exactly one failure event naming riga", h.events)
+		}
+		assertStoreReads(t, h, map[string]int{"/city": 1, "/riga": 1 + hookClaimQueryRetryAttempts, "/rigb": 1})
+	})
 }
