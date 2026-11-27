@@ -2692,6 +2692,10 @@ any server that implements the Gas City Service Protocol v0. It opens a browser
 to sign in; use --device for headless shells, or --token to store an existing
 token. The token is stored per service under ~/.gc/credentials.json.
 
+Prefer --device or the GC_SERVICE_TOKEN environment variable over a literal
+--token value: a token typed on the command line stays in shell history and
+is visible to other local users in the process list while gc runs.
+
 ```
 gc login [flags]
 ```
@@ -3477,6 +3481,10 @@ Log in to Gas City Registry and store a local API token.
 By default this opens a browser for GitHub or Google Workspace sign-in. Use
 --device for headless shells, or --token to store an existing registry token.
 
+Prefer --device or the GC_REGISTRY_TOKEN environment variable over a literal
+--token value: a token typed on the command line stays in shell history and
+is visible to other local users in the process list while gc runs.
+
 ```
 gc pack registry login [flags]
 ```
@@ -3993,8 +4001,12 @@ gc resume [path|name] [flags]
 Manage rigs (external project directories) registered with the city.
 
 Rigs are project directories that the city orchestrates. Each rig gets
-its own beads database, agent hooks, and cross-rig routing. Agents
-are scoped to rigs via their "dir" field.
+its own beads database, agent hooks, and cross-rig routing.
+
+Schema-2 convention agents are city-scoped. Rig-scoped agents come from
+the packs a rig imports ("gc rig add --include", [rigs.imports.&lt;binding&gt;])
+or from [[patches.agent]]; only legacy schema-1 configs scope an agent to
+a rig with its "dir" field.
 
 ```
 gc rig

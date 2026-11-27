@@ -40,8 +40,12 @@ func newRigCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Manage rigs (external project directories) registered with the city.
 
 Rigs are project directories that the city orchestrates. Each rig gets
-its own beads database, agent hooks, and cross-rig routing. Agents
-are scoped to rigs via their "dir" field.`,
+its own beads database, agent hooks, and cross-rig routing.
+
+Schema-2 convention agents are city-scoped. Rig-scoped agents come from
+the packs a rig imports ("gc rig add --include", [rigs.imports.<binding>])
+or from [[patches.agent]]; only legacy schema-1 configs scope an agent to
+a rig with its "dir" field.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {

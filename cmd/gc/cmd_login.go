@@ -47,7 +47,11 @@ func newLoginCmd(stdout, stderr io.Writer) *cobra.Command {
 By default this targets ` + defaultServiceURL + `; pass --at <url> to log in to
 any server that implements the Gas City Service Protocol v0. It opens a browser
 to sign in; use --device for headless shells, or --token to store an existing
-token. The token is stored per service under ~/.gc/credentials.json.`,
+token. The token is stored per service under ~/.gc/credentials.json.
+
+Prefer --device or the ` + serviceTokenEnv + ` environment variable over a literal
+--token value: a token typed on the command line stays in shell history and
+is visible to other local users in the process list while gc runs.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if doLogin(cmd.Context(), opts, stdout, stderr) != 0 {
