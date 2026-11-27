@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"io"
 	"maps"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -167,5 +169,78 @@ func TestDoctorV2DemandMigrationsFixAppliesLegacyRepairs(t *testing.T) {
 	}
 	if r := c.Run(ctx); r.Status != doctor.StatusOK {
 		t.Errorf("after fix: status = %v (%s), want OK", r.Status, r.Message)
+	}
+}
+
+// TestDoctorV2DemandMigrationsLeavesRefusedSharedRigRows is AC-8 of the #5846
+// design: the doctor sweep hands the repairs the same store refs the demand
+// pass uses, so a foreign row on a shared rig leg is refused, not counted as a
+// repair. The dry run counts only the own-leg row and reports no read
+// problems; --fix rewrites the own-leg row, leaves the refused rows untouched,
+// and prints the re-home audit instead of silently skipping.
+func TestDoctorV2DemandMigrationsLeavesRefusedSharedRigRows(t *testing.T) {
+	fxPath := t.TempDir()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			poolAgent("planner", "rig-A", intPtr(5), 0),
+			poolAgent("omp", "fixture", intPtr(3), 0),
+		},
+		Rigs: []config.Rig{{Name: "fixture", Path: fxPath}},
+	}
+	cityPath := t.TempDir()
+	city := beads.NewMemStoreFrom(0, []beads.Bead{
+		workBead("ga-rlegacy", "rig-A/gc.planner", "", "open", 5),
+	}, nil)
+	fx := beads.NewMemStoreFrom(0, []beads.Bead{
+		workBead("fx-asg", "fixture/pool.omp", "fixture/pool.omp", "in_progress", 5),
+		workBead("fx-routed", "fixture/pool.omp", "", "open", 5),
+	}, nil)
+	c := demandMigrationsCheckFor(t, cfg, cityPath, city, map[string]beads.Store{"fixture": fx})
+	cfg.Daemon.SessionReconciler = config.SessionReconcilerV2
+	ctx := &doctor.CheckContext{CityPath: cityPath}
+
+	// Dry run: the refused rows cost nothing — only the own-leg row needs a
+	// repair, and the refusals are not read problems.
+	sweep := c.sweep(false, io.Discard)
+	if len(sweep.problems) != 0 {
+		t.Fatalf("problems = %q, want none", sweep.problems)
+	}
+	wantCounts := map[demandMigrationKey]int{
+		{"canonicalizeLegacyBoundUnassignedRoutedWork", "city"}: 1,
+	}
+	if !maps.Equal(sweep.counts, wantCounts) {
+		t.Errorf("counts = %v, want %v (a refused rewrite is not a repair)", sweep.counts, wantCounts)
+	}
+	r := c.Run(ctx)
+	if r.Status != doctor.StatusWarning {
+		t.Errorf("status = %v (%s), want warning for the own-leg row under v2", r.Status, r.Message)
+	}
+	if strings.Contains(r.Message, "read problem") {
+		t.Errorf("message %q reports read problems, want none: a refusal is a decision, not a failure", r.Message)
+	}
+
+	// --fix: the own-leg row is rewritten and audited; the refused rows are
+	// left for the city that owns them.
+	var buf bytes.Buffer
+	if err := c.Fix(&doctor.CheckContext{CityPath: cityPath, Output: &buf}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	for _, wantLine := range []string{
+		`rehomed ga-rlegacy on city:city: gc.routed_to "rig-A/gc.planner" -> "rig-A/planner"`,
+		`canonicalizeLegacyBoundAssignedWork: refused 1 foreign legacy re-home(s) this pass: "fixture/pool.omp" -> "fixture/omp" (1: fx-asg)`,
+		`canonicalizeLegacyBoundUnassignedRoutedWork: refused 1 foreign legacy re-home(s) this pass: "fixture/pool.omp" -> "fixture/omp" (1: fx-routed)`,
+	} {
+		if !strings.Contains(buf.String(), wantLine) {
+			t.Errorf("fix output missing %q; got:\n%s", wantLine, buf.String())
+		}
+	}
+	if got, err := fx.Get("fx-asg"); err != nil || got.Assignee != "fixture/pool.omp" || got.Metadata["gc.routed_to"] != "fixture/pool.omp" {
+		t.Errorf("fx-asg after fix = (err %v, assignee %q, route %q), want the foreign row untouched", err, got.Assignee, got.Metadata["gc.routed_to"])
+	}
+	if got, err := fx.Get("fx-routed"); err != nil || got.Metadata["gc.routed_to"] != "fixture/pool.omp" {
+		t.Errorf("fx-routed after fix = (err %v, route %q), want the foreign row untouched", err, got.Metadata["gc.routed_to"])
+	}
+	if got, err := city.Get("ga-rlegacy"); err != nil || got.Metadata["gc.routed_to"] != "rig-A/planner" {
+		t.Errorf("ga-rlegacy after fix = (err %v, route %q), want it re-homed to rig-A/planner", err, got.Metadata["gc.routed_to"])
 	}
 }
