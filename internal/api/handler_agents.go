@@ -109,12 +109,13 @@ type expandedAgent struct {
 }
 
 // expandAgent expands a config.Agent into its effective runtime agents.
-// For bounded pool agents, this generates pool-1..pool-max members.
-// For unlimited pools (max < 0), it discovers running instances via session
+// For bounded pool agents, this generates pool-1..pool-max members. For
+// unlimited pools (max < 0), it discovers running instances via session
 // provider prefix matching — the same approach as discoverPoolInstances.
-// That prefix never matches a named session running under the template's
-// bare name, so a template that leaves max_active_sessions unset (the shape
-// gc lint accepts for one) lists its own named session from config instead.
+// Neither the bounded enumeration nor the unlimited prefix match covers a
+// named session running under the template's bare name, so a template with
+// its own named session (bounded or unlimited) lists that row from config
+// alongside its pool instances.
 func expandAgent(a config.Agent, cityName, sessTmpl string, sp sessionLister, named []config.NamedSession) []expandedAgent {
 	expanded, _ := expandAgentChecked(a, cityName, sessTmpl, sp, named)
 	return expanded
@@ -156,6 +157,9 @@ func expandAgentChecked(a config.Agent, cityName, sessTmpl string, sp sessionLis
 	}
 
 	var result []expandedAgent
+	if maxSess != nil && isOwnNamedSession(a, named) {
+		result = append(result, configuredPoolRow(a))
+	}
 	for i := 1; i <= poolMax; i++ {
 		memberName := poolInstanceNameForAPI(a.Name, i, a)
 		qn := a.QualifiedInstanceName(memberName)
