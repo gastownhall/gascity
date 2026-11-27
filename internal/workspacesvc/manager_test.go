@@ -1100,3 +1100,90 @@ func TestManagerAuthorizeAndServeHTTPRunsAuthorizationWithoutInstance(t *testing
 		t.Fatal("expected authorization callback to run without an active instance")
 	}
 }
+
+// TestManagerTickAndRestartDoNotWaitForAnOpenRequest: an instance serves a
+// request outside the registry lock, so a request it holds open (a stream, or
+// a degraded proxy_process service whose process accepts a request and never
+// answers) stalls neither the controller's Tick nor the Restart an operator
+// runs to recover the service.
+func TestManagerTickAndRestartDoNotWaitForAnOpenRequest(t *testing.T) {
+	contract := uniqueContract(t)
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseRequest := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseRequest)
+	registerWorkflowContractForTest(t, contract, func(_ RuntimeContext, svc config.Service) (Instance, error) {
+		return &testInstance{
+			status: Status{
+				ServiceName:      svc.Name,
+				WorkflowContract: contract,
+				State:            "ready",
+				LocalState:       "ready",
+			},
+			handleHTTP: func(w http.ResponseWriter, _ *http.Request, _ string) bool {
+				select {
+				case entered <- struct{}{}:
+				default:
+				}
+				<-release
+				w.WriteHeader(http.StatusNoContent)
+				return true
+			},
+		}, nil
+	})
+
+	rt := &testRuntime{
+		cityPath: t.TempDir(),
+		cityName: "test-city",
+		cfg: &config.City{
+			Services: []config.Service{{
+				Name:     "review-intake",
+				Workflow: config.ServiceWorkflowConfig{Contract: contract},
+			}},
+		},
+		sp:    runtime.NewFake(),
+		store: beads.NewMemStore(),
+	}
+
+	mgr := NewManager(rt)
+	if err := mgr.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+
+	served := make(chan struct{})
+	rec := httptest.NewRecorder()
+	var routed bool
+	go func() {
+		defer close(served)
+		routed = mgr.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/svc/review-intake/hooks/github", nil))
+	}()
+	awaitClosed(t, entered, "the service to start serving the request")
+
+	ticked := make(chan struct{})
+	go func() {
+		defer close(ticked)
+		mgr.Tick(context.Background(), time.Now().UTC())
+	}()
+	awaitClosed(t, ticked, "Manager.Tick to return while the service holds a request open")
+
+	restarted := make(chan struct{})
+	var restartErr error
+	go func() {
+		defer close(restarted)
+		restartErr = mgr.Restart("review-intake")
+	}()
+	awaitClosed(t, restarted, "Manager.Restart to return while the service holds a request open")
+	if restartErr != nil {
+		t.Fatalf("Restart: %v", restartErr)
+	}
+
+	releaseRequest()
+	awaitClosed(t, served, "the released request to finish")
+	if !routed {
+		t.Fatal("ServeHTTP returned false, want true")
+	}
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+}

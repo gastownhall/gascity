@@ -161,13 +161,18 @@ func (p *proxyProcessInstance) Status() Status {
 }
 
 func (p *proxyProcessInstance) HandleHTTP(w http.ResponseWriter, r *http.Request, subpath string) bool {
+	// A generation that has finished starting is proxied whatever its last
+	// health probe reported; the probe result is published through Status.
+	// When the process's socket cannot be dialed the proxy answers 502 at once,
+	// but a process that accepts a request and never answers holds it until the
+	// caller gives up, because the transport sets no response timeout.
 	p.mu.Lock()
-	ready := !p.closed && p.cmd != nil && p.status.LocalState == "ready"
+	routable := !p.closed && p.cmd != nil && p.status.LocalState != "starting"
 	reason := p.status.Reason
 	transport := p.transport
 	p.mu.Unlock()
 
-	if !ready {
+	if !routable {
 		http.Error(w, serviceUnavailableMessage(reason), http.StatusServiceUnavailable)
 		return true
 	}
