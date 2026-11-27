@@ -2,6 +2,8 @@ package main
 
 import (
 	"io"
+	"maps"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
@@ -361,5 +363,42 @@ func TestRouteAdoptionAdoptedBeadIsServedClaimedAndDemanded(t *testing.T) {
 	got, ok := demandServableForTemplates(cfg, bead, map[string]struct{}{template: {}})
 	if !ok || got != template {
 		t.Fatalf("demandServableForTemplates(adopted bead) = %q, %v; want %q, true", got, ok, template)
+	}
+}
+
+// TestRouteAdoptionBackstopLogsUnroutedBacklogForScopesWithNoTarget pins the
+// backlog line: the backstop counts the adoptable unrouted rows it already
+// listed in each scope with no unrouted_work_target and logs one line per
+// scope pointing at `gc doctor`, while a scope that adopts logs none.
+func TestRouteAdoptionBackstopLogsUnroutedBacklogForScopesWithNoTarget(t *testing.T) {
+	cfg := adoptionRigConfig(t, "")
+	routed := plainCreatedBead("ct-8")
+	routed.Metadata = map[string]string{beadmeta.RoutedToMetadataKey: "elsewhere"}
+	cr, cityStore, rigStore := adoptionRigRuntime(t, cfg,
+		[]beads.Bead{plainCreatedBead("ct-9"), plainCreatedBead("ct-10"), routed},
+		[]beads.Bead{plainCreatedBead("hw-9")})
+	var stderr strings.Builder
+	cr.stderr, cr.logPrefix = &stderr, "gc"
+
+	report := cr.runRouteRecoveryBackstop(backstopReasonCadence)
+
+	if got, want := report.unroutedBacklog, map[string]int{"city": 2, "rig hello-world": 1}; !maps.Equal(got, want) {
+		t.Fatalf("backstop unroutedBacklog = %v, want %v", got, want)
+	}
+	if cityStore.writes != 0 || rigStore.writes != 0 {
+		t.Fatalf("writes city=%d rig=%d, want 0: the backlog is reported, never routed", cityStore.writes, rigStore.writes)
+	}
+	for _, want := range []string{
+		"gc: route recovery (backstop): 2 open bead(s) in city carry no gc.routed_to and the scope sets no unrouted_work_target; no pool will claim them (see gc doctor: unrouted-ready-work)\n",
+		"gc: route recovery (backstop): 1 open bead(s) in rig hello-world carry no gc.routed_to and the scope sets no unrouted_work_target; no pool will claim them (see gc doctor: unrouted-ready-work)\n",
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr missing backlog line %q:\n%s", want, stderr.String())
+		}
+	}
+
+	adopting, _, _ := adoptionRigRuntime(t, adoptionRigConfig(t, "hello-world/researcher"), nil, []beads.Bead{plainCreatedBead("hw-9")})
+	if got := adopting.runRouteRecoveryBackstop(backstopReasonCadence).unroutedBacklog; len(got) != 0 {
+		t.Fatalf("adopting scope unroutedBacklog = %v, want none", got)
 	}
 }

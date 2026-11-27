@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -382,6 +383,9 @@ func (cr *CityRuntime) logRouteRecovery(report routeRecoveryReport) {
 	}
 	if report.adopted > 0 {
 		fmt.Fprintf(cr.stderr, "%s: route recovery (%s): adopted %d unrouted bead(s) (%s)\n", cr.logPrefix, report.lane, report.adopted, report.adoptedSummary()) //nolint:errcheck // best-effort stderr
+	}
+	for _, scope := range slices.Sorted(maps.Keys(report.unroutedBacklog)) {
+		fmt.Fprintf(cr.stderr, "%s: route recovery (%s): %d open bead(s) in %s carry no gc.routed_to and the scope sets no unrouted_work_target; no pool will claim them (see gc doctor: unrouted-ready-work)\n", cr.logPrefix, report.lane, report.unroutedBacklog[scope], scope) //nolint:errcheck // best-effort stderr
 	}
 	if len(report.flapping) > 0 {
 		// The loud half of the flap bound: a route that keeps needing restoring

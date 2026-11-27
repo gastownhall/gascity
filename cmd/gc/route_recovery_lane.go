@@ -170,7 +170,11 @@ type routeRecoveryReport struct {
 	quarantined int
 	// adoptedVia tallies adoptions by "<scope>→<route>" for the log line.
 	adoptedVia map[string]int
-	flapping   []string
+	// unroutedBacklog counts, by scope label, the adoptable unrouted rows the
+	// backstop listed in scopes that set no unrouted_work_target: work no pool
+	// will claim. Counted from the rows the scan already read, never written.
+	unroutedBacklog map[string]int
+	flapping        []string
 	// legReads counts store round trips this pass issued. It is the unit the
 	// tick's latency is actually measured in, and the budget test asserts on it.
 	legReads int
@@ -218,6 +222,15 @@ func (r *routeRecoveryReport) noteAdopted(via string) {
 		r.adoptedVia = map[string]int{}
 	}
 	r.adoptedVia[via]++
+}
+
+// noteUnroutedBacklog counts n adoptable unrouted rows in scope, which sets
+// no unrouted_work_target.
+func (r *routeRecoveryReport) noteUnroutedBacklog(scope string, n int) {
+	if r.unroutedBacklog == nil {
+		r.unroutedBacklog = map[string]int{}
+	}
+	r.unroutedBacklog[scope] += n
 }
 
 // adoptedSummary renders adoptedVia as "<scope>→<route> xN, …", sorted.
@@ -372,6 +385,19 @@ func (l *routeRecoveryLane) setAdoptionPolicy(p unroutedAdoptionPolicy) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.adoption = p
+}
+
+// unroutedBacklogScope returns the label of b's owning scope when b is
+// adoptable unrouted work and that scope sets no unrouted_work_target.
+func (l *routeRecoveryLane) unroutedBacklogScope(b beads.Bead) (string, bool) {
+	l.mu.Lock()
+	p := l.adoption
+	l.mu.Unlock()
+	sc, ok := p.scopeFor(b.ID)
+	if !ok || sc.route != "" || !adoptableUnroutedWork(b) {
+		return "", false
+	}
+	return sc.label, true
 }
 
 // adoptionRoute returns the adoption route for b under the current policy, or
@@ -881,6 +907,9 @@ func (l *routeRecoveryLane) backstopPassOnPlane(plan storeref.ResolvedPlan, reas
 			}
 			report.adoptedVia[via] += n
 		}
+		for scope, n := range legReport.unroutedBacklog {
+			report.noteUnroutedBacklog(scope, n)
+		}
 		report.quarantined += legReport.quarantined
 		report.legReads += legReport.legReads
 		report.offPlaneRouted += legReport.offPlaneRouted
@@ -962,6 +991,12 @@ func (l *routeRecoveryLane) backstopLeg(leg planeLeg) routeRecoveryReport {
 		// already claimed and needs no route.
 		if b.Status != "open" || strings.TrimSpace(b.Assignee) != "" {
 			continue
+		}
+		if !leg.binding {
+			if scope, ok := l.unroutedBacklogScope(b); ok {
+				report.noteUnroutedBacklog(scope, 1)
+				continue
+			}
 		}
 		if carriedPoolRoute(b) == "" && (leg.binding || l.adoptionRouteOnly(b) == "") {
 			continue
