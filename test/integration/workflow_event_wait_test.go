@@ -20,10 +20,11 @@ const (
 func waitForBeadCondition(t *testing.T, cityDir, beadID string, timeout time.Duration, predicate func(graphBead) bool) (graphBead, error) {
 	t.Helper()
 
+	deadline := time.Now().Add(timeout)
 	eventLog := filepath.Join(cityDir, ".gc", "events.jsonl")
 	offset := eventLogOffset(eventLog)
 
-	if bead, err := tryShowBead(cityDir, beadID); err == nil {
+	if bead, err := tryShowBeadUntil(cityDir, beadID, deadline); err == nil {
 		if predicate(bead) {
 			return bead, nil
 		}
@@ -58,7 +59,7 @@ func waitForBeadCondition(t *testing.T, cityDir, beadID string, timeout time.Dur
 			continue
 		}
 
-		bead, err := tryShowBead(cityDir, beadID)
+		bead, err := tryShowBeadUntil(cityDir, beadID, deadline)
 		if err != nil {
 			t.Logf("bd show error while waiting for %s (retrying): %v", beadID, err)
 			continue
