@@ -281,24 +281,31 @@ func TestManagedDoltSpawnWrappedInInfraScope(t *testing.T) {
 			assertScopedInvocation(t, logPath, started.InfraScope, "gascity infra: managed dolt")
 		})
 	}
-	// Each of these stays in its caller's cgroup.
+	// Each of these stays in its caller's cgroup, with or without a session,
+	// and never runs systemd-run, not even for the probe.
 	for _, tc := range []struct {
 		name     string
 		host     infraScopeHost
 		sliceEnv string
 	}{
-		{name: "from a session with GC_INFRA_SLICE=off", host: wrappableFromSession, sliceEnv: "off"},
-		{name: "from a session in a system service", host: infraScopeHost{session: true, linger: true, cgroup: supervisorSliceServiceCgroup}},
+		{name: "with GC_INFRA_SLICE=off", host: infraScopeHost{linger: true, cgroup: userServiceCgroup}, sliceEnv: "off"},
+		{name: "from a login session without lingering", host: infraScopeHost{cgroup: loginSessionCgroup}},
+		{name: "in a system service", host: infraScopeHost{linger: true, cgroup: supervisorSliceServiceCgroup}},
+		{name: "in a container root", host: infraScopeHost{linger: true, cgroup: containerRootCgroup}},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			logPath := installInfraScopeHost(t, tc.host)
-			t.Setenv(infraSliceEnv, tc.sliceEnv)
-			started, _ := startDirectManagedDolt(t)
-			assertNoSystemdRun(t, logPath)
-			if started.InfraScope != "" {
-				t.Fatalf("unwrapped spawn recorded infra scope %q, want none", started.InfraScope)
-			}
-		})
+		for _, session := range []bool{false, true} {
+			host := tc.host
+			host.session = session
+			t.Run(fmt.Sprintf("%s/session=%t", tc.name, session), func(t *testing.T) {
+				logPath := installInfraScopeHost(t, host)
+				t.Setenv(infraSliceEnv, tc.sliceEnv)
+				started, _ := startDirectManagedDolt(t)
+				assertNoSystemdRun(t, logPath)
+				if started.InfraScope != "" {
+					t.Fatalf("unwrapped spawn recorded infra scope %q, want none", started.InfraScope)
+				}
+			})
+		}
 	}
 }
 
