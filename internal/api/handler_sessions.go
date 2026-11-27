@@ -359,6 +359,7 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 		items[i] = sessionResponseWithReason(sess, responseByID[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
 		s.enrichSessionResponseWithKeyedPaths(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, activeBeads.lookup, false, 0, keyedTranscriptPaths)
 	}
+	partialErrors = append(partialErrors, activeBeads.partialErrors()...)
 
 	if !pp.IsPaging {
 		writeJSON(w, http.StatusOK, listResponse{
