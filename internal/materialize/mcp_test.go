@@ -274,6 +274,28 @@ func TestMCPTemplateDataUsesBD105WorkQuery(t *testing.T) {
 	}
 }
 
+func TestMCPTemplateDataCityName(t *testing.T) {
+	t.Parallel()
+
+	agent := &config.Agent{Name: "worker"}
+	for _, tc := range []struct {
+		name  string
+		cfg   *config.City
+		agent *config.Agent
+		want  string
+	}{
+		{"basename fallback", &config.City{}, agent, "city"},
+		{"workspace name", &config.City{Workspace: config.Workspace{Name: "declared"}}, agent, "declared"},
+		{"site-bound name", &config.City{ResolvedWorkspaceName: "bound", Workspace: config.Workspace{Name: "declared"}}, agent, "bound"},
+		{"no agent", &config.City{ResolvedWorkspaceName: "bound"}, nil, "bound"},
+	} {
+		got := MCPTemplateData(tc.cfg, "/tmp/city", tc.agent, "worker", "/tmp/work", config.QueryTopology{})
+		if got["CityName"] != tc.want {
+			t.Errorf("%s: CityName = %q, want %q", tc.name, got["CityName"], tc.want)
+		}
+	}
+}
+
 func TestMCPTemplateDataPreservesBranchAlias(t *testing.T) {
 	t.Parallel()
 
