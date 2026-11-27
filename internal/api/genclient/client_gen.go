@@ -3582,15 +3582,20 @@ type ExternalAttachment struct {
 
 // ExternalInboundMessage defines model for ExternalInboundMessage.
 type ExternalInboundMessage struct {
-	Actor             ExternalActor         `json:"actor"`
-	Attachments       *[]ExternalAttachment `json:"attachments,omitempty"`
-	Conversation      ConversationRef       `json:"conversation"`
-	DedupKey          *string               `json:"dedup_key,omitempty"`
-	ExplicitTarget    *string               `json:"explicit_target,omitempty"`
-	ProviderMessageId string                `json:"provider_message_id"`
-	ReceivedAt        time.Time             `json:"received_at"`
-	ReplyToMessageId  *string               `json:"reply_to_message_id,omitempty"`
-	Text              string                `json:"text"`
+	Actor ExternalActor `json:"actor"`
+
+	// AddressedSession Session the adapter routed the message to from its own bindings or configuration, never from the message text: a session ID, session name, alias, or configured named session. In a conversation that has no group, the message is recorded and delivered to that session once, whether or not it is a member; no session is created for it, and a value that names no open session delivers to no one. A conversation that has a group ignores it, even when a binding routes the conversation: the group decides who hears the message. A value that names more than one session is rejected with 400. explicit_target still decides whom the other notified sessions are told the message is for.
+	AddressedSession *string               `json:"addressed_session,omitempty"`
+	Attachments      *[]ExternalAttachment `json:"attachments,omitempty"`
+	Conversation     ConversationRef       `json:"conversation"`
+	DedupKey         *string               `json:"dedup_key,omitempty"`
+
+	// ExplicitTarget Handle the sender addressed the message to, as read from the message (an @handle prefix or a mention). A hint only: it selects a group participant by handle and tells the other notified sessions whom the message is for, and it never delivers the message to a session.
+	ExplicitTarget    *string   `json:"explicit_target,omitempty"`
+	ProviderMessageId string    `json:"provider_message_id"`
+	ReceivedAt        time.Time `json:"received_at"`
+	ReplyToMessageId  *string   `json:"reply_to_message_id,omitempty"`
+	Text              string    `json:"text"`
 }
 
 // ExtmsgAdapterInfo defines model for ExtmsgAdapterInfo.
@@ -3803,21 +3808,26 @@ type HookClaimReclaimedStalePayload struct {
 
 // InboundEventPayload defines model for InboundEventPayload.
 type InboundEventPayload struct {
-	Actor          string  `json:"actor"`
-	ConversationId string  `json:"conversation_id"`
-	Provider       string  `json:"provider"`
-	TargetAgent    *string `json:"target_agent,omitempty"`
-	TargetSession  string  `json:"target_session"`
+	Actor string `json:"actor"`
+
+	// AddressedSession Session the inbound's adapter addressed it to (its addressed_session, resolved), which hears it whether or not it is a member of the conversation.
+	AddressedSession *string `json:"addressed_session,omitempty"`
+	ConversationId   string  `json:"conversation_id"`
+	Provider         string  `json:"provider"`
+	TargetAgent      *string `json:"target_agent,omitempty"`
+	TargetSession    string  `json:"target_session"`
 }
 
 // InboundResult defines model for InboundResult.
 type InboundResult struct {
-	Binding         *SessionBindingRecord         `json:"Binding,omitempty"`
-	GroupRoute      *GroupRouteDecision           `json:"GroupRoute,omitempty"`
-	Message         ExternalInboundMessage        `json:"Message"`
-	TargetAgentName string                        `json:"TargetAgentName"`
-	TargetSessionID string                        `json:"TargetSessionID"`
-	TranscriptEntry *ConversationTranscriptRecord `json:"TranscriptEntry,omitempty"`
+	// AddressedSessionID Session the message's addressed_session resolved to, which hears the message whether or not it is a member. Absent when the message carried no addressed_session, when it named no open session, or when the conversation has a group.
+	AddressedSessionID *string                       `json:"AddressedSessionID,omitempty"`
+	Binding            *SessionBindingRecord         `json:"Binding,omitempty"`
+	GroupRoute         *GroupRouteDecision           `json:"GroupRoute,omitempty"`
+	Message            ExternalInboundMessage        `json:"Message"`
+	TargetAgentName    string                        `json:"TargetAgentName"`
+	TargetSessionID    string                        `json:"TargetSessionID"`
+	TranscriptEntry    *ConversationTranscriptRecord `json:"TranscriptEntry,omitempty"`
 }
 
 // ListBodyAgentPatch defines model for ListBodyAgentPatch.

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -82,6 +83,41 @@ func (s *Server) extmsgResolveSessionSelector() func(ctx context.Context, select
 	}
 }
 
+// extmsgResolveAddressedSession builds the InboundDeps addressed-session
+// resolver: it resolves a selector as extmsgResolveSessionSelector does,
+// without materializing a session. A selector that names no session, or names
+// a closed one (an exact session ID still names its session once closed),
+// addresses no one. One that names several sessions, or conflicts with a
+// configured named session, wraps extmsg.ErrInvalidInput: a retry of the
+// inbound cannot change that answer, so the adapter must drop the message
+// rather than hold its stream behind it.
+func (s *Server) extmsgResolveAddressedSession() func(ctx context.Context, selector string) (string, error) {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
+		return nil
+	}
+	sessions := session.NewStore(store)
+	return func(ctx context.Context, selector string) (string, error) {
+		sessionID, err := s.resolveSessionTargetIDWithContext(ctx, store, selector, apiSessionResolveOptions{})
+		switch {
+		case errors.Is(err, session.ErrSessionNotFound):
+			return "", nil
+		case errors.Is(err, session.ErrAmbiguous), errors.Is(err, errConfiguredNamedSessionConflict):
+			return "", fmt.Errorf("%w: %w", extmsg.ErrInvalidInput, err)
+		case err != nil:
+			return "", err
+		}
+		_, closed, err := sessions.GetState(sessionID)
+		switch {
+		case errors.Is(err, session.ErrSessionNotFound), errors.Is(err, beads.ErrNotFound), err == nil && closed:
+			return "", nil
+		case err != nil:
+			return "", fmt.Errorf("reading addressed session %s: %w", sessionID, err)
+		}
+		return sessionID, nil
+	}
+}
+
 func extmsgHandleLabel(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -117,23 +153,40 @@ func (s *Server) extmsgSessionHandleForResolvedID(resolvedID, fallback string) s
 	return extmsgHandleLabel(source)
 }
 
+// extmsgNotification is one message a notice fan-out announces to a
+// conversation's readers.
+type extmsgNotification struct {
+	Conversation extmsg.ConversationRef
+	ActorDisplay string
+	ActorKind    string
+	Text         string
+	// ExcludeSelector names the session that published the message, which is
+	// never told of its own message.
+	ExcludeSelector string
+	// ExplicitTarget is the handle an inbound was addressed to
+	// (ExternalInboundMessage.ExplicitTarget), which the notices' self-silence
+	// line names. Outbound reply broadcasts and self-update notifications leave
+	// it empty because they are not addressed to a specific agent.
+	ExplicitTarget string
+	// AddressedSessionID is the session an inbound's adapter addressed it to
+	// (InboundResult.AddressedSessionID). It is notified once, whether or not
+	// it is a member, and a membership row that resolves to it gets no second
+	// notice.
+	AddressedSessionID string
+}
+
 // extmsgNotifyMembers sends a peer-publication reminder to transcript members
-// via the session message API. This treats membership as the routing truth and
-// lets session resolution materialize or wake named sessions on first receive.
+// via the session message API. Transcript members are the conversation's
+// readership; session resolution materializes or wakes a member's named
+// session on first receive. The one reader outside the membership is an
+// inbound's addressed session (n.AddressedSessionID), which inbound routing
+// resolved without materializing anything.
 //
-// explicitTarget, when non-empty, carries the address-by-handle target so
-// peer members can self-silence on off-target messages (see #2484). Outbound
-// reply broadcasts and self-update notifications pass "" because they are
-// not addressed to a specific agent.
-func (s *Server) extmsgNotifyMembers(
-	ctx context.Context,
-	conv extmsg.ConversationRef,
-	actorDisplayName string,
-	actorKind string,
-	text string,
-	excludeSelector string,
-	explicitTarget string,
-) {
+// When n.ExplicitTarget is non-empty, every notice except the addressee's
+// carries a self-silence line so peers can stay quiet on off-target messages
+// (see #2484). The addressee is the addressed session or, in a grouped room,
+// the participant whose handle the explicit target names.
+func (s *Server) extmsgNotifyMembers(ctx context.Context, n extmsgNotification) {
 	svc := s.state.ExtMsgServices()
 	// Sessions class, and a WRITE path: the member fan-out below materializes a
 	// configured named session that has no live bead yet, so through the work
@@ -143,37 +196,27 @@ func (s *Server) extmsgNotifyMembers(
 		return
 	}
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "extmsg-notify"}
-	explicitTargetSessionID := extmsgNotifyExplicitTargetSessionID(ctx, svc, conv, explicitTarget)
-	members, err := svc.Transcript.ListMemberships(ctx, caller, conv)
+	addresseeID := extmsgNotifyAddresseeSessionID(ctx, svc, n)
+	members, err := svc.Transcript.ListMemberships(ctx, caller, n.Conversation)
 	if err != nil {
-		log.Printf("extmsg: ListMemberships failed for %s/%s: %v", conv.Provider, conv.ConversationID, err)
+		log.Printf("extmsg: ListMemberships failed for %s/%s: %v", n.Conversation.Provider, n.Conversation.ConversationID, err)
 		return
 	}
-
-	excludedResolvedID := ""
-	excludedSelector := apiNormalizeSessionTarget(excludeSelector)
-	if selector := strings.TrimSpace(excludeSelector); selector != "" {
-		resolvedID, err := s.resolveSessionTargetIDWithContext(ctx, store, selector, apiSessionResolveOptions{})
-		if err != nil {
-			log.Printf("extmsg: resolve sender %s failed: %v", selector, err)
-		} else {
-			excludedResolvedID = resolvedID
-		}
-	}
+	sender := s.extmsgNotifySenderOf(ctx, store, n.ExcludeSelector)
 
 	notifyResolved := func(sessionSelector, resolvedID string) {
 		handle := s.extmsgSessionHandleForResolvedID(resolvedID, sessionSelector)
 		nudge := s.extmsgNotice(extmsgNotifyReminder{
-			Provider:                conv.Provider,
-			ConversationID:          conv.ConversationID,
-			ActorDisplay:            actorDisplayName,
-			ActorKind:               actorKind,
-			Text:                    text,
+			Provider:                n.Conversation.Provider,
+			ConversationID:          n.Conversation.ConversationID,
+			ActorDisplay:            n.ActorDisplay,
+			ActorKind:               n.ActorKind,
+			Text:                    n.Text,
 			RecipientSelector:       sessionSelector,
 			RecipientSessionID:      resolvedID,
 			Handle:                  handle,
-			ExplicitTarget:          explicitTarget,
-			ExplicitTargetSessionID: explicitTargetSessionID,
+			ExplicitTarget:          n.ExplicitTarget,
+			ExplicitTargetSessionID: addresseeID,
 		})
 		if err := s.sendBackgroundMessageToSession(ctx, store, resolvedID, nudge); err != nil {
 			log.Printf("extmsg: notify %s failed: %v", sessionSelector, err)
@@ -181,36 +224,28 @@ func (s *Server) extmsgNotifyMembers(
 	}
 
 	var wg sync.WaitGroup
+	if addressed := n.AddressedSessionID; addressed != "" && !sender.excludes(addressed, addressed) {
+		wg.Go(func() { notifyResolved(addressed, addressed) })
+	}
 	for _, m := range members {
-		wg.Add(1)
-		go func(sessionSelector string) {
-			defer wg.Done()
-			if excludedSelector != "" && apiNormalizeSessionTarget(sessionSelector) == excludedSelector {
-				return
+		wg.Go(func() {
+			resolvedID, ok := s.extmsgMemberSessionID(ctx, store, n.Conversation, m.SessionID, sender)
+			if ok && resolvedID != n.AddressedSessionID {
+				notifyResolved(m.SessionID, resolvedID)
 			}
-			preexistingID, preErr := s.resolveSessionTargetIDWithContext(ctx, store, sessionSelector, apiSessionResolveOptions{})
-			if preErr == nil && preexistingID != "" {
-				if excludedResolvedID != "" && preexistingID == excludedResolvedID {
-					return
-				}
-				notifyResolved(sessionSelector, preexistingID)
-				return
-			}
-			resolvedID, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store, sessionSelector)
-			if err != nil {
-				log.Printf("extmsg: resolve session %s failed: %v", sessionSelector, err)
-				return
-			}
-			if preErr != nil {
-				log.Printf("extmsg: materialized session %s as %s for conversation %s/%s", sessionSelector, resolvedID, conv.Provider, conv.ConversationID)
-			}
-			if excludedResolvedID != "" && resolvedID == excludedResolvedID {
-				return
-			}
-			notifyResolved(sessionSelector, resolvedID)
-		}(m.SessionID)
+		})
 	}
 	wg.Wait()
+}
+
+// extmsgNotifyAddresseeSessionID returns the session n is addressed to, whose
+// notice carries no self-silence line: n's addressed session, else the group
+// participant whose handle n.ExplicitTarget names.
+func extmsgNotifyAddresseeSessionID(ctx context.Context, svc *extmsg.Services, n extmsgNotification) string {
+	if n.AddressedSessionID != "" {
+		return n.AddressedSessionID
+	}
+	return extmsgNotifyExplicitTargetSessionID(ctx, svc, n.Conversation, n.ExplicitTarget)
 }
 
 func extmsgNotifyExplicitTargetSessionID(ctx context.Context, svc *extmsg.Services, conv extmsg.ConversationRef, explicitTarget string) string {
@@ -231,12 +266,78 @@ func extmsgNotifyExplicitTargetSessionID(ctx context.Context, svc *extmsg.Servic
 	return strings.TrimSpace(route.TargetSessionID)
 }
 
-func (s *Server) extmsgNotifyInboundMembers(ctx context.Context, msg extmsg.ExternalInboundMessage) {
+// extmsgNotifySender is the session that published the message a notice
+// fan-out announces, which is never told of its own message: its selector,
+// normalized, and the session that selector resolves to, when it does.
+type extmsgNotifySender struct {
+	selector  string
+	sessionID string
+}
+
+// excludes reports whether a recipient, named by selector or resolved to
+// resolvedID, is the sender. An empty resolvedID checks the selector alone.
+func (snd extmsgNotifySender) excludes(selector, resolvedID string) bool {
+	return (snd.selector != "" && apiNormalizeSessionTarget(selector) == snd.selector) ||
+		(snd.sessionID != "" && resolvedID == snd.sessionID)
+}
+
+// extmsgNotifySenderOf resolves the sender excludeSelector names, without
+// materializing a session. A selector that does not resolve still excludes the
+// membership rows it names directly.
+func (s *Server) extmsgNotifySenderOf(ctx context.Context, store beads.SessionStore, excludeSelector string) extmsgNotifySender {
+	sender := extmsgNotifySender{selector: apiNormalizeSessionTarget(excludeSelector)}
+	selector := strings.TrimSpace(excludeSelector)
+	if selector == "" {
+		return sender
+	}
+	resolvedID, err := s.resolveSessionTargetIDWithContext(ctx, store, selector, apiSessionResolveOptions{})
+	if err != nil {
+		log.Printf("extmsg: resolve sender %s failed: %v", selector, err)
+		return sender
+	}
+	sender.sessionID = resolvedID
+	return sender
+}
+
+// extmsgMemberSessionID resolves a membership row's session selector to the
+// session its notice goes to, materializing a configured named session that
+// has no live bead yet. It reports false when the row gets no notice: it names
+// the sender, or its selector does not resolve.
+func (s *Server) extmsgMemberSessionID(ctx context.Context, store beads.SessionStore, conv extmsg.ConversationRef, selector string, sender extmsgNotifySender) (string, bool) {
+	if sender.excludes(selector, "") {
+		return "", false
+	}
+	preexistingID, preErr := s.resolveSessionTargetIDWithContext(ctx, store, selector, apiSessionResolveOptions{})
+	if preErr == nil && preexistingID != "" {
+		return preexistingID, !sender.excludes(selector, preexistingID)
+	}
+	resolvedID, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store, selector)
+	if err != nil {
+		log.Printf("extmsg: resolve session %s failed: %v", selector, err)
+		return "", false
+	}
+	if preErr != nil {
+		log.Printf("extmsg: materialized session %s as %s for conversation %s/%s", selector, resolvedID, conv.Provider, conv.ConversationID)
+	}
+	return resolvedID, !sender.excludes(selector, resolvedID)
+}
+
+// extmsgNotifyInboundMembers announces an inbound to the conversation's
+// members and, when its adapter addressed it to a session, to that session
+// (addressedSessionID, the inbound's InboundResult.AddressedSessionID).
+func (s *Server) extmsgNotifyInboundMembers(ctx context.Context, msg extmsg.ExternalInboundMessage, addressedSessionID string) {
 	actorKind := "agent"
 	if !msg.Actor.IsBot {
 		actorKind = "human"
 	}
-	s.extmsgNotifyMembers(ctx, msg.Conversation, msg.Actor.DisplayName, actorKind, msg.Text, "", msg.ExplicitTarget)
+	s.extmsgNotifyMembers(ctx, extmsgNotification{
+		Conversation:       msg.Conversation,
+		ActorDisplay:       msg.Actor.DisplayName,
+		ActorKind:          actorKind,
+		Text:               msg.Text,
+		ExplicitTarget:     msg.ExplicitTarget,
+		AddressedSessionID: addressedSessionID,
+	})
 }
 
 // titleCaseProvider uppercases the first ASCII byte of a provider name.
@@ -265,7 +366,9 @@ func titleCaseProvider(name string) string {
 // subteam mention). When non-empty and not routed to the receiving session,
 // formatExtmsgNotifyReminder emits a "do not reply" discriminator line so
 // peer sessions can self-silence on off-target messages. See
-// gastownhall/gascity#2484.
+// gastownhall/gascity#2484. ExplicitTargetSessionID is the session the inbound
+// is addressed to, when known: its addressed session, or the group participant
+// ExplicitTarget names.
 type extmsgNotifyReminder struct {
 	Provider                string
 	ConversationID          string
@@ -322,10 +425,19 @@ func formatExtmsgNotifyReminder(r extmsgNotifyReminder) string {
 	return b.String()
 }
 
+// extmsgNotifyReminderTargetsRecipient reports whether the reminder's
+// recipient is the session its inbound is addressed to, whose notice carries
+// no discriminator line. A known addressee (ExplicitTargetSessionID) decides
+// by session. Otherwise target is compared with the recipient's handle, its
+// session ID, and the selector it was reached by, so a member named by its own
+// ID is not told the message is for someone else.
 func extmsgNotifyReminderTargetsRecipient(r extmsgNotifyReminder, target string) bool {
+	recipientID := strings.TrimSpace(r.RecipientSessionID)
 	if targetSessionID := strings.TrimSpace(r.ExplicitTargetSessionID); targetSessionID != "" {
-		return strings.TrimSpace(r.RecipientSessionID) == targetSessionID ||
+		return recipientID == targetSessionID ||
 			apiNormalizeSessionTarget(r.RecipientSelector) == apiNormalizeSessionTarget(targetSessionID)
 	}
-	return strings.EqualFold(target, strings.TrimSpace(r.Handle))
+	return strings.EqualFold(target, strings.TrimSpace(r.Handle)) ||
+		target == recipientID ||
+		apiNormalizeSessionTarget(target) == apiNormalizeSessionTarget(r.RecipientSelector)
 }

@@ -200,7 +200,12 @@ func TestExtmsgNotifyMembersMaterializesIntoSessionsClass(t *testing.T) {
 	}
 
 	// Nothing is excluded, so the fan-out must materialize the named member.
-	srv.extmsgNotifyMembers(context.Background(), ref, "Alice", "human", "hello peers", "", "")
+	srv.extmsgNotifyMembers(context.Background(), extmsgNotification{
+		Conversation: ref,
+		ActorDisplay: "Alice",
+		ActorKind:    "human",
+		Text:         "hello peers",
+	})
 	srv.waitForBackground()
 
 	if id, err := session.ResolveSessionID(beadstest.Sessions(fs.cityBeadStore), "myrig/worker"); err == nil {

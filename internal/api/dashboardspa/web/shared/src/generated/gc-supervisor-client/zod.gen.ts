@@ -830,6 +830,7 @@ export const zExternalAttachment = z.object({
 
 export const zExternalInboundMessage = z.object({
     actor: zExternalActor,
+    addressed_session: z.string().optional(),
     attachments: z.array(zExternalAttachment).nullish(),
     conversation: zConversationRef,
     dedup_key: z.string().optional(),
@@ -1008,6 +1009,7 @@ export const zHookClaimReclaimedStalePayload = z.object({
 
 export const zInboundEventPayload = z.object({
     actor: z.string(),
+    addressed_session: z.string().optional(),
     conversation_id: z.string(),
     provider: z.string(),
     target_agent: z.string().optional(),
@@ -3927,6 +3929,7 @@ export const zConversationTranscriptRecord = z.object({
 });
 
 export const zInboundResult = z.object({
+    AddressedSessionID: z.string().optional(),
     Binding: zSessionBindingRecord.optional(),
     GroupRoute: zGroupRouteDecision.optional(),
     Message: zExternalInboundMessage,
