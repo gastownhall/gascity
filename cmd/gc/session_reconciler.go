@@ -3001,6 +3001,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						gate = closeFreeSlot
 					}
 					closed, cause := closeSeatFor(store, sw, infoByID[id], closeWhy{reason: reason, gate: gate}, clk.Now().UTC(), stderr)
+					canonicalIdentity := ""
 					// An operator's suspend keeps the seat whole: its claims are
 					// not released, nor is it closed through the releasing gate.
 					if !closed && reason == "orphaned" && cause != causeKeepsSlot {
@@ -3024,6 +3025,21 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// moved, or detached and alive) still blocks.
 						if !closed && onlyStrandedWork(sw, infoByID[id]) {
 							closed = closeSeat(store, sw, infoByID[id], closeWhy{reason: reason, gate: closeReleasing}, clk.Now().UTC(), stderr)
+						}
+						// A canonical singleton seat's alias is its agent's
+						// configured identity, and work claimed under it is that
+						// identity's (#9245): when nothing else a lane serves holds
+						// the seat, it closes, and its cascade gives those claims
+						// back to the pool, keeping only the ones routed to the
+						// identity, and keeps its own unserved claims (O5).
+						if !closed {
+							if identity, ok := canonicalSingletonSeatIdentity(infoByID[id], cfg); ok && rowOwnsNoServedWorkBesidesIdentity(sw, infoByID[id], cfg, identity) {
+								closed = closeSeat(store, sw, infoByID[id], closeWhy{reason: reason, gate: closeReleasing, identity: identity}, clk.Now().UTC(), stderr)
+								if closed {
+									canonicalIdentity = identity
+									fmt.Fprintf(stdout, "Closed orphaned canonical singleton seat '%s' (claims under %q go back to its pool; process gone)\n", name, identity) //nolint:errcheck
+								}
+							}
 						}
 					}
 					if closed {
@@ -3054,6 +3070,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								"assigned_work_bead_cnt":          len(assignedWorkBeads),
 								"assigned_work_store_cnt":         len(reconcileOpts.assignedWorkStores),
 							}
+						}
+						if canonicalIdentity != "" {
+							if payload == nil {
+								payload = traceRecordPayload{}
+							}
+							payload["canonical_identity"] = canonicalIdentity
 						}
 						trace.RecordDecision(TraceSiteReconcilerCloseOrphan, TraceReasonCode(reason), outcome, template, name, payload)
 					}

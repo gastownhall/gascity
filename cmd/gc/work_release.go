@@ -138,6 +138,7 @@ var releasePolicies = map[releaseWhy]releasePolicy{
 const (
 	keptStarted       = "started"
 	keptNamedIdentity = "named-identity" // held under the seat's configured named identity
+	keptIdentity      = "identity"       // held under, and routed to, a canonical singleton's identity (ReleaseOpts.Identity)
 	keptUnservedRoute = "unserved-route"
 	keptMoved         = "moved"
 	keptDetachedHeld  = "detached-held" // its gc.detached probe did not attest the runtime dead
@@ -268,6 +269,11 @@ type ReleaseOpts struct {
 	// released, and the outcome is Refused with those claims Kept. A seat's
 	// own drain-ack uses it: it must finish such work before it acks.
 	RefuseStarted bool
+	// Identity is the configured identity of the canonical singleton seat
+	// whose orphan close releases (#9245): a claim held under it that routes
+	// to it is kept (canonicalIdentityKeeps), and every other claim takes
+	// the path's policy as usual.
+	Identity string
 }
 
 // ReleaseOutcome is what a release did with each claim.
@@ -276,6 +282,16 @@ type ReleaseOutcome struct {
 	Why                    map[string]string // by bead ID, for Kept and Failed
 	Route                  map[string]string // by bead ID, for a claim kept unserved: the route it would take
 	Refused                bool              // RefuseStarted refused the release: Kept are the started claims
+}
+
+// seatWorkIDs is hits' bead IDs, in order: a release's claims as a log line
+// names them.
+func seatWorkIDs(hits []seatWorkHit) []string {
+	ids := make([]string, 0, len(hits))
+	for _, h := range hits {
+		ids = append(ids, h.bead.ID)
+	}
+	return ids
 }
 
 // strandedClaim is one claim kept because no lane serves it.
@@ -361,6 +377,10 @@ func releaseListed(claims []seatWorkHit, why releaseWhy, seat releaseSeat, cfg *
 		fallback = seat.fallback
 	}
 	for _, c := range mine {
+		if canonicalIdentityKeeps(cfg, opts.Identity, c.bead) {
+			keep(c, keptIdentity)
+			continue
+		}
 		if p.startedNamedKeeps && seat.keepsStarted(c.bead) {
 			keep(c, keptStarted)
 			continue
@@ -467,7 +487,13 @@ func namedSessionBacks(cfg *config.City, agent *config.Agent) bool {
 // only then is the seat read live, which must agree. A failed read, or no
 // claim at all, reports false.
 func onlyStrandedWork(sw *SeatWork, info sessionpkg.Info) bool {
-	scope := releaseScope(info, sw.Legs().cfg)
+	return onlyStrandedWorkIn(sw, releaseScope(info, sw.Legs().cfg), info)
+}
+
+// onlyStrandedWorkIn is onlyStrandedWork over scope, which sw must have read
+// (the tick's SeatWork reads every assignee; a seatWorkFor, its scope's): an
+// identity sw did not read fails the read, so the answer is false.
+func onlyStrandedWorkIn(sw *SeatWork, scope ReleaseScope, info sessionpkg.Info) bool {
 	q := seatWorkQuery{scope: scope, statuses: seatWorkStatuses}
 	seat := releaseSeatOfInfo(info)
 	stranded := func(hits []seatWorkHit, err error) bool {

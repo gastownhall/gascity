@@ -129,6 +129,9 @@ func (p *effectPass) readWork(row session.Info, it intent) *txWork {
 	}
 	if it.Kind != intentClose {
 		scope = refuseScope(row, p.World.Env.Cfg)
+	} else if it.Closing.Identity != "" {
+		// A canonical singleton seat's alias claims are not the row's work.
+		scope = rowOwnScope(row, p.World.Env.Cfg, it.Closing.Identity)
 	}
 	statuses := seatWorkStatuses
 	if it.Kind == intentRollback { // a live incarnation's in-flight work (#2081): open work no stale incarnation can claim

@@ -1352,6 +1352,61 @@ func parityFixtures() []parityFixture {
 			Explain: map[string]string{"row:gc-1:*reason": "§12.2#17 orphan-close-reason"},
 		},
 		{
+			// #9245: a max-one seat under its agent's own name holds only
+			// claims under that alias, the canonical identity's. Both modes
+			// close the row and give them back: the routed claim through the
+			// orphan release, the routeless one through the cascade with the
+			// seat's route. v2 drains the seat as suspended where legacy
+			// classifies it orphaned (§12.2 #17).
+			Name: "an agent-suspended canonical singleton seat gives its alias claims back, then closes", Behaviors: []string{"SESS-082"},
+			City: func() *config.City { cfg := workerCity(1); cfg.Agents[0].Suspended = true; return cfg },
+			Rows: []parityRow{poolRow("gc-1", "worker", 1, "asleep", "agent_name", "worker", "alias", "worker", "sleep_reason", "idle", "slept_at", at(-time.Hour))},
+			Work: []parityRow{
+				{ID: "gw-1", Title: "gw-1", Type: "task", Status: "in_progress", Assignee: "worker", Metadata: map[string]string{"gc.routed_to": "worker"}},
+				{ID: "gw-2", Title: "gw-2", Type: "task", Status: "open", Assignee: "worker", Metadata: map[string]string{}},
+			},
+			Explain: map[string]string{"row:gc-1:*reason": "§12.2#17 orphan-close-reason"},
+		},
+		{
+			// #9245's wedge: the canonical singleton seat's only claim is a
+			// blocked routeless one under its alias, so no demand keeps the
+			// seat. Both modes close the row and give the claim back with the
+			// seat's route, where route recovery finds it.
+			Name: "an orphaned canonical singleton seat gives its blocked alias claim back with its route, then closes", Behaviors: []string{"SESS-082"},
+			City: func() *config.City { return workerCity(1) },
+			Rows: []parityRow{poolRow("gc-1", "worker", 1, "asleep", "agent_name", "worker", "alias", "worker", "sleep_reason", "idle", "slept_at", at(-time.Hour))},
+			Work: []parityRow{
+				{ID: "gw-1", Title: "gw-1", Type: "task", Status: "open", Assignee: "worker", Metadata: map[string]string{}},
+				{ID: "gw-2", Title: "gw-2", Type: "task", Status: "open", Metadata: map[string]string{}},
+			},
+			Deps: []beads.Dep{{IssueID: "gw-1", DependsOnID: "gw-2", Type: "blocks"}},
+		},
+		{
+			// O5 on the canonical singleton seat: its only claim is under its
+			// own bead ID, routed to a lane no agent serves. Both modes close
+			// the row over it and keep it there, stamped and alerted.
+			Name: "an orphaned canonical singleton seat closes over its own claim no lane serves, keeping it", Behaviors: []string{"SESS-082"},
+			City: func() *config.City { return workerCity(1) },
+			Rows: []parityRow{poolRow("gc-1", "worker", 1, "asleep", "agent_name", "worker", "alias", "worker", "sleep_reason", "idle", "slept_at", at(-time.Hour))},
+			Work: []parityRow{
+				{ID: "gw-1", Title: "gw-1", Type: "task", Status: "open", Assignee: "gc-1", Metadata: map[string]string{"gc.routed_to": "nowhere/lane"}},
+			},
+		},
+		{
+			// The same claim beside #9245's blocked routeless claim under the
+			// alias: both modes close the row, keep the row's own claim on
+			// it, and give the alias claim back with the seat's route.
+			Name: "an orphaned canonical singleton seat keeps its own claim no lane serves and gives its alias claim back, then closes", Behaviors: []string{"SESS-082"},
+			City: func() *config.City { return workerCity(1) },
+			Rows: []parityRow{poolRow("gc-1", "worker", 1, "asleep", "agent_name", "worker", "alias", "worker", "sleep_reason", "idle", "slept_at", at(-time.Hour))},
+			Work: []parityRow{
+				{ID: "gw-1", Title: "gw-1", Type: "task", Status: "open", Assignee: "gc-1", Metadata: map[string]string{"gc.routed_to": "nowhere/lane"}},
+				{ID: "gw-2", Title: "gw-2", Type: "task", Status: "open", Assignee: "worker", Metadata: map[string]string{}},
+				{ID: "gw-3", Title: "gw-3", Type: "task", Status: "open", Metadata: map[string]string{}},
+			},
+			Deps: []beads.Dep{{IssueID: "gw-2", DependsOnID: "gw-3", Type: "blocks"}},
+		},
+		{
 			Name: "an undesired pool row under a live user hold keeps its slot", Behaviors: []string{"MAINT-051"},
 			// Legacy keeps it too since closeAllowed (R9-C): its KeepsSlot.
 			Rows: []parityRow{poolRow("gc-1", "worker", 1, "asleep", "sleep_intent", "user-hold", "sleep_reason", "user-hold", "held_until", at(time.Hour), "slept_at", at(-time.Hour))},

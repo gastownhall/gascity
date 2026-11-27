@@ -88,14 +88,15 @@ func asClose(sec section) section {
 // its release, whether every claim left is one no lane serves under the
 // cascade's rule: an orphaned orphan's close then lands over them (closeStep
 // decides which), and the cascade keeps, stamps and alerts on them (O5,
-// revised).
+// revised). It reads L5's scope: an orphaned canonical singleton seat's own
+// work, without its alias claims (rowOwnScope), which the cascade gives back.
 func strandedOnlyProbe(_ context.Context, r effectReads, v txView) (bool, error) {
 	c := v.It.Closing
 	if c.Kind != closeOrphan || v.Fence.Work == nil || v.Fence.Work.Free || v.World.Env == nil {
 		return false, nil
 	}
-	scope := releaseScope(v.Row, v.World.Env.Cfg)
-	return onlyStrandedWork(seatWorkFor(r.legs, scope), v.Row), nil
+	scope := rowOwnScope(v.Row, v.World.Env.Cfg, c.Identity)
+	return onlyStrandedWorkIn(seatWorkFor(r.legs, scope), scope, v.Row), nil
 }
 
 // redecideClose is A21 decided again on the fresh row and runtime read:
@@ -261,11 +262,16 @@ func strandedProbe(ctx context.Context, r effectReads, v txView) (strandedWork, 
 	return out, nil
 }
 
-// closeRelease is a release the work branch hands its Call.
+// closeRelease is a release the work branch hands its Call. cascadeReports
+// marks an orphaned canonical singleton seat's (#9245): its cascade gives
+// back what this release keeps for want of a lane, a routeless claim with the
+// seat's route, and reports what it keeps itself, so this release reports
+// none of its kept claims.
 type closeRelease struct {
-	why   releaseWhy
-	scope ReleaseScope
-	seat  releaseSeat
+	why            releaseWhy
+	scope          ReleaseScope
+	seat           releaseSeat
+	cascadeReports bool
 }
 
 func (r closeRelease) wanted() bool { return r.seat.id != "" }
@@ -283,12 +289,19 @@ func closeWorkStep(v txView, stranded strandedWork, _ error) txStep {
 		cfg = v.World.Env.Cfg
 	}
 	release := func(why releaseWhy) txStep {
-		return txStep{Pass: closeRelease{why: why, scope: releaseScope(v.Row, cfg), seat: releaseSeatOfInfo(v.Row)}}
+		return txStep{Pass: closeRelease{why: why, scope: releaseScope(v.Row, cfg), seat: releaseSeatOfInfo(v.Row), cascadeReports: c.Identity != ""}}
 	}
 	work := v.Fence.Work != nil && !v.Fence.Work.Free
 	switch {
 	case c.Killed:
 		return release(releaseKilledSeat) // before L5, which the close reads after it
+	case c.Identity != "":
+		// An orphaned canonical singleton seat (#9245) releases over its
+		// whole ReleaseScope, as legacy's orphan close does (ga-jrnou): the
+		// alias claims L5 skips included, whether or not the row owns work.
+		// The cascade gives back the rest with the seat's route, and reports
+		// what it keeps.
+		return release(releaseOrphan)
 	case !work || c.Phantom:
 	case c.Kind == closeOrphan && c.Orphaned:
 		return release(releaseOrphan)
@@ -398,8 +411,10 @@ func closeAround(ctx context.Context, a aroundCaps, run func() settlement) settl
 // phantom skips L5; a killed seat runs while its release would give a claim
 // back; an orphaned orphan while a claim is releasable or every claim is
 // stranded; a pool slot while its marker is aged (the repair) or empty (the
-// stamp). With no legs to read L5 through it runs nothing; a failed read
-// runs, and the effect decides.
+// stamp). An orphaned canonical singleton seat's L5, and whether all of it
+// is stranded, are its own work, without its alias claims (rowOwnScope).
+// With no legs to read L5 through it runs nothing; a failed read runs, and
+// the effect decides.
 func closeWorthRunning(a aroundCaps) bool {
 	c := a.it.Closing
 	switch {
@@ -409,7 +424,7 @@ func closeWorthRunning(a aroundCaps) bool {
 		return false // L5 cannot read: the effect could only refuse
 	}
 	cfg := a.release.cfg
-	scope := releaseScope(c.Row, cfg)
+	scope := rowOwnScope(c.Row, cfg, c.Identity)
 	hits, err := seatWorkFor(a.reads.legs, scope).match(seatWorkQuery{scope: scope, statuses: seatWorkStatuses}, false)
 	if err != nil || len(hits) == 0 {
 		return true
@@ -427,7 +442,7 @@ func closeWorthRunning(a aroundCaps) bool {
 		return !started && slices.ContainsFunc(hits, func(h seatWorkHit) bool { return direct(h.bead, seat.fallback) })
 	case c.Kind == closeOrphan && c.Orphaned:
 		return slices.ContainsFunc(hits, func(h seatWorkHit) bool { return direct(h.bead, "") }) ||
-			onlyStrandedWork(seatWorkFor(a.reads.legs, scope), c.Row)
+			onlyStrandedWorkIn(seatWorkFor(a.reads.legs, scope), scope, c.Row)
 	case c.Kind == closePoolSlot:
 		return c.Repair || strings.TrimSpace(c.Row.StrandedEventEmittedAt) == ""
 	}
@@ -450,7 +465,11 @@ type closeReleases struct {
 // release is a work branch's release over the seat's legs, read live.
 func (c *closeReleases) release(r closeRelease) (closeReleased, error) {
 	out, err := ReleaseClaims(seatWorkFor(c.legs, r.scope), r.scope, r.seat, r.why, ReleaseOpts{})
-	logRelease(c.stderr, "closing", r.seat.id, out, err)
+	logged := out
+	if r.cascadeReports {
+		logged.Kept = nil
+	}
+	logRelease(c.stderr, "closing", r.seat.id, logged, err)
 	done := closeReleased{why: r.why, out: out}
 	if r.why == releaseOrphan {
 		for _, hit := range out.Released {
@@ -469,10 +488,13 @@ func (c *closeReleases) release(r closeRelease) (closeReleased, error) {
 // cascade is legacy's post-close cascade (closeBeadPreservingAssignees,
 // closeFailedCreateBead) for it's closed row: cancel its waits and close its
 // external-message bindings; then, except for a failed create, release its
-// work (every identity the closed row carries, but the kept assignees)
-// through ReleaseClaims, alerting on what no lane serves; then, for a pool
-// slot, prune its worker worktree when safe. Each step is best-effort, as
-// legacy's: errors go to stderr, and the orphan release is the fallback.
+// work (every identity the closed row carries, but the kept assignees and a
+// canonical singleton's claims routed to its identity) through ReleaseClaims,
+// alerting on what no lane serves, and for a canonical singleton seat
+// logging its identity with the claims given back and kept, as legacy's close
+// line names the seat; then, for a pool slot, prune its worker worktree when
+// safe. Each step is best-effort, as legacy's: errors go to stderr, and the
+// orphan release is the fallback.
 func (c *closeReleases) cascade(ctx context.Context, it intent) {
 	store := c.stores[it.Key.Leg]
 	if store == nil {
@@ -501,8 +523,11 @@ func (c *closeReleases) cascade(ctx context.Context, it intent) {
 				fmt.Fprintf(c.stderr, "session beads: clearing current claim on closing session %s: %v\n", b.ID, err) //nolint:errcheck // best-effort stderr
 			}
 		}
-		out, err := ReleaseClaims(seatWorkFor(c.legs, scope), scope, releaseSeatOfBead(b), releaseCloseCascade, ReleaseOpts{Late: true, Deadline: deadline})
+		out, err := ReleaseClaims(seatWorkFor(c.legs, scope), scope, releaseSeatOfBead(b), releaseCloseCascade, ReleaseOpts{Late: true, Deadline: deadline, Identity: it.Closing.Identity})
 		logRelease(c.stderr, "closing", b.ID, out, err)
+		if identity := it.Closing.Identity; identity != "" {
+			fmt.Fprintf(c.stderr, "session beads: closed orphaned canonical singleton seat %s (identity %q): gave back %v, kept %v\n", b.ID, identity, seatWorkIDs(out.Released), seatWorkIDs(out.Kept)) //nolint:errcheck // best-effort stderr
+		}
 		strand(c.alerts, releaseSeatOfBead(b), strings.TrimSpace(b.Metadata["state"]), out, c.now, c.stderr)
 	}
 	if it.Closing.Kind == closePoolSlot && c.cfg != nil && ctx.Err() == nil && !c.workDirInUse(store, b) {

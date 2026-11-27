@@ -27,13 +27,14 @@ import (
 // closeCase is one row on an atomic-close store, its entry reading
 // liveness, desire and reason, its city work on the same store.
 type closeCase struct {
-	store beads.Store
-	w     *World
-	a     *allocDecision
-	k     rowKey
-	cfg   *config.City
-	rec   *events.Fake
-	bare  bool // run without the close's around: the effect alone holds
+	store  beads.Store
+	w      *World
+	a      *allocDecision
+	k      rowKey
+	cfg    *config.City
+	rec    *events.Fake
+	bare   bool            // run without the close's around: the effect alone holds
+	stderr strings.Builder // what the close's releases logged
 }
 
 func newCloseCase(t *testing.T, liveness rowLiveness, desired desire, meta ...string) *closeCase {
@@ -74,7 +75,7 @@ func (c *closeCase) run(t *testing.T, sp runtime.Provider) settlement {
 	w := *c.w
 	w.Env = &reconcileEnv{SP: sp, Cfg: c.cfg}
 	p := newEffectPass(&w, c.a)
-	p.held.release = newCloseReleases(c.w, &strandedClaimAlerts{rec: c.rec}, io.Discard)
+	p.held.release = newCloseReleases(c.w, &strandedClaimAlerts{rec: c.rec}, &c.stderr)
 	p.held.release.cfg = c.cfg
 	spec := effectSpecs[it.Kind]
 	if c.bare {
