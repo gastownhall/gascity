@@ -5,12 +5,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 // gatedActiveWorkStore serves each in_progress read from the underlying
@@ -209,5 +211,140 @@ func TestListBuildSharingQueuedFresh(t *testing.T) {
 	srv.responseCacheMu.Unlock()
 	if left != 0 {
 		t.Errorf("%d list build slots left after the queue drained, want 0", left)
+	}
+}
+
+// TestListBuildSharingPostMutation pins what a reader admitted while a
+// build runs may expect from the build that serves it: the build queued
+// behind the running one starts after that reader's admission, so it reads
+// the state then — a mutation the running build never saw is in its body —
+// and its X-GC-Index covers the mutation's event, while the reader admitted
+// before the mutation keeps the pre-mutation body and index its own build
+// read.
+func TestListBuildSharingPostMutation(t *testing.T) {
+	st := newFakeState(t)
+	st.cfg.NamedSessions = nil
+	st.cfg.Agents = []config.Agent{
+		{Name: "worker1", Dir: "myrig", Provider: "test-agent", MaxActiveSessions: intPtr(1)},
+	}
+	gates := []chan struct{}{make(chan struct{}), make(chan struct{})}
+	arrived := []chan struct{}{make(chan struct{}), make(chan struct{})}
+	gated := &gatedActiveWorkStore{Store: st.stores["myrig"], gates: gates, arrived: arrived}
+	st.stores["myrig"] = gated
+	srv := New(st)
+	h := newTestCityHandlerWith(t, st, srv)
+
+	// The response cache is off: every reader here is a cache miss, which is
+	// the sharing path's precondition.
+	oldTTL, oldFloor := responseCacheTTL, agentListResponseTTLFloor
+	responseCacheTTL, agentListResponseTTLFloor = 0, 0
+	t.Cleanup(func() {
+		responseCacheTTL, agentListResponseTTLFloor = oldTTL, oldFloor
+	})
+
+	releases := make([]func(), len(gates))
+	for i := range gates {
+		g := gates[i]
+		releases[i] = sync.OnceFunc(func() { close(g) })
+	}
+	t.Cleanup(func() {
+		for _, r := range releases {
+			r()
+		}
+	})
+
+	type agentCall struct {
+		id    int
+		code  int
+		index string
+		body  agentListWire
+	}
+	calls := make(chan agentCall, 2)
+	fetch := func(id int) {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(st, "/agents"), nil))
+		var body agentListWire
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Errorf("decode GET /agents: %v", err)
+			calls <- agentCall{id: id, code: rec.Code}
+			return
+		}
+		calls <- agentCall{id: id, code: rec.Code, index: rec.Header().Get("X-GC-Index"), body: body}
+	}
+	activeBeadOf := func(call agentCall, name string) string {
+		for _, item := range call.body.Items {
+			if item.Name == name {
+				return item.ActiveBead
+			}
+		}
+		return "<not listed>"
+	}
+	anyBuildRunning := func() bool {
+		for _, slot := range srv.listBuilds {
+			if slot.running != nil {
+				return true
+			}
+		}
+		return false
+	}
+	queuedBehindRunning := func() bool {
+		for _, slot := range srv.listBuilds {
+			if slot.running != nil && slot.queued != nil {
+				return true
+			}
+		}
+		return false
+	}
+
+	// The first reader's build reads the store and holds its rows.
+	go fetch(1)
+	awaitSlotState(t, srv, "the first build to start", anyBuildRunning)
+	awaitSignal(t, arrived[0], "the first build's in_progress read")
+
+	// Work appears and the event log advances while the first build still
+	// holds its pre-mutation rows.
+	first := mustCreateInProgress(t, gated.Store, "first work", "myrig/worker1")
+	st.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "test", Subject: "post-mutation"})
+	mutatedSeq, err := st.eventProv.LatestSeq()
+	if err != nil {
+		t.Fatalf("read the event index after the mutation: %v", err)
+	}
+
+	// A second reader arrives after the mutation and joins the build queued
+	// behind the running one; that build starts only once the running one
+	// ends, so it reads the state after the reader's admission.
+	go fetch(2)
+	awaitSlotState(t, srv, "a queued build to form behind the running one", queuedBehindRunning)
+	releases[0]()
+	awaitSignal(t, arrived[1], "the queued build's in_progress read")
+	releases[1]()
+
+	// Pair each response with its reader by id, not by completion order (the
+	// sends can invert under scheduler delays).
+	byReader := make(map[int]agentCall, 2)
+	for range []int{1, 2} {
+		call := <-calls
+		byReader[call.id] = call
+	}
+	for id, call := range byReader {
+		if call.code != http.StatusOK {
+			t.Errorf("reader %d status = %d, want 200", id, call.code)
+		}
+	}
+	if got := activeBeadOf(byReader[1], "myrig/worker1"); got != "" {
+		t.Errorf("the pre-mutation reader's build saw active_bead %q, want none: its build read the state before the work was created", got)
+	}
+	if got := activeBeadOf(byReader[2], "myrig/worker1"); got != first.ID {
+		t.Errorf("the post-mutation reader's build saw active_bead %q, want %s: the build that serves it starts after its admission and reads the state then", got, first.ID)
+	}
+	servedIndex, err := strconv.ParseUint(byReader[2].index, 10, 64)
+	if err != nil {
+		t.Fatalf("read the serving build's X-GC-Index %q: %v", byReader[2].index, err)
+	}
+	if servedIndex < mutatedSeq {
+		t.Errorf("the serving build's X-GC-Index is %d, want >= %d: the build that answers a reader admitted after a mutation starts after that admission, so the index it captures covers the mutation's event", servedIndex, mutatedSeq)
+	}
+	if gated.reads != 2 {
+		t.Errorf("GET /agents served 2 cache-miss readers with %d builds, want 2: one running build and the one queued behind it", gated.reads)
 	}
 }
