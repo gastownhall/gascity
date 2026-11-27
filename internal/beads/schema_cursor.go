@@ -2,6 +2,7 @@ package beads
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
@@ -250,23 +251,35 @@ func CursorsMatchPinned(c proxyendpoint.Cursors, reality proxyendpoint.CursorRea
 // not a new hole: detecting that write, rather than its leftovers, needs the
 // read-only open from beads.
 //
-// # Why it is not terminal, and what it therefore does NOT claim
+// # Whose move it was: the window
 //
-// gc cannot tell a commit ITS open minted from one another bd client made in the
-// same window: bd writes to this database constantly, and the schema commits
-// carry no author gc could recognize. Demoting terminally on that would let
-// another process's ordinary `bd update` permanently pin a scope to the bd front
-// door. So the verdict is non-terminal: this open stands down loudly (every
-// site that meets the verdict logs it at WARN with both hashes — the factory,
-// the read path's reopen and the guard's recovery, proxied_incident_log.go),
-// the opener forgets the memoized admission so the next open re-probes and is
-// checked again, and a genuine per-open write shows up as a per-open demotion
-// rather than as silence.
+// bd writes to this database constantly, so a HEAD that moved between the
+// probe and the re-read is usually another client's commit, and refusing every
+// such open would demote a busy city's scopes to the bd front door for no
+// reason. So a moved HEAD is attributed by the window between the two hashes
+// (proxyendpoint.PostOpenWindow, read on the observation's own pinned
+// connection), and it is let through only on positive evidence:
 //
-// The price of that choice is stated rather than hidden: on a city whose bd
-// clients commit inside the probe-to-re-read window, an open that wrote nothing
-// is demoted to the bd front door it would otherwise have replaced. That is the
-// pre-PR2 path, so it costs forks, never correctness.
+//   - A window that was not read, could not be read, holds more commits than
+//     were read, or lists none is no evidence. It is head_moved, with the
+//     reason in the detail (proxiedWindowUnattributable).
+//   - A window carrying a library open's shape is head_moved naming the commit
+//     or table that decided it (proxiedWindowOpenShape): a commit under the
+//     open path's schema: label, a schema change on any table, or a change to
+//     one of the tables only the open path writes. The table half is what
+//     catches the open's uncommitted write swept into another client's -Am
+//     commit, whose message says nothing.
+//   - Anything else is another client's ordinary write. It is no verdict; the
+//     memoized admission stands, and the ignored-plane check below still runs,
+//     because a window of committed writes says nothing about the plane HEAD
+//     cannot see.
+//
+// The verdict stays non-terminal. A window can be misread — a release that
+// renames a schema: commit would hide it, which is what the pinned-module
+// drift guard exists to catch — and a non-terminal stand-down re-probes on the
+// next open, so a per-open write shows up as a per-open demotion rather than
+// as a scope pinned to the bd front door for the process. Every site that
+// meets the verdict logs it at WARN with both hashes (proxied_incident_log.go).
 //
 // # An unobserved HEAD declines rather than agrees
 //
@@ -283,23 +296,96 @@ func ProxiedOpenUnmoved(pin Pin, observed proxyendpoint.PostOpenReport) error {
 		return nil
 	}
 	if before != after {
-		return NewProxiedVerdictError(ProxiedVerdictHeadMoved, fmt.Sprintf(
-			"opening the linked library against database %q moved HEAD from %s to %s: "+
-				"PR2's native lane serves reads only, so an open that commits may be gc writing to bd's database "+
-				"(a writable library open can seed dolt_ignore, heal the tracked cursor table, or add a "+
-				"content_hash column, each ending in a DOLT_COMMIT); this open takes bd's front door. "+
-				"If another bd client committed in the same window this is that write and not gc's, "+
-				"which is why the verdict is non-terminal and the next open re-probes",
-			pin.Database(), before, after), nil)
+		if reason := proxiedWindowUnattributable(observed.Window); reason != "" {
+			return NewProxiedVerdictError(ProxiedVerdictHeadMoved, fmt.Sprintf(
+				"opening the linked library against database %q moved HEAD from %s to %s and the commits in between "+
+					"cannot be attributed (%s): a move gc cannot show was another client's may be gc writing to "+
+					"bd's database, so this open takes bd's front door and the next open re-probes",
+				pin.Database(), before, after, reason), nil)
+		}
+		if shape := proxiedWindowOpenShape(observed.Window); shape != "" {
+			return NewProxiedVerdictError(ProxiedVerdictHeadMoved, fmt.Sprintf(
+				"opening the linked library against database %q moved HEAD from %s to %s through %s, which is the "+
+					"shape of a library open's own write (a seed, heal, backfill, repair or migration commit): "+
+					"PR2's native lane serves reads only, so this open takes bd's front door and the next open re-probes",
+				pin.Database(), before, after, shape), nil)
+		}
 	}
 	admitted := pin.Cursors().Ignored
 	if now := observed.EffectiveIgnored(admitted); now != admitted {
 		return NewProxiedVerdictError(ProxiedVerdictHeadMoved, fmt.Sprintf(
-			"opening the linked library against database %q left HEAD at %s but the ignored plane's effective "+
+			"opening the linked library against database %q, with HEAD at %s, left the ignored plane's effective "+
 				"cursor at %d where admission found %d (%s): the dolt_ignore'd plane is never committed, so HEAD "+
 				"cannot see it, and a plane the next writable open would replay is not one this leaf may serve; "+
 				"this open takes bd's front door and the next open re-probes",
 			pin.Database(), after, now, admitted, observed.IgnoredPlaneReason()), nil)
 	}
 	return nil
+}
+
+// proxiedWindowUnattributable names why a moved HEAD's window is no evidence
+// about who moved it, or returns "" for a window that can be attributed. A
+// window that was not read, could not be read, holds more commits than were
+// read, or lists no commits at all says nothing about the move, so it can
+// never be read as another client's.
+func proxiedWindowUnattributable(window *proxyendpoint.PostOpenWindow) string {
+	switch {
+	case window == nil:
+		return "no window was read between the two hashes"
+	case window.Unreadable != "":
+		return "the window could not be read: " + window.Unreadable
+	case window.Truncated:
+		return fmt.Sprintf("the window holds more than %d commits", proxyendpoint.PostOpenWindowCommitLimit)
+	case len(window.Commits) == 0:
+		return "the window lists no commits"
+	default:
+		return ""
+	}
+}
+
+// proxiedOpenCommitPrefix is the message prefix every commit the linked
+// library's open path makes under its own label carries: the dolt_ignore seed,
+// the migration commits and the #4356 untrack and sweep.
+const proxiedOpenCommitPrefix = "schema:"
+
+// proxiedOpenWriteTables are the tables the linked library's open path writes:
+// its seed, heal, backfill and repair commits touch nothing else as data, and
+// the repairs and migrations 0040/0041 commit dolt_nonlocal_tables under
+// messages that carry no schema: prefix. A window that changes any of them is
+// the open's shape whatever its commit messages say, because another client's
+// -Am commit can sweep the open's uncommitted write into itself.
+var proxiedOpenWriteTables = []string{
+	"dolt_ignore",
+	"schema_migrations",
+	"ignored_schema_migrations",
+	"custom_types",
+	"custom_statuses",
+	"dolt_nonlocal_tables",
+}
+
+// proxiedWindowOpenShape names the commit or table that makes window look
+// like the linked library's own open-time write, or returns "" when nothing in
+// it does. The checks are in order of how directly they name the open: a
+// schema:-prefixed message, then a schema change on any table, then a change
+// to a table only the open path writes.
+func proxiedWindowOpenShape(window *proxyendpoint.PostOpenWindow) string {
+	if window == nil {
+		return ""
+	}
+	for _, message := range window.Commits {
+		if strings.HasPrefix(strings.TrimSpace(message), proxiedOpenCommitPrefix) {
+			return fmt.Sprintf("commit %q", message)
+		}
+	}
+	for _, table := range window.Tables {
+		if table.SchemaChange {
+			return fmt.Sprintf("a schema change to table %q", table.Name)
+		}
+	}
+	for _, table := range window.Tables {
+		if slices.Contains(proxiedOpenWriteTables, table.Name) {
+			return fmt.Sprintf("a change to table %q", table.Name)
+		}
+	}
+	return ""
 }

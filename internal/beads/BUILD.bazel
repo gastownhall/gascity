@@ -279,6 +279,7 @@ go_test(
         "proxied_guard_tick_test.go",
         "proxied_incident_log_test.go",
         "proxied_store_conformance_test.go",
+        "proxied_store_demoted_test.go",
         "proxied_store_exact_batch_test.go",
         "proxied_store_test.go",
         "proxied_store_view_test.go",

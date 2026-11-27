@@ -277,9 +277,10 @@ type proxiedNativeOpener struct {
 	// pre-open root, be-itm5), so the re-read costs round trips on a
 	// connection gc already holds and never a session of its own. Injected for
 	// the same reason as the two opens; nil means the production readers, so
-	// omitting them cannot switch the check off.
-	leafObserve    func(ctx context.Context, native *beads.NativeDoltStore) (proxyendpoint.PostOpenReport, error)
-	storageObserve func(ctx context.Context, storage beads.NativeStorage) (proxyendpoint.PostOpenReport, error)
+	// omitting them cannot switch the check off. since is the pin's HEAD: the
+	// readers read the window between it and the observed HEAD.
+	leafObserve    func(ctx context.Context, native *beads.NativeDoltStore, since string) (proxyendpoint.PostOpenReport, error)
+	storageObserve func(ctx context.Context, storage beads.NativeStorage, since string) (proxyendpoint.PostOpenReport, error)
 
 	// logger receives the post-open check's WARN when the re-read itself
 	// fails. Nil is slog.Default(): the composition roots build this opener
@@ -392,7 +393,30 @@ func (o *proxiedNativeOpener) open(parent context.Context, longLived bool) (bead
 
 	native, err := o.openNativeLeaf(ctx, pin, longLived, beads.ProxiedIncidentSiteOpen)
 	if err != nil {
-		return nil, pin.Report(), err
+		verdict, ok := beads.ProxiedVerdictOf(err)
+		if !ok || !longLived || verdict.Terminal() {
+			return nil, pin.Report(), err
+		}
+		// A long-lived open whose admission passed and whose leaf refused
+		// non-terminally. The leaf is already closed; the store starts on the
+		// bd leaf, carrying the pin and the verdict, with the guard armed to
+		// re-pin it. Without this the open was a plain bd store for the life
+		// of the process: only a fresh open brought the native leaf back, and
+		// a long-lived store is never reopened. The report is the pin's,
+		// exactly as the bd fallback for the same verdict returns it, so the
+		// factory's diagnostic does not change with the store.
+		bd, bdErr := o.openBd()
+		if bdErr != nil {
+			return nil, pin.Report(), bdErr
+		}
+		demoted, demoteErr := beads.NewDemotedProxiedStore(bd, pin, verdict,
+			beads.WithNativeLeafReopener(o.recoverNativeLeaf()))
+		if demoteErr != nil {
+			closeProxiedLeafQuietly(bd)
+			return nil, pin.Report(), demoteErr
+		}
+		demoted.StartGuard()
+		return demoted, pin.Report(), nil
 	}
 
 	bd, err := o.openBd()
@@ -461,7 +485,7 @@ func (o *proxiedNativeOpener) openNativeLeaf(ctx context.Context, pin beads.Pin,
 		leafObserve = beads.ProxiedLeafObservation
 	}
 	if verdict := o.openUnmoved(ctx, pin, site, func(ctx context.Context) (proxyendpoint.PostOpenReport, error) {
-		return leafObserve(ctx, native)
+		return leafObserve(ctx, native, pin.Head())
 	}); verdict != nil {
 		closeProxiedLeafQuietly(native)
 		return nil, verdict
@@ -500,7 +524,8 @@ func (o *proxiedNativeOpener) openNativeLeaf(ctx context.Context, pin beads.Pin,
 //
 // On a verdict the memoized admission is forgotten. Otherwise the next open in
 // this process would be served from the memo — which carries no hash — and walk
-// past the one check that just fired.
+// past the one check that just fired. A HEAD another client moved is no
+// verdict: the memo stands and the move is logged at DEBUG with both hashes.
 func (o *proxiedNativeOpener) openUnmoved(ctx context.Context, pin beads.Pin, site string, read func(context.Context) (proxyendpoint.PostOpenReport, error)) error {
 	if pin.Head() == "" {
 		return nil
@@ -513,8 +538,12 @@ func (o *proxiedNativeOpener) openUnmoved(ctx context.Context, pin beads.Pin, si
 	verdict := beads.ProxiedOpenUnmoved(pin, observed)
 	if verdict != nil {
 		beads.ForgetProxiedPin(o.scopeRoot, pin.Database())
+		return verdict
 	}
-	return verdict
+	if observed.Head != pin.Head() {
+		beads.LogProxiedForeignHeadMove(o.logger, o.scopeRoot, site, pin.Database(), pin.Head(), observed.Head)
+	}
+	return nil
 }
 
 // recoverNativeLeaf is the guard tick's recovery for a handle that stood down
@@ -668,7 +697,7 @@ func (o *proxiedNativeOpener) reopen(longLived bool) beads.NativeReopenFunc {
 			storageObserve = beads.ProxiedOpenedObservation
 		}
 		if verdict := o.openUnmoved(ctx, pin, beads.ProxiedIncidentSiteReadReopen, func(ctx context.Context) (proxyendpoint.PostOpenReport, error) {
-			return storageObserve(ctx, storage)
+			return storageObserve(ctx, storage, pin.Head())
 		}); verdict != nil {
 			_ = storage.Close()
 			return nil, verdict

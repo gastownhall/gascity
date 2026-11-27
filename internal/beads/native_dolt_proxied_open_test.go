@@ -461,7 +461,7 @@ func TestProxiedOpenedObservationReadsOverTheLibrarysOwnPool(t *testing.T) {
 		proxyendpointtest.State{Head: " after11111\n", AbsentTables: map[string]bool{"wisp_dependencies": true}})
 	t.Cleanup(func() { _ = pool.DB.Close() })
 
-	report, err := ProxiedOpenedObservation(context.Background(), &poolStorage{db: pool.DB})
+	report, err := ProxiedOpenedObservation(context.Background(), &poolStorage{db: pool.DB}, "")
 	if err != nil {
 		t.Fatalf("ProxiedOpenedObservation: %v", err)
 	}
@@ -482,28 +482,28 @@ func TestProxiedOpenedObservationReadsOverTheLibrarysOwnPool(t *testing.T) {
 		proxyendpointtest.State{Head: "before0000"}, proxyendpointtest.State{Head: "after11111"})
 	t.Cleanup(func() { _ = leafPool.DB.Close() })
 	leaf := newNativeDoltStoreForTest(&poolStorage{db: leafPool.DB})
-	if report, err := ProxiedLeafObservation(context.Background(), leaf); err != nil || report.Head != "after11111" {
+	if report, err := ProxiedLeafObservation(context.Background(), leaf, ""); err != nil || report.Head != "after11111" {
 		t.Fatalf("ProxiedLeafObservation = (%+v, %v), want the leaf's own pool's post-open answer", report, err)
 	}
 
 	// A handle that cannot answer is an error, never an empty report: the
 	// caller must be able to tell "not observed" from a value.
-	if _, err := ProxiedOpenedObservation(context.Background(), &nativeDoltStorageSpy{}); err == nil {
+	if _, err := ProxiedOpenedObservation(context.Background(), &nativeDoltStorageSpy{}, ""); err == nil {
 		t.Fatal("a handle with no UnderlyingDB produced an observation")
 	}
 	failing := proxyendpointtest.NewPostOpenDB(proxyendpointtest.State{}, proxyendpointtest.State{}).
 		Failing(errors.New("invalid connection"))
 	t.Cleanup(func() { _ = failing.DB.Close() })
-	if _, err := ProxiedOpenedObservation(context.Background(), &poolStorage{db: failing.DB}); err == nil {
+	if _, err := ProxiedOpenedObservation(context.Background(), &poolStorage{db: failing.DB}, ""); err == nil {
 		t.Fatal("a failed re-read produced an observation")
 	}
 	empty := proxyendpointtest.NewPostOpenDB(proxyendpointtest.State{Head: "x"}, proxyendpointtest.State{Head: ""})
 	t.Cleanup(func() { _ = empty.DB.Close() })
-	if _, err := ProxiedOpenedObservation(context.Background(), &poolStorage{db: empty.DB}); err == nil {
+	if _, err := ProxiedOpenedObservation(context.Background(), &poolStorage{db: empty.DB}, ""); err == nil {
 		t.Fatal("an empty hash was reported as an observation instead of a failure to observe")
 	}
 	// A closed leaf is refused before anything is asked.
-	if _, err := ProxiedLeafObservation(context.Background(), nil); err == nil {
+	if _, err := ProxiedLeafObservation(context.Background(), nil, ""); err == nil {
 		t.Fatal("a nil leaf produced an observation")
 	}
 }
