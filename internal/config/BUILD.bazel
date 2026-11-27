@@ -250,10 +250,12 @@ go_test(
     deps = [
         "//internal/bazeltest",
         "//internal/beadmeta",
+        "//internal/beads",
         "//internal/builtinpacks",
         "//internal/citylayout",
         "//internal/coordclass",
         "//internal/fsys",
+        "//internal/molecule",
         "//internal/pathdurability",
         "//internal/pathutil",
         "//internal/pricing",

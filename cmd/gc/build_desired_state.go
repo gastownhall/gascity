@@ -1971,7 +1971,7 @@ func collectAssignedWorkBeadsWithStores(
 			listMembers := func(q beads.ListQuery) ([]beads.Bead, error) {
 				return listBothTiersForControllerDemand(source.store, q)
 			}
-			dropAwaitingFinalizeReadiness(listMembers, readyIDs, inProgress, pass, read("list_workflow_members", demandReadTierCached))
+			dropAwaitingFinalizeReadiness(listMembers, readyIDs, inProgress, pass, read)
 			// Open assigned molecule roots that count as wake demand. Whether an
 			// open assigned root is demand must be decided from the bead's RAW
 			// status, not the collapsed Bead.Status: mapBdStatus folds bd's
@@ -3632,28 +3632,66 @@ func appendOpenAssignedMoleculeWorkUnique(dst *[]beads.Bead, stores *[]beads.Sto
 // release, pool accounting and crash recovery still see the claim); it only
 // stops being wake demand. A failed member read keeps the root's readiness,
 // the same fail-open verdict the hook's crash-recovery gate gives it.
-// listMembers reads the leg the in_progress rows came from.
-func dropAwaitingFinalizeReadiness(listMembers func(beads.ListQuery) ([]beads.Bead, error), readyIDs map[string]bool, inProgress []beads.Bead, pass *demandPassTrace, read demandStoreRead) {
+// listMembers reads the leg the in_progress rows came from, and read labels
+// each member read in the demand trace.
+func dropAwaitingFinalizeReadiness(listMembers func(beads.ListQuery) ([]beads.Bead, error), readyIDs map[string]bool, inProgress []beads.Bead, pass *demandPassTrace, read func(op, tier string) demandStoreRead) {
 	for _, root := range inProgress {
-		if !readyIDs[root.ID] || strings.TrimSpace(root.Assignee) == "" ||
-			strings.TrimSpace(root.Metadata[beadmeta.KindMetadataKey]) != beadmeta.KindWorkflow {
+		if !readyIDs[root.ID] || strings.TrimSpace(root.Assignee) == "" || !isInProgressWorkflowRoot(root) {
 			continue
 		}
-		start := pass.now()
-		members, err := listMembers(beads.ListQuery{
-			Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
-			IncludeClosed: true,
-			TierMode:      beads.TierBoth,
-		})
-		pass.read(read, start, len(members), err)
-		if err != nil {
-			log.Printf("collectAssignedWorkBeads: workflow member read for %s failed; keeping its wake readiness: %v", root.ID, err)
-			continue
-		}
-		if molecule.WorkflowAwaitingFinalize(root, members) {
+		if workflowRootAwaitingFinalize(listMembers, root, pass, read) {
 			delete(readyIDs, root.ID)
 		}
 	}
+}
+
+// isInProgressWorkflowRoot reports whether b is a row dropAwaitingFinalizeReadiness
+// assesses: an in_progress workflow root, by its trimmed gc.kind. The awake
+// bridge (newAwakeInputFromSnapshot) reads a false readiness flag on such a row
+// as that assessment's verdict, so both sides take it from here.
+func isInProgressWorkflowRoot(b beads.Bead) bool {
+	return b.Status == "in_progress" && strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey]) == beadmeta.KindWorkflow
+}
+
+// awaitingFinalizeClosedEvidenceLimit bounds the closed-member read of
+// workflowRootAwaitingFinalize, as workflowMemberReadLimit bounds the hook's
+// (internal/config): a root whose first closed members are all workflow
+// topology keeps its readiness.
+const awaitingFinalizeClosedEvidenceLimit = 20
+
+// workflowRootAwaitingFinalize reads root's members live-first, in the order
+// the hook's gc_workflow_work_done reads them. The members that are not closed
+// come first, from the read cache where it can serve them (listMembers reads
+// the backing store only when it cannot), and a root with a live member, as
+// most are, is settled on that read alone. Only a root with none pays a
+// backing read: its closed members, bounded, for the evidence that a worker
+// step ran. A failed read answers false, which keeps the root's readiness.
+func workflowRootAwaitingFinalize(listMembers func(beads.ListQuery) ([]beads.Bead, error), root beads.Bead, pass *demandPassTrace, read func(op, tier string) demandStoreRead) bool {
+	ofRoot := map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID}
+	start := pass.now()
+	members, err := listMembers(beads.ListQuery{Metadata: ofRoot, TierMode: beads.TierBoth})
+	pass.read(read("list_workflow_members", demandReadTierCached), start, len(members), err)
+	if err != nil {
+		log.Printf("collectAssignedWorkBeads: workflow member read for %s failed; keeping its wake readiness: %v", root.ID, err)
+		return false
+	}
+	if molecule.WorkflowHasLiveWork(root, members) {
+		return false
+	}
+	// The read cache holds no closed rows, so this read is the backing store's.
+	start = pass.now()
+	closed, err := listMembers(beads.ListQuery{
+		Metadata: ofRoot,
+		Status:   "closed",
+		Limit:    awaitingFinalizeClosedEvidenceLimit,
+		TierMode: beads.TierBoth,
+	})
+	pass.read(read("list_workflow_members_closed", demandReadTierLive), start, len(closed), err)
+	if err != nil {
+		log.Printf("collectAssignedWorkBeads: closed workflow member read for %s failed; keeping its wake readiness: %v", root.ID, err)
+		return false
+	}
+	return molecule.WorkflowAwaitingFinalize(root, append(members, closed...))
 }
 
 // markReadyAssigned records a bead ID as wake-demand-ready. It is called only

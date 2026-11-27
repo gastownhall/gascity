@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -176,4 +177,74 @@ func TestInProgressWorkAwaitingFinalizeDoesNotWakeOrFillScaleSlot(t *testing.T) 
 	assertAsleep(t, result, "polecat-mc-p1")
 	assertAwake(t, result, "polecat-mc-p2")
 	assertReason(t, result, "polecat-mc-p2", "scaled:demand")
+}
+
+// TestDropAwaitingFinalizeReadinessReadsLiveFirst pins the order and the cost
+// of the controller's member reads. The members that are not closed are read
+// first, in a read the read cache can serve (it holds no closed rows), and that
+// read alone settles a live root. Only a root with no live member reads its
+// closed members, bounded, and that backing read is traced as a live one.
+func TestDropAwaitingFinalizeReadinessReadsLiveFirst(t *testing.T) {
+	mem := beads.NewMemStore()
+	finished := createAwaitingFinalizeRoot(t, mem, "finished root")
+	createAwaitingFinalizeMember(t, mem, finished.ID, "finished step", "task", "closed")
+	createAwaitingFinalizeMember(t, mem, finished.ID, "finished finalizer", beadmeta.KindWorkflowFinalize, "open")
+	live := createAwaitingFinalizeRoot(t, mem, "live root")
+	createAwaitingFinalizeMember(t, mem, live.ID, "live done step", "task", "closed")
+	createAwaitingFinalizeMember(t, mem, live.ID, "live open step", "task", "open")
+	rootOnly := createAwaitingFinalizeRoot(t, mem, "root-only root")
+
+	for _, tc := range []struct {
+		name      string
+		root      beads.Bead
+		wantReady bool
+		wantReads []string
+	}{
+		{"live root", live, true, []string{"list_workflow_members/" + demandReadTierCached}},
+		{"finished root", finished, false, []string{
+			"list_workflow_members/" + demandReadTierCached,
+			"list_workflow_members_closed/" + demandReadTierLive,
+		}},
+		{"root-only root", rootOnly, true, []string{
+			"list_workflow_members/" + demandReadTierCached,
+			"list_workflow_members_closed/" + demandReadTierLive,
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var queries []beads.ListQuery
+			listMembers := func(q beads.ListQuery) ([]beads.Bead, error) {
+				queries = append(queries, q)
+				return mem.List(q)
+			}
+			var reads []string
+			read := func(op, tier string) demandStoreRead {
+				reads = append(reads, op+"/"+tier)
+				return demandStoreRead{op: op, tier: tier}
+			}
+			// The in_progress pass hands over the rows as the store reads them.
+			root, err := mem.Get(tc.root.ID)
+			if err != nil {
+				t.Fatalf("get %s: %v", tc.root.ID, err)
+			}
+			readyIDs := map[string]bool{root.ID: true}
+			dropAwaitingFinalizeReadiness(listMembers, readyIDs, []beads.Bead{root}, nil, read)
+			if readyIDs[tc.root.ID] != tc.wantReady {
+				t.Fatalf("ready = %v, want %v", readyIDs[tc.root.ID], tc.wantReady)
+			}
+			if strings.Join(reads, ",") != strings.Join(tc.wantReads, ",") {
+				t.Fatalf("member reads traced as %v, want %v", reads, tc.wantReads)
+			}
+			if len(queries) != len(tc.wantReads) {
+				t.Fatalf("issued %d member reads %+v, want %d", len(queries), queries, len(tc.wantReads))
+			}
+			if q := queries[0]; q.IncludesClosed() || q.Status != "" || q.Metadata[beadmeta.RootBeadIDMetadataKey] != tc.root.ID {
+				t.Fatalf("first member read %+v, want the root's members that are not closed, which the read cache can serve", q)
+			}
+			if len(queries) > 1 {
+				if q := queries[1]; q.Status != "closed" || q.Limit != awaitingFinalizeClosedEvidenceLimit || q.Metadata[beadmeta.RootBeadIDMetadataKey] != tc.root.ID {
+					t.Fatalf("second member read %+v, want the root's closed members bounded to %d", q, awaitingFinalizeClosedEvidenceLimit)
+				}
+			}
+		})
+	}
 }

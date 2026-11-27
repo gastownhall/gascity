@@ -5,7 +5,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -205,8 +204,7 @@ func newAwakeInputFromSnapshot(
 			// unready is waiting only on its finalize control
 			// (dropAwaitingFinalizeReadiness). Omitted flags keep today's
 			// wake-on-claim behavior.
-			awaitingFinalize := wb.Status == "in_progress" && i < len(readyAssignedFlags) && !readyAssignedFlags[i] &&
-				strings.TrimSpace(wb.Metadata[beadmeta.KindMetadataKey]) == beadmeta.KindWorkflow
+			awaitingFinalize := isInProgressWorkflowRoot(wb) && i < len(readyAssignedFlags) && !readyAssignedFlags[i]
 			input.WorkBeads = append(input.WorkBeads, AwakeWorkBead{
 				ID: wb.ID, Assignee: a, Status: wb.Status, Ready: ready, Blocked: blocked,
 				AwaitingFinalize: awaitingFinalize,

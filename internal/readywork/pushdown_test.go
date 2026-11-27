@@ -124,7 +124,108 @@ func (s ignoringStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
 
 func (s ignoringStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	query.Assignee = ""
+	query.Metadata = nil
 	return s.MemStore.List(query)
+}
+
+// listRecordingStore is a leg that applies every pushed list predicate, as
+// MemStore does, and records each list query it is asked.
+type listRecordingStore struct {
+	*beads.MemStore
+	mu    sync.Mutex
+	lists []beads.ListQuery
+}
+
+func (s *listRecordingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.mu.Lock()
+	s.lists = append(s.lists, query)
+	s.mu.Unlock()
+	return s.MemStore.List(query)
+}
+
+func (s *listRecordingStore) listQueries() []beads.ListQuery {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.lists)
+}
+
+// TestReadPushesTheStatusArmPredicatesIntoEveryLeg pins what each leg of a
+// --status arm is asked: the assignee and every plain-string key=value pair
+// travel into its list read, so a member read naming one workflow root reads
+// that workflow's rows rather than every bead in the status. A pair a backend
+// could compare differently stays Go-side, and so does the limit.
+func TestReadPushesTheStatusArmPredicatesIntoEveryLeg(t *testing.T) {
+	for _, status := range KnownStatuses() {
+		t.Run(status, func(t *testing.T) {
+			city := &listRecordingStore{MemStore: beads.NewMemStore()}
+			rig := &listRecordingStore{MemStore: beads.NewMemStore()}
+			legs := []Leg{testLeg("city", city), testLeg("rig r", rig)}
+			_, err := Read(legs, Query{
+				Status:         status,
+				Assignee:       "  worker-1 ",
+				MetadataFields: []string{"gc.root_bead_id=wf-1", "gc.flag=true", "gc.kind"},
+				Limit:          20,
+			})
+			if err != nil {
+				t.Fatalf("Read: %v", err)
+			}
+			// Every leg read goes through the store's live handle.
+			want := beads.ListQuery{
+				Status:   status,
+				Assignee: "worker-1",
+				Metadata: map[string]string{"gc.root_bead_id": "wf-1"},
+				TierMode: beads.FederatedReadTier,
+				Live:     true,
+			}
+			if status == StatusOpen {
+				// The open arm reads every non-closed row and keeps the mapped
+				// open ones (readOpenStatusCandidates).
+				want.Status = ""
+				want.AllowScan = true
+			}
+			for _, store := range []*listRecordingStore{city, rig} {
+				got := store.listQueries()
+				if len(got) != 1 {
+					t.Fatalf("leg asked %d list queries, want 1: %+v", len(got), got)
+				}
+				if !reflect.DeepEqual(got[0], want) {
+					t.Fatalf("leg asked %+v, want %+v", got[0], want)
+				}
+			}
+		})
+	}
+}
+
+// TestReadOpenStatusJudgesTheNarrowedAnswerAfterKeepingOpenRows pins the order
+// the open arm keeps its rows in: the open rows are chosen from the narrowed
+// merge before its exactness is judged. Judged first, the bound would be taken
+// over rows the arm then drops, and a binding's relic behind them would never
+// be probed: here the binding's open copy of w-1 sorts behind an in_progress
+// row, while the work store's copy, which the plain read keeps, is in_progress
+// under another root and so answers nothing.
+func TestReadOpenStatusJudgesTheNarrowedAnswerAfterKeepingOpenRows(t *testing.T) {
+	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	root := func(id string) func(*beads.Bead) {
+		return func(b *beads.Bead) { b.Metadata = beads.StringMap{"gc.root_bead_id": id} }
+	}
+	inProgress := func(b *beads.Bead) { b.Status = "in_progress" }
+	work := []beads.Bead{readyRow("w-1", 1, base, root("other"), inProgress)}
+	graph := []beads.Bead{
+		readyRow("g-01", 0, base, root("wf-1"), inProgress),
+		readyRow("w-1", 1, base, root("wf-1")),
+	}
+	binding := func(store beads.Store) Leg {
+		return Leg{Label: "graph", Store: store, ClassBinding: true, ReservedPrefixes: []string{"g"}}
+	}
+	q := Query{Status: StatusOpen, MetadataFields: []string{"gc.root_bead_id=wf-1"}, Limit: 1}
+	plain := []Leg{testLeg("city", ignoringStore{beads.NewMemStoreFrom(0, work, nil)}), binding(ignoringStore{beads.NewMemStoreFrom(0, graph, nil)})}
+	if got := readIDs(t, plain, q); len(got) != 0 {
+		t.Fatalf("unpushed answer = %v, want none: the work store's in_progress copy of w-1 wins the merge", got)
+	}
+	pushed := []Leg{testLeg("city", &listRecordingStore{MemStore: beads.NewMemStoreFrom(0, work, nil)}), binding(&listRecordingStore{MemStore: beads.NewMemStoreFrom(0, graph, nil)})}
+	if got := readIDs(t, pushed, q); len(got) != 0 {
+		t.Fatalf("pushed answer = %v, want the unpushed answer (none)", got)
+	}
 }
 
 func newNarrowingStore(rows ...beads.Bead) *narrowingStore {
@@ -512,7 +613,7 @@ func TestReadPushdownNeverChangesTheAnswer(t *testing.T) {
 				Unassigned: rng.Intn(3) == 0,
 				Limit:      []int{0, 1, 3, 20}[rng.Intn(4)],
 				Sort:       []string{"", "", SortOldest, SortNewest}[rng.Intn(4)],
-				Status:     []string{"", "", "", StatusInProgress, StatusOpen, StatusBlocked}[rng.Intn(6)],
+				Status:     []string{"", "", "", StatusInProgress, StatusOpen, StatusBlocked, StatusClosed}[rng.Intn(7)],
 			}
 			if rng.Intn(2) == 0 {
 				q.MetadataFields = []string{"gc.routed_to=" + routes[1+rng.Intn(len(routes)-1)]}

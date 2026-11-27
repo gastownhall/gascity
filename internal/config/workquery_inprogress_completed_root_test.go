@@ -5,6 +5,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/molecule"
 )
 
 // A graph.v2 workflow root that is in_progress and still assigned, but whose
@@ -70,7 +74,7 @@ type workflowRootFake struct {
 	// and "garbage" for one that prints output jq cannot parse.
 	memberRead string
 	// anchorReady answers the anchor-ready probe (a ready read on
-	// gc.root_bead_id without --status).
+	// gc.root_bead_id without --status) with its rows of the root it asks for.
 	anchorReady string
 	// assignedReady answers the assigned-ready read (`ready --assignee=`).
 	assignedReady string
@@ -130,7 +134,7 @@ case "$*" in
     if [ "$1" = list ] || [ -n "$statuses" ]; then
       ` + memberRead + `
     else
-      printf '%s' "$anchor_ready"
+      printf '%s' "$anchor_ready" | jq -c --arg r "$root" '[.[] | select(.metadata["gc.root_bead_id"] == $r)]'
     fi
     exit 0 ;;
 esac
@@ -169,11 +173,14 @@ func (r workflowRootRun) ids(t *testing.T) []string {
 	return workQueryOutputIDOrder(t, strings.TrimSpace(r.stdout))
 }
 
-// memberReads returns the logged calls that read a workflow's members.
+// memberReads returns the logged calls that read a workflow's members: a
+// `bd list` or a `gc ready --status` read on gc.root_bead_id. The anchor-ready
+// probe reads ready rows on gc.root_bead_id too, and is not one.
 func (r workflowRootRun) memberReads() []string {
 	var reads []string
 	for _, call := range r.calls {
-		if strings.Contains(call, "gc.root_bead_id=") {
+		if strings.Contains(call, "gc.root_bead_id=") &&
+			(strings.HasPrefix(call, "bd list ") || strings.Contains(call, " --status ")) {
 			reads = append(reads, call)
 		}
 	}
@@ -230,6 +237,17 @@ func workflowRootJSON(id string, extraMeta string) string {
 	return `{"id":"` + id + `","status":"in_progress","assignee":"sess-1","issue_type":"task",` +
 		`"metadata":{"gc.kind":"workflow","gc.formula_contract":"graph.v2","gc.routed_to":"luna-worker"` + extraMeta + `}}`
 }
+
+// contractlessFinishedRoot and paddedKindFinishedRoot are in_progress
+// workflow roots assigned to sess-1 that the graph-anchor predicate does not
+// match: one has no gc.formula_contract stamp, the other a padded gc.kind.
+// Both are still workflow roots to the finished-root gate.
+const (
+	contractlessFinishedRoot = `{"id":"wf-root-1","status":"in_progress","assignee":"sess-1","issue_type":"task",` +
+		`"metadata":{"gc.kind":"workflow"}}`
+	paddedKindFinishedRoot = `{"id":"wf-root-1","status":"in_progress","assignee":"sess-1","issue_type":"task",` +
+		`"metadata":{"gc.kind":" workflow ","gc.formula_contract":"graph.v2"}}`
+)
 
 func memberJSON(id, root, status, kind string) string {
 	return `{"id":"` + id + `","status":"` + status + `","issue_type":"task",` +
@@ -466,6 +484,10 @@ func TestCombinedWorkQueryPassesOverFinishedWorkflowHead(t *testing.T) {
 	}
 	ephemeralOrigin := map[string]string{"GC_SESSION_ID": "sess-1", "GC_SESSION_ORIGIN": "ephemeral"}
 	namedOrigin := map[string]string{"GC_SESSION_ID": "sess-1", "GC_SESSION_ORIGIN": "named"}
+	// The same identity's live root behind the finished one, and its ready step.
+	ownLiveRoot := workflowRootJSON("wf-root-2", ``)
+	ownLiveReadyStep := `{"id":"live-ready","status":"open","metadata":{"gc.kind":"task","gc.root_bead_id":"wf-root-2","gc.routed_to":"hello-world/worker"}}`
+	otherStep := `{"id":"other-step","status":"in_progress","assignee":"sess-1","metadata":{"gc.kind":"task"}}`
 	for _, tc := range []struct {
 		name string
 		env  map[string]string
@@ -525,6 +547,46 @@ func TestCombinedWorkQueryPassesOverFinishedWorkflowHead(t *testing.T) {
 			fake: workflowRootFake{inProgress: jsonRows(finishedRoot, liveRoot), members: members(liveMembers...)},
 			want: []string{"wf-root-2"},
 		},
+		{
+			name: "live anchor behind it under the same identity, through the fallback",
+			env:  ephemeralOrigin,
+			fake: workflowRootFake{inProgress: jsonRows(finishedRoot, ownLiveRoot), members: members(liveMembers...)},
+			want: []string{"wf-root-2"},
+		},
+		{
+			name: "live anchor behind it under the same identity, through the origin gate",
+			env:  namedOrigin,
+			fake: workflowRootFake{inProgress: jsonRows(finishedRoot, ownLiveRoot), members: members(liveMembers...)},
+			want: []string{"wf-root-2"},
+		},
+		{
+			name: "ready step of the live anchor behind it",
+			env:  ephemeralOrigin,
+			fake: workflowRootFake{
+				inProgress:  jsonRows(finishedRoot, ownLiveRoot),
+				members:     members(liveMembers...),
+				anchorReady: jsonRows(ownLiveReadyStep),
+			},
+			want: []string{"live-ready"},
+		},
+		{
+			name: "in_progress step behind a finished root with no contract stamp",
+			env:  ephemeralOrigin,
+			fake: workflowRootFake{inProgress: jsonRows(contractlessFinishedRoot, otherStep), members: finishedMembers},
+			want: []string{"other-step"},
+		},
+		{
+			name: "in_progress step behind a finished root with a padded kind",
+			env:  ephemeralOrigin,
+			fake: workflowRootFake{inProgress: jsonRows(paddedKindFinishedRoot, otherStep), members: finishedMembers},
+			want: []string{"other-step"},
+		},
+		{
+			name: "live anchor behind a finished root with no contract stamp",
+			env:  ephemeralOrigin,
+			fake: workflowRootFake{inProgress: jsonRows(contractlessFinishedRoot, ownLiveRoot), members: members(liveMembers...)},
+			want: []string{"wf-root-2"},
+		},
 	} {
 		for _, form := range combinedQueryForms() {
 			t.Run(tc.name+"/"+form.name, func(t *testing.T) {
@@ -553,5 +615,207 @@ func TestCombinedWorkQueryKeepsLiveWorkflowRootWithNoReadyStep(t *testing.T) {
 				t.Fatalf("live workflow root with no ready step was not emitted by the fallback: %v", ids)
 			}
 		})
+	}
+}
+
+// TestInProgressTierLooksBehindAFinishedWorkflowRoot covers the
+// assigned-in-progress-only query's look-behind: a head it passes over as a
+// finished workflow root does not hide the session's next in_progress row,
+// whatever the root's contract stamp or kind padding, in every form of the
+// tier. A graph.v2 root behind it is served as this tier serves every root.
+func TestInProgressTierLooksBehindAFinishedWorkflowRoot(t *testing.T) {
+	otherStep := `{"id":"other-step","status":"in_progress","assignee":"sess-1","metadata":{"gc.kind":"task"}}`
+	finishedMembers := finishedMemberShapes("wf-root-1")["finalizer open"]
+	withLiveRoot := jsonRows(memberJSON("step-a", "wf-root-1", "closed", "task"),
+		memberJSON("fin", "wf-root-1", "open", "workflow-finalize"),
+		memberJSON("live-a", "wf-root-2", "closed", "task"),
+		memberJSON("live-b", "wf-root-2", "open", "task"))
+	for _, tc := range []struct {
+		name, head, behind, members, want string
+	}{
+		{"graph.v2 root, step behind", workflowRootJSON("wf-root-1", ``), otherStep, finishedMembers, "other-step"},
+		{"graph.v2 root, live root behind", workflowRootJSON("wf-root-1", ``), workflowRootJSON("wf-root-2", ``), withLiveRoot, "wf-root-2"},
+		{"root with no contract stamp, step behind", contractlessFinishedRoot, otherStep, finishedMembers, "other-step"},
+		{"root with a padded kind, step behind", paddedKindFinishedRoot, otherStep, finishedMembers, "other-step"},
+	} {
+		for _, form := range inProgressTierForms() {
+			t.Run(tc.name+"/"+form.name, func(t *testing.T) {
+				run := runInProgressTierForm(t, form, workflowRootFake{inProgress: jsonRows(tc.head, tc.behind), members: tc.members})
+				if ids := run.ids(t); len(ids) != 1 || ids[0] != tc.want {
+					t.Fatalf("tier served %v, want %s behind the finished root (stdout %q)", ids, tc.want, run.stdout)
+				}
+			})
+		}
+	}
+}
+
+// isClosedMemberRead reports whether a logged member read is the
+// closed-evidence read.
+func isClosedMemberRead(call string) bool {
+	return strings.Contains(call, "--status=closed") || strings.Contains(call, "--status closed")
+}
+
+// wantMemberReads is how many member reads a root that no live read shows live
+// costs: every live read, then the closed one.
+func wantMemberReads(federated bool) int {
+	if federated {
+		return 4
+	}
+	return 2
+}
+
+// TestWorkQueryReadsWorkflowMembersOnlyWhereTheVerdictDecides pins the cost
+// side of the finished-root gate. The combined query reads a remembered
+// anchor's members only once the anchor is about to be emitted, so a live root
+// whose step a tier serves costs no member read. The reads go live-first, so a
+// live root that is emitted costs one, and the closed-evidence read runs last,
+// for a root no live read shows live; a root the gate judges is judged once.
+func TestWorkQueryReadsWorkflowMembersOnlyWhereTheVerdictDecides(t *testing.T) {
+	liveRoot := workflowRootJSON("wf-root-1", ``)
+	liveMembers := jsonRows(memberJSON("step-a", "wf-root-1", "closed", "task"), memberJSON("step-b", "wf-root-1", "open", "task"))
+	ownStep := `{"id":"own-step","status":"in_progress","assignee":"sess-1","metadata":{"gc.kind":"task","gc.root_bead_id":"wf-root-1"}}`
+	readyStep := `{"id":"ready-step","status":"open","metadata":{"gc.kind":"task","gc.root_bead_id":"wf-root-1"}}`
+	otherStep := `{"id":"other-step","status":"in_progress","assignee":"sess-1","metadata":{"gc.kind":"task"}}`
+	env := map[string]string{"GC_SESSION_ID": "sess-1", "GC_SESSION_ORIGIN": "ephemeral"}
+	for _, tc := range []struct {
+		name      string
+		fake      workflowRootFake
+		want      string
+		wantReads func(federated bool) int
+	}{
+		{
+			name:      "the live root's in_progress step is served",
+			fake:      workflowRootFake{inProgress: jsonRows(liveRoot, ownStep), members: liveMembers},
+			want:      "own-step",
+			wantReads: func(bool) int { return 0 },
+		},
+		{
+			name:      "the live root's ready step is served",
+			fake:      workflowRootFake{inProgress: jsonRows(liveRoot), members: liveMembers, anchorReady: jsonRows(readyStep)},
+			want:      "ready-step",
+			wantReads: func(bool) int { return 0 },
+		},
+		{
+			name:      "the live root itself is emitted",
+			fake:      workflowRootFake{inProgress: jsonRows(liveRoot), members: liveMembers},
+			want:      "wf-root-1",
+			wantReads: func(bool) int { return 1 },
+		},
+		{
+			name:      "a finished root with no contract stamp is judged once",
+			fake:      workflowRootFake{inProgress: jsonRows(contractlessFinishedRoot, otherStep), members: finishedMemberShapes("wf-root-1")["finalizer open"]},
+			want:      "other-step",
+			wantReads: wantMemberReads,
+		},
+	} {
+		for _, form := range combinedQueryForms() {
+			t.Run(tc.name+"/"+form.name, func(t *testing.T) {
+				fake := tc.fake
+				fake.ephemeral = form.ephemeral
+				run := runWorkflowRootQuery(t, form.command, env, fake)
+				if run.exit != 0 {
+					t.Fatalf("query exited %d; stderr=%s", run.exit, run.stderr)
+				}
+				if ids := run.ids(t); len(ids) != 1 || ids[0] != tc.want {
+					t.Fatalf("query served %v, want %s", ids, tc.want)
+				}
+				federated := form.name == "federated"
+				reads := run.memberReads()
+				if len(reads) != tc.wantReads(federated) {
+					t.Fatalf("query made %d member reads, want %d: %v", len(reads), tc.wantReads(federated), reads)
+				}
+				if tc.wantReads(federated) == 1 && isClosedMemberRead(reads[0]) {
+					t.Fatalf("a live root's one member read is the closed-evidence read, want a live read first: %v", reads)
+				}
+			})
+		}
+	}
+	for _, form := range inProgressTierForms() {
+		federated := form.name == "federated"
+		t.Run("in_progress tier serves a live root on one live read/"+form.name, func(t *testing.T) {
+			run := runInProgressTierForm(t, form, workflowRootFake{inProgress: jsonRows(liveRoot), members: liveMembers})
+			if ids := run.ids(t); len(ids) != 1 || ids[0] != "wf-root-1" {
+				t.Fatalf("tier served %v, want the live root", ids)
+			}
+			if reads := run.memberReads(); len(reads) != 1 || isClosedMemberRead(reads[0]) {
+				t.Fatalf("member reads %v, want one live read", reads)
+			}
+		})
+		t.Run("in_progress tier reads closed evidence last/"+form.name, func(t *testing.T) {
+			run := runInProgressTierForm(t, form, workflowRootFake{
+				inProgress: jsonRows(workflowRootJSON("wf-root-1", ``)),
+				members:    finishedMemberShapes("wf-root-1")["finalizer open"],
+			})
+			if ids := run.ids(t); len(ids) != 0 {
+				t.Fatalf("tier served %v, want the finished root passed over", ids)
+			}
+			reads := run.memberReads()
+			if len(reads) != wantMemberReads(federated) {
+				t.Fatalf("member reads %v, want %d", reads, wantMemberReads(federated))
+			}
+			for i, read := range reads {
+				if isClosedMemberRead(read) != (i == len(reads)-1) {
+					t.Fatalf("member reads %v, want every live read before the one closed-evidence read", reads)
+				}
+			}
+		})
+	}
+}
+
+// TestWorkflowWorkDoneMatchesTheControllerVerdict feeds one member corpus to
+// the hook's generated gc_workflow_work_done, through the in_progress tier in
+// both reader forms, and to molecule.WorkflowAwaitingFinalize, the controller's
+// copy of the verdict. They must agree. A root the controller stops waking its
+// holder for must be one the hook passes over, and a root the hook passes over
+// must not wake its holder, or the controller wakes a session the hook then
+// serves nothing (internal/config/AGENTS.md). Reader bounds are left out: a
+// saturated member window reads as live to the hook alone, which only keeps a
+// root served that the controller lets sleep.
+func TestWorkflowWorkDoneMatchesTheControllerVerdict(t *testing.T) {
+	type member struct{ id, root, status, kind string }
+	const root = "wf-root-1"
+	closedStep := member{"step-a", root, "closed", "task"}
+	openFinalizer := member{"fin", root, "open", beadmeta.KindWorkflowFinalize}
+	corpus := map[string][]member{
+		"all closed":               {closedStep, {"fin", root, "closed", beadmeta.KindWorkflowFinalize}},
+		"finalizer open":           {closedStep, openFinalizer},
+		"latches open":             {closedStep, openFinalizer, {"scope", root, "open", beadmeta.KindScope}, {"spec", root, "open", beadmeta.KindSpec}},
+		"padded finalizer kind":    {closedStep, {"fin", root, "open", " workflow-finalize "}},
+		"padded closed step kind":  {{"step-a", root, "closed", " task "}, openFinalizer},
+		"open step":                {closedStep, {"step-b", root, "open", "task"}, openFinalizer},
+		"in_progress step":         {closedStep, {"step-b", root, "in_progress", "task"}, openFinalizer},
+		"blocked step":             {closedStep, {"step-b", root, "blocked", "task"}, openFinalizer},
+		"open retry":               {closedStep, {"retry", root, "open", beadmeta.KindRetry}, openFinalizer},
+		"open nested workflow":     {closedStep, {"nested", root, "open", beadmeta.KindWorkflow}},
+		"root only":                nil,
+		"fresh":                    {{"step-a", root, "open", "task"}, openFinalizer},
+		"only topology closed":     {{"scope", root, "closed", beadmeta.KindScope}, {"spec", root, "closed", beadmeta.KindSpec}, openFinalizer},
+		"another root's open step": {closedStep, openFinalizer, {"other", "wf-root-9", "open", "task"}},
+		"the root's own row":       {closedStep, openFinalizer, {root, root, "in_progress", beadmeta.KindWorkflow}},
+	}
+	rootBead := beads.Bead{ID: root, Status: "in_progress", Assignee: "sess-1", Metadata: map[string]string{
+		beadmeta.KindMetadataKey: beadmeta.KindWorkflow, beadmeta.FormulaContractMetadataKey: "graph.v2",
+	}}
+	forms := inProgressTierForms()
+	for name, members := range corpus {
+		rows := make([]string, 0, len(members))
+		memberBeads := make([]beads.Bead, 0, len(members))
+		for _, m := range members {
+			rows = append(rows, memberJSON(m.id, m.root, m.status, m.kind))
+			memberBeads = append(memberBeads, beads.Bead{ID: m.id, Status: m.status, Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey: m.kind, beadmeta.RootBeadIDMetadataKey: m.root,
+			}})
+		}
+		awaiting := molecule.WorkflowAwaitingFinalize(rootBead, memberBeads)
+		for _, form := range []inProgressTierForm{forms[0], forms[2]} {
+			t.Run(name+"/"+form.name, func(t *testing.T) {
+				run := runInProgressTierForm(t, form, workflowRootFake{inProgress: jsonRows(workflowRootJSON(root, ``)), members: jsonRows(rows...)})
+				ids := run.ids(t)
+				served := len(ids) == 1 && ids[0] == root
+				if served == awaiting {
+					t.Fatalf("hook served the root = %v, but the controller's WorkflowAwaitingFinalize = %v; the two verdicts must agree", served, awaiting)
+				}
+			})
+		}
 	}
 }
