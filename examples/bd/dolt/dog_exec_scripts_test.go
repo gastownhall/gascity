@@ -264,6 +264,8 @@ func (f compactScriptFixture) runWithArgs(t *testing.T, mode string, args []stri
 		"GC_DOLT_COMPACT_ALERT_TO",
 		"GC_DOLT_CONFIG_FILE",
 		"GC_FAKE_DOLT_COMPACT_MODE",
+		"GC_FAKE_DOLT_FLATTEN_STDOUT_FILE",
+		"GC_FAKE_DOLT_FLATTEN_COMMIT",
 		"GC_FAKE_DOLT_COUNT_FILE",
 		"GC_FAKE_DOLT_STATE_FILE",
 		"GC_FAKE_DOLT_HASH_STATE_FILE",
@@ -547,6 +549,10 @@ func assertCompactBeadsQuarantineAlert(t *testing.T, fixture compactScriptFixtur
 	}
 }
 
+// compactFakeFlattenCommit is the commit the fake dolt's flatten DOLT_COMMIT
+// reports: a valid 32-character Dolt hash (digits and a-v).
+const compactFakeFlattenCommit = "compactcommit0000000000000000000"
+
 func writeCompactFakeDolt(t *testing.T, binDir string) string {
 	t.Helper()
 	logPath := filepath.Join(binDir, "dolt.log")
@@ -577,6 +583,23 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 printf 'db=%%s query=%%s\n' "$db" "$query" >> "$log"
+# The flatten's DOLT_COMMIT reports this commit; it is a valid Dolt hash.
+flatten_commit="${GC_FAKE_DOLT_FLATTEN_COMMIT:-%s}"
+# --use-db <db>/<rev> selects the read-only revision database pinned to <rev>.
+# Only the flatten commit exists as a revision here; anything else is unknown,
+# exactly as Dolt rejects it. Reads through it see the state at that commit
+# (current_head reports rev), never the live HEAD a later writer moved.
+rev=""
+case "$db" in
+  */*)
+    rev="${db#*/}"
+    db="${db%%%%/*}"
+    if [ "$rev" != "$flatten_commit" ]; then
+      printf 'database not found: %%s/%%s\n' "$db" "$rev" >&2
+      exit 1
+    fi
+    ;;
+esac
 # Live-database faults. A file <live_fault_dir>/after-<gc|flatten>-<db> holding
 # vanish, unserved, or transient:<n> fires once, after the next DOLT_GC or
 # flatten DOLT_RESET on <db> finishes, whatever its exit status: vanish removes
@@ -638,6 +661,10 @@ print_remote_rows() {
   printf '+------+-----+\n'
 }
 current_head() {
+  if [ -n "$rev" ]; then
+    printf '%%s\n' "$rev"
+    return 0
+  fi
   if [ "$mode" = "head_changes_before_flatten" ]; then
     calls_file="$state_file.head-calls"
     calls=0
@@ -1032,32 +1059,6 @@ case "$query" in
     if { [ "$mode" = "pending_gc_marker_disappears" ] || [ "$mode" = "pending_gc_marker_disappears_remote" ]; } && [ -n "$pending_gc_marker" ]; then
       rm -f "$pending_gc_marker"
     fi
-    if [ "$mode" = "second_db_post_flatten_head_empty" ] && [ "$db" = "zed" ]; then
-      calls_file="$state_file.$db-head-calls"
-      calls=0
-      if [ -f "$calls_file" ]; then
-        calls="$(cat "$calls_file")"
-      fi
-      calls=$((calls + 1))
-      printf '%%s\n' "$calls" > "$calls_file"
-      if [ "$calls" -eq 4 ]; then
-        print_cell ""
-        exit 0
-      fi
-    fi
-    if [ "$mode" = "writer_race_db_hash_empty_pre_probe" ] && [ "$(current_head)" = "compactcommit" ]; then
-      calls_file="$state_file.compact-head-calls"
-      calls=0
-      if [ -f "$calls_file" ]; then
-        calls="$(cat "$calls_file")"
-      fi
-      calls=$((calls + 1))
-      printf '%%s\n' "$calls" > "$calls_file"
-      if [ "$calls" -eq 3 ]; then
-        print_cell ""
-        exit 0
-      fi
-    fi
     if [ "$mode" = "head_probe_failure_during_preflight_verify" ]; then
       # The compact retry loop probes HEAD once before preflight and once
       # after collecting counts/hash; fail the second probe to prove that
@@ -1074,15 +1075,17 @@ case "$query" in
         exit 49
       fi
     fi
-    # writer_race_before_flatten: a normal MVCC writer commits inside the
-    # residual window between the final stable pre-flight HEAD check and the
-    # flatten's DOLT_RESET. The pre-flight loop stabilizes at headcommit, so the
-    # pre-reset HEAD probe (the 3rd HEAD probe taken while still at headcommit)
-    # reports writercommit. State stays at headcommit so the flatten still
-    # advances HEAD to compactcommit and verify still observes the gain+drift.
-    # This advance lives in the HEAD-probe arm (not current_head) so the
-    # "$(current_head)" gate-checks in other arms keep seeing the real state.
-    if { [ "$mode" = "writer_race_before_flatten" ] || [ "$mode" = "remote_writer_race_before_flatten" ]; } && [ "$(current_head)" = "headcommit" ]; then
+    # writer_race_before_flatten (and the other pre-reset writer modes): a
+    # normal MVCC writer commits inside the residual window between the final
+    # stable pre-flight HEAD check and the flatten's DOLT_RESET, so the flatten
+    # absorbs its rows into the flatten commit. The pre-flight loop stabilizes
+    # at headcommit, so the pre-reset HEAD probe (the 3rd HEAD probe taken
+    # while still at headcommit) reports writercommit. State stays at
+    # headcommit so the flatten still advances HEAD to the flatten commit and
+    # verify still observes the absorbed writer's drift. This advance lives in
+    # the HEAD-probe arm (not current_head) so the "$(current_head)" gate-checks
+    # in other arms keep seeing the real state.
+    if { [ "$mode" = "writer_race_before_flatten" ] || [ "$mode" = "remote_writer_race_before_flatten" ] || [ "$mode" = "row_count_decreases_with_writer_race" ] || [ "$mode" = "same_count_hash_drift_with_writer_race" ] || [ "$mode" = "writer_race_same_count_hash_drift_only" ] || [ "$mode" = "writer_race_same_count_hash_drift_diff_fails" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "writers_before_and_after_flatten" ] || [ "$mode" = "writer_race_before_flatten_row_decrease" ] || [ "$mode" = "writer_race_before_flatten_same_count_update" ] || [ "$mode" = "writer_race_before_flatten_db_hash_drift" ]; } && [ "$(current_head)" = "headcommit" ]; then
       calls_file="$state_file.prereset-head-calls"
       calls=0
       if [ -f "$calls_file" ]; then
@@ -1095,13 +1098,25 @@ case "$query" in
         exit 0
       fi
     fi
-    # writer_race_during_verify: a writer commits during/after the post-flatten
-    # verify. The flatten advances HEAD to compactcommit; the 1st HEAD probe at
-    # compactcommit is the flatten_head probe and the 2nd is the post-verify
-    # probe, which reports writercommit so HEAD has moved past the flatten's own
-    # commit. verify_counts still sees compactcommit (gain+drift) because it does
-    # not probe HEAD and the "$(current_head)" gates read the real state.
-    if { [ "$mode" = "writer_race_during_verify" ] || [ "$mode" = "writer_race_db_hash_during_verify" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "row_count_decreases_with_writer_race" ] || [ "$mode" = "same_count_hash_drift_with_writer_race" ] || [ "$mode" = "writer_race_same_count_hash_drift_only" ] || [ "$mode" = "writer_race_same_count_hash_drift_diff_fails" ] || [ "$mode" = "writer_race_after_db_hash" ]; } && [ "$(current_head)" = "compactcommit" ]; then
+    # Later-writer modes: a writer commits right after the flatten, so every
+    # live HEAD probe after it reports writercommit while reads pinned to the
+    # flatten commit keep seeing that commit. writer_after_flatten,
+    # writer_race_during_verify, writer_race_db_hash_during_verify,
+    # row_count_decreases_with_later_writer and
+    # same_count_hash_drift_with_later_writer move HEAD from the first
+    # post-flatten probe; writer_race_after_db_hash moves it only at the 2nd
+    # (the final pre-GC fence, after the post-verify probe).
+    if { [ "$mode" = "writer_after_flatten" ] || [ "$mode" = "writer_race_during_verify" ] || [ "$mode" = "writer_race_db_hash_during_verify" ] || [ "$mode" = "row_count_decreases_with_later_writer" ] || [ "$mode" = "same_count_hash_drift_with_later_writer" ]; } && [ "$(current_head)" = "$flatten_commit" ]; then
+      print_cell writercommit
+      exit 0
+    fi
+    # writers_before_and_after_flatten: a second writer commits latecommit on
+    # top of the flatten commit, so every live HEAD probe after it moves on.
+    if [ "$mode" = "writers_before_and_after_flatten" ] && [ "$(current_head)" = "$flatten_commit" ]; then
+      print_cell latecommit
+      exit 0
+    fi
+    if [ "$mode" = "writer_race_after_db_hash" ] && [ "$(current_head)" = "$flatten_commit" ]; then
       calls_file="$state_file.postverify-head-calls"
       calls=0
       if [ -f "$calls_file" ]; then
@@ -1109,11 +1124,7 @@ case "$query" in
       fi
       calls=$((calls + 1))
       printf '%%s\n' "$calls" > "$calls_file"
-      if [ "$mode" = "writer_race_after_db_hash" ] && [ "$calls" -ge 5 ]; then
-        print_cell writercommit
-        exit 0
-      fi
-      if [ "$mode" != "writer_race_after_db_hash" ] && [ "$calls" -ge 2 ]; then
+      if [ "$calls" -ge 2 ]; then
         print_cell writercommit
         exit 0
       fi
@@ -1137,7 +1148,7 @@ case "$query" in
         # never moves and every per-table working-set hash stays stable. The
         # first_commit_* modes drift the same way because the flatten
         # first-commits a never-committed table.
-        if [ "$(current_head)" = "compactcommit" ]; then
+        if [ "$(current_head)" = "$flatten_commit" ]; then
           print_cell hash-root-after-absorb
         else
           print_cell hash-root-before
@@ -1178,11 +1189,11 @@ case "$query" in
       print_cell ""
       exit 0
     fi
-    if [ "$mode" = "db_hash_empty_after_flatten" ] && [ "$(current_head)" = "compactcommit" ]; then
+    if [ "$mode" = "db_hash_empty_after_flatten" ] && [ "$(current_head)" = "$flatten_commit" ]; then
       print_cell ""
       exit 0
     fi
-    if { [ "$mode" = "writer_race_after_postverify_before_db_hash" ] || [ "$mode" = "writer_race_db_hash_empty_pre_probe" ]; } && [ "$(current_head)" = "compactcommit" ]; then
+    if [ "$mode" = "writer_race_after_postverify_before_db_hash" ] && [ "$(current_head)" = "$flatten_commit" ]; then
       set_head writercommit
       set_hash hash-after-writer
       print_cell hash-after-writer
@@ -1199,15 +1210,21 @@ case "$query" in
       print_cell ""
       exit 0
     fi
-    if [ "$mode" = "table_hash_empty_after_flatten" ] && [ "$(current_head)" = "compactcommit" ]; then
+    if [ "$mode" = "table_hash_empty_after_flatten" ] && [ "$(current_head)" = "$flatten_commit" ]; then
       print_cell ""
       exit 0
     fi
-    if { [ "$mode" = "row_count_and_hash_diverges" ] || [ "$mode" = "same_table_replacement_with_row_gain" ] || [ "$mode" = "mixed_row_count_gain_and_same_count_hash_drift" ] || [ "$mode" = "writer_race_before_flatten" ] || [ "$mode" = "remote_writer_race_before_flatten" ] || [ "$mode" = "writer_race_during_verify" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "row_count_decreases_with_writer_race" ] || [ "$mode" = "row_count_decreases_with_hash_change" ] || [ "$mode" = "same_count_hash_drift_with_writer_race" ]; } && [ "$(current_head)" = "compactcommit" ]; then
+    if { [ "$mode" = "row_count_and_hash_diverges" ] || [ "$mode" = "same_table_replacement_with_row_gain" ] || [ "$mode" = "mixed_row_count_gain_and_same_count_hash_drift" ] || [ "$mode" = "writer_race_before_flatten" ] || [ "$mode" = "remote_writer_race_before_flatten" ] || [ "$mode" = "writer_race_during_verify" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "row_count_decreases_with_writer_race" ] || [ "$mode" = "row_count_decreases_with_hash_change" ] || [ "$mode" = "same_count_hash_drift_with_writer_race" ]; } && [ "$(current_head)" = "$flatten_commit" ]; then
       print_cell hash-beads-after-writer
       exit 0
     fi
-    if { [ "$mode" = "same_row_count_writer" ] || [ "$mode" = "writer_race_same_count_hash_drift_only" ] || [ "$mode" = "writer_race_same_count_hash_drift_diff_fails" ]; } && [ "$(current_head)" = "compactcommit" ]; then
+    if { [ "$mode" = "same_row_count_writer" ] || [ "$mode" = "writer_race_same_count_hash_drift_only" ] || [ "$mode" = "writer_race_same_count_hash_drift_diff_fails" ] || [ "$mode" = "same_count_hash_drift_with_later_writer" ] || [ "$mode" = "writers_before_and_after_flatten" ] || [ "$mode" = "writer_race_before_flatten_same_count_update" ]; } && [ "$(current_head)" = "$flatten_commit" ]; then
+      print_cell hash-beads-after-writer
+      exit 0
+    fi
+    # writer_after_flatten: the later writer's same-count UPDATE is visible in
+    # the live database only; the flatten commit itself is unchanged.
+    if [ "$mode" = "writer_after_flatten" ] && [ -z "$rev" ] && [ "$(current_head)" = "$flatten_commit" ]; then
       print_cell hash-beads-after-writer
       exit 0
     fi
@@ -1215,7 +1232,7 @@ case "$query" in
     exit 0
     ;;
   *"DOLT_HASHOF_TABLE('notes')"*)
-    if { [ "$mode" = "mixed_row_count_gain_and_same_count_hash_drift" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "same_count_hash_drift_then_probe_failure" ] || [ "$mode" = "probe_failure_then_same_count_hash_drift" ]; } && [ "$(current_head)" = "compactcommit" ]; then
+    if { [ "$mode" = "mixed_row_count_gain_and_same_count_hash_drift" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "same_count_hash_drift_then_probe_failure" ] || [ "$mode" = "probe_failure_then_same_count_hash_drift" ]; } && [ "$(current_head)" = "$flatten_commit" ]; then
       print_cell hash-notes-after-writer
       exit 0
     fi
@@ -1227,7 +1244,7 @@ case "$query" in
     exit 0
     ;;
   *"DOLT_HASHOF_TABLE('wisps')"*)
-    if { [ "$mode" = "ignored_table_drift" ] || [ "$mode" = "ignored_committed_table_drift" ]; } && [ "$(current_head)" = "compactcommit" ]; then
+    if { [ "$mode" = "ignored_table_drift" ] || [ "$mode" = "ignored_committed_table_drift" ]; } && [ "$(current_head)" = "$flatten_commit" ]; then
       print_cell hash-wisps-after-churn
       exit 0
     fi
@@ -1333,7 +1350,7 @@ case "$query" in
       printf 'information_schema unavailable\n' >&2
       exit 43
     fi
-    if [ "$mode" = "post_flatten_table_list_failure" ] && [ "$(current_head)" = "compactcommit" ]; then
+    if [ "$mode" = "post_flatten_table_list_failure" ] && [ "$(current_head)" = "$flatten_commit" ]; then
       printf 'information_schema unavailable after flatten\n' >&2
       exit 43
     fi
@@ -1341,11 +1358,11 @@ case "$query" in
       print_cell 'bad/name'
       exit 0
     fi
-    if [ "$mode" = "post_flatten_table_appears" ] && [ "$(current_head)" = "compactcommit" ]; then
+    if [ "$mode" = "post_flatten_table_appears" ] && [ "$(current_head)" = "$flatten_commit" ]; then
       print_cells beads notes
       exit 0
     fi
-    if [ "$mode" = "post_flatten_invalid_table_name" ] && [ "$(current_head)" = "compactcommit" ]; then
+    if [ "$mode" = "post_flatten_invalid_table_name" ] && [ "$(current_head)" = "$flatten_commit" ]; then
       print_cells beads 'bad/name'
       exit 0
     fi
@@ -1413,7 +1430,7 @@ case "$query" in
     # same-count-hash-drift defer). A zero count means the flatten commit
     # itself never touched the table's rows.
     case "$mode" in
-      writer_race_same_count_hash_drift_only|same_count_hash_drift_with_writer_race)
+      writer_race_same_count_hash_drift_only|same_count_hash_drift_with_writer_race|same_count_hash_drift_with_later_writer|writers_before_and_after_flatten|writer_race_before_flatten_same_count_update)
         print_cell 0
         ;;
       writer_race_same_count_hash_drift_diff_fails)
@@ -1439,7 +1456,7 @@ case "$query" in
     exit 0
     ;;
   *"SELECT COUNT(*) FROM"*"wisps"*)
-    if { [ "$mode" = "ignored_table_drift" ] || [ "$mode" = "ignored_committed_table_drift" ]; } && [ "$(current_head)" = "compactcommit" ]; then
+    if { [ "$mode" = "ignored_table_drift" ] || [ "$mode" = "ignored_committed_table_drift" ]; } && [ "$(current_head)" = "$flatten_commit" ]; then
       print_cell 11
       exit 0
     fi
@@ -1465,7 +1482,7 @@ case "$query" in
     fi
     if { [ "$mode" = "row_count_gain_with_stable_hashes" ] || [ "$mode" = "row_count_gain_with_db_hash_drift" ] || [ "$mode" = "row_count_and_hash_diverges" ] || [ "$mode" = "same_table_replacement_with_row_gain" ] || [ "$mode" = "mixed_row_count_gain_and_same_count_hash_drift" ] || [ "$mode" = "writer_race_before_flatten" ] || [ "$mode" = "remote_writer_race_before_flatten" ] || [ "$mode" = "writer_race_during_verify" ] || [ "$mode" = "writer_race_db_hash_during_verify" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ]; } && [ "$calls" -gt 1 ]; then
       print_cell 11
-    elif { [ "$mode" = "row_count_decreases" ] || [ "$mode" = "row_count_decreases_with_writer_race" ] || [ "$mode" = "row_count_decreases_with_hash_change" ]; } && [ "$calls" -gt 1 ]; then
+    elif { [ "$mode" = "row_count_decreases" ] || [ "$mode" = "row_count_decreases_with_writer_race" ] || [ "$mode" = "row_count_decreases_with_hash_change" ] || [ "$mode" = "row_count_decreases_with_later_writer" ] || [ "$mode" = "writer_race_before_flatten_row_decrease" ]; } && [ "$calls" -gt 1 ]; then
       print_cell 9
     else
       print_cell 10
@@ -1487,6 +1504,14 @@ case "$query" in
     fi
     if [ "$mode" = "dropped_ignored_table_db_hash_drift" ]; then
       print_cell wisps
+      exit 0
+    fi
+    # writer_race_before_flatten_db_hash_drift: the pre-reset writer's commit
+    # is absorbed into the flatten and the committed root drifts while every
+    # per-table check passes; the drifted table is inside the verified set, so
+    # the confinement proof succeeds.
+    if [ "$mode" = "writer_race_before_flatten_db_hash_drift" ]; then
+      print_cell beads
       exit 0
     fi
     case "$mode" in
@@ -1566,13 +1591,26 @@ case "$query" in
     if [ "$mode" = "gc_read_timeout_after_slow_flatten" ]; then
       sleep 3
     fi
-    set_head compactcommit
+    set_head "$flatten_commit"
     if [ "$mode" = "same_row_count_writer" ]; then
       set_hash hash-after-writer
     fi
-    if [ "$mode" = "row_count_gain_with_db_hash_drift" ] || [ "$mode" = "same_count_db_hash_drift" ] || [ "$mode" = "row_count_and_hash_diverges" ] || [ "$mode" = "same_table_replacement_with_row_gain" ] || [ "$mode" = "writer_race_db_hash_during_verify" ]; then
+    if [ "$mode" = "row_count_gain_with_db_hash_drift" ] || [ "$mode" = "same_count_db_hash_drift" ] || [ "$mode" = "row_count_and_hash_diverges" ] || [ "$mode" = "same_table_replacement_with_row_gain" ] || [ "$mode" = "writer_race_db_hash_during_verify" ] || [ "$mode" = "writer_race_before_flatten_db_hash_drift" ]; then
       set_hash hash-after-writer
     fi
+    # GC_FAKE_DOLT_FLATTEN_STDOUT_FILE replaces the flatten's result output.
+    if [ -n "${GC_FAKE_DOLT_FLATTEN_STDOUT_FILE:-}" ]; then
+      cat "$GC_FAKE_DOLT_FLATTEN_STDOUT_FILE"
+      exit 0
+    fi
+    # Real Dolt prints one result set per CALL: DOLT_RESET's status, then
+    # DOLT_COMMIT's hash.
+    printf '+--------+\n| status |\n+--------+\n| 0      |\n+--------+\n\n'
+    if [ "$mode" = "second_db_flatten_hash_missing" ] && [ "$db" = "zed" ]; then
+      exit 0
+    fi
+    printf '+----------------------------------+\n| hash                             |\n+----------------------------------+\n'
+    printf '| %%s |\n+----------------------------------+\n\n' "$flatten_commit"
     exit 0
     ;;
   *"DOLT_GC"*)
@@ -1641,7 +1679,7 @@ case "$query" in
 esac
 printf 'unexpected query: %%s\n' "$query" >&2
 exit 64
-`, shellQuote(logPath)))
+`, shellQuote(logPath), compactFakeFlattenCommit))
 	return logPath
 }
 
@@ -2910,48 +2948,212 @@ func TestCompactScriptDefersWhenWriterCommitsBeforeFlatten(t *testing.T) {
 	assertCompactWriterRaceDeferred(t, fixture, out, err, "deferring, will retry next run")
 }
 
-// A writer that commits during/after the post-flatten verify moves HEAD past
-// the flatten's own commit. That difference proves a concurrent writer and the
-// gain+drift quarantine is downgraded to a defer.
-func TestCompactScriptDefersWhenWriterCommitsDuringVerify(t *testing.T) {
+// assertCompactPreResetWriterDeferred encodes the expectations for a writer
+// proven in the pre-reset window (head_before_reset != head), the only
+// movement window that still sets writer_race_detected (#8502): its commit is
+// absorbed into the flatten, the drift inside the flatten commit defers with
+// wantMessage, and the pending-GC marker records that writer's commit as the
+// compaction source.
+func assertCompactPreResetWriterDeferred(t *testing.T, fixture compactScriptFixture, out string, err error, wantMessage string) {
+	t.Helper()
+	if !strings.Contains(out, wantMessage) {
+		t.Fatalf("output missing the pre-reset writer defer message %q:\n%s", wantMessage, out)
+	}
+	if !strings.Contains(out, "pre_reset_HEAD=writercommit") {
+		t.Fatalf("defer message should report the pre-reset writer HEAD:\n%s", out)
+	}
+	assertCompactWriterRaceDeferred(t, fixture, out, err, "deferring, will retry next run")
+	assertCompactPendingGCFromPreResetWriter(t, fixture)
+}
+
+// assertCompactPendingGCFromPreResetWriter checks that the pending-GC marker
+// records the pre-reset writer's commit as the compaction source.
+func assertCompactPendingGCFromPreResetWriter(t *testing.T, fixture compactScriptFixture) {
+	t.Helper()
+	pendingGC := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
+	if compactedFrom := compactMarkerValue(t, pendingGC, "compacted_from_head"); compactedFrom != "writercommit" {
+		t.Fatalf("pending-GC marker should record the pre-reset writer as the compaction source, got %q", compactedFrom)
+	}
+}
+
+// A pre-reset writer's DELETE absorbed into the flatten defers as a
+// concurrent-writer DELETE.
+func TestCompactScriptDefersPreResetWriterRowDecrease(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "writer_race_before_flatten_row_decrease", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	assertCompactPreResetWriterDeferred(t, fixture, out, err,
+		"row-count decrease is concurrent-writer DELETE, not corruption")
+}
+
+// A pre-reset writer's same-count UPDATE absorbed into the flatten defers once
+// the preflight-to-flatten diff proves the drift additive-only.
+func TestCompactScriptDefersPreResetWriterSameCountUpdate(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "writer_race_before_flatten_same_count_update", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	assertCompactPreResetWriterDeferred(t, fixture, out, err,
+		"same-count table value hash drift proven additive-only via DOLT_DIFF")
+}
+
+// A pre-reset writer's commit absorbed into the flatten drifts the committed
+// root while every per-table check passes; the confinement proof keeps the
+// drift inside the verified tables, so the run defers through the same
+// pending-GC path as the writer-race defers.
+func TestCompactScriptDefersPreResetWriterDbHashDrift(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "writer_race_before_flatten_db_hash_drift", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("confined committed-root drift with a pre-reset writer must defer: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "committed-root drift confined to verified table(s) [beads]") ||
+		!strings.Contains(out, "deferring, will retry next run") {
+		t.Fatalf("output missing the confinement-proof defer:\n%s", out)
+	}
+	quarantine := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if _, statErr := os.Stat(quarantine); !os.IsNotExist(statErr) {
+		t.Fatalf("confined committed-root drift must NOT write a quarantine marker; stat=%v", statErr)
+	}
+	pendingGC := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
+	if reason := compactMarkerValue(t, pendingGC, "reason"); reason != "writer race during flatten deferred full GC" {
+		t.Fatalf("confinement defer should record pending-GC retry marker, got reason %q", reason)
+	}
+	assertCompactPendingGCFromPreResetWriter(t, fixture)
+	data, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	if strings.Contains(string(data), "DOLT_GC") {
+		t.Fatalf("confinement defer must skip GC this run:\n%s", data)
+	}
+}
+
+// assertCompactQuarantinedDespiteLaterWriter encodes the expectations for
+// drift inside the flatten commit while an unrelated writer has moved HEAD past
+// it: verification reads the flatten commit itself, so the later writer is no
+// evidence about that drift and the run quarantines with the given reason.
+func assertCompactQuarantinedDespiteLaterWriter(t *testing.T, fixture compactScriptFixture, out string, err error, wantReason string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("compact succeeded despite drift inside the flatten commit:\n%s", out)
+	}
+	if strings.Contains(out, "writer race detected") {
+		t.Fatalf("a writer after the flatten must not explain drift inside the flatten commit:\n%s", out)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	assertCompactMarkerHasEvidence(t, marker,
+		"reason="+wantReason,
+		"flatten_head="+compactFakeFlattenCommit,
+		"flatten_post_verify_head=writercommit",
+	)
+	pendingGC := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
+	if _, statErr := os.Stat(pendingGC); !os.IsNotExist(statErr) {
+		t.Fatalf("drift inside the flatten commit must not write a pending-GC marker; stat=%v", statErr)
+	}
+	data, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	if strings.Contains(string(data), "DOLT_GC") {
+		t.Fatalf("drift inside the flatten commit must block full GC:\n%s", data)
+	}
+}
+
+// Row gain plus table value-hash drift inside the flatten commit still
+// quarantines when an unrelated writer moves HEAD past the flatten commit.
+func TestCompactScriptQuarantinesTableDriftInsideFlattenDespiteLaterWriter(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "writer_race_during_verify", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
 	if !strings.Contains(out, "table=beads gained rows during flatten") ||
 		!strings.Contains(out, "value hash changed with row-count increase") {
-		t.Fatalf("output missing the ambiguous gain+drift signal that the gate downgrades:\n%s", out)
+		t.Fatalf("output missing the gain+drift signal inside the flatten commit:\n%s", out)
 	}
-	if !strings.Contains(out, "post_verify_HEAD=writercommit") {
-		t.Fatalf("defer message should report HEAD moving past the flatten commit:\n%s", out)
-	}
-	assertCompactWriterRaceDeferred(t, fixture, out, err, "deferring, will retry next run")
+	assertCompactQuarantinedDespiteLaterWriter(t, fixture, out, err,
+		"post-flatten table value hash changed with row-count increase")
 }
 
-// The whole-database value hash also drifts when a concurrent writer adds rows.
-// When per-table checks pass but the database hash drifts with a row gain and a
-// writer is proven (HEAD moved past the flatten commit), the database-hash
-// gain+drift quarantine is likewise downgraded to a defer.
-func TestCompactScriptDefersWhenWriterCommitsCausingDatabaseHashDrift(t *testing.T) {
+// Whole-database value-hash drift with a row gain inside the flatten commit
+// still quarantines when an unrelated writer moves HEAD past the flatten commit.
+func TestCompactScriptQuarantinesRootDriftWithRowGainInsideFlattenDespiteLaterWriter(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "writer_race_db_hash_during_verify", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
-	if !strings.Contains(out, "database value hash drift with row-count increase") {
-		t.Fatalf("output missing the database-hash writer-race defer:\n%s", out)
-	}
-	if !strings.Contains(out, "post_verify_HEAD=writercommit") {
-		t.Fatalf("defer message should report HEAD moving past the flatten commit:\n%s", out)
-	}
-	assertCompactWriterRaceDeferred(t, fixture, out, err, "deferring, will retry next run")
+	assertCompactQuarantinedDespiteLaterWriter(t, fixture, out, err,
+		"post-flatten value hash changed with row-count increase")
 }
 
-func TestCompactScriptDefersWhenWriterCommitsDuringDatabaseHash(t *testing.T) {
+// Same-count whole-database value-hash drift inside the flatten commit whose
+// confinement proof fails still quarantines when a writer moves HEAD past the
+// flatten commit during the database hash probe.
+func TestCompactScriptQuarantinesUnconfinedRootDriftInsideFlattenDespiteLaterWriter(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "writer_race_after_postverify_before_db_hash", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
-	if !strings.Contains(out, "database value hash drift") {
-		t.Fatalf("output missing database-hash drift evidence:\n%s", out)
+	if err == nil {
+		t.Fatalf("compact succeeded despite unconfined root drift inside the flatten commit:\n%s", out)
 	}
-	if !strings.Contains(out, "post_db_hash_HEAD=writercommit") {
-		t.Fatalf("defer message should report HEAD moving across the database hash probe:\n%s", out)
+	if strings.Contains(out, "writer race detected") {
+		t.Fatalf("a writer after the flatten must not explain drift inside the flatten commit:\n%s", out)
 	}
-	assertCompactWriterRaceDeferred(t, fixture, out, err, "deferring, will retry next run")
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	assertCompactMarkerHasEvidence(t, marker,
+		"reason=post-flatten value hash changed without row-count increase",
+		"database_value_hash_drift=before=hash-before,after=hash-after-writer,category=same_row_count_db_hash_drift",
+		"flatten_head="+compactFakeFlattenCommit,
+	)
+	pendingGC := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
+	if _, statErr := os.Stat(pendingGC); !os.IsNotExist(statErr) {
+		t.Fatalf("unconfined root drift must not write a pending-GC marker; stat=%v", statErr)
+	}
+	data, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	if strings.Contains(string(data), "DOLT_GC") {
+		t.Fatalf("unconfined root drift must block full GC:\n%s", data)
+	}
+}
+
+// Row-count decrease inside the flatten commit, with an unrelated writer
+// committing after the flatten. Verification reads the flatten commit itself,
+// so the lost rows are part of what the flatten produced: no writer is proven
+// in the pre-reset window, the concurrent-DELETE downgrade does not apply and
+// the run quarantines (#8502). The pre-reset variant that still defers is
+// TestCompactScriptDefersPreResetWriterRowDecrease.
+func TestCompactScriptQuarantinesRowDecreaseDespiteLaterWriter(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "row_count_decreases_with_later_writer", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if !strings.Contains(out, "row count decreased after flatten") {
+		t.Fatalf("output missing the row-decrease signal:\n%s", out)
+	}
+	if strings.Contains(out, "concurrent-writer DELETE") {
+		t.Fatalf("no writer is proven in the pre-reset window; the DELETE downgrade must not fire:\n%s", out)
+	}
+	assertCompactQuarantinedDespiteLaterWriter(t, fixture, out, err, "post-flatten row count decreased")
+}
+
+// Same-count table value-hash drift inside the flatten commit, with an
+// unrelated writer committing after the flatten: the net-zero-row-count churn
+// signature that any HEAD movement used to excuse. The preflight-to-flatten
+// diff would call the drift additive-only, but no writer is proven in the
+// pre-reset window, so that downgrade does not apply and the run quarantines
+// with the movement recorded as marker diagnostics (#8502). The defer paths
+// that remain are the pre-reset window
+// (TestCompactScriptDefersPreResetWriterSameCountUpdate) and the quiet later
+// writer, which verification never sees.
+func TestCompactScriptQuarantinesSameCountDriftDespiteLaterWriter(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "same_count_hash_drift_with_later_writer", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if !strings.Contains(out, "table=beads value hash changed after flatten without row-count increase") {
+		t.Fatalf("output missing value-hash drift warning:\n%s", out)
+	}
+	if strings.Contains(out, "deferring, will retry next run") {
+		t.Fatalf("no writer is proven in the pre-reset window; the same-count downgrade must not fire:\n%s", out)
+	}
+	assertCompactQuarantinedDespiteLaterWriter(t, fixture, out, err,
+		"post-flatten table value hash changed without row-count increase")
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	assertCompactMarkerHasEvidence(t, marker,
+		"integrity_table_drift=table=beads,before_rows=10,after_rows=10,before_hash=hash-beads-before,after_hash=hash-beads-after-writer,category=same_row_count_hash_drift",
+		"flatten_pre_reset_head=headcommit",
+		"decision=preserve_marker_manual_review_required",
+	)
 }
 
 // A writer can commit after the database-hash probes have both completed but
@@ -2969,25 +3171,12 @@ func TestCompactScriptDefersWhenWriterCommitsAfterDatabaseHashBeforeGC(t *testin
 	assertCompactWriterRaceDeferred(t, fixture, out, err, "deferring full GC until the next quiet run")
 }
 
-func TestCompactScriptDefersWhenDatabaseHashPreHeadProbeIsEmptyButPostProbeProvesWriter(t *testing.T) {
-	fixture := newCompactScriptFixture(t)
-	out, err := fixture.run(t, "writer_race_db_hash_empty_pre_probe", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
-	if !strings.Contains(out, "database value hash drift") {
-		t.Fatalf("output missing database-hash drift evidence:\n%s", out)
-	}
-	if !strings.Contains(out, "pre_db_hash_HEAD=<empty>") ||
-		!strings.Contains(out, "post_db_hash_HEAD=writercommit") {
-		t.Fatalf("defer message should report empty pre-probe HEAD and writer post-probe HEAD:\n%s", out)
-	}
-	assertCompactWriterRaceDeferred(t, fixture, out, err, "deferring, will retry next run")
-}
-
-// A concurrent UPDATE that lands during the post-flatten verify leaves the
-// row count unchanged but drifts the table's value hash — the same signal as
-// corruption. HEAD moving past the flatten's own commit proves a writer, and
-// diffing the pre-flight snapshot against the flatten commit shows the
-// flatten itself never touched the table's rows (zero non-added rows), so
-// the drift is entirely the writer's UPDATE. That combination downgrades the
+// A concurrent UPDATE that lands just before the flatten's reset is absorbed
+// into the flatten commit: the row count is unchanged but the table's value
+// hash drifts — the same signal as corruption. HEAD moving before the reset
+// proves a writer, and diffing the pre-flight snapshot against the flatten
+// commit shows no removed or modified rows (zero non-added rows), so the
+// drift is attributable to the writer. That combination downgrades the
 // same-count-hash-drift quarantine to a defer.
 func TestCompactScriptDefersProvenWriterRaceSameCountHashDrift(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
@@ -2995,13 +3184,13 @@ func TestCompactScriptDefersProvenWriterRaceSameCountHashDrift(t *testing.T) {
 	if !strings.Contains(out, "table=beads value hash changed after flatten without row-count increase") {
 		t.Fatalf("output missing the same-count hash-drift signal that the gate downgrades:\n%s", out)
 	}
-	if !strings.Contains(out, "post_verify_HEAD=writercommit") {
-		t.Fatalf("defer message should report HEAD moving past the flatten commit:\n%s", out)
+	if !strings.Contains(out, "pre_reset_HEAD=writercommit") {
+		t.Fatalf("defer message should report HEAD moving before the flatten reset:\n%s", out)
 	}
 	assertCompactWriterRaceDeferred(t, fixture, out, err, "deferring, will retry next run")
 }
 
-// Same proven writer race (HEAD moves past the flatten commit) but the
+// Same proven writer race (HEAD moves before the flatten reset) but the
 // preflight-to-flatten diff proof itself fails — the flatten commit shows a
 // removed/modified row for the drifted table, so the drift cannot be
 // attributed entirely to the writer. The defer downgrade must not apply and
@@ -3029,9 +3218,9 @@ func TestCompactScriptQuarantinesSameCountDriftWhenDiffProofFails(t *testing.T) 
 	assertCompactMarkerHasEvidence(t, marker,
 		"reason=post-flatten table value hash changed without row-count increase",
 		"integrity_table_drift=table=beads,before_rows=10,after_rows=10,before_hash=hash-beads-before,after_hash=hash-beads-after-writer,category=same_row_count_hash_drift",
-		"flatten_pre_reset_head=headcommit",
-		"flatten_head=compactcommit",
-		"flatten_post_verify_head=writercommit",
+		"flatten_pre_reset_head=writercommit",
+		"flatten_head="+compactFakeFlattenCommit,
+		"flatten_post_verify_head="+compactFakeFlattenCommit,
 		"decision=preserve_marker_manual_review_required",
 	)
 	pendingGC := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
@@ -3050,8 +3239,8 @@ func TestCompactScriptRetriesPendingGCAfterWriterRaceDefer(t *testing.T) {
 		t.Fatalf("write oldgen fixture: %v", err)
 	}
 
-	firstOut, err := fixture.run(t, "writer_race_during_verify", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
-	assertCompactWriterRaceDeferred(t, fixture, firstOut, err, "deferring, will retry next run")
+	firstOut, err := fixture.run(t, "writer_race_after_db_hash", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	assertCompactWriterRaceDeferred(t, fixture, firstOut, err, "deferring full GC until the next quiet run")
 	pendingGC := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
 	if compactedFrom := compactMarkerValue(t, pendingGC, "compacted_from_head"); compactedFrom != "headcommit" {
 		t.Fatalf("pending-GC marker should preserve compaction source HEAD, got %q", compactedFrom)
@@ -3914,11 +4103,14 @@ func TestCompactScriptDoesNotCarryQuarantineEvidenceAcrossDatabases(t *testing.T
 		t.Fatalf("mkdir second dolt db: %v", err)
 	}
 
-	out, err := fixture.run(t, "second_db_post_flatten_head_empty", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	out, err := fixture.run(t, "second_db_flatten_hash_missing", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
 	if err == nil {
-		t.Fatalf("compact succeeded despite second database HEAD probe failure:\n%s", out)
+		t.Fatalf("compact succeeded despite second database flatten commit hash missing:\n%s", out)
 	}
 	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "zed")
+	if reason := compactMarkerValue(t, marker, "reason"); reason != "post-flatten commit hash unavailable" {
+		t.Fatalf("second database quarantine reason = %q, want post-flatten commit hash unavailable", reason)
+	}
 	if got := compactMarkerValue(t, marker, "postflight_db_value_hash"); got != "" {
 		t.Fatalf("second database marker inherited postflight hash %q from the first database", got)
 	}
