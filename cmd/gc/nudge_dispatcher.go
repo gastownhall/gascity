@@ -212,6 +212,23 @@ func dispatchQueuedNudges(queue nudgeQueueHandle, cityPath string, cfg *config.C
 			logNudgeDispatchSkip(debugOut, "kill-pending", target.agentKey(), target.sessionName, "")
 			continue
 		}
+		// The pass's snapshot census lets a target skip before any runtime
+		// read: when, judged by it, the target may claim nothing (every due
+		// item is fenced to a sibling that still holds its seat), the target
+		// is neither observed nor tried, and an adoption the snapshot denies
+		// waits for the next pass. A claim that is tried reads its own live
+		// census before it adopts, since the snapshot, or a census an earlier
+		// claim of the pass read, misses a session another process created
+		// after it. The starvation check of a busy target judges with the
+		// snapshot census too, so holding a busy session back reads no store
+		// (nudgeTarget.starvationCensus). The check precedes the observe, so
+		// a target that may claim nothing counts as not-claimable, never as
+		// not-running, whether or not it runs.
+		if !nudgeTargetMayClaimPerSnapshot(queue, target, snapshotCensus, nudgeLaunchReader(target, sp), time.Now()) {
+			skipCounts["not-claimable"]++
+			logNudgeDispatchSkip(debugOut, "not-claimable", target.agentKey(), target.sessionName, "")
+			continue
+		}
 		obs, err := workerObserveNudgeTarget(target, sessStore, sp)
 		if err != nil {
 			if firstErr == nil {
@@ -226,19 +243,8 @@ func dispatchQueuedNudges(queue nudgeQueueHandle, cityPath string, cfg *config.C
 			logNudgeDispatchSkip(debugOut, "not-running", target.agentKey(), target.sessionName, "")
 			continue
 		}
-		// The pass's snapshot census only lets the target skip: when, judged
-		// by it, the target may claim nothing, the claim is not tried, and an
-		// adoption the snapshot denies waits for the next pass. A claim that
-		// is tried reads its own live census before it adopts, since the
-		// snapshot, or a census an earlier claim of the pass read, misses a
-		// session another process created after it. The starvation check of a
-		// busy target judges with the snapshot census too, so holding a busy
-		// session back reads no store (nudgeTarget.starvationCensus).
-		ok := false
-		if nudgeTargetMayClaimPerSnapshot(queue, target, snapshotCensus, nudgeLaunchReader(target, sp), time.Now()) {
-			target.starvationCensus = snapshotCensus
-			ok, err = tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
-		}
+		target.starvationCensus = snapshotCensus
+		ok, err := tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
 		if err != nil && firstErr == nil {
 			firstErr = err
 		}
@@ -246,13 +252,14 @@ func dispatchQueuedNudges(queue nudgeQueueHandle, cityPath string, cfg *config.C
 			delivered++
 			continue
 		}
-		// Matched a live, running session, yet nothing was claimed/delivered
-		// this tick — e.g. the poller quiescence gate (pollerSessionIdleEnough)
-		// hasn't cleared and the queue hasn't starved past
-		// queuedNudgeStarvedAfter yet (a busy session's next delivery waits
-		// only until it starves, then until a turn look, on a leaf that takes
-		// one, says idle), or claimDueQueuedNudgesForTarget found nothing
-		// claimable (already claimed by a concurrent drain path). Either way
+		// Matched a live, running session that may claim, yet nothing was
+		// claimed/delivered this tick — e.g. the poller quiescence gate
+		// (pollerSessionIdleEnough) hasn't cleared and the queue hasn't
+		// starved past queuedNudgeStarvedAfter yet (a busy session's next
+		// delivery waits only until it starves, then until a turn look, on a
+		// leaf that takes one, says idle), or claimDueQueuedNudgesForTarget
+		// found nothing claimable (already claimed by a concurrent drain path,
+		// or adoption refused by the claim's live census). Either way
 		// this is the class of skip ra-oudpha finding-3 could not otherwise
 		// distinguish from "not matched" or "not running" without a trace.
 		reason := "not-delivered"

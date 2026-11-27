@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net"
 	"strings"
 	"testing"
@@ -1163,6 +1164,153 @@ func TestDispatchAdoptsANudgeFencedToAnArchivedSibling(t *testing.T) {
 	msgs := f.nudgeCalls()
 	if delivered != 1 || len(msgs) != 1 || !strings.Contains(msgs[0], "left for s3") || !strings.HasPrefix(msgs[0], f.s1.SessionName+":") {
 		t.Fatalf("delivered=%d nudges=%v, want s1 to adopt the archived s3's nudge", delivered, msgs)
+	}
+}
+
+// setMetadata applies meta to the session bead id.
+func (f *legBDispatchFixture) setMetadata(t *testing.T, id string, meta map[string]string) {
+	t.Helper()
+	for k, v := range meta {
+		if err := f.store.SetMetadata(id, k, v); err != nil {
+			t.Fatalf("SetMetadata(%s, %s=%s): %v", id, k, v, err)
+		}
+	}
+}
+
+// poolSeatMeta is meta on a seat of a controller pool: the fixture's session,
+// created manual, restamped ephemeral, pool-managed and slotted.
+func poolSeatMeta(meta map[string]string) map[string]string {
+	seat := map[string]string{"session_origin": "ephemeral", "pool_managed": "true", "pool_slot": "3"}
+	maps.Copy(seat, meta)
+	return seat
+}
+
+// A nudge fenced to a drained seat of a controller pool, in either drained
+// shape the codec decodes as asleep (raw state=drained from a drain-ack, or
+// state=asleep with sleep_reason=drained from the dead-runtime heal), is
+// adopted by a running session of the same agent: pool demand never starts a
+// drained seat again, so the seat no longer holds its fence.
+func TestDispatchAdoptsANudgeFencedToADrainedPoolSeat(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		meta map[string]string
+	}{
+		{name: "raw drained", meta: poolSeatMeta(map[string]string{"state": "drained"})},
+		{name: "asleep drained", meta: poolSeatMeta(map[string]string{"state": "asleep", "sleep_reason": "drained"})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLegBDispatchFixture(t)
+			s3 := f.create(t)
+			f.setMetadata(t, s3.ID, tc.meta)
+			snapshot, err := loadSessionBeadSnapshot(f.store.Store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info, ok := snapshot.FindInfoByID(s3.ID); !ok || info.Closed {
+				t.Fatalf("setup: s3 in the snapshot = %+v (found %v), want it open", info, ok)
+			}
+			if err := enqueueQueuedNudge(f.dir, newQueuedNudgeWithOptions("worker", "left for drained s3", "session", time.Now().Add(-time.Minute), queuedNudgeOptions{SessionID: s3.ID})); err != nil {
+				t.Fatal(err)
+			}
+			delivered, err := dispatchAllQueuedNudges(f.dir, supervisorCfg(), f.store.Store, f.store.Store, f.fake, snapshot, nil)
+			if err != nil {
+				t.Fatalf("dispatch: %v", err)
+			}
+			msgs := f.nudgeCalls()
+			if delivered != 1 || len(msgs) != 1 || !strings.Contains(msgs[0], "left for drained s3") || !strings.HasPrefix(msgs[0], f.s1.SessionName+":") {
+				t.Fatalf("delivered=%d nudges=%v, want s1 to adopt the drained s3's nudge once", delivered, msgs)
+			}
+			pending, _, _, err := listQueuedNudges(f.dir, "worker", time.Now())
+			if err != nil || len(pending) != 0 {
+				t.Fatalf("pending = %v, %v; want no worker item left", nqCharItems(pending), err)
+			}
+		})
+	}
+}
+
+// fenceHoldingSiblingShapes are open sibling shapes that keep their nudge
+// fence: the reconciler may start each again in place under the same bead id.
+var fenceHoldingSiblingShapes = []struct {
+	name string
+	meta map[string]string
+}{
+	{name: "asleep idle", meta: map[string]string{"state": "asleep", "sleep_reason": "idle"}},
+	{name: "asleep runtime-missing", meta: map[string]string{"state": "asleep", "sleep_reason": "runtime-missing"}},
+	{name: "draining", meta: map[string]string{"state": "draining"}},
+	{name: "quarantined", meta: map[string]string{"state": "quarantined"}},
+	{name: "drained manual", meta: map[string]string{"state": "drained"}},
+	{name: "drained on-demand named", meta: map[string]string{"state": "drained", "session_origin": "named", "configured_named_session": "true", "configured_named_mode": "on_demand"}},
+	{name: "drained always-mode named", meta: map[string]string{"state": "drained", "session_origin": "named", "configured_named_session": "true", "configured_named_mode": "always"}},
+	{name: "drained pool seat with an explicit wake", meta: poolSeatMeta(map[string]string{"state": "drained", "wake_request": "explicit"})},
+	{name: "drained pool seat under an operator hold", meta: poolSeatMeta(map[string]string{"state": "drained", "sleep_intent": "user-hold"})},
+}
+
+// A nudge fenced to an open sibling that still holds its fence stays pending,
+// fenced to that sibling: a running sibling of the same agent does not take it.
+func TestDispatchHoldsANudgeFencedToAFenceHoldingSibling(t *testing.T) {
+	for _, tc := range fenceHoldingSiblingShapes {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLegBDispatchFixture(t)
+			s3 := f.create(t)
+			f.setMetadata(t, s3.ID, tc.meta)
+			snapshot, err := loadSessionBeadSnapshot(f.store.Store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info, ok := snapshot.FindInfoByID(s3.ID); !ok || !sessionHoldsNudgeFence(info) {
+				t.Fatalf("setup: s3 in the snapshot = %+v (found %v), want it open and holding its fence", info, ok)
+			}
+			if err := enqueueQueuedNudge(f.dir, newQueuedNudgeWithOptions("worker", "held for s3", "session", time.Now().Add(-time.Minute), queuedNudgeOptions{SessionID: s3.ID})); err != nil {
+				t.Fatal(err)
+			}
+			delivered, err := dispatchAllQueuedNudges(f.dir, supervisorCfg(), f.store.Store, f.store.Store, f.fake, snapshot, nil)
+			if err != nil {
+				t.Fatalf("dispatch: %v", err)
+			}
+			if msgs := f.nudgeCalls(); delivered != 0 || len(msgs) != 0 {
+				t.Fatalf("s1 took the nudge fenced to fence-holding s3 (delivered=%d): %s", delivered, strings.Join(msgs, " | "))
+			}
+			pending, _, _, err := listQueuedNudges(f.dir, "worker", time.Now())
+			if err != nil || len(pending) != 1 || pending[0].SessionID != s3.ID {
+				t.Fatalf("pending = %v, %v; want the nudge still fenced to s3", nqCharItems(pending), err)
+			}
+		})
+	}
+}
+
+// A running session whose only due nudge is fenced to a fence-holding sibling
+// can claim nothing, so the pass skips it as not-claimable before any runtime
+// observe: no provider call names it.
+func TestDispatchSkipsObservingATargetThatCanClaimNothing(t *testing.T) {
+	f := newLegBDispatchFixture(t)
+	s3 := f.create(t)
+	f.setMetadata(t, s3.ID, map[string]string{"state": "asleep", "sleep_reason": "idle"})
+	snapshot, err := loadSessionBeadSnapshot(f.store.Store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := enqueueQueuedNudge(f.dir, newQueuedNudgeWithOptions("worker", "held for s3", "session", time.Now().Add(-time.Minute), queuedNudgeOptions{SessionID: s3.ID})); err != nil {
+		t.Fatal(err)
+	}
+	n := len(f.fake.SnapshotCalls())
+	if _, err := dispatchAllQueuedNudges(f.dir, supervisorCfg(), f.store.Store, f.store.Store, f.fake, snapshot, nil); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	for _, call := range f.fake.SnapshotCalls()[n:] {
+		if call.Name == f.s1.SessionName {
+			t.Fatalf("the pass made runtime call %s naming s1, which can claim nothing", call.Method)
+		}
+	}
+	state, err := nudgequeue.LoadState(f.dir)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if got := state.DispatchSkips["not-claimable"]; got != 1 {
+		t.Fatalf("DispatchSkips[not-claimable] = %d, want 1 (full map: %#v)", got, state.DispatchSkips)
+	}
+	pending, _, _, err := listQueuedNudges(f.dir, "worker", time.Now())
+	if err != nil || len(pending) != 1 || pending[0].SessionID != s3.ID {
+		t.Fatalf("pending = %v, %v; want the nudge still fenced to s3", nqCharItems(pending), err)
 	}
 }
 
