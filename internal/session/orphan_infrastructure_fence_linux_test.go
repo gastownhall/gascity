@@ -82,7 +82,11 @@ func writeFakeProcess(t *testing.T, root string, pid, ppid int, argv, env []stri
 // still reap the genuine leftover agent runtime but leave the infrastructure
 // alone, or it SIGTERMs the watchdog's process group and the city's Dolt
 // server goes with it. The fixture includes pre-fix, session-stamped
-// processes: the argv fence is what protects them, not the env scrub.
+// processes: the argv fence is what protects them, not the env scrub. The
+// Dolt server bd's proxy runs is its direct child with the proxy's
+// environment (beads internal/storage/dbproxy/server/doltserver.go), so while
+// the proxy lives the backend sits inside the proxy's envelope: never a root,
+// never reached, like the watchdog's own dolt.
 func TestSameSessionRestartDoesNotReachManagedDoltWatchdog(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := &procfsOrphanProvider{Fake: runtime.NewFake()}
@@ -104,22 +108,30 @@ func TestSameSessionRestartDoesNotReachManagedDoltWatchdog(t *testing.T) {
 		watchdogPID = 4100
 		doltPID     = 4101
 		proxyPID    = 4200
+		backendPID  = 4201
 		agentPID    = 4300
 	)
 	writeFakeProcess(t, root, watchdogPID, 1, []string{"/usr/local/bin/gc", proctable.ManagedDoltScopeWatchdogVerb, "/city/.beads/dolt-config.yaml", "/city/.gc/dolt.log", "/city"}, env)
 	writeFakeProcess(t, root, doltPID, watchdogPID, []string{"dolt", "sql-server", "--config", "/city/.beads/dolt-config.yaml"}, env)
 	writeFakeProcess(t, root, proxyPID, 1, []string{"/usr/local/bin/bd", proctable.BDProxyChildVerb, "--root", "/city/.beads/proxy"}, env)
+	writeFakeProcess(t, root, backendPID, proxyPID, []string{"dolt", "sql-server", "--config", "/city/.beads/proxy/config.yaml"}, env)
 	writeFakeProcess(t, root, agentPID, 1, []string{"claude", "--resume"}, env)
 	proctable.SetScanRootForTesting(t, root)
+	logged := captureStdLog(t)
 
 	if err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if len(sp.terminated) != 1 || sp.terminated[0] != agentPID {
-		t.Fatalf("pre-start orphan kill terminated %v, want only the leftover agent pid %d (never the watchdog %d, its dolt %d, or the bd proxy %d)", sp.terminated, agentPID, watchdogPID, doltPID, proxyPID)
+		t.Fatalf("pre-start orphan kill terminated %v, want only the leftover agent pid %d (never the watchdog %d, its dolt %d, the bd proxy %d, or the proxy's dolt %d)", sp.terminated, agentPID, watchdogPID, doltPID, proxyPID, backendPID)
 	}
 	if len(sp.started) != 1 || sp.started[0] != info.ID {
 		t.Fatalf("started %v, want the resumed session %s", sp.started, info.ID)
+	}
+	for _, pid := range []int{doltPID, backendPID} {
+		if out := logged.String(); strings.Contains(out, "pid="+strconv.Itoa(pid)) {
+			t.Errorf("log %q reports pid %d as a root; a child of live infrastructure is never one", out, pid)
+		}
 	}
 }
 

@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "proxyendpoint",
     srcs = [
+        "backend.go",
         "birth.go",
         "birth_linux.go",
         "birth_other.go",
@@ -28,6 +29,7 @@ go_library(
 go_test(
     name = "proxyendpoint_test",
     srcs = [
+        "backend_test.go",
         "birth_linux_test.go",
         "birth_test.go",
         "idle_test.go",

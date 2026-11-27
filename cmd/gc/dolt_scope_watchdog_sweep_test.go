@@ -127,7 +127,11 @@ func writeFakeProcEntry(t *testing.T, root string, pid, ppid int, comm string, e
 // scanner reports them as that session's roots; the sweep must recognize them
 // by argv and leave them alone, while still reaping a genuine orphaned agent
 // runtime of the same session. The dolt child under the watchdog must not be
-// promoted to a root in the watchdog's place.
+// promoted to a root in the watchdog's place, nor the Dolt server under the
+// proxy: bd starts `dolt sql-server` as the proxy's own child with the
+// proxy's environment (beads internal/storage/dbproxy/server/doltserver.go),
+// so while the proxy lives its backend sits inside the proxy's envelope and
+// is never a root the sweep can reach.
 func TestSweepProcessTableOrphansFencesCityInfrastructureByArgv(t *testing.T) {
 	if goruntime.GOOS != "linux" {
 		t.Skip("drives the scanner against a procfs-shaped tree")
@@ -147,6 +151,8 @@ func TestSweepProcessTableOrphansFencesCityInfrastructureByArgv(t *testing.T) {
 	writeFakeProcCmdline(t, root, 4101, "dolt", "sql-server", "--config", "/city/.beads/dolt-config.yaml")
 	writeFakeProcEntry(t, root, 4200, 1, "bd", sessionEnv)
 	writeFakeProcCmdline(t, root, 4200, "/opt/beads/bd-1.3.0", proxyendpoint.ChildVerb, "--root", cityPath+"/.beads/proxy")
+	writeFakeProcEntry(t, root, 4201, 4200, "dolt", sessionEnv)
+	writeFakeProcCmdline(t, root, 4201, "dolt", "sql-server", "--config", cityPath+"/.beads/proxy/config.yaml")
 	writeFakeProcEntry(t, root, 4300, 1, "claude", sessionEnv)
 	writeFakeProcCmdline(t, root, 4300, "claude", "--resume")
 	proctable.SetScanRootForTesting(t, root)
@@ -155,11 +161,16 @@ func TestSweepProcessTableOrphansFencesCityInfrastructureByArgv(t *testing.T) {
 	var stderr bytes.Buffer
 	got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), nil, store, cityPath, &stderr)
 	if got != 1 || len(sp.terminated) != 1 || sp.terminated[0].PID != 4300 {
-		t.Fatalf("sweepProcessTableOrphans() = %d reaped, terminated %v, want only the agent pid 4300; stderr=%q", got, sp.terminated, stderr.String())
+		t.Fatalf("sweepProcessTableOrphans() = %d reaped, terminated %v, want only the agent pid 4300 (never the watchdog's dolt 4101 or the bd proxy's dolt 4201); stderr=%q", got, sp.terminated, stderr.String())
 	}
 	for _, pid := range []string{"pid=4100", "pid=4200"} {
 		if !strings.Contains(stderr.String(), "leaving process-table root "+pid) {
 			t.Errorf("stderr %q does not report leaving %s alone", stderr.String(), pid)
+		}
+	}
+	for _, pid := range []string{"pid=4101", "pid=4201"} {
+		if strings.Contains(stderr.String(), pid) {
+			t.Errorf("stderr %q reports %s as a root; a child of live infrastructure is never one", stderr.String(), pid)
 		}
 	}
 }
