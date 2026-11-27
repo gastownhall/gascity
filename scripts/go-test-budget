@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Print the per-package `go test` budget for the unsharded unit sweeps
+# (`make test-go`, `make test-mac`): GO_TEST_TIMEOUT when the caller set one,
+# otherwise the default scripts/test-local-parallel applies to its unit sweep
+# and cmd/gc shards (ga-9au). The number lives only in that runner; reading it
+# from there keeps the sweeps on the fan-out's budget instead of a second
+# number that drifts. The sweeps sat on 15m while the fan-out moved to 20m,
+# and cmd/gc crossed 15m on a loaded host with every test passing, which a
+# CI gate could only report as a red with no failing test to name. Exits 1 with a message when neither source yields a Go duration,
+# so the Makefile stops rather than handing `go test` an empty -timeout.
+set -euo pipefail
+
+override="${GO_TEST_TIMEOUT:-}"
+if [[ -n "$override" ]]; then
+  if ! [[ "$override" =~ ^[0-9]+[smh]$ ]]; then
+    echo "go-test-budget: GO_TEST_TIMEOUT=$override is not a Go duration of the form <n>s, <n>m, or <n>h" >&2
+    exit 1
+  fi
+  printf '%s\n' "$override"
+  exit 0
+fi
+
+runner="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/test-local-parallel"
+budget="$(sed -nE 's/^go_test_timeout="\$\{GO_TEST_TIMEOUT:-([0-9]+[smh])\}"$/\1/p' "$runner" | head -n 1)"
+if [[ -z "$budget" ]]; then
+  echo "go-test-budget: $runner no longer declares go_test_timeout=\"\${GO_TEST_TIMEOUT:-<n>[smh]}\"; the sweeps have no budget to share" >&2
+  exit 1
+fi
+printf '%s\n' "$budget"
