@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
+	"strings"
 	"time"
 )
 
@@ -75,6 +77,24 @@ func (ops *hookClaimOps) claimReadContext() (context.Context, context.CancelFunc
 	return context.WithCancel(context.Background())
 }
 
+// The read outcomes the trace records, one per entry.
+const (
+	hookClaimReadOutcomeWork      = "work"
+	hookClaimReadOutcomeEmpty     = "empty"
+	hookClaimReadOutcomeError     = "error"
+	hookClaimReadOutcomeBudgetCut = "budget-cut"
+)
+
+// hookClaimReadEntry is one work-query read of a claim invocation as the read
+// trace prints it: which leg ran, when it started (offset from InvokedAt), how
+// long it ran, and how it ended.
+type hookClaimReadEntry struct {
+	leg      string
+	offset   time.Duration
+	duration time.Duration
+	outcome  string
+}
+
 // hookClaimReadGuard enforces the invocation read budget at the runner seam, so
 // every read the claim path makes — every fan-out leg, every paced retry —
 // shares it, whatever runner is injected:
@@ -90,12 +110,18 @@ func (ops *hookClaimOps) claimReadContext() (context.Context, context.CancelFunc
 // failure exits 2 with GC_HOOK_STORE_UNAVAILABLE, and a secondary leg's failure
 // ends the invocation through hookSecondaryStoreFailure — a timed-out read, not
 // an idle store.
+//
+// The guard also records every read it sees, and a failed claim prints that
+// ledger as one stderr line (printTrace): #5693's unanswered question was where
+// the invocation's time went, and the entries answer it per leg.
 type hookClaimReadGuard struct {
 	ops *hookClaimOps
 	// stores and primary name each leg in the refusal's message: the agent's
 	// own store, "rig:<name>", or the store's directory.
 	stores  []hookStore
 	primary hookStore
+	// entries is every read the guard saw, in order, for the trace.
+	entries []hookClaimReadEntry
 }
 
 // runner wraps run with the budget's two rules.
@@ -103,15 +129,55 @@ func (g *hookClaimReadGuard) runner(run hookStoreRunner) hookStoreRunner {
 	return func(command, dir string, env []string) (string, error) {
 		deadline, bounded := g.ops.readDeadline()
 		start := g.ops.nowOrWallClock()
+		leg := g.legLabel(dir, env)
+		entry := hookClaimReadEntry{leg: leg}
+		if !g.ops.InvokedAt.IsZero() {
+			entry.offset = start.Sub(g.ops.InvokedAt)
+		}
 		if bounded && !start.Before(deadline) {
-			return "", g.refusal(g.legLabel(dir, env))
+			entry.outcome = hookClaimReadOutcomeBudgetCut
+			g.entries = append(g.entries, entry)
+			return "", g.refusal(leg)
 		}
 		out, err := run(command, dir, env)
-		if err == nil && bounded && !g.ops.nowOrWallClock().Before(deadline) {
-			return "", g.refusal(g.legLabel(dir, env))
+		end := g.ops.nowOrWallClock()
+		entry.duration = end.Sub(start)
+		switch {
+		case err == nil && bounded && !end.Before(deadline):
+			entry.outcome = hookClaimReadOutcomeBudgetCut
+			g.entries = append(g.entries, entry)
+			return "", g.refusal(leg)
+		case err != nil:
+			entry.outcome = hookClaimReadOutcomeError
+		case workQueryHasReadyWork(filterUnreadyHookCandidates(normalizeWorkQueryOutput(strings.TrimSpace(out)), end)):
+			entry.outcome = hookClaimReadOutcomeWork
+		default:
+			entry.outcome = hookClaimReadOutcomeEmpty
 		}
+		g.entries = append(g.entries, entry)
 		return out, err
 	}
+}
+
+// printTrace writes the one-line read trace a FAILED claim prints (#5693's
+// "where does the time go"): every leg that was read, when it started, how long
+// it ran, and how it ended, closed by suffix — how the invocation ended. A
+// claim and a no_work drain print nothing: those invocations answered, and the
+// ledger is for the ones that did not.
+func (g *hookClaimReadGuard) printTrace(stderr io.Writer, suffix string) {
+	if stderr == nil || len(g.entries) == 0 {
+		return
+	}
+	header := "gc hook --claim: reads (no invocation window): "
+	if _, bounded := g.ops.readDeadline(); bounded {
+		window := g.ops.claimWindowOrDefault()
+		header = fmt.Sprintf("gc hook --claim: reads (budget %s of %s window): ", window-hookClaimReadReserve(window), window)
+	}
+	segments := make([]string, 0, len(g.entries))
+	for _, e := range g.entries {
+		segments = append(segments, fmt.Sprintf("%s +%s %s %s", e.leg, e.offset.Round(time.Millisecond), e.duration.Round(time.Millisecond), e.outcome))
+	}
+	fmt.Fprintf(stderr, "%s%s; %s\n", header, strings.Join(segments, "; "), suffix) //nolint:errcheck // best-effort stderr commentary
 }
 
 // refusal is the guard's answer for a read the budget would not admit or cut

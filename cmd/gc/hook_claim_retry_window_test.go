@@ -470,6 +470,164 @@ func TestClaimRetryAnswerPastReadBudgetNeverReachesCAS(t *testing.T) {
 	}
 }
 
+// TestClaimReadTraceOnFailedClaims pins the read trace (#5693's "where does
+// the invocation's time go"): every FAILED claim prints one stderr line
+// listing each leg that was read — when it started, how long it ran, how it
+// ended — closed by how the invocation ended. A claim and a no_work drain
+// print nothing: those invocations answered.
+func TestClaimReadTraceOnFailedClaims(t *testing.T) {
+	t.Run("failed read", func(t *testing.T) {
+		withFastClaimRetries(t)
+		h := newFailureHookHarness()
+		h.script("/own", hookRunnerAnswer{err: errors.New("bd ready: exit status 1: Error: dial tcp 127.0.0.1:3307: connect: connection refused")})
+		stores := []hookStore{{dir: "/own", env: []string{"BEADS_DIR=/own"}}}
+		clock := newClaimFanoutClock(0)
+
+		code, _, stderr, _ := runClaimFanout(t, clock, h, stores)
+
+		if code != 2 {
+			t.Fatalf("exit=%d, want 2 for the transport-class read failure", code)
+		}
+		for _, want := range []string{
+			"gc hook --claim: reads (budget 2m30s of 2m40s window):",
+			"own +0s",
+			" error",
+			"; no claim started",
+		} {
+			if !strings.Contains(stderr, want) {
+				t.Fatalf("trace = %q, want it to contain %q", stderr, want)
+			}
+		}
+	})
+
+	t.Run("budget-cut leg", func(t *testing.T) {
+		withProductionClaimRetryPacing(t)
+		h := newFailureHookHarness()
+		h.script("/own", hookRunnerAnswer{out: "[]"})
+		h.script("/alpha", hookRunnerAnswer{out: "[]"})
+		h.script("/beta", hookRunnerAnswer{out: routedRowJSON("work-1")})
+		stores := federatedClaimLegs(2)
+		clock := newClaimFanoutClock(60 * time.Second)
+
+		code, _, stderr, _ := runClaimFanout(t, clock, h, stores)
+
+		if code != 2 {
+			t.Fatalf("exit=%d, want 2 for the cut read", code)
+		}
+		for _, want := range []string{
+			"own +0s 1m0s empty",
+			"rig:alpha +1m0s 1m0s empty",
+			"rig:beta +2m0s 1m0s budget-cut",
+			"; no claim started",
+		} {
+			if !strings.Contains(stderr, want) {
+				t.Fatalf("trace = %q, want it to contain %q", stderr, want)
+			}
+		}
+	})
+
+	t.Run("window refusal after a stall that is not a read", func(t *testing.T) {
+		h := newFailureHookHarness()
+		h.script("/own", hookRunnerAnswer{out: "[]"})
+		h.script("/rig", hookRunnerAnswer{out: routedRowJSON("work-1")})
+		// The selected leg's env carries the session id, so the drain-pending
+		// probe runs before the claim tiers — the seam the stall rides.
+		stores := []hookStore{
+			{dir: "/own", env: []string{"BEADS_DIR=/own"}},
+			{dir: "/rig", env: []string{"BEADS_DIR=/rig", "GC_SESSION_ID=gcs-1"}, rig: "alpha"},
+		}
+		clock := newClaimFanoutClock(70 * time.Second)
+		stall := func(o *hookClaimOps) {
+			o.DrainPending = func(string) (bool, error) {
+				clock.now = clock.now.Add(100 * time.Second) // a stall other than a read
+				return false, nil
+			}
+		}
+
+		code, _, stderr, rec := runClaimFanout(t, clock, h, stores, stall)
+
+		if code != 1 || len(rec.windowExpired) != 1 {
+			t.Fatalf("exit=%d windowExpired=%d, want the 1 of a window refusal", code, len(rec.windowExpired))
+		}
+		for _, want := range []string{
+			"claim window is spent",
+			"rig:alpha +1m10s 1m10s work",
+			"; no claim started",
+		} {
+			if !strings.Contains(stderr, want) {
+				t.Fatalf("trace = %q, want it to contain %q", stderr, want)
+			}
+		}
+	})
+
+	t.Run("claims_errored drain", func(t *testing.T) {
+		withFastClaimRetries(t)
+		h := newFailureHookHarness()
+		h.script("/rig", hookRunnerAnswer{out: "[]"})
+		h.script("/city", hookRunnerAnswer{out: routedRowJSON("cas-1")})
+		stores := []hookStore{
+			{dir: "/rig", env: []string{"BEADS_DIR=/rig"}},
+			{dir: "/city", env: []string{"BEADS_DIR=/city"}},
+		}
+		clock := newClaimFanoutClock(0)
+		casFails := func(o *hookClaimOps) {
+			o.Claim = func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
+				return beads.Bead{}, false, errors.New("bd update --claim: connection refused")
+			}
+		}
+
+		code, result, stderr, _ := runClaimFanout(t, clock, h, stores, casFails)
+
+		if code != 0 || result.Reason != hookClaimReasonClaimsErrored {
+			t.Fatalf("exit=%d result=%+v, want the claims_errored drain", code, result)
+		}
+		for _, want := range []string{
+			" work",
+			"; every claim attempt errored",
+		} {
+			if !strings.Contains(stderr, want) {
+				t.Fatalf("trace = %q, want it to contain %q", stderr, want)
+			}
+		}
+	})
+
+	t.Run("claim prints nothing", func(t *testing.T) {
+		h := newFailureHookHarness()
+		h.script("/rig", hookRunnerAnswer{out: routedRowJSON("work-1")})
+		stores := []hookStore{{dir: "/rig", env: []string{"BEADS_DIR=/rig"}}}
+		clock := newClaimFanoutClock(time.Second)
+
+		code, _, stderr, _ := runClaimFanout(t, clock, h, stores)
+
+		if code != 0 {
+			t.Fatalf("exit=%d, want 0 for a successful claim", code)
+		}
+		if strings.Contains(stderr, "gc hook --claim: reads (") {
+			t.Fatalf("stderr = %q, want no read trace for a successful claim", stderr)
+		}
+	})
+
+	t.Run("no_work drain prints nothing", func(t *testing.T) {
+		h := newFailureHookHarness()
+		h.script("/own", hookRunnerAnswer{out: "[]"})
+		h.script("/rig", hookRunnerAnswer{out: "[]"})
+		stores := []hookStore{
+			{dir: "/own", env: []string{"BEADS_DIR=/own"}},
+			{dir: "/rig", env: []string{"BEADS_DIR=/rig"}, rig: "alpha"},
+		}
+		clock := newClaimFanoutClock(time.Second)
+
+		code, result, stderr, _ := runClaimFanout(t, clock, h, stores)
+
+		if code != 0 || result.Reason != hookClaimReasonNoWork {
+			t.Fatalf("exit=%d result=%+v, want the no_work drain", code, result)
+		}
+		if strings.Contains(stderr, "gc hook --claim: reads (") {
+			t.Fatalf("stderr = %q, want no read trace for an idle store", stderr)
+		}
+	})
+}
+
 // End to end through the claim loop: a read that would recover on retry, but
 // only after the window closed, must not be retried into a claim. The
 // invocation keeps the failed-read contract: no drain result, no drain-ack, no

@@ -1025,8 +1025,10 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 	// The invocation read budget (#5693): one read share of the claim window
 	// for the whole invocation, enforced at the runner seam so every read —
 	// every fan-out leg, every paced retry — shares it, whatever runner is
-	// injected.
-	run = (&hookClaimReadGuard{ops: &ops, stores: stores, primary: primary}).runner(run)
+	// injected. The guard also records every read for the trace a failed
+	// claim prints below.
+	readGuard := &hookClaimReadGuard{ops: &ops, stores: stores, primary: primary}
+	run = readGuard.runner(run)
 	report := newHookStoreFailureReport("gc hook --claim", stderr, emitFailure)
 	noteStoreFailure := report.note
 	remaining := stores
@@ -1042,6 +1044,7 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		discovered, selected, err := selectStoreWithWorkRetrying(workQuery, remaining, primary, run, &ops, noteStoreFailure)
 		if err != nil {
 			report.failed(workQuery, err)
+			readGuard.printTrace(stderr, "no claim started")
 			return reportClaimWorkQueryFailure(err, stderr)
 		}
 		if isZeroHookStore(selected) {
@@ -1070,6 +1073,12 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		storeOps.Runner = func(string, string) (string, error) { return claimOutput, nil }
 		res := tryHookClaim(workQuery, storeDir, &storeOpts, &storeOps, stdout, stderr)
 		if res.terminal {
+			// A window refusal's cause is usually the reads themselves (#5693):
+			// print the ledger next to the refusal line so the operator sees
+			// which reads spent the window.
+			if res.windowRefused {
+				readGuard.printTrace(stderr, "no claim started")
+			}
 			return res.code
 		}
 		if res.claimsErrored {
@@ -1085,7 +1094,14 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		remaining = removeHookStore(remaining, claimStore)
 	}
 	reportHookClaimLeftToAnotherSession(left, claimOpts.PoolSeat, stderr)
-	return writeHookClaimNoWork(claimOpts, ops, claimsErrored, workDir, stdout, stderr)
+	code := writeHookClaimNoWork(claimOpts, ops, claimsErrored, workDir, stdout, stderr)
+	// The claims_errored drain means every CAS errored after the reads found
+	// work: the trace closes the loop on whether the reads or the writes cost
+	// the invocation (#5693).
+	if claimsErrored {
+		readGuard.printTrace(stderr, "every claim attempt errored")
+	}
+	return code
 }
 
 // reportClaimWorkQueryFailure reports a failed claim-path work query on stderr

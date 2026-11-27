@@ -478,6 +478,12 @@ type hookProvisionedWorktree struct {
 type hookClaimResult struct {
 	terminal bool
 	code     int
+	// windowRefused is set on a terminal result that refused the claim because
+	// the invocation's claim window had spent — refuseExpiredHookClaimWindow.
+	// The federated caller uses it to print the invocation's read trace next
+	// to the refusal (#5693): the window spent its time on reads, and the
+	// operator needs to see which ones.
+	windowRefused bool
 	// claimsErrored is set on a NON-terminal result when one or more eligible
 	// candidates' claim mutations errored and nothing was ultimately claimed. It
 	// lets the shared no-work drain report a distinct "claims_errored" reason
@@ -914,7 +920,7 @@ func refuseExpiredHookClaimWindow(candidateID string, ops hookClaimOps, stderr i
 	_, _ = fmt.Fprintf(stderr,
 		"gc hook --claim: refusing to claim %s: the %s claim window is spent (invocation age %s, parent alive %t); the turn that invoked this claim is gone\n",
 		candidateID, ops.claimWindowOrDefault(), age.Round(time.Millisecond), parentAlive)
-	return hookClaimResult{terminal: true, code: 1}
+	return hookClaimResult{terminal: true, code: 1, windowRefused: true}
 }
 
 // claimFirstReadyHookAssignment atomically promotes the first open candidate
