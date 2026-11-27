@@ -620,3 +620,49 @@ func TestClaimReadContextKillsAReadAtTheReadDeadline(t *testing.T) {
 		t.Fatalf("err = %v, want it classified store-unavailable like any timed-out read", err)
 	}
 }
+
+// A paced retry may start inside the read budget but must not carry found work
+// past it into a CAS; and a retry that could only start at or after the read
+// deadline does not run at all, not even its pacing sleep.
+func TestClaimReadRetryCannotLandFoundWorkPastTheReadBudget(t *testing.T) {
+	t.Run("retry answers past the deadline", func(t *testing.T) {
+		withProductionClaimRetryPacing(t)
+		b := newBudgetClaimHarness()
+		stores := budgetLegs()
+		b.script("/city", hookRunnerAnswer{err: errors.New("bd ready: exit status 1")}, hookRunnerAnswer{out: routedRowJSON("work-1")})
+		b.costs["/city"] = []time.Duration{100 * time.Second, 70 * time.Second}
+
+		code, _, stderr := b.claim(stores, b.ops())
+
+		if code != 2 || !strings.Contains(stderr, hookStoreUnavailableToken) {
+			t.Fatalf("exit = %d, want the timed-out-read exit 2; starts=%v stderr=%s", code, b.clock.readStarts, stderr)
+		}
+		if len(b.claims) != 0 || len(b.windowExpired) != 0 {
+			t.Fatalf("claims = %v, window expiries = %d; want no CAS and no window refusal of found work", b.claims, len(b.windowExpired))
+		}
+		if want := []time.Duration{0, 105 * time.Second}; len(b.clock.readStarts) != 2 || b.clock.readStarts[1] != want[1] {
+			t.Fatalf("read starts = %v, want %v", b.clock.readStarts, want)
+		}
+	})
+	t.Run("retry that cannot start inside the read budget", func(t *testing.T) {
+		withProductionClaimRetryPacing(t)
+		b := newBudgetClaimHarness()
+		stores := budgetLegs()
+		b.script("/city",
+			hookRunnerAnswer{err: errors.New("bd ready: exit status 1: Error: dial tcp 127.0.0.1:3307: connect: connection refused")},
+			hookRunnerAnswer{out: routedRowJSON("work-1")})
+		b.costs["/city"] = []time.Duration{147 * time.Second, time.Second}
+
+		code, _, stderr := b.claim(stores, b.ops())
+
+		if code != 2 || !strings.Contains(stderr, hookStoreUnavailableToken) {
+			t.Fatalf("exit = %d, want 2 with %s; stderr=%s", code, hookStoreUnavailableToken, stderr)
+		}
+		if len(b.reads) != 1 || len(b.clock.sleeps) != 0 {
+			t.Fatalf("reads = %v, sleeps = %v; want one read and no pacing sleep toward a deadline the retry cannot use", b.reads, b.clock.sleeps)
+		}
+		if len(b.claims) != 0 {
+			t.Fatalf("claims = %v, want none", b.claims)
+		}
+	})
+}

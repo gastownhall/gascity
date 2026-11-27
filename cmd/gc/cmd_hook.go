@@ -1149,14 +1149,16 @@ var (
 // the ERROR case only. It returns the first successful selection, or the last
 // error once the budget is spent.
 //
-// The retry budget is also bounded by the invocation's claim window (F-B). Three
-// paced retries on top of a work query that may itself run to
-// hookWorkQueryTimeout can carry a `gc hook --claim` process well past the turn
-// that invoked it, and a read that lands past the window buys nothing: any claim
-// it leads to is refused on arrival. So a retry runs only when it would start
-// strictly inside the window, both before the pacing sleep (the sleep must not
-// run past the window) and after it (the sleep may have overrun). When the window
-// cuts the budget short, the last read error is returned, annotated, so the
+// The retry budget is also bounded by the invocation's claim read budget
+// (claimReadBudget: the claim window less the mutation reserve). Three paced
+// retries on top of a work query that may itself run to hookWorkQueryTimeout can
+// carry a `gc hook --claim` process well past the turn that invoked it, and a
+// read that lands past the read deadline buys nothing: the read guard discards
+// its answer, so work it found can never reach a CAS. So a retry runs only when
+// it would start strictly inside the read budget, both before the pacing sleep
+// (the sleep must not run past the deadline) and after it (the sleep may have
+// overrun). When the budget cuts the retries short, the last read error is
+// returned, annotated, so the
 // caller keeps its failed-read contract instead of treating a dead invocation
 // as an idle store: no drain, and reportClaimWorkQueryFailure classifies the
 // code (2 if the read failed transport-class or timed out, else 1).
@@ -1167,11 +1169,11 @@ var (
 func selectStoreWithWorkRetrying(workQuery string, stores []hookStore, primary hookStore, run hookStoreRunner, ops *hookClaimOps, noted ...hookStoreFailureNote) (string, hookStore, error) {
 	out, selected, err := bestStoreWithWork(workQuery, stores, primary, run, noted...)
 	for attempt := 0; err != nil && attempt < hookClaimQueryRetryAttempts; attempt++ {
-		if ops.claimWindowSpentAfter(hookClaimQueryRetryInterval) {
+		if ops.claimReadBudgetSpentAfter(hookClaimQueryRetryInterval) {
 			return out, selected, hookClaimRetryWindowClosed(err, ops)
 		}
 		ops.sleepOrWallClock(hookClaimQueryRetryInterval)
-		if ops.claimWindowSpentAfter(0) {
+		if ops.claimReadBudgetSpentAfter(0) {
 			return out, selected, hookClaimRetryWindowClosed(err, ops)
 		}
 		out, selected, err = bestStoreWithWork(workQuery, stores, primary, run, noted...)
@@ -1180,10 +1182,12 @@ func selectStoreWithWorkRetrying(workQuery string, stores []hookStore, primary h
 }
 
 // hookClaimRetryWindowClosed annotates the last claim-read error with the reason
-// the retry budget stopped early. It is a wrapped suffix, so errors.Is/As and the
+// the retry budget stopped early: the claim window's read budget runs out before
+// the next retry could run. It is a wrapped suffix, so errors.Is/As and the
 // kill/timeout markers classifyWorkQueryFailure matches on stay intact.
 func hookClaimRetryWindowClosed(err error, ops *hookClaimOps) error {
-	return fmt.Errorf("%w (claim-read retries stopped: the %s claim window closes before the next retry could run)", err, ops.claimWindowOrDefault())
+	return fmt.Errorf("%w (claim-read retries stopped: the %s read budget of the %s claim window runs out before the next retry could run)",
+		err, ops.claimReadBudget(), ops.claimWindowOrDefault())
 }
 
 func hookClaimPrimaryRouteTarget(a *config.Agent) string {
