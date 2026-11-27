@@ -1197,3 +1197,38 @@ func TestLegGateKeepsEveryRowWhoseOwnVerdictStands(t *testing.T) {
 		}
 	}
 }
+
+// TestReadStatusMetadataFieldOnASplitCity pins the --status metadata pushdown
+// on real backends (ga-8g39ur): a native work store and the SQLite binding each
+// hold beads with and without gc.root_bead_id=R, and `--status closed` and
+// `--status open` with the pair answer exactly the R beads of that status from
+// both stores.
+func TestReadStatusMetadataFieldOnASplitCity(t *testing.T) {
+	work := splittest.NewNativeWorkStore(t, "gc")
+	binding := sqliteBinding(t)
+	want := map[string][]string{}
+	for _, store := range []beads.Store{work, binding} {
+		for _, st := range []string{StatusOpen, StatusClosed} {
+			for _, root := range []string{"R", "other", ""} {
+				b := beads.Bead{Title: st + " " + root, Type: "task"}
+				if root != "" {
+					b.Metadata = beads.StringMap{"gc.root_bead_id": root}
+				}
+				created := mustCreate(t, store, b)
+				if st == StatusClosed {
+					closeBead(t, store, created.ID)
+				}
+				if root == "R" {
+					want[st] = append(want[st], created.ID)
+				}
+			}
+		}
+	}
+	legs := splitLegs(work, binding)
+	for _, st := range []string{StatusClosed, StatusOpen} {
+		got := readyIDs(t, legs, Query{Status: st, MetadataFields: []string{"gc.root_bead_id=R"}})
+		if !sameSet(got, want[st]) {
+			t.Fatalf("--status %s answer = %v, want %v", st, got, want[st])
+		}
+	}
+}

@@ -26,6 +26,7 @@ type narrowingStore struct {
 	mu      sync.Mutex
 	ready   []beads.ReadyQuery
 	ordered []orderedCall
+	lists   []beads.ListQuery
 }
 
 type orderedCall struct {
@@ -95,6 +96,21 @@ func (s *narrowingStore) ReadyOrdered(q beads.ReadyQuery, order beads.ReadyOrder
 	return rows, true, nil
 }
 
+// List records what the leg is asked and answers it as MemStore does, which
+// applies ListQuery.Metadata and Assignee exactly.
+func (s *narrowingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.mu.Lock()
+	s.lists = append(s.lists, q)
+	s.mu.Unlock()
+	return s.MemStore.List(q)
+}
+
+func (s *narrowingStore) listQueries() []beads.ListQuery {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.lists)
+}
+
 func (s *narrowingStore) readyQueries() []beads.ReadyQuery {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -124,6 +140,7 @@ func (s ignoringStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
 
 func (s ignoringStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	query.Assignee = ""
+	query.Metadata = nil
 	return s.MemStore.List(query)
 }
 
@@ -163,13 +180,165 @@ func TestReadPushesTheSelectivePredicatesIntoEveryLeg(t *testing.T) {
 	}
 }
 
+// statusLegRows seeds one leg with a row per status and metadata shape: one
+// carrying gc.root_bead_id=R, one carrying another root, one carrying none. The
+// in_progress rows are assigned to w1 and w2 in turn.
+func statusLegRows(prefix string) []beads.Bead {
+	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	var rows []beads.Bead
+	for si, status := range []string{StatusOpen, StatusInProgress, StatusBlocked, StatusClosed} {
+		for mi, root := range []string{"R", "other", ""} {
+			for ai, assignee := range []string{"w1", "w2"} {
+				id := fmt.Sprintf("%s-%s-%d-%s", prefix, status, mi, assignee)
+				rows = append(rows, readyRow(id, (si+mi+ai)%4, base.Add(time.Duration(len(rows))*time.Minute), func(b *beads.Bead) {
+					b.Status = status
+					b.Assignee = assignee
+					if root != "" {
+						b.Metadata = beads.StringMap{"gc.root_bead_id": root}
+					}
+				}))
+			}
+		}
+	}
+	return rows
+}
+
+// TestReadyStatusLegsFilterMetadataInTheStore pins what a --status arm asks each
+// leg for (ga-8g39ur): a plain-string key=value --metadata-field travels to the
+// store as ListQuery.Metadata beside the arm's own query, so a store with a
+// large tier in that status is not read whole and filtered here afterwards. The
+// answer is the rows of that status carrying the pair, from every leg.
+func TestReadyStatusLegsFilterMetadataInTheStore(t *testing.T) {
+	root := map[string]string{"gc.root_bead_id": "R"}
+	for _, tc := range []struct {
+		name  string
+		query Query
+		want  beads.ListQuery
+		ids   []string
+	}{
+		{
+			name:  "closed",
+			query: Query{Status: StatusClosed},
+			want:  beads.ListQuery{Status: StatusClosed, TierMode: beads.FederatedReadTier, Metadata: root},
+			ids:   []string{"c-closed-0-w1", "c-closed-0-w2", "r-closed-0-w1", "r-closed-0-w2"},
+		},
+		{
+			name:  "blocked",
+			query: Query{Status: StatusBlocked},
+			want:  beads.ListQuery{Status: StatusBlocked, TierMode: beads.FederatedReadTier, Metadata: root},
+			ids:   []string{"c-blocked-0-w1", "c-blocked-0-w2", "r-blocked-0-w1", "r-blocked-0-w2"},
+		},
+		{
+			name:  "in_progress",
+			query: Query{Status: StatusInProgress},
+			want:  beads.ListQuery{Status: StatusInProgress, TierMode: beads.FederatedReadTier, Metadata: root},
+			ids:   []string{"c-in_progress-0-w1", "c-in_progress-0-w2", "r-in_progress-0-w1", "r-in_progress-0-w2"},
+		},
+		{
+			name:  "in_progress with an assignee",
+			query: Query{Status: StatusInProgress, Assignee: "w1"},
+			want:  beads.ListQuery{Status: StatusInProgress, Assignee: "w1", TierMode: beads.FederatedReadTier, Metadata: root},
+			ids:   []string{"c-in_progress-0-w1", "r-in_progress-0-w1"},
+		},
+		{
+			// Gas City's open is every non-closed row that maps to open, so the
+			// open leg scans with no status and the pair beside it.
+			name:  "open",
+			query: Query{Status: StatusOpen},
+			want:  beads.ListQuery{AllowScan: true, TierMode: beads.FederatedReadTier, Metadata: root},
+			ids:   []string{"c-open-0-w1", "c-open-0-w2", "r-open-0-w1", "r-open-0-w2"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			city, rig := newNarrowingStore(statusLegRows("c")...), newNarrowingStore(statusLegRows("r")...)
+			legs := []Leg{testLeg("city", city), testLeg("rig r", rig)}
+			q := tc.query
+			q.MetadataFields = []string{"gc.root_bead_id=R"}
+			got := readIDs(t, legs, q)
+			plain := []Leg{
+				testLeg("city", ignoringStore{beads.NewMemStoreFrom(0, statusLegRows("c"), nil)}),
+				testLeg("rig r", ignoringStore{beads.NewMemStoreFrom(0, statusLegRows("r"), nil)}),
+			}
+			if want := readIDs(t, plain, q); !slices.Equal(got, want) {
+				t.Fatalf("pushed answer = %v, want the unpushed %v", got, want)
+			}
+			slices.Sort(got)
+			if !slices.Equal(got, tc.ids) {
+				t.Fatalf("answer = %v, want %v", got, tc.ids)
+			}
+			for _, store := range []*narrowingStore{city, rig} {
+				lists := store.listQueries()
+				if len(lists) == 0 {
+					t.Fatal("leg was asked no List query")
+				}
+				// The live handle every leg is read through stamps Live on the
+				// query; the arm's own question is the rest of it.
+				got := lists[0]
+				got.Live = false
+				if !reflect.DeepEqual(got, tc.want) {
+					t.Fatalf("leg's first List query = %+v, want %+v", got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// TestReadClosedStatusAsksBdListForTheMetadataField pins the invocation that
+// timed out in the field (ga-8g39ur): on a bd-backed leg, `gc ready --status
+// closed --metadata-field gc.root_bead_id=R` asks bd list for the pair, rather
+// than listing the whole closed tier.
+func TestReadClosedStatusAsksBdListForTheMetadataField(t *testing.T) {
+	var mu sync.Mutex
+	var calls [][]string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		mu.Lock()
+		calls = append(calls, slices.Clone(args))
+		mu.Unlock()
+		return []byte("[]"), nil
+	}
+	leg := testLeg("city", beads.NewBdStore("/city", runner))
+	if _, err := Read([]Leg{leg}, Query{Status: StatusClosed, MetadataFields: []string{"gc.root_bead_id=R"}}); err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	var lists [][]string
+	for _, args := range calls {
+		if len(args) > 0 && args[0] == "list" {
+			lists = append(lists, args)
+		}
+	}
+	if len(lists) == 0 {
+		t.Fatalf("no bd list call among %q", calls)
+	}
+	for _, args := range lists {
+		if !slices.Contains(args, "--status=closed") || !slices.Contains(args, "--all") {
+			t.Fatalf("bd list %q does not read the closed tier", args)
+		}
+		i := slices.Index(args, "--metadata-field")
+		if i < 0 || i+1 >= len(args) || args[i+1] != "gc.root_bead_id=R" {
+			t.Fatalf("bd list %q does not carry --metadata-field gc.root_bead_id=R", args)
+		}
+	}
+}
+
 // TestReadNeverPushesAPredicateABackendCouldCompareDifferently pins the other
 // half: a predicate whose backend comparison is not provably the Go comparison
 // stays Go-side, so no store can drop a row the Go filter keeps.
+//
+// The --status arms' list legs push less than the ready arm does: an empty
+// value ("key=" is present-and-empty in Go, which a backend's = ” or LIKE
+// misses for a stored JSON null), a value outside printable ASCII and a value
+// whose JSON string form is not the value between quotes (DoltLite's LIKE
+// prefilter matches only Go's encoding of it, and other writers spell those
+// values differently) stay Go-side there. The ready arm's query for those
+// forms is unchanged.
 func TestReadNeverPushesAPredicateABackendCouldCompareDifferently(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		query Query
+		// readyPushes is what the ready arm pushes for this form.
+		readyPushes map[string]string
 	}{
 		{name: "bare key", query: Query{MetadataFields: []string{"gc.routed_to"}}},
 		{name: "JSON boolean value", query: Query{MetadataFields: []string{"gc.flag=true"}}},
@@ -179,6 +348,10 @@ func TestReadNeverPushesAPredicateABackendCouldCompareDifferently(t *testing.T) 
 		{name: "key outside bd's grammar", query: Query{MetadataFields: []string{"gc route=x"}}},
 		{name: "excluded type", query: Query{ExcludeTypes: []string{"epic"}}},
 		{name: "excluded label", query: Query{ExcludeLabels: []string{"hold:mayor"}}},
+		{name: "empty value", query: Query{MetadataFields: []string{"gc.x="}}, readyPushes: map[string]string{"gc.x": ""}},
+		{name: "value needs JSON escaping", query: Query{MetadataFields: []string{"gc.x=a<b"}}, readyPushes: map[string]string{"gc.x": "a<b"}},
+		{name: "value with a quote", query: Query{MetadataFields: []string{`gc.x=say "hi"`}}, readyPushes: map[string]string{"gc.x": `say "hi"`}},
+		{name: "value outside printable ASCII", query: Query{MetadataFields: []string{"gc.x=café"}}, readyPushes: map[string]string{"gc.x": "café"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := newNarrowingStore()
@@ -186,11 +359,74 @@ func TestReadNeverPushesAPredicateABackendCouldCompareDifferently(t *testing.T) 
 				t.Fatalf("Read: %v", err)
 			}
 			got := store.readyQueries()
-			if len(got) != 1 || len(got[0].MetadataEquals) != 0 || got[0].Unassigned || got[0].Assignee != "" {
+			if len(got) != 1 || got[0].Unassigned || got[0].Assignee != "" {
 				t.Fatalf("leg asked %+v; this predicate must stay Go-side", got)
+			}
+			if len(got[0].MetadataEquals) != 0 || len(tc.readyPushes) != 0 {
+				if !reflect.DeepEqual(got[0].MetadataEquals, tc.readyPushes) {
+					t.Fatalf("ready leg asked MetadataEquals %v, want %v", got[0].MetadataEquals, tc.readyPushes)
+				}
+			}
+			for _, status := range []string{StatusOpen, StatusInProgress, StatusBlocked, StatusClosed} {
+				q := tc.query
+				q.Status = status
+				rows := metadataFormRows()
+				store := newNarrowingStore(rows...)
+				gotIDs := readIDs(t, []Leg{testLeg("city", store)}, q)
+				for _, lq := range store.listQueries() {
+					if lq.Metadata != nil {
+						t.Fatalf("--status %s leg asked %+v; this pair must stay Go-side", status, lq)
+					}
+				}
+				wantIDs := readIDs(t, []Leg{testLeg("city", ignoringStore{beads.NewMemStoreFrom(0, rows, nil)})}, q)
+				if !slices.Equal(gotIDs, wantIDs) {
+					t.Fatalf("--status %s answer = %v, want the unpushed %v", status, gotIDs, wantIDs)
+				}
 			}
 		})
 	}
+	t.Run("empty value keeps only the present-empty bead", func(t *testing.T) {
+		for _, status := range []string{StatusOpen, StatusInProgress, StatusBlocked, StatusClosed} {
+			got := readIDs(t, []Leg{testLeg("city", newNarrowingStore(metadataFormRows()...))}, Query{Status: status, MetadataFields: []string{"gc.x="}})
+			if want := []string{status + "-empty"}; !slices.Equal(got, want) {
+				t.Fatalf("--status %s gc.x= answer = %v, want %v", status, got, want)
+			}
+		}
+	})
+}
+
+// metadataFormRows seeds, in every status, one row per form gc.x can be stored
+// in: present and empty, missing, each JSON literal, values whose JSON string
+// form needs escaping, and a value outside printable ASCII.
+func metadataFormRows() []beads.Bead {
+	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	forms := []struct {
+		name  string
+		value *string
+	}{
+		{name: "empty", value: new("")},
+		{name: "missing"},
+		{name: "true", value: new("true")},
+		{name: "42", value: new("42")},
+		{name: "null", value: new("null")},
+		{name: "object", value: new(`{"a":1}`)},
+		{name: "angle", value: new("a<b")},
+		{name: "quote", value: new(`say "hi"`)},
+		{name: "accent", value: new("café")},
+	}
+	var rows []beads.Bead
+	for _, status := range []string{StatusOpen, StatusInProgress, StatusBlocked, StatusClosed} {
+		for _, form := range forms {
+			rows = append(rows, readyRow(status+"-"+form.name, 1, base.Add(time.Duration(len(rows))*time.Minute), func(b *beads.Bead) {
+				b.Status = status
+				b.Metadata = beads.StringMap{"gc.routed_to": "pool/a", "gc.flag": "true", "gc.count": "42", "gc route": "x"}
+				if form.value != nil {
+					b.Metadata["gc.x"] = *form.value
+				}
+			}))
+		}
+	}
+	return rows
 }
 
 // TestReadPushesABoundedOrderedReadAndKeepsTheTopN pins the limit pushdown: a
@@ -453,6 +689,73 @@ func TestReadBoundedBindingReadIsNeverEndedByRelics(t *testing.T) {
 	}
 }
 
+// TestReadStatusLegsNeverServeARelicThePlainReadDrops pins answer preservation
+// on the --status arms (ga-8g39ur) over a migration relic: an id the work leg
+// holds whose class-binding copy carries the pushed pair and the work copy does
+// not. The plain read keeps the work copy (first leg wins) and the filter drops
+// it; a narrowed read must not serve the binding's copy instead.
+func TestReadStatusLegsNeverServeARelicThePlainReadDrops(t *testing.T) {
+	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	rooted := func(b *beads.Bead) { b.Metadata = beads.StringMap{"gc.root_bead_id": "R"} }
+	status := func(s string) func(*beads.Bead) { return func(b *beads.Bead) { b.Status = s } }
+	for _, tc := range []struct {
+		name        string
+		work, graph []beads.Bead
+		query       Query
+		want        []string
+	}{
+		{
+			name: "closed",
+			work: []beads.Bead{readyRow("w-1", 1, base, status(StatusClosed))},
+			graph: []beads.Bead{
+				readyRow("w-1", 1, base, status(StatusClosed), rooted),
+				readyRow("g-1", 1, base.Add(time.Minute), status(StatusClosed), rooted),
+			},
+			query: Query{Status: StatusClosed, MetadataFields: []string{"gc.root_bead_id=R"}},
+			want:  []string{"g-1"},
+		},
+		{
+			// The work leg's in_progress row ranks first. Left in the narrowed
+			// open read's window, it would fill --limit 1 and leave the
+			// binding's relic unprobed, and the open cut would then serve it.
+			name: "open with a limit",
+			work: []beads.Bead{
+				readyRow("w-0", 0, base, status(StatusInProgress), rooted),
+				readyRow("w-1", 1, base.Add(time.Minute)),
+			},
+			graph: []beads.Bead{readyRow("w-1", 1, base.Add(time.Minute), rooted)},
+			query: Query{Status: StatusOpen, MetadataFields: []string{"gc.root_bead_id=R"}, Limit: 1},
+			want:  []string{},
+		},
+		{
+			// The work leg holds the id in_progress and the binding's copy is
+			// open. The guard falls back to the plain read, whose merge keeps
+			// the work copy (first leg wins) before the open cut drops it; cut
+			// per leg, that read would answer with the binding's copy and put
+			// one id in two status inventories.
+			name:  "open over an in_progress work copy",
+			work:  []beads.Bead{readyRow("w-1", 1, base, status(StatusInProgress), rooted)},
+			graph: []beads.Bead{readyRow("w-1", 1, base, rooted)},
+			query: Query{Status: StatusOpen, MetadataFields: []string{"gc.root_bead_id=R"}},
+			want:  []string{},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			binding := func(store beads.Store) Leg {
+				return Leg{Label: "graph", Store: store, ClassBinding: true, ReservedPrefixes: []string{"g"}}
+			}
+			legs := []Leg{testLeg("city", newNarrowingStore(tc.work...)), binding(newNarrowingStore(tc.graph...))}
+			plain := []Leg{testLeg("city", ignoringStore{beads.NewMemStoreFrom(0, tc.work, nil)}), binding(ignoringStore{beads.NewMemStoreFrom(0, tc.graph, nil)})}
+			if got := readIDs(t, plain, tc.query); !slices.Equal(got, tc.want) {
+				t.Fatalf("unpushed answer = %v, want %v", got, tc.want)
+			}
+			if got := readIDs(t, legs, tc.query); !slices.Equal(got, tc.want) {
+				t.Fatalf("pushed answer = %v, want the unpushed %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestReadPushdownNeverChangesTheAnswer is the property the pushdown rests on:
 // over random cities and random queries, every arm, legs that apply every pushed
 // predicate and cut bounded reads in order give exactly the answer of legs that
@@ -512,7 +815,7 @@ func TestReadPushdownNeverChangesTheAnswer(t *testing.T) {
 				Unassigned: rng.Intn(3) == 0,
 				Limit:      []int{0, 1, 3, 20}[rng.Intn(4)],
 				Sort:       []string{"", "", SortOldest, SortNewest}[rng.Intn(4)],
-				Status:     []string{"", "", "", StatusInProgress, StatusOpen, StatusBlocked}[rng.Intn(6)],
+				Status:     []string{"", "", "", StatusInProgress, StatusOpen, StatusBlocked, StatusClosed}[rng.Intn(7)],
 			}
 			if rng.Intn(2) == 0 {
 				q.MetadataFields = []string{"gc.routed_to=" + routes[1+rng.Intn(len(routes)-1)]}
