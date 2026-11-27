@@ -1249,6 +1249,27 @@ func printSupervisorSupervisionWarning(stderr io.Writer, warning string) {
 	fmt.Fprintf(stderr, "gc supervisor status: warning: %s\n", warning) //nolint:errcheck
 }
 
+// pokeStartedCitiesOnReload pokes every started city of snap so it
+// reconciles its agents at once (e.g. after a child process was killed), and
+// asks each of its bead caches, which GET /beads serves, for a re-scan, so a
+// write made outside gc (an out-of-process bd close) shows without waiting
+// for the cache's cadence. It waits on no reconcile and no scan.
+func pokeStartedCitiesOnReload(snap *citySnapshot, stderr io.Writer) {
+	for _, v := range snap.all {
+		if !v.Started || v.cs == nil {
+			continue
+		}
+		// A view's state is always its runtime's *controllerState.
+		cs, ok := v.cs.(*controllerState)
+		if !ok || cs == nil {
+			fmt.Fprintf(stderr, "gc supervisor: reload: city '%s': state %T has no controller wake; not poked\n", v.Name, v.cs) //nolint:errcheck // best-effort stderr
+			continue
+		}
+		cs.wakeOf().Enqueue(wakeReasonSupervisor, reconcilekey.Allocator()) // reload: re-plan each city
+		cs.requestBeadCacheRescans()
+	}
+}
+
 func newSupervisorReloadCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOut bool
 	cmd := &cobra.Command{
@@ -1873,21 +1894,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 			// sessions are untouched.
 			req.reportWriteAuthKeys(reloadSupervisorWriteAuthKeys(apiMux, stderr))
 			safeReconcile()
-			// Also poke all running cities so they immediately reconcile
-			// their agents (e.g. after a child process was killed).
-			snap := registry.Snapshot()
-			for _, v := range snap.all {
-				if !v.Started || v.cs == nil {
-					continue
-				}
-				// A view's state is always its runtime's *controllerState.
-				cs, ok := v.cs.(*controllerState)
-				if !ok || cs == nil {
-					fmt.Fprintf(stderr, "gc supervisor: reload: city '%s': state %T has no controller wake; not poked\n", v.Name, v.cs) //nolint:errcheck // best-effort stderr
-					continue
-				}
-				cs.wakeOf().Enqueue(wakeReasonSupervisor, reconcilekey.Allocator()) // reload: re-plan each city
-			}
+			pokeStartedCitiesOnReload(registry.Snapshot(), stderr)
 			// Per sd_notify(3) a reload ends with READY=1.
 			notifySdState(stderr, sdnotify.Ready)
 			if req.done != nil {
