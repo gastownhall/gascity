@@ -547,3 +547,40 @@ func TestSweepClosedOrderTrackingRetentionAcrossStoresBoundedStopsOnCancel(t *te
 	}
 	assertBeadsKept(t, secondInner, seedIDs(secondSeed)...)
 }
+
+// run() starts the retention lane once the city is ready and joins it on the
+// way out: with the lane parked inside its listing, a canceled run() does not
+// begin shutdown(), which closes the storage binding the sweep reads, until
+// the listing returns and the lane exits.
+func TestCityRuntimeRunJoinsRetentionLaneBeforeShutdown(t *testing.T) {
+	h := newRetentionRunHarness(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		h.cr.run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		h.release()
+		awaitClose(t, runDone, "run() returning after cancellation")
+	})
+
+	awaitClose(t, h.started, "onStarted")
+	awaitClose(t, h.store.entered, "run()'s retention lane reaching its listing")
+
+	cancel()
+	// A short window: shutdown cannot begin while the lane is parked.
+	select {
+	case <-h.od.drained:
+		t.Fatal("shutdown began while the retention lane was parked in its listing")
+	case <-runDone:
+		t.Fatal("run() returned while the retention lane was parked in its listing")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	h.release()
+	awaitClose(t, runDone, "run() returning once the retention lane exited")
+	awaitClose(t, h.od.drained, "shutdown draining the order dispatcher")
+}

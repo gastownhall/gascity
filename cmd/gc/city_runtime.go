@@ -1021,6 +1021,11 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// on its own lane with only the controller (pending_interaction_lane.go).
 	// Its event-log rebuild runs on that lane too, so it never delays a tick.
 	defer cr.startPendingInteractionLane(ctx)()
+	// The closed order-tracking retention sweep runs on its own lane
+	// (order_tracking_retention_lane.go), off dispatch and readiness. The
+	// deferred stop joins the lane before the deferred shutdown() closes the
+	// storage binding the sweep reads.
+	defer cr.startOrderTrackingRetentionLane(ctx)()
 	// Track pool instance liveness for death detection.
 	var prevPoolRunning map[string]bool
 	runTick := func(trigger string) {
