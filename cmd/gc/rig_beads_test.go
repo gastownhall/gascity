@@ -29,12 +29,12 @@ func TestGenerateRoutesFor(t *testing.T) {
 		if routes[0].Path != "." {
 			t.Errorf("self route path = %q, want %q", routes[0].Path, ".")
 		}
-		if routes[0].Prefix != "mc" {
-			t.Errorf("self route prefix = %q, want %q", routes[0].Prefix, "mc")
+		if routes[0].Prefix != "mc-" {
+			t.Errorf("self route prefix = %q, want %q", routes[0].Prefix, "mc-")
 		}
 		// Route to frontend
-		if routes[1].Prefix != "fe" {
-			t.Errorf("routes[1].Prefix = %q, want %q", routes[1].Prefix, "fe")
+		if routes[1].Prefix != "fe-" {
+			t.Errorf("routes[1].Prefix = %q, want %q", routes[1].Prefix, "fe-")
 		}
 		if routes[1].Path != "../projects/my-frontend" {
 			t.Errorf("routes[1].Path = %q, want %q", routes[1].Path, "../projects/my-frontend")
@@ -50,8 +50,8 @@ func TestGenerateRoutesFor(t *testing.T) {
 			t.Fatalf("len(routes) = %d, want 3", len(routes))
 		}
 		// Route to HQ
-		if routes[0].Prefix != "mc" {
-			t.Errorf("routes[0].Prefix = %q, want %q", routes[0].Prefix, "mc")
+		if routes[0].Prefix != "mc-" {
+			t.Errorf("routes[0].Prefix = %q, want %q", routes[0].Prefix, "mc-")
 		}
 		if routes[0].Path != "../../my-city" {
 			t.Errorf("routes[0].Path = %q, want %q", routes[0].Path, "../../my-city")
@@ -63,6 +63,29 @@ func TestGenerateRoutesFor(t *testing.T) {
 		// Route to backend (sibling)
 		if routes[2].Path != "../my-backend" {
 			t.Errorf("routes[2].Path = %q, want %q", routes[2].Path, "../my-backend")
+		}
+	})
+
+	t.Run("prefix normalization avoids double hyphen", func(t *testing.T) {
+		got, err := generateRoutesFor(
+			rigRoute{Prefix: "hq", AbsDir: "/home/user/city"},
+			[]rigRoute{
+				{Prefix: "hq-", AbsDir: "/home/user/city"},
+				{Prefix: "fx", AbsDir: "/home/user/city/rigs/fx"},
+				{Prefix: "", AbsDir: "/home/user/city/rigs/empty"},
+			},
+		)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got[0].Prefix != "hq-" {
+			t.Errorf("got[0].Prefix = %q, want %q", got[0].Prefix, "hq-")
+		}
+		if got[1].Prefix != "fx-" {
+			t.Errorf("got[1].Prefix = %q, want %q", got[1].Prefix, "fx-")
+		}
+		if got[2].Prefix != "" {
+			t.Errorf("got[2].Prefix = %q, want empty", got[2].Prefix)
 		}
 	})
 }
@@ -103,8 +126,8 @@ func TestWriteAllRoutes(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[0]), &entry); err != nil {
 		t.Fatalf("parsing HQ route line 0: %v", err)
 	}
-	if entry.Prefix != "mc" || entry.Path != "." {
-		t.Errorf("HQ self route = {%q, %q}, want {%q, %q}", entry.Prefix, entry.Path, "mc", ".")
+	if entry.Prefix != "mc-" || entry.Path != "." {
+		t.Errorf("HQ self route = {%q, %q}, want {%q, %q}", entry.Prefix, entry.Path, "mc-", ".")
 	}
 
 	// Check frontend routes file.

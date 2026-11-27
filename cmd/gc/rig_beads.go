@@ -25,6 +25,17 @@ type routeEntry struct {
 	Path   string `json:"path"`
 }
 
+// routePrefix normalizes a bare store prefix to bd's trailing-hyphen format
+// (e.g. "fx" -> "fx-") so routes.jsonl entries match prefixes extracted by bd
+// during cross-store lookups.
+func routePrefix(prefix string) string {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" || strings.HasSuffix(prefix, "-") {
+		return prefix
+	}
+	return prefix + "-"
+}
+
 // generateRoutesFor computes the route entries for a single rig, given all
 // known rigs. Each route is a relative path from `from` to every rig
 // (including itself as "."). Returns an error if any relative path cannot
@@ -37,7 +48,7 @@ func generateRoutesFor(from rigRoute, all []rigRoute) ([]routeEntry, error) {
 			return nil, fmt.Errorf("computing relative path from %q to %q: %w",
 				from.AbsDir, to.AbsDir, err)
 		}
-		routes = append(routes, routeEntry{Prefix: to.Prefix, Path: rel})
+		routes = append(routes, routeEntry{Prefix: routePrefix(to.Prefix), Path: rel})
 	}
 	return routes, nil
 }
