@@ -9690,6 +9690,24 @@ func TestRequestDormantQueuedNudgeWake(t *testing.T) {
 			wantWanted:  true,
 			wantWake:    string(session.WakeCauseExplicit),
 		},
+		{
+			name:        "operator-suspended row is held",
+			prepare:     holdAsleepRow(map[string]string{"sleep_intent": string(session.SleepReasonUserHold), "suspended_at": time.Now().UTC().Format(time.RFC3339)}),
+			wantOutcome: session.WakeHeld,
+			wantWanted:  true,
+		},
+		{
+			name:        "wait-held row is held",
+			prepare:     holdAsleepRow(map[string]string{"sleep_intent": string(session.SleepReasonWaitHold), "wait_hold": "wait-1"}),
+			wantOutcome: session.WakeHeld,
+			wantWanted:  true,
+		},
+		{
+			name:        "row held until a future time is held",
+			prepare:     holdAsleepRow(map[string]string{"held_until": time.Now().Add(time.Hour).UTC().Format(time.RFC3339)}),
+			wantOutcome: session.WakeHeld,
+			wantWanted:  true,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newQueuedNoticeCity(t)
@@ -9709,5 +9727,59 @@ func TestRequestDormantQueuedNudgeWake(t *testing.T) {
 				t.Fatalf("pending = %d, want the notice still queued", n)
 			}
 		})
+	}
+}
+
+// holdAsleepRow prepares an asleep row that hold, its metadata, keeps held.
+func holdAsleepRow(hold map[string]string) func(*testing.T, *queuedNoticeCity) {
+	return func(t *testing.T, c *queuedNoticeCity) {
+		t.Helper()
+		sleepUnheld(t, c.store, c.id)
+		if err := c.store.SetMetadataBatch(c.id, hold); err != nil {
+			t.Fatalf("SetMetadataBatch(hold): %v", err)
+		}
+	}
+}
+
+// TestNudgePollLeavesHeldRecipientAsleep: a poller that finds the recipient
+// of a queued notice held by an operator records no wake, pokes no
+// controller, and leaves the notice queued.
+func TestNudgePollLeavesHeldRecipientAsleep(t *testing.T) {
+	c := newQueuedNoticeCity(t)
+	c.stop(t)
+	holdAsleepRow(map[string]string{"sleep_intent": string(session.SleepReasonUserHold), "suspended_at": time.Now().UTC().Format(time.RFC3339)})(t, c)
+	c.runPoller(t, func() bool {
+		if c.observe.Load() < 20 {
+			return false
+		}
+		if n := len(c.pending(t)); n != 1 {
+			t.Errorf("pending = %d, want the notice still queued", n)
+		}
+		return true
+	})
+	if got := c.wakeRequest(t); got != "" || c.pokes.Load() != 0 {
+		t.Fatalf("wake_request = %q, pokes = %d; want neither for a held session", got, c.pokes.Load())
+	}
+}
+
+// TestNudgeDispatcherLeavesHeldRecipientAsleep: a supervisor dispatcher pass
+// that finds the recipient of a queued notice held records no wake and
+// leaves the notice queued.
+func TestNudgeDispatcherLeavesHeldRecipientAsleep(t *testing.T) {
+	c := newQueuedNoticeCity(t)
+	c.stop(t)
+	holdAsleepRow(map[string]string{"wait_hold": "wait-1", "sleep_intent": string(session.SleepReasonWaitHold)})(t, c)
+	snapshot, err := loadSessionBeadSnapshot(c.store)
+	if err != nil {
+		t.Fatalf("loadSessionBeadSnapshot: %v", err)
+	}
+	if _, err := dispatchAllQueuedNudges(c.dir, supervisorCfg(), c.store, c.store, c.fake, snapshot, nil); err != nil {
+		t.Fatalf("dispatchAllQueuedNudges: %v", err)
+	}
+	if got := c.wakeRequest(t); got != "" {
+		t.Fatalf("wake_request = %q, want none for a held session", got)
+	}
+	if n := len(c.pending(t)); n != 1 {
+		t.Fatalf("pending = %d, want the notice still queued", n)
 	}
 }
