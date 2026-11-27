@@ -3,19 +3,24 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strconv"
 	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 )
 
-// heldActiveStore holds every in_progress List call until it is opened, and
-// counts the calls and the most that ran at once. A list build reads a rig
-// store's in_progress beads once (activeBeadIndex), so its calls count the
-// builds that reached it.
+// heldActiveStore holds every in_progress List call, after it has read the
+// store, until it is opened, and counts the calls and the most that ran at
+// once. A list build reads a rig store's in_progress beads once
+// (activeBeadIndex), so its calls count the builds that reached it, and a
+// held build answers with what the store held when it read.
 type heldActiveStore struct {
 	beads.Store
 	entered chan struct{}
@@ -46,9 +51,10 @@ func (s *heldActiveStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 		s.running--
 		s.mu.Unlock()
 	}()
+	rows, err := s.Store.List(query)
 	s.entered <- struct{}{}
 	<-s.release
-	return s.Store.List(query)
+	return rows, err
 }
 
 // open lets every held call, and every later one, through.
@@ -72,10 +78,11 @@ func (sh *listBuildSharer[T]) slotCount() int {
 // listShareFixture is a city whose list endpoint reads its active work from
 // held, with work assigned to every row.
 type listShareFixture struct {
-	srv  *Server
-	h    http.Handler
-	url  string
-	held *heldActiveStore
+	state *fakeState
+	srv   *Server
+	h     http.Handler
+	url   string
+	held  *heldActiveStore
 	// want is each row's active bead, by agent name or session id.
 	want map[string]string
 	// joined sets the endpoint's sharer hook.
@@ -108,6 +115,7 @@ func newAgentListShareFixture(t *testing.T) *listShareFixture {
 	st.stores["myrig"] = held
 	srv := New(st)
 	f := &listShareFixture{
+		state:  st,
 		srv:    srv,
 		h:      newTestCityHandlerWith(t, st, srv),
 		url:    cityURL(st, "/agents"),
@@ -145,6 +153,7 @@ func newSessionListShareFixture(t *testing.T) *listShareFixture {
 	}
 	srv := New(fs)
 	f := &listShareFixture{
+		state:  fs,
 		srv:    srv,
 		h:      newTestCityHandlerWith(t, fs, srv),
 		url:    cityURL(fs, "/sessions"),
@@ -245,6 +254,90 @@ func TestListBuildSharingQueuedFresh(t *testing.T) {
 			}
 			if n := f.slots(); n != 0 {
 				t.Errorf("%d build slots left once the builds ended, want 0", n)
+			}
+		})
+	}
+}
+
+// listIndex is the event index a list response reports (X-GC-Index).
+func listIndex(t *testing.T, rec *httptest.ResponseRecorder) uint64 {
+	t.Helper()
+	index, err := strconv.ParseUint(rec.Header().Get("X-GC-Index"), 10, 64)
+	if err != nil {
+		t.Fatalf("X-GC-Index %q: %v", rec.Header().Get("X-GC-Index"), err)
+	}
+	return index
+}
+
+// TestListBuildSharingPostMutation: a reader that misses while a build runs is
+// answered by a build that starts once the running one ends, with the event
+// index that build started at, whichever reader queued it. Reader A's build
+// holds after it reads the store; reader C queues, creating the next build;
+// one row's work then moves to a new bead and the event index advances;
+// reader B joins C's queued build. A gets the list as it was, and B and C get
+// the changed list, reporting an index no older than the change.
+func TestListBuildSharingPostMutation(t *testing.T) {
+	for _, fx := range listShareFixtures {
+		t.Run(fx.name, func(t *testing.T) {
+			f := fx.new(t)
+			joins := make(chan bool, 16)
+			f.joined(func(_ string, started bool) { joins <- started })
+			recs := make(map[string]*httptest.ResponseRecorder, 3)
+			var mu sync.Mutex
+			var wg sync.WaitGroup
+			read := func(reader string) {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					rec := f.get(f.url)
+					mu.Lock()
+					recs[reader] = rec
+					mu.Unlock()
+				}()
+			}
+
+			read("A")
+			if started := <-joins; !started {
+				t.Fatal("reader A did not start a build")
+			}
+			<-f.held.entered
+			read("C")
+			if started := <-joins; started {
+				t.Fatal("reader C started a build while one was running")
+			}
+
+			row := slices.Sorted(maps.Keys(f.want))[0]
+			if err := f.held.Close(f.want[row]); err != nil {
+				t.Fatalf("Close(%s): %v", f.want[row], err)
+			}
+			changed := maps.Clone(f.want)
+			changed[row] = addActiveWork(t, f.held.Store, row)
+			f.state.eventProv.Record(events.Event{Type: events.BeadUpdated, Actor: "tester", Subject: changed[row]})
+			changedIndex, err := f.state.eventProv.LatestSeq()
+			if err != nil {
+				t.Fatalf("LatestSeq: %v", err)
+			}
+
+			read("B")
+			if started := <-joins; started {
+				t.Fatal("reader B started a build while one was running")
+			}
+			f.held.open()
+			wg.Wait()
+			f.srv.waitForBackground()
+
+			if got := listIndex(t, recs["A"]); got >= changedIndex {
+				t.Errorf("reader A X-GC-Index = %d, want one before the change at %d", got, changedIndex)
+			}
+			f.checkRows(t, recs["A"], f.want)
+			for _, reader := range []string{"B", "C"} {
+				if got := listIndex(t, recs[reader]); got < changedIndex {
+					t.Errorf("reader %s X-GC-Index = %d, want at least %d: its build started after the change", reader, got, changedIndex)
+				}
+				f.checkRows(t, recs[reader], changed)
+			}
+			if reads, _ := f.held.stats(); reads != 2 {
+				t.Errorf("%d builds read the store, want 2", reads)
 			}
 		})
 	}
