@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1391,19 +1392,29 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 				return last, err
 			}
 			cursorFn := orders.CursorAcross(frontDoors)
+			eventCursorUnavailable := false
 			if a.Trigger == "event" {
-				cursor, err := bdCursorAcrossStores(a.ScopedName(), rawOrderStores(typedStores)...)
+				cursor, stale, err := bdCursorAcrossStores(a.ScopedName(), ep, rawOrderStores(typedStores)...)
 				if err != nil {
 					fmt.Fprintf(stderr, "gc order check: reading event cursor for %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
 					return 1
 				}
-				start, err := orders.CheckEventStart(ep, cursor)
-				if err != nil {
-					fmt.Fprintf(stderr, "gc order check: %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
-					return 1
-				}
-				cursorFn = func(string) uint64 {
-					return start
+				if stale {
+					eventCursorUnavailable = true
+				} else {
+					start, err := orders.CheckEventStart(ep, cursor)
+					if err != nil {
+						fmt.Fprintf(stderr, "gc order check: %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
+						return 1
+					}
+					bounded, ok := boundEventCursorToHead(a.ScopedName(), start, ep)
+					if !ok {
+						eventCursorUnavailable = true
+					} else {
+						cursorFn = func(string) uint64 {
+							return bounded
+						}
+					}
 				}
 			}
 			triggerOpts, err := orderTriggerOptions(cityPath, cfg, a)
@@ -1411,7 +1422,12 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 				fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
-			check := orders.CheckTriggerWithOptions(a, now, lastRunFn, ep, cursorFn, triggerOpts)
+			var check orders.TriggerResult
+			if eventCursorUnavailable {
+				check = orders.TriggerResult{Due: false, Reason: "event: log head unavailable, skipping tick"}
+			} else {
+				check = orders.CheckTriggerWithOptions(a, now, lastRunFn, ep, cursorFn, triggerOpts)
+			}
 			if lastRunErr != nil {
 				fmt.Fprintf(stderr, "gc order check: reading last run for %s: %v\n", a.ScopedName(), lastRunErr) //nolint:errcheck // best-effort stderr
 				return 1
@@ -1487,19 +1503,29 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 			return last, err
 		}
 		cursorFn := orders.CursorAcross(frontDoors)
+		eventCursorUnavailable := false
 		if a.Trigger == "event" {
-			cursor, err := bdCursorAcrossStores(a.ScopedName(), rawOrderStores(typedStores)...)
+			cursor, stale, err := bdCursorAcrossStores(a.ScopedName(), ep, rawOrderStores(typedStores)...)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc order check: reading event cursor for %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
-			start, err := orders.CheckEventStart(ep, cursor)
-			if err != nil {
-				fmt.Fprintf(stderr, "gc order check: %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
-				return 1
-			}
-			cursorFn = func(string) uint64 {
-				return start
+			if stale {
+				eventCursorUnavailable = true
+			} else {
+				start, err := orders.CheckEventStart(ep, cursor)
+				if err != nil {
+					fmt.Fprintf(stderr, "gc order check: %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
+					return 1
+				}
+				bounded, ok := boundEventCursorToHead(a.ScopedName(), start, ep)
+				if !ok {
+					eventCursorUnavailable = true
+				} else {
+					cursorFn = func(string) uint64 {
+						return bounded
+					}
+				}
 			}
 		}
 		triggerOpts, err := orderTriggerOptions(cityPath, cfg, a)
@@ -1507,7 +1533,12 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 			fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		result := orders.CheckTriggerWithOptions(a, now, lastRunFn, ep, cursorFn, triggerOpts)
+		var result orders.TriggerResult
+		if eventCursorUnavailable {
+			result = orders.TriggerResult{Due: false, Reason: "event: log head unavailable, skipping tick"}
+		} else {
+			result = orders.CheckTriggerWithOptions(a, now, lastRunFn, ep, cursorFn, triggerOpts)
+		}
 		if lastRunErr != nil {
 			fmt.Fprintf(stderr, "gc order check: reading last run for %s: %v\n", a.ScopedName(), lastRunErr) //nolint:errcheck // best-effort stderr
 			return 1
@@ -2152,10 +2183,11 @@ func findOrder(aa []orders.Order, name, rig string) (orders.Order, bool) {
 // when a same-second burst exceeds the cap.
 const bdCursorRecentRunsLimit = 256
 
-func bdCursor(store beads.Store, orderName string) (uint64, error) {
-	// One leg of bdCursorAcrossStores: run records live in the orders binding
-	// and, for v1 poured order-run roots (work class), on the work legs, so a
-	// leg that holds none of them is expected to miss.
+// bdCursor returns the order's run-record seq cursor in one store. With a
+// nil head it is the plain max seq (main's behavior). With a head, a seq above
+// the event log's head is stale (#8567): it is ignored, and sawStale reports
+// it. sawValid reports a seq at or below head.
+func bdCursor(store beads.Store, orderName string, head *uint64) (uint64, bool, bool, error) {
 	var beadList []beads.Bead
 	err := beads.FederatedRead(func() (err error) {
 		beadList, err = store.List(beads.ListQuery{
@@ -2179,7 +2211,7 @@ func bdCursor(store beads.Store, orderName string) (uint64, error) {
 	})
 	if err != nil {
 		if len(beadList) == 0 {
-			return 0, fmt.Errorf("listing event cursor beads for order %q: %w", orderName, err)
+			return 0, false, false, fmt.Errorf("listing event cursor beads for order %q: %w", orderName, err)
 		}
 		orderLogf("gc order: event cursor lookup partially failed for %s: %v", orderName, err)
 	}
@@ -2192,24 +2224,99 @@ func bdCursor(store beads.Store, orderName string) (uint64, error) {
 			labelSets = append(labelSets, b.Labels)
 		}
 	}
-	return orders.MaxSeqFromLabels(labelSets), nil
+	if head == nil {
+		return orders.MaxSeqFromLabels(labelSets), true, false, nil
+	}
+	var cursor uint64
+	var sawStale, sawValid bool
+	for _, labels := range labelSets {
+		for _, l := range labels {
+			if !strings.HasPrefix(l, "seq:") {
+				continue
+			}
+			n, perr := strconv.ParseUint(l[4:], 10, 64)
+			if perr != nil {
+				continue
+			}
+			if n > *head {
+				sawStale = true
+				continue
+			}
+			sawValid = true
+			if n > cursor {
+				cursor = n
+			}
+		}
+	}
+	return cursor, sawValid, sawStale, nil
 }
 
-func bdCursorAcrossStores(orderName string, stores ...beads.Store) (uint64, error) {
-	var maxSeq uint64
+// bdCursorAcrossStores is the max run-record seq across stores. With ep set,
+// each seq above the event log's head is stale (#8567, PR #8605 review) and
+// ignored, so the cursor is the largest seq at or below head. When every seq
+// label is above head, no cursor can be trusted: stale is true and the caller
+// holds the check. The cursor is not clamped to head in that case, because a
+// head-clamp is redone from the same stale labels on every tick and skips
+// events recorded between ticks. With ep nil, the result is the plain max.
+func bdCursorAcrossStores(orderName string, ep events.Provider, stores ...beads.Store) (cursor uint64, stale bool, err error) {
+	var head *uint64
+	if ep != nil {
+		h, herr := ep.LatestSeq()
+		if herr != nil {
+			return 0, false, fmt.Errorf("reading event head for order %q: %w", orderName, herr)
+		}
+		head = &h
+	}
+	var sawStale, sawValid bool
 	for i, store := range stores {
 		if store == nil {
 			continue
 		}
-		seq, err := bdCursor(store, orderName)
+		seq, valid, staleHere, err := bdCursor(store, orderName, head)
 		if err != nil {
-			return 0, fmt.Errorf("store %d: %w", i, err)
+			return 0, false, fmt.Errorf("store %d: %w", i, err)
 		}
-		if seq > maxSeq {
-			maxSeq = seq
+		sawValid = sawValid || valid
+		sawStale = sawStale || staleHere
+		if seq > cursor {
+			cursor = seq
 		}
 	}
-	return maxSeq, nil
+	if head != nil && !sawValid && sawStale {
+		orderLogf("gc order: event cursor for %s: every run record seq is above the event log head (seq:%d); holding the check until a run records a seq at or below head (#8567)", orderName, *head)
+		return 0, true, nil
+	}
+	return cursor, false, nil
+}
+
+// boundEventCursorToHead clamps a cursor computed from run-record seq:<N>
+// labels (bdCursor/bdCursorAcrossStores) to the event log's actual current
+// head, so a run record's seq label surviving a log reset or restore (#8567:
+// events.jsonl lost/replaced while the bead store survives, so FileRecorder
+// restarts its seq counter at 1 but old run records keep their old high seq)
+// never produces an AfterSeq above the log's real head. Left unbounded, that
+// stale cursor matches nothing until the new log's seq climbs back past it,
+// silently stalling the order. Clamping to 0 instead of the head would be
+// worse: it would re-match every record still inside the bdCursor scan
+// window on every tick, firing a repeat loop against already-consumed
+// events. Bounding to head instead skips exactly the gap and no more.
+//
+// When the log's head itself cannot be read, ok is false: the caller must
+// fail closed (treat the tick as "no new events yet") rather than guess.
+func boundEventCursorToHead(orderName string, cursor uint64, ep events.Provider) (bounded uint64, ok bool) {
+	if ep == nil {
+		return cursor, true
+	}
+	head, err := ep.LatestSeq()
+	if err != nil {
+		orderLogf("gc order: event cursor check for %s: reading event log head failed, skipping tick: %v", orderName, err)
+		return 0, false
+	}
+	if cursor > head {
+		orderLogf("gc order: event cursor for %s (seq:%d) exceeds event log head (seq:%d); dropping stale label and clamping to head", orderName, cursor, head)
+		return head, true
+	}
+	return cursor, true
 }
 
 // --- gc order sweep-nudge-mail ---
