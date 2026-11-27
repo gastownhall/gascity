@@ -1874,6 +1874,12 @@ func supervisorServiceExtraEnv() []supervisorServiceEnvVar {
 		if !ok || val == "" || !shouldPersistSupervisorEnv(key) {
 			continue
 		}
+		// A routing name (base URL or model selector) only persists from the
+		// shell when explicitly opted in; routing must travel with the
+		// credential it accompanies, not with whatever shell ran install.
+		if isProviderRoutingEnv(key) && !explicitEnvKeySet[key] {
+			continue
+		}
 		env[key] = val
 	}
 	for _, key := range explicitEnvKeys {
@@ -1964,6 +1970,17 @@ func shouldPersistSupervisorEnv(key string) bool {
 
 func isProviderCredentialEnv(key string) bool {
 	return processenv.IsProviderCredentialEnv(key)
+}
+
+// isProviderRoutingEnv reports whether key is a provider-scoped routing name:
+// where the credential is sent (*_BASE_URL) or which model it asks for
+// (*_MODEL). Such names are not credentials and are refused from the shell
+// unless explicitly opted in (gastownhall/gascity#9257).
+func isProviderRoutingEnv(key string) bool {
+	if !isProviderCredentialEnv(key) {
+		return false
+	}
+	return strings.HasSuffix(key, "_BASE_URL") || strings.HasSuffix(key, "_MODEL")
 }
 
 // supervisorSecretsEnvFileName is the dotenv-style file under GC_HOME that

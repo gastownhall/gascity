@@ -579,7 +579,7 @@ func TestBuildSupervisorServiceDataIncludesProviderEnv(t *testing.T) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "AKIA123")
 	t.Setenv("AWS_PAGER", "less")
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(homeDir, ".claude"))
-	t.Setenv("GC_SUPERVISOR_ENV", "CUSTOM_PROVIDER_TOKEN,IGNORED_EMPTY")
+	t.Setenv("GC_SUPERVISOR_ENV", "CUSTOM_PROVIDER_TOKEN,IGNORED_EMPTY,ANTHROPIC_BASE_URL")
 	t.Setenv("CUSTOM_PROVIDER_TOKEN", "custom-token")
 	t.Setenv("IGNORED_EMPTY", "")
 	t.Setenv("UNRELATED_SECRET", "do-not-persist")
