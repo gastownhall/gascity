@@ -49,6 +49,18 @@ func unroutedAdoptionPolicyFor(cfg *config.City) unroutedAdoptionPolicy {
 	if hq := strings.ToLower(strings.TrimSpace(config.EffectiveHQPrefix(cfg))); hq != "" {
 		scopes[hq] = unroutedAdoptionScope{label: "city", route: adoptionRouteFor(cfg, cfg.Workspace.UnroutedWorkTarget)}
 	}
+	// No inheritance: a rig adopts only through its own unrouted_work_target.
+	for _, rig := range cfg.Rigs {
+		prefix := strings.ToLower(strings.TrimSpace(rig.EffectivePrefix()))
+		if prefix == "" {
+			continue
+		}
+		if _, taken := scopes[prefix]; taken {
+			// The HQ prefix wins, exactly as targetless sling resolves it.
+			continue
+		}
+		scopes[prefix] = unroutedAdoptionScope{label: "rig " + rig.Name, route: adoptionRouteFor(cfg, rig.UnroutedWorkTarget)}
+	}
 	return unroutedAdoptionPolicy{cfg: cfg, scopes: scopes}
 }
 

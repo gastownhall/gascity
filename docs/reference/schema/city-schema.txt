@@ -2893,6 +2893,10 @@
           "type": "array",
           "description": "DefaultSlingTargets is the plural form of DefaultSlingTarget.\nWhen set, targetless gc sling picks one entry at random each dispatch.\nTakes precedence over DefaultSlingTarget when non-empty. Each entry is\nresolved the same way as DefaultSlingTarget. Example:\n  default_sling_targets = [\"rig/polecat-a\", \"rig/polecat-b\"]"
         },
+        "unrouted_work_target": {
+          "type": "string",
+          "description": "UnroutedWorkTarget names the agent that open, unassigned work in this\nrig's bead store adopts when it carries no gc.routed_to, such as a bead\nmade with plain `bd create`. The controller stamps the same gc.routed_to\n`gc sling \u003ctarget\u003e \u003cid\u003e` would write. Empty (the default) adopts\nnothing; the workspace unrouted_work_target does not apply to rigs. The\ntarget must resolve to a configured agent with built-in sling routing\n(no custom sling_query). Example: \"rig/polecat\""
+        },
         "federation": {
           "type": "string",
           "enum": [

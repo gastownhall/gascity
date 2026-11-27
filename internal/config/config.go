@@ -655,6 +655,14 @@ type Rig struct {
 	// resolved the same way as DefaultSlingTarget. Example:
 	//   default_sling_targets = ["rig/polecat-a", "rig/polecat-b"]
 	DefaultSlingTargets []string `toml:"default_sling_targets,omitempty"`
+	// UnroutedWorkTarget names the agent that open, unassigned work in this
+	// rig's bead store adopts when it carries no gc.routed_to, such as a bead
+	// made with plain `bd create`. The controller stamps the same gc.routed_to
+	// `gc sling <target> <id>` would write. Empty (the default) adopts
+	// nothing; the workspace unrouted_work_target does not apply to rigs. The
+	// target must resolve to a configured agent with built-in sling routing
+	// (no custom sling_query). Example: "rig/polecat"
+	UnroutedWorkTarget string `toml:"unrouted_work_target,omitempty"`
 	// Federation selects which of this city's agents may act on the rig's bead
 	// store. "city" (the default) keeps today's behavior: city-scoped agents
 	// read every rig, and any agent whose identity matches a row may serve,

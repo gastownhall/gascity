@@ -87,3 +87,80 @@ func TestRouteAdoptionCarriedRouteWins(t *testing.T) {
 		t.Fatalf("backstop restored=%d adopted=%d, want restored=1 adopted=0", report.restored, report.adopted)
 	}
 }
+
+// adoptionRigRuntime builds a runtime over a city store and one rig store
+// ("hello-world", prefix "hw"), configured with cfg.
+func adoptionRigRuntime(t *testing.T, cfg *config.City, citySeed, rigSeed []beads.Bead) (*CityRuntime, *countingRouteStore, *countingRouteStore) {
+	t.Helper()
+	cityStore := &countingRouteStore{Store: beads.NewMemStoreFrom(0, citySeed, nil)}
+	rigStore := &countingRouteStore{Store: beads.NewMemStoreFrom(0, rigSeed, nil)}
+	cr := &CityRuntime{
+		cityName:            "city",
+		cityPath:            t.TempDir(),
+		cfg:                 cfg,
+		standaloneCityStore: cityStore,
+		standaloneRigStores: map[string]beads.Store{"hello-world": rigStore},
+		stderr:              io.Discard,
+	}
+	return cr, cityStore, rigStore
+}
+
+// adoptionRigConfig is a city with a "hello-world" rig (prefix "hw") and a
+// rig-scoped researcher pool. rigTarget is the rig's unrouted_work_target.
+func adoptionRigConfig(t *testing.T, rigTarget string) *config.City {
+	t.Helper()
+	return &config.City{
+		Workspace: config.Workspace{Name: "city", Prefix: "ct"},
+		Rigs: []config.Rig{
+			{Name: "hello-world", Path: t.TempDir(), Prefix: "hw", UnroutedWorkTarget: rigTarget},
+		},
+		Agents: []config.Agent{
+			{Name: "researcher", Dir: "hello-world", MinActiveSessions: ptr(0), MaxActiveSessions: ptr(3)},
+		},
+	}
+}
+
+// TestRouteAdoptionRigTargetAdoptsOnlyItsOwnScope is AC-2's first half: a
+// rig's unrouted_work_target adopts the rig's plain-created bead and leaves
+// the city's unrouted, since the workspace sets no target.
+func TestRouteAdoptionRigTargetAdoptsOnlyItsOwnScope(t *testing.T) {
+	cfg := adoptionRigConfig(t, "hello-world/researcher")
+	cityBead, rigBead := plainCreatedBead("ct-9"), plainCreatedBead("hw-9")
+	cr, cityStore, rigStore := adoptionRigRuntime(t, cfg, []beads.Bead{cityBead}, []beads.Bead{rigBead})
+
+	report := cr.runRouteRecoveryBackstop(backstopReasonCadence)
+
+	if got := mustRoutedTo(t, rigStore, "hw-9"); got != "hello-world/researcher" {
+		t.Fatalf("hw-9 gc.routed_to = %q, want %q", got, "hello-world/researcher")
+	}
+	if got := mustRoutedTo(t, cityStore, "ct-9"); got != "" {
+		t.Fatalf("ct-9 gc.routed_to = %q, want empty (the workspace sets no target)", got)
+	}
+	if report.adopted != 1 {
+		t.Fatalf("backstop adopted %d, want 1", report.adopted)
+	}
+}
+
+// TestRouteAdoptionNoTargetAnywhereWritesNothing is AC-2's second half: with
+// no unrouted_work_target configured, plain-created beads add no candidates
+// and draw no writes from either pass.
+func TestRouteAdoptionNoTargetAnywhereWritesNothing(t *testing.T) {
+	cfg := adoptionRigConfig(t, "")
+	cityBead, rigBead := plainCreatedBead("ct-9"), plainCreatedBead("hw-9")
+	cr, cityStore, rigStore := adoptionRigRuntime(t, cfg, []beads.Bead{cityBead}, []beads.Bead{rigBead})
+	lane := cr.routeRecoveryLaneOf()
+
+	lane.observe(beadCreatedEvent(t, cityBead))
+	lane.observe(beadCreatedEvent(t, rigBead))
+	delta := cr.recoverUnroutedWorkRoutesDelta()
+	if delta.candidates != 0 || delta.legReads != 0 {
+		t.Fatalf("delta candidates=%d reads=%d, want 0/0 with no target configured", delta.candidates, delta.legReads)
+	}
+	backstop := cr.runRouteRecoveryBackstop(backstopReasonCadence)
+	if backstop.candidates != 0 || backstop.adopted != 0 {
+		t.Fatalf("backstop candidates=%d adopted=%d, want 0/0 with no target configured", backstop.candidates, backstop.adopted)
+	}
+	if cityStore.writes != 0 || rigStore.writes != 0 {
+		t.Fatalf("writes city=%d rig=%d, want 0", cityStore.writes, rigStore.writes)
+	}
+}
