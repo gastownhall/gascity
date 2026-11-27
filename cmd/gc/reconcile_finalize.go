@@ -65,5 +65,23 @@ func finalizePatch(f finalizeFacts) finalizeChoice {
 	if f.RestartRequested {
 		c.Patch["restart_requested"] = ""
 	}
+	// Durably mark (or clear) the stranded-holder fact alongside the sleep the
+	// same patch writes (#5731). session.drain_acked_with_assigned_work already
+	// reports this moment, but an event is not queryable state and the patch is
+	// an ordinary idle sleep — so on the bead a stranded holder is
+	// indistinguishable from a seat that merely went idle. The orphan-release
+	// lane needs that distinction to tell a live claimant from a seat that
+	// acknowledged its own exit while holding the claim (see
+	// releaseOrphanedPoolAssignments). Nothing about the work bead changes here:
+	// recovery stays out of the drain-ack path (#2293). f.Now is the patch's
+	// single clock read, so slept_at and drain_ack_stranded_at cannot disagree
+	// by a tick. A bare drain-ack, a no-work finalize, and an honored wake
+	// (the seat starts; it never slept stranded) all clear it, so the marker
+	// can never go stale; PreWakePatch clears it again when the seat starts.
+	if f.HasWork && !f.HonoredWake {
+		c.Patch[session.DrainAckStrandedAtKey] = f.Now.UTC().Format(time.RFC3339)
+	} else {
+		c.Patch[session.DrainAckStrandedAtKey] = ""
+	}
 	return c
 }
