@@ -396,3 +396,43 @@ func TestCanonicalSingletonRunningSeatKeepsItsInProgressClaim(t *testing.T) {
 		t.Fatalf("session starts = %v, want only the fixture's own start", starts)
 	}
 }
+
+// AC-6: a max >= 2 pool's transient slot row carries no canonical identity,
+// so in AC-1's orphaned state it keeps today's close_orphan outcome and the
+// identity-preserving close never fires; a named session's row is the ga-n2d
+// phantom path's, never this one's.
+func TestCanonicalSingletonOrphanCloseSkipsTransientAndNamedRows(t *testing.T) {
+	t.Run("transient slot", func(t *testing.T) {
+		agent := singletonOrphanAgent()
+		agent.MaxActiveSessions = intPtr(2)
+		e := newSingletonOrphanEnv(t, agent)
+		if _, ok := canonicalSingletonSeatIdentity(sessionInfoFromBead(e.seat), e.cfg); ok {
+			t.Fatalf("transient slot row (alias %q) reports a canonical singleton identity", e.seat.Metadata["alias"])
+		}
+
+		records := e.tick(t)
+
+		// Today the claim under the template identity is not the transient
+		// row's, so the sweep closes the row before the orphan close sees it.
+		for _, rec := range records {
+			if _, ok := rec.Fields["preserved_identity"]; ok {
+				t.Fatalf("close_orphan carries preserved_identity %v for a transient slot", rec.Fields["preserved_identity"])
+			}
+		}
+		seat := e.get(t, e.seat.ID)
+		if seat.Status != "closed" || seat.Metadata["state"] != "gc_swept" {
+			t.Fatalf("transient row status=%q state=%q, want today's sweep (closed, gc_swept)", seat.Status, seat.Metadata["state"])
+		}
+		if got := e.get(t, e.claim.ID); got.Assignee != e.cfg.Agents[0].QualifiedName() || got.Status != "open" {
+			t.Fatalf("claim assignee=%q status=%q, want untouched", got.Assignee, got.Status)
+		}
+	})
+	t.Run("named session", func(t *testing.T) {
+		e := newSingletonOrphanEnv(t, singletonOrphanAgent())
+		info := sessionInfoFromBead(e.seat)
+		info.ConfiguredNamedSession = true
+		if identity, ok := canonicalSingletonSeatIdentity(info, e.cfg); ok {
+			t.Fatalf("named session row reports canonical singleton identity %q", identity)
+		}
+	})
+}
