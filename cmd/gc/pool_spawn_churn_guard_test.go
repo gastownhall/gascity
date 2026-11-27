@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
@@ -38,9 +39,9 @@ func newPoolSpawnChurnHarness(t *testing.T) *poolSpawnChurnHarness {
 }
 
 // seatEvent feeds one session-bead notification about id, stamped now.
-func (h *poolSpawnChurnHarness) seatEvent(typ, id, template string, created time.Time, md map[string]string) {
+func (h *poolSpawnChurnHarness) seatEvent(typ, id string, created time.Time, md map[string]string) {
 	h.t.Helper()
-	meta := map[string]string{"template": template}
+	meta := map[string]string{"template": "claude"}
 	for k, v := range md {
 		meta[k] = v
 	}
@@ -62,12 +63,12 @@ func (h *poolSpawnChurnHarness) churnBlindSeat() {
 	h.seats++
 	id := fmt.Sprintf("gcg-session-%d", h.seats)
 	pool := map[string]string{"pool_managed": "true"}
-	h.seatEvent(events.BeadCreated, id, "claude", h.now, pool)
-	h.seatEvent(events.BeadUpdated, id, "claude", h.now, map[string]string{
+	h.seatEvent(events.BeadCreated, id, h.now, pool)
+	h.seatEvent(events.BeadUpdated, id, h.now, map[string]string{
 		"pool_managed":         "true",
 		"creation_complete_at": h.now.UTC().Format(time.RFC3339),
 	})
-	h.seatEvent(events.BeadClosed, id, "claude", h.now, pool)
+	h.seatEvent(events.BeadClosed, id, h.now, pool)
 }
 
 func TestPoolSpawnChurnGuardTripsAfterThreeChurnedCloses(t *testing.T) {
@@ -148,5 +149,106 @@ func TestPoolSpawnChurnGuardRegistryRoundtrip(t *testing.T) {
 	}
 	if poolSpawnChurnGuardFor("") != nil {
 		t.Fatalf("a blank city path resolved a guard")
+	}
+}
+
+// churnSeatOpts feeds one pool seat through its life with md merged into
+// every event's metadata.
+func (h *poolSpawnChurnHarness) churnSeatOpts(md map[string]string) {
+	h.t.Helper()
+	h.seats++
+	id := fmt.Sprintf("gcg-session-%d", h.seats)
+	pool := map[string]string{"pool_managed": "true"}
+	merge := func(extra map[string]string) map[string]string {
+		out := map[string]string{"pool_managed": "true"}
+		for k, v := range pool {
+			out[k] = v
+		}
+		for k, v := range extra {
+			out[k] = v
+		}
+		return out
+	}
+	h.seatEvent(events.BeadCreated, id, h.now, merge(md))
+	h.seatEvent(events.BeadUpdated, id, h.now, merge(map[string]string{
+		"creation_complete_at": h.now.UTC().Format(time.RFC3339),
+	}))
+	h.seatEvent(events.BeadClosed, id, h.now, merge(md))
+}
+
+// AC-4 (ga-s5l1ms): the closes that never count as churn — a bound seat, a
+// claimed seat, an operational claims_errored drain, a failed create, a
+// named or manual session — do not add to any template's streak. The plain
+// churned close still trips (TestPoolSpawnChurnGuardTripsAfterThreeChurnedCloses).
+func TestPoolSpawnChurnGuardExcludedClosesDoNotCount(t *testing.T) {
+	claimCell := fmt.Sprintf(`{"v":1,"claims":[{"store":"city","bead":"bd-9","gen":2,"at":%q,"via":"claim"}]}`,
+		time.Date(2026, 11, 19, 11, 0, 0, 0, time.UTC).Format(time.RFC3339Nano))
+	for _, tc := range []struct {
+		name string
+		md   map[string]string
+	}{
+		{name: "bound to a trigger bead", md: map[string]string{beadmeta.TriggerBeadIDMetadataKey: "bd-9"}},
+		{name: "claimed work in work_started", md: map[string]string{"work_started": claimCell}},
+		{name: "claims_errored close", md: map[string]string{"sleep_reason": "claims_errored"}},
+		{name: "failed-create close", md: map[string]string{"state": "failed-create"}},
+		{name: "named session", md: map[string]string{session.NamedSessionMetadataKey: "true"}},
+		{name: "manual session", md: map[string]string{"manual_session": "true"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newPoolSpawnChurnHarness(t)
+			base := h.now
+			for i := 0; i < 3; i++ {
+				h.now = base.Add(time.Duration(i) * 3 * time.Minute)
+				h.churnSeatOpts(tc.md)
+			}
+			if allow := h.guard.allowance(); len(allow) != 0 {
+				t.Fatalf("excluded closes counted toward a hold: %v", allow)
+			}
+		})
+	}
+}
+
+// AC-4: a trigger stamp cleared mid-life still binds — provenance is sticky,
+// so a late clear cannot turn a bound seat into churn.
+func TestPoolSpawnChurnGuardClearedStampStillBinds(t *testing.T) {
+	h := newPoolSpawnChurnHarness(t)
+	base := h.now
+	for i := 0; i < 3; i++ {
+		h.now = base.Add(time.Duration(i) * 3 * time.Minute)
+		h.seats++
+		id := fmt.Sprintf("gcg-session-%d", h.seats)
+		pool := map[string]string{"pool_managed": "true"}
+		bound := map[string]string{"pool_managed": "true", beadmeta.TriggerBeadIDMetadataKey: "bd-9"}
+		h.seatEvent(events.BeadCreated, id, h.now, bound)
+		h.seatEvent(events.BeadUpdated, id, h.now, map[string]string{
+			"pool_managed":         "true",
+			"creation_complete_at": h.now.UTC().Format(time.RFC3339),
+		}) // the stamp is gone from this snapshot on
+		h.seatEvent(events.BeadClosed, id, h.now, pool)
+	}
+	if allow := h.guard.allowance(); len(allow) != 0 {
+		t.Fatalf("a cleared stamp unbound a seat: %v", allow)
+	}
+}
+
+// AC-4: a seat whose creation the guard did not observe — first seen through
+// an update or a close, as after a controller restart — never counts, so the
+// guard re-learns from genuinely new seats only.
+func TestPoolSpawnChurnGuardSeatFirstSeenMidLifeDoesNotCount(t *testing.T) {
+	h := newPoolSpawnChurnHarness(t)
+	base := h.now
+	for i := 0; i < 3; i++ {
+		h.now = base.Add(time.Duration(i) * 3 * time.Minute)
+		h.seats++
+		id := fmt.Sprintf("gcg-session-%d", h.seats)
+		pool := map[string]string{"pool_managed": "true"}
+		h.seatEvent(events.BeadUpdated, id, h.now, map[string]string{
+			"pool_managed":         "true",
+			"creation_complete_at": h.now.UTC().Format(time.RFC3339),
+		})
+		h.seatEvent(events.BeadClosed, id, h.now, pool)
+	}
+	if allow := h.guard.allowance(); len(allow) != 0 {
+		t.Fatalf("a seat first seen mid-life counted: %v", allow)
 	}
 }
