@@ -269,3 +269,51 @@ func TestClaimAuthorityPublishedPoolSessionCanClaim(t *testing.T) {
 		})
 	}
 }
+
+// AC-4: on an armed store, unassigning or releasing routed work held by an
+// identity nobody publishes any more, and claiming or assigning a bead with
+// no routing metadata, all succeed unchanged, through the library and raw
+// SQL, on both tiers.
+func TestClaimAuthorityAllowsReleaseAndNonRoutedWrites(t *testing.T) {
+	f := newClaimAuthorityFixture(t)
+	pub := testClaimAuthorityPublisher("alpha", ClaimAuthorityModeAuto)
+	const gone = "rig/pool-gone"
+	for _, ephemeral := range []bool{false, true} {
+		t.Run(f.tableOf(ephemeral), func(t *testing.T) {
+			f.reconcile(t, pub, true, gone)
+			held := f.createRouted(t, ephemeral)
+			if _, _, err := f.store.Claim(held.ID, gone); err != nil {
+				t.Fatalf("claim by published %s: %v", gone, err)
+			}
+			released := f.createRouted(t, ephemeral)
+			if _, _, err := f.store.Claim(released.ID, gone); err != nil {
+				t.Fatalf("claim by published %s: %v", gone, err)
+			}
+			f.reconcile(t, pub, true) // the session ended: its identities are pruned
+
+			empty, open := "", "open"
+			if err := f.store.Update(held.ID, UpdateOpts{Assignee: &empty}); err != nil {
+				t.Fatalf("unassign of routed work held by the pruned %s: %v", gone, err)
+			}
+			if err := f.store.Update(released.ID, UpdateOpts{Assignee: &empty, Status: &open}); err != nil {
+				t.Fatalf("release of routed work held by the pruned %s: %v", gone, err)
+			}
+			assertClaimed(t, f.store, held.ID, "")
+			assertBeadOpenUnassigned(t, f.store, released.ID)
+
+			plain, err := f.store.Create(Bead{Title: "unrouted work", Type: "task", Ephemeral: ephemeral})
+			if err != nil {
+				t.Fatalf("Create unrouted bead: %v", err)
+			}
+			if _, _, err := f.store.Claim(plain.ID, absentClaimant); err != nil {
+				t.Fatalf("claim of an unrouted bead by %s: %v", absentClaimant, err)
+			}
+			assertClaimed(t, f.store, plain.ID, absentClaimant)
+			f.awaitRowVisible(t, f.tableOf(ephemeral), plain.ID)
+			if _, err := f.db.ExecContext(t.Context(),
+				"UPDATE `"+f.tableOf(ephemeral)+"` SET assignee = ?, status = 'in_progress' WHERE id = ?", absentClaimant+"-raw", plain.ID); err != nil {
+				t.Fatalf("raw assign of an unrouted bead: %v", err)
+			}
+		})
+	}
+}
