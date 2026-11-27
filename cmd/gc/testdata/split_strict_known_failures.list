@@ -189,6 +189,8 @@ TestOrderSweepTrackingRequiresConfirm	fails under the gate: cmdOrderSweepTrackin
 TestOrderTrackingRetentionWatchdog_LogsPrunedCount	fails under the gate: stderr = "", want 'pruned' in output
 TestOrderTrackingRetentionWatchdog_PrunesEligibleBeads	fails under the gate: Get(prune-00) err = <nil>, want ErrNotFound (should be pruned)
 TestOrderTrackingRetentionWatchdog_PrunesWhenBackupFresh	fails under the gate: Get(guard-00) err = <nil>, want ErrNotFound (should be pruned)
+TestOrderTrackingRetentionLanePrunesOnItsFirstPass	fails under the gate: the lane's first pass pruning the eligible beads did not happen within the hang budget (1m0s)
+TestOrderTrackingRetentionLaneSkipsUnderFSPressure	fails under the gate: Get(guard-00) err = <nil>, want ErrNotFound: the forced pass sweeps
 TestOrderTrackingSweepWatchdogAllowsSweepOrderToCleanStaleTracking	fails under the gate: sweep tracking status = open, want closed before dispatch
 TestOrderTrackingSweepWatchdogClosesAllStaleTracking	fails under the gate: sweep tracking status = open, want closed
 TestOrderTrackingSweepWatchdogClosesRigStoreSweepTracking	fails under the gate: rig sweep tracking status = open, want closed
