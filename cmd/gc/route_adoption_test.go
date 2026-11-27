@@ -164,3 +164,73 @@ func TestRouteAdoptionNoTargetAnywhereWritesNothing(t *testing.T) {
 		t.Fatalf("writes city=%d rig=%d, want 0", cityStore.writes, rigStore.writes)
 	}
 }
+
+// TestRouteAdoptionRefusesIneligibleBeads is AC-3: in a scope with a target,
+// neither the delta nor the backstop pass adopts an open, unassigned,
+// unrouted bead that the target's Tier 3 query would refuse, that is held,
+// ephemeral, workflow or control topology, or that gc ever claimed.
+func TestRouteAdoptionRefusesIneligibleBeads(t *testing.T) {
+	withMeta := func(key string) func(*beads.Bead) {
+		return func(b *beads.Bead) { b.Metadata = map[string]string{key: "x"} }
+	}
+	withLabel := func(label string) func(*beads.Bead) {
+		return func(b *beads.Bead) { b.Labels = []string{label} }
+	}
+	cases := []struct {
+		name  string
+		shape func(*beads.Bead)
+	}{
+		{"epic", func(b *beads.Bead) { b.Type = "epic" }},
+		{"ready-excluded type", func(b *beads.Bead) { b.Type = "molecule" }},
+		{"ready-excluded label", withLabel("gc:session")},
+		{"dispatch hold", withLabel(beadmeta.DispatchHoldLabels[0])},
+		{"human label", withLabel(beadmeta.HumanLabel)},
+		{"ephemeral", func(b *beads.Bead) { b.Ephemeral = true }},
+		{"gc.kind", withMeta(beadmeta.KindMetadataKey)},
+		{"gc.execution_routed_to", withMeta(beadmeta.ExecutionRoutedToMetadataKey)},
+		{"gc.deferred_routed_to", withMeta(beadmeta.DeferredRoutedToMetadataKey)},
+		{"gc.deferred_execution_routed_to", withMeta(beadmeta.DeferredExecutionRoutedToMetadataKey)},
+		{"gc.instantiating", withMeta(beadmeta.InstantiatingMetadataKey)},
+		{"gc.claimed_at", withMeta(beadmeta.ClaimedAtMetadataKey)},
+		{"route-recovery quarantined", func(b *beads.Bead) {
+			b.Metadata = map[string]string{beadmeta.RouteQuarantineMetadataKey: "true"}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bead := plainCreatedBead("ct-3")
+			tc.shape(&bead)
+			if adoptableUnroutedWork(bead) {
+				t.Fatalf("adoptableUnroutedWork(%s) = true, want false", tc.name)
+			}
+			cr, store := adoptionRuntime(t, adoptionTestConfig(), bead)
+			cr.routeRecoveryLaneOf().observe(beadCreatedEvent(t, bead))
+
+			delta := cr.recoverUnroutedWorkRoutesDelta()
+			backstop := cr.runRouteRecoveryBackstop(backstopReasonCadence)
+
+			if got := mustRoutedTo(t, store, "ct-3"); got != "" {
+				t.Fatalf("gc.routed_to = %q, want empty", got)
+			}
+			if delta.adopted != 0 || backstop.adopted != 0 {
+				t.Fatalf("adopted delta=%d backstop=%d, want 0/0", delta.adopted, backstop.adopted)
+			}
+		})
+	}
+	t.Run("gc.run_target is restored, not adopted", func(t *testing.T) {
+		bead := plainCreatedBead("ct-4")
+		bead.Metadata = map[string]string{beadmeta.RunTargetMetadataKey: "carried-pool"}
+		if adoptableUnroutedWork(bead) {
+			t.Fatal("adoptableUnroutedWork(gc.run_target) = true, want false")
+		}
+		cr, store := adoptionRuntime(t, adoptionTestConfig(), bead)
+		cr.routeRecoveryLaneOf().observe(beadCreatedEvent(t, bead))
+		delta := cr.recoverUnroutedWorkRoutesDelta()
+		if got := mustRoutedTo(t, store, "ct-4"); got != "carried-pool" {
+			t.Fatalf("gc.routed_to = %q, want the carried %q", got, "carried-pool")
+		}
+		if delta.adopted != 0 || delta.restored != 1 {
+			t.Fatalf("delta adopted=%d restored=%d, want 0/1", delta.adopted, delta.restored)
+		}
+	})
+}

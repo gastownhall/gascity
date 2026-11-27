@@ -100,13 +100,37 @@ func (p unroutedAdoptionPolicy) routeFor(b beads.Bead) string {
 	return sc.route
 }
 
+// adoptionRefusingMetadataKeys mark a bead as workflow or control topology,
+// as already carrying a deferred or execution route, or as claimed by gc at
+// some point. Adoption never routes such a bead: its route, if any, is owned
+// by the machinery that stamped the key.
+var adoptionRefusingMetadataKeys = []string{
+	beadmeta.KindMetadataKey,
+	beadmeta.RoutedToMetadataKey,
+	beadmeta.RunTargetMetadataKey,
+	beadmeta.ExecutionRoutedToMetadataKey,
+	beadmeta.DeferredRoutedToMetadataKey,
+	beadmeta.DeferredExecutionRoutedToMetadataKey,
+	beadmeta.InstantiatingMetadataKey,
+	beadmeta.ClaimedAtMetadataKey,
+}
+
 // adoptableUnroutedWork is the single structural predicate for work the
 // route-recovery lane may adopt and the unrouted-ready-work doctor check
-// reports: open, unassigned work that carries no route of any kind.
+// reports: open, unassigned, non-ephemeral work that carries no route of any
+// kind, was never claimed, is not quarantined, and that the Tier 3 serving
+// rules (demandRowServable, ready exclusions) would hand to a worker.
 func adoptableUnroutedWork(b beads.Bead) bool {
-	if b.Status != "open" || strings.TrimSpace(b.Assignee) != "" {
+	if b.Status != "open" || strings.TrimSpace(b.Assignee) != "" || b.Ephemeral {
 		return false
 	}
-	return strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) == "" &&
-		strings.TrimSpace(b.Metadata[beadmeta.RunTargetMetadataKey]) == ""
+	for _, key := range adoptionRefusingMetadataKeys {
+		if strings.TrimSpace(b.Metadata[key]) != "" {
+			return false
+		}
+	}
+	if beads.IsReadyExcludedBead(b) || !demandRowServable(b) {
+		return false
+	}
+	return !isRouteRecoveryQuarantined(b)
 }
