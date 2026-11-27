@@ -13,13 +13,24 @@ import (
 // split city (cs; nil elsewhere) and native input admission on every city
 // (judge, internal/inputadmission). A row either holds back is not ready.
 type rowGate struct {
+	legs  []Leg
 	cs    *crossStore
 	judge *inputadmission.Judge
 }
 
 // newRowGate returns the gate for one read over legs, judging deferral at now.
 func newRowGate(legs []Leg, cs *crossStore, now time.Time) *rowGate {
-	return &rowGate{cs: cs, judge: inputadmission.New(admissionSources(legs), now)}
+	return &rowGate{legs: legs, cs: cs, judge: inputadmission.New(admissionSources(legs), now)}
+}
+
+// legIndex returns the index of the leg serving store, or -1.
+func (g *rowGate) legIndex(store beads.StoreReader) int {
+	for i, leg := range g.legs {
+		if beads.StoreReader(leg.Store) == store {
+			return i
+		}
+	}
+	return -1
 }
 
 // admissionSources are legs as the stores input admission reads, each named by

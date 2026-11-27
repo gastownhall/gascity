@@ -1,6 +1,7 @@
 package readywork
 
 import (
+	"context"
 	"slices"
 	"testing"
 	"time"
@@ -235,5 +236,56 @@ func TestNativeInputAdmissionLeavesExemptRowsServed(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestNativeInputAdmissionBoundedReadRefillsPastWithheldRows is AC-4: on a
+// unified city, more than limit+20 withheld steps ordered ahead of an
+// admissible one do not end a bounded read short; the admissible step is the
+// answer and no withheld one is.
+func TestNativeInputAdmissionBoundedReadRefillsPastWithheldRows(t *testing.T) {
+	store := beads.NewMemStore()
+	held := newNativeWorkflow(t, store, store, beads.Bead{Labels: []string{"hold:external"}})
+	first, later := 0, 3
+	withheld := map[string]bool{held.step.ID: true}
+	for i := 0; i < boundedSlack+5; i++ {
+		b := mustCreate(t, store, beads.Bead{Title: "withheld step", Type: "task", Priority: &first, Metadata: map[string]string{
+			"gc.root_bead_id": held.root.ID, "gc.routed_to": "gascity/pool",
+		}})
+		withheld[b.ID] = true
+	}
+	free := newNativeWorkflow(t, store, store, beads.Bead{})
+	if err := store.Update(free.step.ID, beads.UpdateOpts{Priority: &later}); err != nil {
+		t.Fatalf("lowering step priority: %v", err)
+	}
+	legs := []Leg{testLeg("city", externalBlockerStore{Store: store})}
+	q := poolQuery
+	q.Limit = 1
+	if got := readyIDs(t, legs, q); !slices.Equal(got, []string{free.step.ID}) {
+		t.Fatalf("Ready(limit=1) = %v, want [%s]: every step ahead of it is withheld by held input %s", got, free.step.ID, held.input.ID)
+	}
+}
+
+// TestNativeInputAdmissionLegGateOnUnifiedCity is AC-4's demand half: the leg
+// gate the controller and the API apply judges input admission on a city with
+// no class binding too.
+func TestNativeInputAdmissionLegGateOnUnifiedCity(t *testing.T) {
+	store := beads.NewMemStore()
+	held := newNativeWorkflow(t, store, store, beads.Bead{Labels: []string{"hold:external"}})
+	free := newNativeWorkflow(t, store, store, beads.Bead{})
+	rows, err := store.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	gated, err := NewLegGate([]Leg{testLeg("city", store)}, beads.ReadyQuery{}).Gate(context.Background(), 0, rows)
+	if err != nil {
+		t.Fatalf("Gate: %v", err)
+	}
+	ids := make([]string, 0, len(gated))
+	for _, b := range gated {
+		ids = append(ids, b.ID)
+	}
+	if slices.Contains(ids, held.step.ID) || !slices.Contains(ids, free.step.ID) {
+		t.Fatalf("Gate = %v, want %s (free input) and not %s (input %s held)", ids, free.step.ID, held.step.ID, held.input.ID)
 	}
 }
