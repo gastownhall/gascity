@@ -20,6 +20,22 @@ func ExcludedClaimants(value string) []string {
 	return out
 }
 
+// MergeExcludedClaimants unions exclusion lists without weakening any input.
+// Member order is preserved, with duplicate identities and empty members removed.
+func MergeExcludedClaimants(values ...string) string {
+	seen := make(map[string]bool)
+	var members []string
+	for _, value := range values {
+		for _, member := range ExcludedClaimants(value) {
+			if !seen[member] {
+				seen[member] = true
+				members = append(members, member)
+			}
+		}
+	}
+	return strings.Join(members, ",")
+}
+
 // ExcludesClaimant reports whether metadata's gc.exclude_claimants names any
 // of identities. It is the one predicate every work-serving decision in
 // `gc hook --claim` answers with: the fresh claim, the ready-assignment

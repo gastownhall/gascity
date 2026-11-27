@@ -1867,6 +1867,13 @@ func stampDrainItemRecipe(recipe *formula.Recipe, control, unit, member beads.Be
 	root.Metadata[beadmeta.DrainMemberAccessMetadataKey] = drainMemberAccess(control)
 	root.Metadata[beadmeta.ItemRootKeyMetadataKey] = row.ItemRootKey
 	root.Metadata[beadmeta.Graphv2RootKeyMetadataKey] = graphv2.RootKey(unit.ID, itemFormula, vars, "drain", control.ID+":"+member.ID)
+	if excluded := beadmeta.MergeExcludedClaimants(
+		root.Metadata[beadmeta.ExcludeClaimantsMetadataKey],
+		control.Metadata[beadmeta.ExcludeClaimantsMetadataKey],
+		unit.Metadata[beadmeta.ExcludeClaimantsMetadataKey],
+		member.Metadata[beadmeta.ExcludeClaimantsMetadataKey]); excluded != "" {
+		root.Metadata[beadmeta.ExcludeClaimantsMetadataKey] = excluded
+	}
 	if metadata := graphv2.RuntimeVarsMetadata(vars); metadata != "" {
 		root.Metadata[graphv2.RuntimeVarsMetadataKey] = metadata
 	}

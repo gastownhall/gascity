@@ -322,9 +322,16 @@ func Attach(ctx context.Context, store beads.MoleculeTarget, recipe *formula.Rec
 	// anything else (closed, or no longer resolvable) falls back to self-root,
 	// exactly like the no-chain case (ga-yov1rr). A live chain
 	// (gcg-wisp-y785sz) is unaffected: its root bead is never closed.
+	workflowRoot := parentBead
 	if rootBeadID != attachBeadID {
-		if rootBead, err := store.Get(rootBeadID); err != nil || rootBead.Status == "closed" {
+		rootBead, err := store.Get(rootBeadID)
+		if err != nil && !errors.Is(err, beads.ErrNotFound) {
+			return nil, fmt.Errorf("loading workflow root %s for claimant exclusions: %w", rootBeadID, err)
+		}
+		if err != nil || rootBead.Status == "closed" {
 			rootBeadID = attachBeadID
+		} else {
+			workflowRoot = rootBead
 		}
 	}
 
@@ -371,6 +378,9 @@ func Attach(ctx context.Context, store beads.MoleculeTarget, recipe *formula.Rec
 	if err := ValidateRecipeRuntimeVars(recipe, Options{Title: opts.Title, Vars: opts.Vars}); err != nil {
 		return nil, fmt.Errorf("validate runtime vars: %w", err)
 	}
+	inheritExcludedClaimants(recipe.Steps, beadmeta.MergeExcludedClaimants(
+		workflowRoot.Metadata[beadmeta.ExcludeClaimantsMetadataKey],
+		parentBead.Metadata[beadmeta.ExcludeClaimantsMetadataKey]))
 
 	// Stamp every step with the parent workflow's graph metadata.
 	for i := range recipe.Steps {
@@ -876,6 +886,7 @@ func Instantiate(ctx context.Context, store beads.MoleculeTarget, recipe *formul
 		recipe = recipeWithNativeStepDependencies(recipe)
 		opts.nativeStepTopologyPrepared = true
 	}
+	inheritExcludedClaimants(recipe.Steps, recipe.Steps[0].Metadata[beadmeta.ExcludeClaimantsMetadataKey])
 	if !opts.DeferAssignees && IsGraphApplyEnabled() {
 		if applier, ok := beads.As[beads.GraphApplyStore](store); ok {
 			result, err := instantiateViaGraphApply(ctx, applier, recipe, opts)
@@ -1188,12 +1199,13 @@ func InstantiateFragment(ctx context.Context, store beads.MoleculeTarget, recipe
 		return nil, err
 	}
 	opts.nativeStepTopologyPrepared = true
+	root, err := store.Get(opts.RootID)
+	if err != nil {
+		return nil, fmt.Errorf("loading root bead %s: %w", opts.RootID, err)
+	}
+	inheritExcludedClaimants(recipe.Steps, root.Metadata[beadmeta.ExcludeClaimantsMetadataKey])
 	priorityOverride := clonePriority(opts.PriorityOverride)
 	if priorityOverride == nil {
-		root, err := store.Get(opts.RootID)
-		if err != nil {
-			return nil, fmt.Errorf("loading root bead %s: %w", opts.RootID, err)
-		}
 		priorityOverride = clonePriority(root.Priority)
 	}
 	if IsGraphApplyEnabled() {
@@ -1368,6 +1380,22 @@ func InstantiateFragment(ctx context.Context, store beads.MoleculeTarget, recipe
 		IDMapping: idMapping,
 		Created:   len(createdIDs),
 	}, nil
+}
+
+// inheritExcludedClaimants decorates recipes before both sequential Create and
+// batch ApplyGraphPlan so no actionable bead is born without its exclusions.
+func inheritExcludedClaimants(steps []formula.RecipeStep, inherited string) {
+	if inherited == "" {
+		return
+	}
+	for i := range steps {
+		md := cloneMetadata(steps[i].Metadata)
+		if md == nil {
+			md = make(map[string]string)
+		}
+		md[beadmeta.ExcludeClaimantsMetadataKey] = beadmeta.MergeExcludedClaimants(inherited, md[beadmeta.ExcludeClaimantsMetadataKey])
+		steps[i].Metadata = md
+	}
 }
 
 func recipeParentDeps(deps []formula.RecipeDep) map[string]string {

@@ -4601,3 +4601,95 @@ func TestInstantiateWithoutRootMetadataStampsNothing(t *testing.T) {
 		t.Fatalf("root carries %s=%q without RootMetadata", testRootMetaKey, got)
 	}
 }
+
+func TestMoleculeExclusionsSurviveEveryMaterialization(t *testing.T) {
+	for _, batch := range []bool{false, true} {
+		t.Run(map[bool]string{false: "sequential", true: "graph-apply"}[batch], func(t *testing.T) {
+			prev := IsGraphApplyEnabled()
+			SetGraphApplyEnabled(batch)
+			t.Cleanup(func() { SetGraphApplyEnabled(prev) })
+			mem := beads.NewMemStore()
+			var store beads.Store = mem
+			var spy *graphApplySpyStore
+			if batch {
+				spy = &graphApplySpyStore{MemStore: mem}
+				store = spy
+			}
+			root, err := mem.Create(beads.Bead{Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:             beadmeta.KindWorkflow,
+				beadmeta.ExcludeClaimantsMetadataKey: "review.author",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			parent, err := mem.Create(beads.Bead{Type: "task", Metadata: map[string]string{
+				beadmeta.RootBeadIDMetadataKey:       root.ID,
+				beadmeta.ExcludeClaimantsMetadataKey: "review.parent",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			check := func(ids map[string]string, want ...string) {
+				t.Helper()
+				if batch {
+					for _, node := range spy.plan.Nodes {
+						for _, id := range want {
+							if !beadmeta.ExcludesClaimant(node.Metadata, id) {
+								t.Errorf("graph node %s missing %s: %v", node.Key, id, node.Metadata)
+							}
+						}
+					}
+				} else {
+					for _, id := range ids {
+						b, e := mem.Get(id)
+						if e != nil {
+							t.Fatal(e)
+						}
+						for _, who := range want {
+							if !beadmeta.ExcludesClaimant(b.Metadata, who) {
+								t.Errorf("bead %s missing %s: %v", id, who, b.Metadata)
+							}
+						}
+					}
+				}
+			}
+			recipe := &formula.Recipe{Name: "review", Steps: []formula.RecipeStep{
+				{ID: "review", IsRoot: true, Type: "task", Title: "Review", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow, beadmeta.ExcludeClaimantsMetadataKey: "review.author"}},
+				{ID: "review.work", Type: "task", Title: "Work", Metadata: map[string]string{beadmeta.ExcludeClaimantsMetadataKey: "review.local"}},
+			}}
+			initial, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			check(initial.IDMapping, "review.author")
+			var local map[string]string
+			if batch {
+				local = nodeByKey(spy.plan.Nodes, "review.work").Metadata
+			} else {
+				step, err := mem.Get(initial.IDMapping["review.work"])
+				if err != nil {
+					t.Fatal(err)
+				}
+				local = step.Metadata
+			}
+			if !beadmeta.ExcludesClaimant(local, "review.local") {
+				t.Fatal("inherited exclusion replaced a step-local exclusion")
+			}
+			attempt := &formula.Recipe{Name: "attempt", Steps: []formula.RecipeStep{
+				{ID: "attempt", IsRoot: true, Type: "task", Title: "Attempt"},
+				{ID: "attempt.work", Type: "task", Title: "Work"},
+			}}
+			attached, err := Attach(context.Background(), beadstest.GraphMolecule(store), attempt, parent.ID, AttachOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			check(attached.IDMapping, "review.author", "review.parent")
+			fragment := &formula.FragmentRecipe{Steps: []formula.RecipeStep{{ID: "fanout.work", Type: "task", Title: "Fanout"}}}
+			expanded, err := InstantiateFragment(context.Background(), beadstest.GraphMolecule(store), fragment, FragmentOptions{RootID: root.ID, PriorityOverride: priorityPtr(1)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			check(expanded.IDMapping, "review.author")
+		})
+	}
+}

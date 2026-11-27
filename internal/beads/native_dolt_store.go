@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	beadslib "github.com/steveyegge/beads"
 	"github.com/steveyegge/beads/issueops"
 
@@ -3685,6 +3686,11 @@ func metadataMapFromNative(raw json.RawMessage) (map[string]string, error) {
 	}
 	metadata := make(map[string]string, len(values))
 	for k, v := range values {
+		if k == beadmeta.ExcludeClaimantsMetadataKey {
+			if _, ok := v.(string); !ok {
+				return nil, fmt.Errorf("metadata %s must be a string", k)
+			}
+		}
 		text, err := metadataValueText(v)
 		if err != nil {
 			return nil, fmt.Errorf("marshaling metadata value %q: %w", k, err)
