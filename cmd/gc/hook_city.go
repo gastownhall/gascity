@@ -134,5 +134,6 @@ func (h *hookCity) claimOps() hookClaimOps {
 	ops.ProveInputAbsent = func(ctx context.Context, ids []string) (bool, error) {
 		return proveInputAbsentAcrossCity(ctx, h.path, h.cfg, ids)
 	}
+	ops.InputAdmission = hookInputAdmissionWithBdStore
 	return ops
 }

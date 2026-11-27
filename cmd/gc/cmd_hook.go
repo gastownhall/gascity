@@ -603,6 +603,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	routeTargets := hookClaimRouteTargets(hookClaimPrimaryRouteTarget(&a), resolvedAgentName, strings.TrimSpace(overrides["GC_TEMPLATE"]))
 	strictDrainAck := func() bool { return cityRunsV2(cityPath, cfg) }
 	if opts.Claim {
+		admissionFallback, admissionBlind := admissionFallbackHookWorkQuery(cityPath, cityName, cfg, &a, topo, stderr)
 		claimOpts := hookClaimOptions{
 			Assignee:           assignee,
 			SessionID:          sessionID,
@@ -617,7 +618,9 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			// queryEnv has GC_INSTANCE_TOKEN filtered out.
 			StartedFence: hookStartedFenceOf(os.Environ()),
 			// The fenced row, so the worktree check costs no extra read.
-			PoolSeat: hookClaimPoolSeatFor(cityPath, cityName, cfg.Rigs, fencedSession, &a),
+			PoolSeat:               hookClaimPoolSeatFor(cityPath, cityName, cfg.Rigs, fencedSession, &a),
+			AdmissionFallbackQuery: admissionFallback,
+			AdmissionBlindQuery:    admissionBlind,
 		}
 		var provisionWorktree hookProvisionWorktreeFunc
 		if opts.Worktree {
@@ -1055,7 +1058,15 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 			storeDir = dir
 		}
 		storeOps := ops
-		storeOps.Runner = func(string, string) (string, error) { return claimOutput, nil }
+		// The claim reads the answer already fetched; any other command is
+		// the admission fallback (AdmissionFallbackQuery), read from the same
+		// store.
+		storeOps.Runner = func(command, dir string) (string, error) {
+			if command == workQuery {
+				return claimOutput, nil
+			}
+			return run(command, dir, storeOpts.Env)
+		}
 		res := tryHookClaim(workQuery, storeDir, &storeOpts, &storeOps, stdout, stderr)
 		if res.terminal {
 			return res.code
@@ -1222,6 +1233,27 @@ func singleStoreHookWorkQuery(cityPath, cityName string, cfg *config.City, a *co
 		return ""
 	}
 	return expandAgentCommandTemplate(cityPath, cityName, a, cfg.Rigs, "work_query", command, stderr)
+}
+
+// admissionFallbackHookWorkQuery returns the agent's work query built with the
+// federated reader on, for a claim whose own query reads single-store tiers:
+// those tiers bound before input admission can drop a row, while the
+// federated form reads through gc ready, which admits first. It returns ""
+// when the hook already runs the federated form. blind reports a custom
+// work_query, which reads through no admission at all.
+func admissionFallbackHookWorkQuery(cityPath, cityName string, cfg *config.City, a *config.Agent, topo config.QueryTopology, stderr io.Writer) (query string, blind bool) {
+	if cfg == nil || a == nil {
+		return "", false
+	}
+	if strings.TrimSpace(a.WorkQuery) != "" {
+		return "", true
+	}
+	if topo.FederatedReady {
+		return "", false
+	}
+	federated := topo
+	federated.FederatedReady = true
+	return expandAgentCommandTemplate(cityPath, cityName, a, cfg.Rigs, "work_query", a.EffectiveWorkQueryFor(federated), stderr), false
 }
 
 func hookSessionAgentForQuery() string {
