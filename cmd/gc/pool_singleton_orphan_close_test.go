@@ -152,6 +152,15 @@ func (e *singletonOrphanEnv) tick(t *testing.T) []SessionReconcilerTraceRecord {
 	return out
 }
 
+// closeOrphanOutcomes is records' outcome codes, for a failure message.
+func closeOrphanOutcomes(records []SessionReconcilerTraceRecord) []TraceOutcomeCode {
+	out := make([]TraceOutcomeCode, 0, len(records))
+	for _, r := range records {
+		out = append(out, r.OutcomeCode)
+	}
+	return out
+}
+
 // AC-1: the orphaned canonical singleton seat blocked only by claims under
 // its alias closes, and those claims keep the alias for the next seat.
 func TestReconcileSessionBeads_OrphanedCanonicalSingletonClosesKeepingIdentityClaims(t *testing.T) {
@@ -164,7 +173,7 @@ func TestReconcileSessionBeads_OrphanedCanonicalSingletonClosesKeepingIdentityCl
 	records := e.tick(t)
 
 	if len(records) != 1 {
-		t.Fatalf("close_orphan records = %d, want 1: %+v", len(records), records)
+		t.Fatalf("close_orphan outcomes = %v, want one", closeOrphanOutcomes(records))
 	}
 	if records[0].OutcomeCode != TraceOutcomeClosed {
 		t.Fatalf("close_orphan outcome = %q, want %q", records[0].OutcomeCode, TraceOutcomeClosed)
@@ -178,5 +187,48 @@ func TestReconcileSessionBeads_OrphanedCanonicalSingletonClosesKeepingIdentityCl
 	claim := e.get(t, e.claim.ID)
 	if claim.Assignee != identity || claim.Status != "open" {
 		t.Fatalf("claim assignee=%q status=%q, want kept on %q and open", claim.Assignee, claim.Status, identity)
+	}
+}
+
+// AC-3: a claim under the seat's own identifiers (its bead ID or
+// session_name) is the row's, so the identity-preserving close does not fire
+// over it and the orphan close reports today's no_change.
+func TestCanonicalSingletonOrphanCloseKeepsRowOwnedClaimsGated(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status string
+		owner  func(seat beads.Bead) string
+	}{
+		{"open under bead id", "open", func(seat beads.Bead) string { return seat.ID }},
+		{"in_progress under bead id", "in_progress", func(seat beads.Bead) string { return seat.ID }},
+		{"open under session_name", "open", func(seat beads.Bead) string { return seat.Metadata["session_name"] }},
+		{"in_progress under session_name", "in_progress", func(seat beads.Bead) string { return seat.Metadata["session_name"] }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newSingletonOrphanEnv(t, singletonOrphanAgent())
+			owner := tc.owner(e.seat)
+			if owner == "" {
+				t.Fatal("fixture seat has no identifier for the row-owned claim")
+			}
+			own := e.addClaim(t, tc.status, owner)
+
+			records := e.tick(t)
+
+			if len(records) != 1 || records[0].OutcomeCode != TraceOutcomeNoChange {
+				t.Fatalf("close_orphan outcomes = %v, want [no_change]", closeOrphanOutcomes(records))
+			}
+			if _, ok := records[0].Fields["preserved_identity"]; ok {
+				t.Fatalf("close_orphan carries preserved_identity %v; the preserving close must not fire", records[0].Fields["preserved_identity"])
+			}
+			if got := e.get(t, e.seat.ID).Status; got == "closed" {
+				t.Fatal("seat closed over a claim it owns under its own identifiers")
+			}
+			if got := e.get(t, own.ID); got.Assignee != owner || got.Status != tc.status {
+				t.Fatalf("row-owned claim assignee=%q status=%q, want %q/%q", got.Assignee, got.Status, owner, tc.status)
+			}
+			if got := e.get(t, e.claim.ID); got.Assignee != e.cfg.Agents[0].QualifiedName() {
+				t.Fatalf("alias claim assignee = %q, want kept on the alias", got.Assignee)
+			}
+		})
 	}
 }

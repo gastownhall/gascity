@@ -37,3 +37,19 @@ func canonicalSingletonSeatIdentity(info sessionpkg.Info, cfg *config.City) (str
 	}
 	return identity, true
 }
+
+// rowOwnsNoWorkBesidesIdentity reports that info's seat holds no open or
+// in_progress work under its own identifiers (its ReleaseScope without
+// identity), on the tick's read and again on a live re-read, as a work-gated
+// close reads it. A failed read counts as work.
+func rowOwnsNoWorkBesidesIdentity(sw *SeatWork, info sessionpkg.Info, cfg *config.City, identity string) bool {
+	scope := releaseScope(info, cfg).except(assigneePreserveSet([]string{identity}))
+	if len(scope.scopeIDs()) == 0 {
+		return false
+	}
+	if held, err := seatHasWorkForCloseGate(sw, scope); err != nil || held {
+		return false
+	}
+	late, err := lateSeatWork(sw.Legs(), scope, seatWorkStatuses, notOwnDrainStep)
+	return err == nil && len(late) == 0
+}

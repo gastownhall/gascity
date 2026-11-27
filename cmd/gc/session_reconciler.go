@@ -3031,7 +3031,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// identity's (#9245): when nothing else holds the seat, it
 						// closes keeping those claims for the next seat.
 						if !closed {
-							if identity, ok := canonicalSingletonSeatIdentity(infoByID[id], cfg); ok {
+							if identity, ok := canonicalSingletonSeatIdentity(infoByID[id], cfg); ok && rowOwnsNoWorkBesidesIdentity(sw, infoByID[id], cfg, identity) {
 								closed = closeSeat(store, sw, infoByID[id], closeWhy{reason: reason, gate: closeReleasing, preserve: []string{identity}}, clk.Now().UTC(), stderr)
 								if closed {
 									preservedIdentity = identity
