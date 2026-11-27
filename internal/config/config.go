@@ -1357,6 +1357,15 @@ type Workspace struct {
 	Prefix string `toml:"prefix,omitempty"`
 	// Provider is the default provider name used by agents that don't specify one.
 	Provider string `toml:"provider,omitempty"`
+	// UnroutedWorkTarget names the agent that open, unassigned work in the
+	// city (HQ) store adopts when it carries no gc.routed_to, such as a bead
+	// made with plain `bd create`. The controller stamps the same gc.routed_to
+	// `gc sling <target> <id>` would write. Empty (the default) adopts
+	// nothing, so such work stays unrouted until something routes it. It
+	// governs the city store only; a rig adopts through its own
+	// unrouted_work_target. The target must resolve to a configured agent
+	// with built-in sling routing (no custom sling_query).
+	UnroutedWorkTarget string `toml:"unrouted_work_target,omitempty"`
 	// Timezone is the city-default IANA time zone (e.g. "America/New_York")
 	// in which cron order schedules are evaluated when an order does not set
 	// its own tz. Empty means the controller's process-local zone. Invalid

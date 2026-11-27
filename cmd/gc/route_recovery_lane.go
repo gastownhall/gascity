@@ -72,6 +72,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -157,12 +158,19 @@ const (
 // operator log need: what it repaired, what it could not, and whether its answer
 // was complete.
 type routeRecoveryReport struct {
-	lane        string
-	reason      string
-	candidates  int
-	restored    int
+	lane       string
+	reason     string
+	candidates int
+	restored   int
+	// adopted counts unrouted beads this pass routed to their scope's
+	// unrouted_work_target (route_adoption.go). Separate from restored: a
+	// restore copies a route the bead carried, an adoption applies one the
+	// operator configured.
+	adopted     int
 	quarantined int
-	flapping    []string
+	// adoptedVia tallies adoptions by "<scope>→<route>" for the log line.
+	adoptedVia map[string]int
+	flapping   []string
 	// legReads counts store round trips this pass issued. It is the unit the
 	// tick's latency is actually measured in, and the budget test asserts on it.
 	legReads int
@@ -203,12 +211,31 @@ type routeRecoveryReport struct {
 	err      error
 }
 
+// noteAdopted counts one adoption through via ("<scope>→<route>").
+func (r *routeRecoveryReport) noteAdopted(via string) {
+	r.adopted++
+	if r.adoptedVia == nil {
+		r.adoptedVia = map[string]int{}
+	}
+	r.adoptedVia[via]++
+}
+
+// adoptedSummary renders adoptedVia as "<scope>→<route> xN, …", sorted.
+func (r routeRecoveryReport) adoptedSummary() string {
+	parts := make([]string, 0, len(r.adoptedVia))
+	for _, via := range slices.Sorted(maps.Keys(r.adoptedVia)) {
+		parts = append(parts, fmt.Sprintf("%s x%d", via, r.adoptedVia[via]))
+	}
+	return strings.Join(parts, ", ")
+}
+
 // fields renders the report for the reconciler trace.
 func (r routeRecoveryReport) fields() map[string]any {
 	out := map[string]any{
 		"lane":        r.lane,
 		"candidates":  r.candidates,
 		"restored":    r.restored,
+		"adopted":     r.adopted,
 		"leg_reads":   r.legReads,
 		"legs":        r.legs,
 		"quarantined": r.quarantined,
@@ -289,6 +316,11 @@ type routeRecoveryLane struct {
 	consecutiveRecheckFailures map[string]int
 	restores                   map[string]int
 
+	// adoption is the unrouted-work adoption policy from the latest config
+	// snapshot. It is read under mu because observe runs on the journal-watch
+	// goroutine while the passes refresh it.
+	adoption unroutedAdoptionPolicy
+
 	interval time.Duration
 	retry    time.Duration
 	poll     time.Duration
@@ -327,10 +359,40 @@ func (l *routeRecoveryLane) force(reason string) {
 	}
 }
 
+// adoptionRouteOnly is adoptionRoute without the scope label.
+func (l *routeRecoveryLane) adoptionRouteOnly(b beads.Bead) string {
+	route, _ := l.adoptionRoute(b)
+	return route
+}
+
+// setAdoptionPolicy publishes the adoption policy the next observe and pass
+// use. Each pass calls it with the current config snapshot, so a config reload
+// takes effect on the next pass.
+func (l *routeRecoveryLane) setAdoptionPolicy(p unroutedAdoptionPolicy) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.adoption = p
+}
+
+// adoptionRoute returns the adoption route for b under the current policy, or
+// "" when b is not adoptable or its scope sets no target, and the owning
+// scope's label.
+func (l *routeRecoveryLane) adoptionRoute(b beads.Bead) (route, scope string) {
+	l.mu.Lock()
+	p := l.adoption
+	l.mu.Unlock()
+	route = p.routeFor(b)
+	if route == "" {
+		return "", ""
+	}
+	sc, _ := p.scopeFor(b.ID)
+	return route, sc.label
+}
+
 // observe feeds one journal event to the delta lane. It decodes the bead
 // snapshot the event carries and keeps the id only when that snapshot declares a
-// recoverable route — so a busy city's ordinary bead traffic costs the tick
-// nothing.
+// recoverable route, or is unrouted work its scope adopts — so a busy city's
+// ordinary bead traffic costs the tick nothing.
 func (l *routeRecoveryLane) observe(evt events.Event) {
 	switch evt.Type {
 	case events.BeadCreated, events.BeadUpdated:
@@ -338,11 +400,14 @@ func (l *routeRecoveryLane) observe(evt events.Event) {
 		return
 	}
 	bead, ok := beads.DecodeBeadEventPayload(evt.Payload)
-	if !ok || strings.TrimSpace(bead.ID) == "" || carriedPoolRoute(bead) == "" {
+	if !ok || strings.TrimSpace(bead.ID) == "" {
 		return
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if carriedPoolRoute(bead) == "" && l.adoption.routeFor(bead) == "" {
+		return
+	}
 	if len(l.pending) >= routeRecoveryCandidateCap {
 		// The feed can no longer claim to name everything. Hand the question to
 		// the scan rather than silently dropping candidates.
@@ -655,9 +720,11 @@ func (l *routeRecoveryLane) deltaPass(plan storeref.ResolvedPlan, candidates []s
 				continue
 			}
 			resolved[row.ID] = struct{}{}
-			outcome := l.restoreRoute(leg.store, row, false)
+			outcome := l.restoreRoute(leg.store, row, false, !leg.binding)
 			report.legReads += outcome.writes
 			switch {
+			case outcome.adopted:
+				report.noteAdopted(outcome.adoptedVia)
 			case outcome.restored:
 				report.restored++
 			case outcome.flapping:
@@ -752,9 +819,11 @@ func (l *routeRecoveryLane) ledgerCandidatePass(plan storeref.ResolvedPlan, cand
 		}
 		for _, row := range rows {
 			resolved[row.ID] = struct{}{}
-			outcome := l.restoreRoute(leg.store, row, false)
+			outcome := l.restoreRoute(leg.store, row, false, !leg.binding)
 			report.legReads += outcome.writes
 			switch {
+			case outcome.adopted:
+				report.noteAdopted(outcome.adoptedVia)
 			case outcome.restored:
 				report.restored++
 			case outcome.flapping:
@@ -805,6 +874,13 @@ func (l *routeRecoveryLane) backstopPassOnPlane(plan storeref.ResolvedPlan, reas
 		legReport := l.backstopLeg(leg)
 		report.candidates += legReport.candidates
 		report.restored += legReport.restored
+		for via, n := range legReport.adoptedVia {
+			report.adopted += n
+			if report.adoptedVia == nil {
+				report.adoptedVia = map[string]int{}
+			}
+			report.adoptedVia[via] += n
+		}
 		report.quarantined += legReport.quarantined
 		report.legReads += legReport.legReads
 		report.offPlaneRouted += legReport.offPlaneRouted
@@ -884,7 +960,10 @@ func (l *routeRecoveryLane) backstopLeg(leg planeLeg) routeRecoveryReport {
 		// Belt-and-braces with the Status:"open" query so the guarantee holds
 		// regardless of store-level filtering semantics: an assigned bead is
 		// already claimed and needs no route.
-		if carriedPoolRoute(b) == "" || b.Status != "open" || strings.TrimSpace(b.Assignee) != "" {
+		if b.Status != "open" || strings.TrimSpace(b.Assignee) != "" {
+			continue
+		}
+		if carriedPoolRoute(b) == "" && (leg.binding || l.adoptionRouteOnly(b) == "") {
 			continue
 		}
 		ids = append(ids, b.ID)
@@ -906,9 +985,11 @@ func (l *routeRecoveryLane) backstopLeg(leg planeLeg) routeRecoveryReport {
 	returned := make(map[string]struct{}, len(rows))
 	for _, row := range rows {
 		returned[row.ID] = struct{}{}
-		outcome := l.restoreRoute(store, row, true)
+		outcome := l.restoreRoute(store, row, true, !leg.binding)
 		report.legReads += outcome.writes
 		switch {
+		case outcome.adopted:
+			report.noteAdopted(outcome.adoptedVia)
 		case outcome.restored:
 			report.restored++
 		case outcome.flapping:
@@ -977,7 +1058,12 @@ func liveOpenCandidates(store beads.Store, ids []string) ([]beads.Bead, int, err
 
 // routeRestoreOutcome is what one candidate's re-verify decided.
 type routeRestoreOutcome struct {
-	restored    bool
+	restored bool
+	// adopted is set instead of restored when the route written came from the
+	// scope's unrouted_work_target rather than from the bead itself.
+	adopted bool
+	// adoptedVia is "<scope>→<route>" for an adoption.
+	adoptedVia  string
 	flapping    bool
 	quarantined bool
 	writes      int
@@ -985,15 +1071,25 @@ type routeRestoreOutcome struct {
 }
 
 // restoreRoute re-stamps gc.routed_to from the route the LIVE row still
-// declares, and is the only place this lane writes a route.
+// declares or, when it declares none and adopt allows it (a work-store leg,
+// never a class binding), from its scope's unrouted_work_target. It is the
+// only place this lane writes a route.
 //
-// The live row is the authority: recomputing carriedPoolRoute on it is what
-// makes the pass idempotent (a bead another pass already restored yields "") and
-// what keeps a claim that landed since the scan from being clobbered — a claim
-// flips the bead to in_progress and consumes gc.routed_to in one update (ga-sa0,
-// ga-bgu).
-func (l *routeRecoveryLane) restoreRoute(store beads.Store, live beads.Bead, backstop bool) routeRestoreOutcome {
+// The live row is the authority: recomputing carriedPoolRoute and the adoption
+// route on it is what makes the pass idempotent (a bead another pass already
+// routed yields "") and what keeps a claim that landed since the scan from
+// being clobbered — a claim flips the bead to in_progress and consumes
+// gc.routed_to in one update (ga-sa0, ga-bgu).
+func (l *routeRecoveryLane) restoreRoute(store beads.Store, live beads.Bead, backstop, adopt bool) routeRestoreOutcome {
 	route := carriedPoolRoute(live)
+	adoptedVia := ""
+	if route == "" && adopt {
+		var scope string
+		route, scope = l.adoptionRoute(live)
+		if route != "" {
+			adoptedVia = scope + "→" + route
+		}
+	}
 	if route == "" || live.Status != "open" || strings.TrimSpace(live.Assignee) != "" {
 		if backstop {
 			marked, err := l.noteRecheckFailure(store, live.ID)
@@ -1049,16 +1145,16 @@ func (l *routeRecoveryLane) restoreRoute(store beads.Store, live beads.Bead, bac
 			return routeRestoreOutcome{writes: 1}
 		default:
 			if !isRouteRecoveryQuarantined(live) {
-				return routeRestoreOutcome{restored: true, writes: 1}
+				return routedOutcome(adoptedVia, 1, nil)
 			}
 			// The re-check passes now, so the quarantine verdict is stale.
 			if err := store.SetMetadataBatch(live.ID, map[string]string{
 				beadmeta.RouteQuarantineMetadataKey:       "",
 				beadmeta.RouteQuarantineReasonMetadataKey: "",
 			}); err != nil {
-				return routeRestoreOutcome{restored: true, writes: 2, err: fmt.Errorf("bead %s: clearing route-recovery quarantine: %w", live.ID, err)}
+				return routedOutcome(adoptedVia, 2, fmt.Errorf("bead %s: clearing route-recovery quarantine: %w", live.ID, err))
 			}
-			return routeRestoreOutcome{restored: true, writes: 2}
+			return routedOutcome(adoptedVia, 2, nil)
 		}
 	}
 
@@ -1072,7 +1168,16 @@ func (l *routeRecoveryLane) restoreRoute(store beads.Store, live beads.Bead, bac
 	if err := store.SetMetadataBatch(live.ID, writes); err != nil {
 		return routeRestoreOutcome{writes: 1, err: fmt.Errorf("bead %s: restoring gc.routed_to=%q: %w", live.ID, route, err)}
 	}
-	return routeRestoreOutcome{restored: true, writes: 1}
+	return routedOutcome(adoptedVia, 1, nil)
+}
+
+// routedOutcome is the outcome of a successful route write, classified by
+// where the route came from.
+func routedOutcome(adoptedVia string, writes int, err error) routeRestoreOutcome {
+	if adoptedVia != "" {
+		return routeRestoreOutcome{adopted: true, adoptedVia: adoptedVia, writes: writes, err: err}
+	}
+	return routeRestoreOutcome{restored: true, writes: writes, err: err}
 }
 
 // pruneRestoresLocked bounds the per-bead restore tally, which otherwise grows

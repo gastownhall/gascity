@@ -3665,6 +3665,10 @@
           "type": "string",
           "description": "Provider is the default provider name used by agents that don't specify one."
         },
+        "unrouted_work_target": {
+          "type": "string",
+          "description": "UnroutedWorkTarget names the agent that open, unassigned work in the\ncity (HQ) store adopts when it carries no gc.routed_to, such as a bead\nmade with plain `bd create`. The controller stamps the same gc.routed_to\n`gc sling \u003ctarget\u003e \u003cid\u003e` would write. Empty (the default) adopts\nnothing, so such work stays unrouted until something routes it. It\ngoverns the city store only; a rig adopts through its own\nunrouted_work_target. The target must resolve to a configured agent\nwith built-in sling routing (no custom sling_query)."
+        },
         "timezone": {
           "type": "string",
           "description": "Timezone is the city-default IANA time zone (e.g. \"America/New_York\")\nin which cron order schedules are evaluated when an order does not set\nits own tz. Empty means the controller's process-local zone. Invalid\nnames fail order discovery loudly rather than falling back silently."
