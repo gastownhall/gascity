@@ -618,3 +618,109 @@ func TestFormatExtmsgNotifyReminderExplicitTargetSanitization(t *testing.T) {
 		t.Fatalf("ExplicitTarget tag breakout survived stripping:\n%s", got)
 	}
 }
+
+// explicitTargetFixture is a conversation bound to one session (the mayor),
+// as the default route leaves it, and a second live session (a worker) that is
+// not a member of it: the shape an adapter's answer to a worker's question has
+// when the question was posted in a channel the mayor is bound to.
+func explicitTargetFixture(t *testing.T) (*fakeState, *Server, extmsg.ConversationRef, session.Info, session.Info) {
+	t.Helper()
+	fs, srv, services, ref := newExtMsgAgentBindingFixture(t)
+	mayor := createTestSession(t, fs.cityBeadStore, fs.sp, "Mayor")
+	worker := createTestSession(t, fs.cityBeadStore, fs.sp, "Worker")
+	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+	if _, err := services.Bindings.Bind(context.Background(), caller, extmsg.BindInput{
+		Conversation: ref,
+		SessionID:    mayor.ID,
+		Now:          time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Bind(mayor): %v", err)
+	}
+	return fs, srv, ref, mayor, worker
+}
+
+func postExplicitInbound(t *testing.T, fs *fakeState, srv *Server, ref extmsg.ConversationRef, id, target, text string) {
+	t.Helper()
+	rec := postExtMsg(t, fs, srv, "/extmsg/inbound", map[string]any{
+		"message": map[string]any{
+			"provider_message_id": id,
+			"conversation":        conversationBody(ref),
+			"actor":               map[string]any{"id": "user-1", "display_name": "User One", "is_bot": false},
+			"text":                text,
+			"explicit_target":     target,
+			"received_at":         time.Now().UTC().Format(time.RFC3339),
+		},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	srv.waitForBackground()
+}
+
+func nudgesTo(fs *fakeState, sessionName string) []string {
+	var out []string
+	for _, call := range fs.sp.Calls {
+		if call.Method == "Nudge" && call.Name == sessionName {
+			out = append(out, call.Message)
+		}
+	}
+	return out
+}
+
+// An inbound addressed to a live session that is not a member of the
+// conversation reaches that session, not only the members (who are told it is
+// not for them). Before, only the members were nudged, so the addressed
+// session never heard it.
+func TestHandleExtMsgInboundNotifiesExplicitTargetOutsideMembers(t *testing.T) {
+	fs, srv, ref, mayor, worker := explicitTargetFixture(t)
+
+	postExplicitInbound(t, fs, srv, ref, "msg-explicit-1", worker.ID, "1. Send them now")
+
+	got := nudgesTo(fs, worker.SessionName)
+	if len(got) != 1 {
+		t.Fatalf("worker nudges = %d, want 1; calls=%#v", len(got), fs.sp.Calls)
+	}
+	if !strings.Contains(got[0], "1. Send them now") {
+		t.Fatalf("worker nudge lacks the message:\n%s", got[0])
+	}
+	if strings.Contains(got[0], "Addressed to:") {
+		t.Fatalf("the addressed session was told the message is not for it:\n%s", got[0])
+	}
+	mayorGot := nudgesTo(fs, mayor.SessionName)
+	if len(mayorGot) != 1 || !strings.Contains(mayorGot[0], "Addressed to: @"+worker.ID) {
+		t.Fatalf("member nudges = %#v, want one with the discriminator", mayorGot)
+	}
+}
+
+// An explicit target that is already a member is nudged once, as before.
+func TestHandleExtMsgInboundExplicitTargetMemberNudgedOnce(t *testing.T) {
+	fs, srv, ref, mayor, worker := explicitTargetFixture(t)
+
+	postExplicitInbound(t, fs, srv, ref, "msg-explicit-2", mayor.ID, "status?")
+
+	got := nudgesTo(fs, mayor.SessionName)
+	if len(got) != 1 {
+		t.Fatalf("mayor nudges = %d, want 1; calls=%#v", len(got), fs.sp.Calls)
+	}
+	if strings.Contains(got[0], "Addressed to:") {
+		t.Fatalf("the addressed member saw the discriminator:\n%s", got[0])
+	}
+	if n := len(nudgesTo(fs, worker.SessionName)); n != 0 {
+		t.Fatalf("worker nudges = %d, want 0", n)
+	}
+}
+
+// An explicit target that names no session reaches no one new and creates
+// nothing: the members still hear it.
+func TestHandleExtMsgInboundUnknownExplicitTargetCreatesNoSession(t *testing.T) {
+	fs, srv, ref, mayor, _ := explicitTargetFixture(t)
+
+	postExplicitInbound(t, fs, srv, ref, "msg-explicit-3", "myrig/worker", "hello")
+
+	if id, err := session.ResolveSessionID(beadstest.Sessions(fs.cityBeadStore), "myrig/worker"); err == nil {
+		t.Fatalf("an explicit target materialized a session: %s", id)
+	}
+	if n := len(nudgesTo(fs, mayor.SessionName)); n != 1 {
+		t.Fatalf("mayor nudges = %d, want 1", n)
+	}
+}
