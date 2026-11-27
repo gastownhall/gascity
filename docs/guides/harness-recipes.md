@@ -272,7 +272,7 @@ api_key_env = "CEREBRAS_API_KEY"
 ```toml
 provider        = "opencode"
 option_defaults = { model = "opencode/big-pickle" }
-# also: opencode/deepseek-v4-flash-free · opencode/nemotron-3-super-free
+# also: opencode/deepseek-v4.1-flash-free · opencode/nemotron-3.5-super-vl-free
 
 # Point at any provider OpenCode supports by naming that provider's key var:
 [upstreams.my-provider]
