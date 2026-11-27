@@ -950,6 +950,17 @@ func (l *routeRecoveryLane) backstopLeg(leg planeLeg) routeRecoveryReport {
 // round trips. A single candidate stays a Get, which is strictly cheaper than a
 // filtered List on a backend that cannot push the IN-list down.
 //
+// The shortcut never changes the answer: for one id it returns what the batched
+// Live "open" List returns for that id. A Get row folds a store's raw status to
+// gc's three, so the row alone decides only where it can:
+//   - a recorded SourceStatus (bd, native Dolt, DoltLite) decides, since those
+//     stores answer a Live "open" by it: a parked blocked, deferred, review,
+//     testing, hooked or pinned row is left out;
+//   - a row with no source status that is deferred into the future is the
+//     store's call (SQLite leaves it out of its raw open, MemStore and FileStore
+//     keep it), so it costs the store's own Live List for that id;
+//   - any other open row is kept.
+//
 // It returns the number of store round trips it made so the caller can budget.
 func liveOpenCandidates(store beads.Store, ids []string) ([]beads.Bead, int, error) {
 	if store == nil || len(ids) == 0 {
@@ -963,8 +974,19 @@ func liveOpenCandidates(store beads.Store, ids []string) ([]beads.Bead, int, err
 			}
 			return nil, 1, err
 		}
-		if bead.Status != "open" {
+		switch {
+		case bead.Status != "open":
 			return nil, 1, nil
+		case bead.SourceStatus != "":
+			if bead.SourceStatus != "open" {
+				return nil, 1, nil
+			}
+		case beads.LiveOpenLeavesOut(bead, time.Now()):
+			rows, err := store.List(beads.ListQuery{IDs: ids, Status: "open", Live: true})
+			if err != nil {
+				return nil, 2, err
+			}
+			return rows, 2, nil
 		}
 		return []beads.Bead{bead}, 1, nil
 	}
