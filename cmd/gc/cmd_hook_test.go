@@ -2188,7 +2188,16 @@ mode = "on_demand"
 		t.Fatal(err)
 	}
 
-	installFakeBdOnPath(t, "#!/bin/sh\nprintf '[]'\n", map[string]nativeFakeBdReply{"": {Stdout: "[]"}})
+	// The claim's canonical readback (bd show) finds the bead the work query
+	// served, held by this holder: a served bead that no store holds was
+	// purged, and the claim drops it instead of adopting it.
+	const ownRow = `[{"id":"ga-frpt4k","status":"in_progress","assignee":"builder","metadata":{"gc.routed_to":"builder"}}]`
+	installFakeBdOnPath(t, `#!/bin/sh
+case "$*" in
+  *show*ga-frpt4k*) printf '%s' '`+ownRow+`' ;;
+  *) printf '[]' ;;
+esac
+`, map[string]nativeFakeBdReply{"": {Stdout: "[]"}, "show --json ga-frpt4k": {Stdout: ownRow}})
 
 	t.Setenv("GC_CITY", cityDir)
 	// Named holder / canonical slot: GC_ALIAS IS the bare template.

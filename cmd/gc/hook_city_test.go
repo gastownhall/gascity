@@ -188,6 +188,51 @@ func TestHookCityWorkStartedSeamsShareTheFrontDoor(t *testing.T) {
 	}
 }
 
+// Kills a forget seam that clears blind or misses the invocation's own session
+// row: through the shared front door it takes a claim back off the row's
+// current-claim stamp only while the stamp names it, by the city store's
+// metadata CAS.
+func TestHookCityForgetSessionClaimClearsOnlyTheNamedClaim(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	cityDir := writeFenceTestCity(t)
+	sessionID := newFenceSessionBead(t, cityDir, session.StateActive, "live-token")
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("load city config: %v", err)
+	}
+	t.Chdir(t.TempDir()) // nothing to resolve from here
+	ops := newHookCity(cityDir, cfg).claimOps()
+	stamp := func() string {
+		t.Helper()
+		row, err := cliSessionFrontDoor(mustOpenCityStore(t, cityDir), cfg, cityDir).Get(sessionID)
+		if err != nil {
+			t.Fatalf("reread session: %v", err)
+		}
+		return row.CurrentClaimBeadID
+	}
+	if err := ops.StampSessionClaim(sessionID, "gc-claimed"); err != nil {
+		t.Fatalf("StampSessionClaim: %v", err)
+	}
+
+	if err := ops.ForgetSessionClaim(sessionID, "gc-other"); err != nil {
+		t.Fatalf("ForgetSessionClaim(gc-other): %v", err)
+	}
+	if got := stamp(); got != "gc-claimed" {
+		t.Fatalf("current claim after forgetting another claim = %q, want gc-claimed kept", got)
+	}
+	if err := ops.ForgetSessionClaim(sessionID, "gc-claimed"); err != nil {
+		t.Fatalf("ForgetSessionClaim(gc-claimed): %v", err)
+	}
+	if got := stamp(); got != "" {
+		t.Fatalf("current claim after forgetting it = %q, want it cleared", got)
+	}
+	if err := ops.ForgetSessionClaim("gc-no-such-session", "gc-claimed"); err == nil {
+		t.Fatal("ForgetSessionClaim of a missing row = nil, want an error")
+	}
+}
+
 // Kills a session-trigger seam that reads anything but the invocation's own
 // session row: it returns the row's gc.trigger_bead_id stamp, and a row it
 // cannot read is an error, never an empty stamp (gastownhall/gascity#5738).

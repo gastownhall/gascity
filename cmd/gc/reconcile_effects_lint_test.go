@@ -33,12 +33,13 @@ import (
 //   - the session.Store creates, wake, #46 episode save and wait-bead
 //     writers;
 //   - the runtime stops that skip the destructive fence (v5 O2);
-//   - the operator's content hold writers and its batch item (OJ-19), which
-//     no effect or step writes.
+//   - the operator's content hold writers and its batch item (OJ-19), and
+//     the hook's CAS taking a claim back off its current-claim stamp
+//     (ClearCurrentClaim), none of which an effect or step writes.
 var effectBannedMethods = []string{
 	"ApplyPatch", "ApplyPatchInfo", "UpdateMetadataInfo", "SetMetadata", "SetMetadataBatch", "SetMarker", "SetState",
 	"Sleep", "SetWaitHold", "SetPinAwake", "RecordCurrentBead",
-	"SetCurrentClaim", "SetStatusOpen", "RepairType", "RepairTypeBestEffort", "SetLocalString", "CloseWithoutReason",
+	"SetCurrentClaim", "ClearCurrentClaim", "SetStatusOpen", "RepairType", "RepairTypeBestEffort", "SetLocalString", "CloseWithoutReason",
 	"UpdateMetadataFenced", "ApplyPatchIfLifecycleUnchanged", "WithPendingCreateRollback", "CommitClose",
 	"RollbackPendingCreateAtomically", "CloseWithMetadataIfMatch", "ApplyPatchIfLifecycleUnchangedUnder",
 	"RollbackPendingCreateAtomicallyUnder", "CommitStartedIfCurrentUnder", "Commit",

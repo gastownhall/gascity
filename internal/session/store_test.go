@@ -473,6 +473,137 @@ func TestCurrentClaimRefusesANonSessionBead(t *testing.T) {
 	if _, err := is.CurrentClaimBeadID("wb-1"); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("CurrentClaimBeadID on a non-session bead = %v, want ErrSessionNotFound", err)
 	}
+	if _, err := is.ClearCurrentClaim("wb-1", "gcg-42"); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("ClearCurrentClaim on a non-session bead = %v, want ErrSessionNotFound", err)
+	}
+	if n := len(rec.CallsForOp("SetMetadata")) + len(rec.CallsForOp("CompareAndSetMetadataKey")); n != 0 {
+		t.Errorf("refused clear still wrote %d times", n)
+	}
+}
+
+// claimStampedSession is a session row stamped with claim, in a MemStore.
+func claimStampedSession(t *testing.T, claim string) *beads.MemStore {
+	t.Helper()
+	return beads.NewMemStoreFrom(1, []beads.Bead{
+		sessionBeadFixture("s-1", "open", map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: claim}),
+	}, nil)
+}
+
+// claimStampOf is the current-claim stamp the row s-1 holds in mem.
+func claimStampOf(t *testing.T, mem *beads.MemStore) beads.Bead {
+	t.Helper()
+	b, err := mem.Get("s-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// TestClearCurrentClaimClearsOnlyTheNamedClaim: the clear takes back exactly
+// the claim the caller names. A stamp naming other work, a blank name, or a
+// stamp already clear is left alone and nothing is written.
+func TestClearCurrentClaimClearsOnlyTheNamedClaim(t *testing.T) {
+	mem := claimStampedSession(t, "gcg-42")
+	is := NewStore(beads.SessionStore{Store: mem})
+	rev := claimStampOf(t, mem).Revision
+
+	for _, other := range []string{"gcg-9", "", "  "} {
+		cleared, err := is.ClearCurrentClaim("s-1", other)
+		if err != nil || cleared {
+			t.Fatalf("ClearCurrentClaim(%q) over gcg-42 = (%v, %v), want (false, nil)", other, cleared, err)
+		}
+	}
+	if b := claimStampOf(t, mem); b.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey] != "gcg-42" || b.Revision != rev {
+		t.Fatalf("row after clears of other claims = %q at revision %d, want gcg-42 unwritten at %d",
+			b.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey], b.Revision, rev)
+	}
+
+	cleared, err := is.ClearCurrentClaim("s-1", " gcg-42 ")
+	if err != nil || !cleared {
+		t.Fatalf("ClearCurrentClaim(gcg-42) = (%v, %v), want (true, nil)", cleared, err)
+	}
+	if got, err := is.CurrentClaimBeadID("s-1"); err != nil || got != "" {
+		t.Fatalf("CurrentClaimBeadID after the clear = (%q, %v), want empty", got, err)
+	}
+
+	rev = claimStampOf(t, mem).Revision
+	if cleared, err := is.ClearCurrentClaim("s-1", "gcg-42"); err != nil || cleared {
+		t.Fatalf("ClearCurrentClaim of an already clear stamp = (%v, %v), want (false, nil)", cleared, err)
+	}
+	if got := claimStampOf(t, mem).Revision; got != rev {
+		t.Fatalf("clearing an already clear stamp wrote the row (revision %d -> %d)", rev, got)
+	}
+}
+
+// claimStampRacer lands a newer claim stamp on the row just before the first
+// write to it, blind or CAS: an overlapping `gc hook --claim` of the same
+// session that stamped its own claim after ClearCurrentClaim read the row.
+type claimStampRacer struct {
+	*beads.MemStore
+	t     *testing.T
+	stamp string
+	raced bool
+}
+
+func (r *claimStampRacer) SetMetadata(id, key, value string) error {
+	r.landRace(id)
+	return r.MemStore.SetMetadata(id, key, value)
+}
+
+func (r *claimStampRacer) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
+	r.landRace(id)
+	return r.MemStore.CompareAndSetMetadataKey(id, key, expected, next)
+}
+
+// landRace is the fixture's write, outside the store adapter the session
+// guards look past (storeWriteMethod).
+func (r *claimStampRacer) landRace(id string) {
+	if r.raced {
+		return
+	}
+	r.raced = true
+	if err := r.MemStore.SetMetadata(id, beadmeta.CurrentClaimBeadIDMetadataKey, r.stamp); err != nil {
+		r.t.Errorf("landing the racing stamp: %v", err)
+	}
+}
+
+// TestClearCurrentClaimKeepsAClaimStampedAfterItsRead: a claim stamped between
+// the clear's read of the row and its write survives the clear. The write is
+// a CAS on the named claim, so it cannot erase the newer one the way
+// SetCurrentClaim(id, "") would.
+func TestClearCurrentClaimKeepsAClaimStampedAfterItsRead(t *testing.T) {
+	mem := claimStampedSession(t, "gcg-42")
+	racer := &claimStampRacer{MemStore: mem, t: t, stamp: "gcg-43"}
+	is := NewStore(beads.SessionStore{Store: racer})
+
+	cleared, err := is.ClearCurrentClaim("s-1", "gcg-42")
+	if !racer.raced {
+		t.Fatal("ClearCurrentClaim wrote nothing, so the racing stamp never landed")
+	}
+	if got := claimStampOf(t, mem).Metadata[beadmeta.CurrentClaimBeadIDMetadataKey]; got != "gcg-43" {
+		t.Errorf("current claim after the clear = %q, want the racing claim gcg-43", got)
+	}
+	if err != nil || cleared {
+		t.Errorf("ClearCurrentClaim over a racing stamp = (%v, %v), want (false, nil)", cleared, err)
+	}
+}
+
+// TestClearCurrentClaimNeverClearsBlind: a store with no metadata CAS refuses
+// the clear and keeps the stamp, and a missing row is the store's not-found.
+func TestClearCurrentClaimNeverClearsBlind(t *testing.T) {
+	mem := claimStampedSession(t, "gcg-42")
+	mem.DisableConditionalWrites = true
+	is := NewStore(beads.SessionStore{Store: mem})
+
+	if cleared, err := is.ClearCurrentClaim("s-1", "gcg-42"); !errors.Is(err, beads.ErrConditionalWriteUnsupported) || cleared {
+		t.Fatalf("ClearCurrentClaim without a metadata CAS = (%v, %v), want ErrConditionalWriteUnsupported", cleared, err)
+	}
+	if got := claimStampOf(t, mem).Metadata[beadmeta.CurrentClaimBeadIDMetadataKey]; got != "gcg-42" {
+		t.Fatalf("a store without a CAS was cleared blind: %q", got)
+	}
+	if _, err := is.ClearCurrentClaim("s-missing", "gcg-42"); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("ClearCurrentClaim of a missing row = %v, want beads.ErrNotFound", err)
+	}
 }
 
 // TestCloseWithoutReasonEmitsSingleClose proves CloseWithoutReason emits exactly

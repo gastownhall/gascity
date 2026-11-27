@@ -19,7 +19,8 @@ const collapsedIdentityWorkQuery = `sh -c 'for id in "$GC_SESSION_ID" "$GC_SESSI
 
 // writeCollapsedIdentityCity writes the maintainer-city olivia shape: a
 // single-slot (max_active_sessions = 1) agent that is ALSO the template of an
-// on-demand [[named_session]] of the same name.
+// on-demand [[named_session]] of the same name, and the work its query serves
+// (newCollapsedIdentityWorkBead).
 func writeCollapsedIdentityCity(t *testing.T) string {
 	t.Helper()
 	cityDir := t.TempDir()
@@ -44,7 +45,26 @@ mode = "on_demand"
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	newCollapsedIdentityWorkBead(t, cityDir)
 	return cityDir
+}
+
+// newCollapsedIdentityWorkBead stores the bead collapsedIdentityWorkQuery
+// serves, mc-olivia-1 in progress and assigned to olivia, in the city's file
+// store, so the claim's canonical readback finds the bead the query served. A
+// served bead that no store of the city holds was purged, and the claim drops
+// it instead of adopting it.
+func newCollapsedIdentityWorkBead(t *testing.T, cityDir string) {
+	t.Helper()
+	store, err := openScopeLocalFileStoreForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("open the city file store: %v", err)
+	}
+	if _, err := store.CreateWithForeignID(beads.Bead{
+		ID: "mc-olivia-1", Title: "olivia's work", Type: "task", Status: "in_progress", Assignee: "olivia",
+	}); err != nil {
+		t.Fatalf("create the served work bead: %v", err)
+	}
 }
 
 // newCollapsedPoolSessionBead creates the pool session bead the supervisor's
