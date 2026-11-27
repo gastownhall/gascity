@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/orders"
 )
 
 func TestScanAllNilConfigUsesDefaultCityRootsAndOSFS(t *testing.T) {
@@ -989,5 +990,191 @@ interval = "5m"
 	}
 	if aa[0].Exec != "scripts/city.sh" || aa[0].IsEnabled() {
 		t.Fatalf("order = exec %q enabled %v, want the disabled city-local copy", aa[0].Exec, aa[0].IsEnabled())
+	}
+}
+
+func TestScanAllOverrideCanEnableOrderItsFileDisables(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "nightly-bench", `[order]
+description = "Ships disabled; a city override turns it on"
+exec = "scripts/bench.sh"
+trigger = "cooldown"
+interval = "24h"
+enabled = false
+`)
+
+	enabled := true
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+		},
+		Orders: config.OrdersConfig{
+			Overrides: []config.OrderOverride{
+				{Name: "nightly-bench", Enabled: &enabled},
+			},
+		},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	if len(aa) != 1 || aa[0].Name != "nightly-bench" {
+		t.Fatalf("got %d orders (%v), want nightly-bench", len(aa), aa)
+	}
+	if !aa[0].IsEnabled() {
+		t.Fatal("nightly-bench disabled: the enabled=true override was not applied")
+	}
+	if active := orders.FilterEnabled(aa); len(active) != 1 || active[0].Name != "nightly-bench" {
+		t.Fatalf("FilterEnabled = %v, want nightly-bench kept in the active set", active)
+	}
+}
+
+func TestScanAllInvalidFileDisabledOrderReachesValidateHandler(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	// Neither formula nor exec: fails Validate even though the order is disabled.
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "broken", `[order]
+trigger = "cooldown"
+interval = "24h"
+enabled = false
+`)
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{City: []string{cityLayer}},
+	}
+
+	var handled []string
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{
+		OnValidateError: func(orderName string, _ error) error {
+			handled = append(handled, orderName)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	if len(handled) != 1 || !strings.Contains(handled[0], "broken") {
+		t.Fatalf("validate handler saw %v, want the file-disabled broken order", handled)
+	}
+	if len(aa) != 0 {
+		t.Fatalf("got %d orders (%v), want the invalid order dropped", len(aa), aa)
+	}
+}
+
+func TestScanAllRigOverrideEnablesOnlyThatRigsFileDisabledPackOrder(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	packDir := filepath.Join(t.TempDir(), "bench-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "nightly-bench", `[order]
+exec = "scripts/bench.sh"
+trigger = "cooldown"
+interval = "24h"
+enabled = false
+`)
+	enabled := true
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{"alpha": {cityLayer}, "beta": {cityLayer}},
+		},
+		RigPackDirs: map[string][]string{"alpha": {packDir}, "beta": {packDir}},
+		Orders: config.OrdersConfig{
+			Overrides: []config.OrderOverride{{Name: "nightly-bench", Rig: "alpha", Enabled: &enabled}},
+		},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	enabledByRig := map[string]bool{}
+	for _, a := range aa {
+		if a.Name != "nightly-bench" {
+			t.Fatalf("unexpected order %q in %#v", a.Name, aa)
+		}
+		enabledByRig[a.Rig] = a.IsEnabled()
+	}
+	if len(aa) != 2 || !enabledByRig["alpha"] || enabledByRig["beta"] {
+		t.Fatalf("enabled by rig = %v (%d orders), want alpha enabled and beta disabled", enabledByRig, len(aa))
+	}
+	if active := orders.FilterEnabled(aa); len(active) != 1 || active[0].Rig != "alpha" {
+		t.Fatalf("FilterEnabled = %#v, want only alpha's instance", active)
+	}
+}
+
+func TestScanAllRiglessEnablingOverrideForRigOnlyPackOrderGetsRigHint(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	packDir := filepath.Join(t.TempDir(), "bench-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "nightly-bench", `[order]
+exec = "scripts/bench.sh"
+trigger = "cooldown"
+interval = "24h"
+enabled = false
+`)
+	enabled := true
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{"alpha": {cityLayer}},
+		},
+		RigPackDirs: map[string][]string{"alpha": {packDir}},
+		Orders: config.OrdersConfig{
+			Overrides: []config.OrderOverride{{Name: "nightly-bench", Enabled: &enabled}},
+		},
+	}
+
+	_, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err == nil {
+		t.Fatal("ScanAll returned nil error, want the rig-scoped not-found hint")
+	}
+	if !strings.Contains(err.Error(), `order "nightly-bench" not found at city scope`) || !strings.Contains(err.Error(), `rig = "alpha"`) {
+		t.Fatalf("ScanAll error = %q, want the city-scope miss with a rig = \"alpha\" hint", err)
+	}
+}
+
+func TestScanAllSkipListStillBeatsEnablingOverride(t *testing.T) {
+	tests := []struct {
+		name        string
+		skipAliases string
+		skip        string
+	}{
+		{name: "skip by name", skip: "nightly-bench"},
+		{name: "skip by alias", skipAliases: "skip_aliases = [\"old-bench\"]\n", skip: "old-bench"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityPath, cityLayer := orderDiscoveryCity(t)
+			writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "nightly-bench", `[order]
+exec = "scripts/bench.sh"
+trigger = "cooldown"
+interval = "24h"
+enabled = false
+`+tt.skipAliases)
+			enabled := true
+			cfg := &config.City{
+				FormulaLayers: config.FormulaLayers{
+					City: []string{cityLayer},
+				},
+				Orders: config.OrdersConfig{
+					Skip:      []string{tt.skip},
+					Overrides: []config.OrderOverride{{Name: "nightly-bench", Enabled: &enabled}},
+				},
+			}
+
+			var overrideErr error
+			aa, err := ScanAll(cityPath, cfg, ScanOptions{
+				OnOverrideError: func(err error) error {
+					overrideErr = err
+					return nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("ScanAll returned error: %v", err)
+			}
+			if len(aa) != 0 {
+				t.Fatalf("got %d orders, want the skipped order excluded: %#v", len(aa), aa)
+			}
+			if overrideErr == nil || overrideErr.Error() != `orders.overrides[0]: order "nightly-bench" not found` {
+				t.Fatalf("override error = %v, want orders.overrides[0]: order \"nightly-bench\" not found", overrideErr)
+			}
+		})
 	}
 }

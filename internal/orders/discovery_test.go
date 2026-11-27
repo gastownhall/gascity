@@ -130,6 +130,7 @@ schedule = "*/5 * * * *"
 	}{
 		{name: "file-disabled order is returned", upper: disabledOrder, wantPresent: true, wantEnabled: false},
 		{name: "file-disabled order on skip list is excluded", upper: disabledOrder, skip: []string{"health-check"}},
+		{name: "file-disabled order with skipped alias is excluded", upper: disabledOrder + "skip_aliases = [\"old-health\"]\n", skip: []string{"old-health"}},
 		{name: "higher disabled layer beats lower enabled layer", lower: enabledOrder, upper: disabledOrder, wantPresent: true, wantEnabled: false},
 	}
 	for _, tt := range tests {

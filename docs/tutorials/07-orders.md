@@ -306,8 +306,9 @@ one rig's local `orders/` directory.
 
 ## Disabling and skipping orders
 
-Set `enabled = false` in an order's own definition to keep it from running —
-it won't appear in `gc order list` or get evaluated:
+Set `enabled = false` in an order's own definition to keep it from running.
+It won't appear in `gc order list` or get evaluated, but `gc order show` still
+finds it, and an override with `enabled = true` can turn it on:
 
 ```toml
 [order]
