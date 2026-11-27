@@ -27,6 +27,7 @@ const (
 	keyType             = "gc.ev.type"
 	keyTs               = "gc.ev.ts"
 	keyActor            = "gc.ev.actor"
+	keyClaimedActor     = "gc.ev.claimed_actor"
 	keySubject          = "gc.ev.subject"
 	keyMessage          = "gc.ev.message"
 	keyPayload          = "gc.ev.payload"
@@ -78,6 +79,7 @@ func Encode(prefix string, f Fact) (beads.Bead, error) {
 		keyType:             e.Type,
 		keyTs:               e.Ts.UTC().Format(time.RFC3339Nano),
 		keyActor:            e.Actor,
+		keyClaimedActor:     e.ClaimedActor,
 		keySubject:          e.Subject,
 		keyMessage:          e.Message,
 		keyPayload:          payload,
@@ -180,14 +182,15 @@ func Decode(b beads.Bead) (Fact, error) {
 		Generation: d.int64(keyGen),
 		N:          d.uint64(keyN),
 		Event: events.Event{
-			Type:      d.required(keyType),
-			Ts:        d.time(keyTs),
-			Actor:     d.meta[keyActor],
-			Subject:   d.meta[keySubject],
-			Message:   d.meta[keyMessage],
-			RunID:     d.meta[keyRunID],
-			SessionID: d.meta[keySessionID],
-			StepID:    d.meta[keyStepID],
+			Type:         d.required(keyType),
+			Ts:           d.time(keyTs),
+			Actor:        d.meta[keyActor],
+			ClaimedActor: d.meta[keyClaimedActor],
+			Subject:      d.meta[keySubject],
+			Message:      d.meta[keyMessage],
+			RunID:        d.meta[keyRunID],
+			SessionID:    d.meta[keySessionID],
+			StepID:       d.meta[keyStepID],
 		},
 		PayloadDropped: d.int(keyPayloadDropped),
 	}

@@ -1270,7 +1270,7 @@ func (cs *controllerState) applyCommittedClose(evt events.Event, store beads.Sto
 		return
 	}
 	if step, ok := beads.DecodeBeadEventPayload(evt.Payload); ok {
-		cs.emitCompletedFact(step, evt.Actor)
+		cs.emitCompletedFact(step, evt.AttributionActor())
 	}
 	cs.runBeadCloseAutoclose(evt.Subject, store, storeRef)
 }
@@ -1296,7 +1296,7 @@ func (cs *controllerState) applyInferredClose(evt events.Event, route []storeref
 	store, live, err := liveCloseOwner(epoch, route, stores, evt.Subject, relic)
 	switch confirmInferredClose(live, err) {
 	case closeConfirmed:
-		cs.emitCompletedFact(live, evt.Actor)
+		cs.emitCompletedFact(live, evt.AttributionActor())
 		finished := cs.beadCloseAutoclose(evt.Subject, store, relicStoreRef(store, relic, storeRef))()
 		cs.autocloseSweepOf().settle(evt.Subject, finished, time.Now())
 	case closeUnconfirmed:

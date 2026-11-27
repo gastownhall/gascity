@@ -31,7 +31,8 @@ func testFact() Fact {
 		Event: events.Event{
 			Type:             "custom.box-signal",
 			Ts:               time.Date(2026, 10, 15, 12, 30, 45, 123456789, time.UTC),
-			Actor:            "rig/polecat-1",
+			Actor:            "unknown",
+			ClaimedActor:     "rig/polecat-1",
 			Subject:          "gc-42",
 			Message:          "line one\nline two",
 			Payload:          json.RawMessage(`{"k":"v","n":1}`),
@@ -77,7 +78,8 @@ func TestEncodeGoldenRow(t *testing.T) {
 		"gc.ev.n":                   "1",
 		"gc.ev.type":                "custom.box-signal",
 		"gc.ev.ts":                  "2026-10-15T12:30:45.123456789Z",
-		"gc.ev.actor":               "rig/polecat-1",
+		"gc.ev.actor":               "unknown",
+		"gc.ev.claimed_actor":       "rig/polecat-1",
 		"gc.ev.subject":             "gc-42",
 		"gc.ev.message":             "line one\nline two",
 		"gc.ev.payload":             `{"k":"v","n":1}`,
@@ -646,7 +648,7 @@ func TestCodecCoversEveryEventField(t *testing.T) {
 // factKeys is every key a fact row carries under schema 1.
 var factKeys = []string{
 	keySchema, keySession, keyGen, keyOrigin, keyN,
-	keyType, keyTs, keyActor, keySubject, keyMessage, keyPayload, keyPayloadDropped,
+	keyType, keyTs, keyActor, keyClaimedActor, keySubject, keyMessage, keyPayload, keyPayloadDropped,
 	keyRunID, keySessionID, keyStepID, keyDependsOnStepIDs,
 }
 

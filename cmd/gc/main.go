@@ -1514,19 +1514,22 @@ func openCityRecorderAt(cityPath string, stderr io.Writer) events.Recorder {
 // `gc event emit`) be attributed correctly to the controller or the order
 // that triggered the close.
 func eventActor() string {
-	if alias := strings.TrimSpace(os.Getenv("GC_ALIAS")); alias != "" {
-		return alias
-	}
-	if agent := strings.TrimSpace(os.Getenv("GC_AGENT")); agent != "" {
-		return agent
-	}
-	if sessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID")); sessionID != "" {
-		return sessionID
-	}
-	if beadsActor := strings.TrimSpace(os.Getenv("BEADS_ACTOR")); beadsActor != "" {
-		return beadsActor
+	if claim := envEventActorClaim(); claim != "" {
+		return claim
 	}
 	return "human"
+}
+
+// envEventActorClaim is the first non-empty identity in the process env, in
+// eventActor's precedence, or "" when none is set. Unlike eventActor it has no
+// "human" fallback, so a caller can tell an absent identity from a named one.
+func envEventActorClaim() string {
+	for _, key := range []string{"GC_ALIAS", "GC_AGENT", "GC_SESSION_ID", "BEADS_ACTOR"} {
+		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // openCityStore locates the city root from the current directory and opens a

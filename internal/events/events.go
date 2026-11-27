@@ -797,16 +797,21 @@ var KnownEventTypes = []string{
 // from Payload — the redacted export forwards them as typed primitives, never by
 // decoding the free-form payload.
 type Event struct {
-	Seq       uint64          `json:"seq"`
-	Type      string          `json:"type"`
-	Ts        time.Time       `json:"ts"`
-	Actor     string          `json:"actor"`
-	Subject   string          `json:"subject,omitempty"`
-	Message   string          `json:"message,omitempty"`
-	Payload   json.RawMessage `json:"payload,omitempty"`
-	RunID     string          `json:"run_id,omitempty"`
-	SessionID string          `json:"session_id,omitempty"`
-	StepID    string          `json:"step_id,omitempty"`
+	Seq   uint64    `json:"seq"`
+	Type  string    `json:"type"`
+	Ts    time.Time `json:"ts"`
+	Actor string    `json:"actor"`
+	// ClaimedActor is the identity a CLI writer asserted (flag or process env).
+	// It is not verified. A CLI write sets Actor to UnknownActor and records the
+	// claim here, so consumers that need the hook's identity read it through
+	// AttributionActor (gascity#9180).
+	ClaimedActor string          `json:"claimed_actor,omitempty"`
+	Subject      string          `json:"subject,omitempty"`
+	Message      string          `json:"message,omitempty"`
+	Payload      json.RawMessage `json:"payload,omitempty"`
+	RunID        string          `json:"run_id,omitempty"`
+	SessionID    string          `json:"session_id,omitempty"`
+	StepID       string          `json:"step_id,omitempty"`
 	// DependsOnStepIDs is nil for unknown native topology; a present empty
 	// slice represents a known root.
 	DependsOnStepIDs *[]string `json:"depends_on_step_ids,omitempty"`
