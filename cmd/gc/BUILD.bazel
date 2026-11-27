@@ -1849,6 +1849,7 @@ go_test(
         "hook_work_started_test.go",
         "hooks_test.go",
         "host_pressure_test.go",
+        "host_pressure_trickle_test.go",
         "hosted_beads_gateway_test.go",
         "hosted_beads_provider_adoption_test.go",
         "idle_nudge_test.go",

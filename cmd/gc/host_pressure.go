@@ -1,12 +1,16 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
 	"os"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 // defaultHostPressureThreshold is the CPU "some avg10" above which the
@@ -88,4 +92,76 @@ func readPSIAvg(read func(string) ([]byte, error), path, window string) (float64
 		return 0, fmt.Errorf("%s field not found on 'some' line", window)
 	}
 	return 0, fmt.Errorf("'some' line not found in %s", path)
+}
+
+// maxHostPressureHoldIntervals is how many patrol intervals a CPU-pressure
+// hold lasts, from the episode's start or the last forced start, before the
+// next pass forces one start or create through it, so sustained pressure
+// slows wakes without stopping them.
+const maxHostPressureHoldIntervals = 5
+
+// The outcomes of a supervisor.cpu_pressure.held_starts event.
+const (
+	hostPressureOutcomeHeld     = "held"
+	hostPressureOutcomeForced   = "forced"
+	hostPressureOutcomeReleased = "released"
+)
+
+// hostPressureEpisode is a reconciler's memory of a CPU-pressure episode:
+// whether one is under way and when its trickle window opened.
+type hostPressureEpisode struct {
+	active    bool
+	holdSince time.Time
+}
+
+// observe takes a pass's pressure reading at now. It reports whether the
+// pass may force one start or create through the hold (the window has lasted
+// maxHostPressureHoldIntervals patrol intervals) and the event outcome the
+// reading brings: held when an episode begins, released when it ends, ""
+// otherwise.
+func (e *hostPressureEpisode) observe(p hostPressure, now time.Time, patrol time.Duration) (trickle bool, outcome string) {
+	switch {
+	case !p.High && !e.active:
+		return false, ""
+	case !p.High:
+		*e = hostPressureEpisode{}
+		return false, hostPressureOutcomeReleased
+	case !e.active:
+		*e = hostPressureEpisode{active: true, holdSince: now}
+		return false, hostPressureOutcomeHeld
+	}
+	return now.Sub(e.holdSince) >= maxHostPressureHoldIntervals*patrol, ""
+}
+
+// forced restarts the trickle window at now, after a pass forced a start or
+// create through the hold.
+func (e *hostPressureEpisode) forced(now time.Time) { e.holdSince = now }
+
+// noteHostPressure reports a held_starts outcome: the event, and for held the
+// episode's one stderr line. An empty outcome reports nothing.
+func noteHostPressure(rec events.Recorder, stderr io.Writer, cityName string, p hostPressure, outcome string) {
+	if outcome == "" {
+		return
+	}
+	if outcome == hostPressureOutcomeHeld && stderr != nil {
+		fmt.Fprintf(stderr, "gc: host CPU pressure high (some avg10=%.2f > threshold=%.1f); holding starts and creates, forcing one through every %d patrol intervals\n", //nolint:errcheck // best-effort stderr
+			p.Avg10, p.Threshold, maxHostPressureHoldIntervals)
+	}
+	if rec == nil {
+		return
+	}
+	raw, err := json.Marshal(events.SupervisorCPUPressureHeldStartsPayload{
+		Avg10: p.Avg10, Threshold: p.Threshold, MaxHoldIntervals: maxHostPressureHoldIntervals, Outcome: outcome,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "gc: encoding %s payload: %v\n", events.SupervisorCPUPressureHeldStarts, err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	rec.Record(events.Event{
+		Type:    events.SupervisorCPUPressureHeldStarts,
+		Actor:   "supervisor",
+		Subject: cityName,
+		Message: "host CPU pressure: " + outcome,
+		Payload: raw,
+	})
 }

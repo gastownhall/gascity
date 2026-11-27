@@ -283,6 +283,7 @@ var builtinAuthorship = map[string]Authorship{
 	SupervisorShutdownRequested:     AuthorController,
 	SupervisorRequest:               AuthorController,
 	SupervisorFSPressureSkippedTick: AuthorController,
+	SupervisorCPUPressureHeldStarts: AuthorController,
 	EventsRotated:                   AuthorController,
 	StoreMaintenanceDone:            AuthorController,
 	StoreMaintenanceFailed:          AuthorController,

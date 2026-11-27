@@ -501,6 +501,10 @@ const (
 	WorkerOperation                 = "worker.operation"
 	ProjectIdentityStamped          = "project.identity.stamped"
 	SupervisorFSPressureSkippedTick = "supervisor.fs_pressure.skipped_tick"
+	// SupervisorCPUPressureHeldStarts fires when host CPU pressure starts a
+	// hold on starts and creates (held), when a start is forced through a
+	// sustained hold (forced), and when the pressure ends (released).
+	SupervisorCPUPressureHeldStarts = "supervisor.cpu_pressure.held_starts"
 
 	// MoleculeResolved fires once at the molecule-autoclose Go close site
 	// when a molecule root transitions to closed. It carries the
@@ -760,7 +764,7 @@ var KnownEventTypes = []string{
 	RequestAccepted, RigProvisionProgress,
 	CityCreated, CityUnregisterRequested,
 	OrderFired, OrderCompleted, OrderFailed, OrderSuppressed, OrderSkipped, OrderInapplicable,
-	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
+	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick, SupervisorCPUPressureHeldStarts,
 	MoleculeResolved,
 	SupervisorStarted, SupervisorShutdownRequested, SupervisorRequest,
 	ExtMsgBound, ExtMsgUnbound, ExtMsgGroupCreated,

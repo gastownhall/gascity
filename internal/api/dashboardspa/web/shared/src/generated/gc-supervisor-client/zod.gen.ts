@@ -3831,6 +3831,13 @@ export const zSessionSubmitInputBody = z.object({
     resume: z.boolean().optional()
 });
 
+export const zSupervisorCpuPressureHeldStartsPayload = z.object({
+    avg10: z.number(),
+    max_hold_intervals: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    outcome: z.string(),
+    threshold: z.number()
+});
+
 export const zSupervisorCitiesOutputBody = z.object({
     items: z.array(zCityInfo).nullable(),
     total: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
@@ -4186,6 +4193,7 @@ export const zEventPayload = z.union([
     zStoreDiskWarnPayload,
     zStoreMaintenanceDonePayload,
     zStoreMaintenanceFailedPayload,
+    zSupervisorCpuPressureHeldStartsPayload,
     zSupervisorFsPressureSkippedTickPayload,
     zSupervisorRequestPayload,
     zSupervisorShutdownPayload,
@@ -6395,6 +6403,24 @@ export const zTypedEventStreamEnvelopeStorageRigResidue = z.object({
 });
 
 /**
+ * TypedEventStreamEnvelope supervisor.cpu_pressure.held_starts
+ */
+export const zTypedEventStreamEnvelopeSupervisorCpuPressureHeldStarts = z.object({
+    actor: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zSupervisorCpuPressureHeldStartsPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('supervisor.cpu_pressure.held_starts'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedEventStreamEnvelope supervisor.fs_pressure.skipped_tick
  */
 export const zTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick = z.object({
@@ -6786,6 +6812,7 @@ export const zTypedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedEventStreamEnvelopeStorageBindingUnconverged.extend({ type: z.literal('storage.binding.unconverged') }),
     zTypedEventStreamEnvelopeStorageRigImport.extend({ type: z.literal('storage.rig_import') }),
     zTypedEventStreamEnvelopeStorageRigResidue.extend({ type: z.literal('storage.rig_residue') }),
+    zTypedEventStreamEnvelopeSupervisorCpuPressureHeldStarts.extend({ type: z.literal('supervisor.cpu_pressure.held_starts') }),
     zTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick.extend({ type: z.literal('supervisor.fs_pressure.skipped_tick') }),
     zTypedEventStreamEnvelopeSupervisorRequest.extend({ type: z.literal('supervisor.request') }),
     zTypedEventStreamEnvelopeSupervisorShutdownRequested.extend({ type: z.literal('supervisor.shutdown_requested') }),
@@ -9052,6 +9079,25 @@ export const zTypedTaggedEventStreamEnvelopeStorageRigResidue = z.object({
 });
 
 /**
+ * TypedTaggedEventStreamEnvelope supervisor.cpu_pressure.held_starts
+ */
+export const zTypedTaggedEventStreamEnvelopeSupervisorCpuPressureHeldStarts = z.object({
+    actor: z.string(),
+    city: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zSupervisorCpuPressureHeldStartsPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('supervisor.cpu_pressure.held_starts'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedTaggedEventStreamEnvelope supervisor.fs_pressure.skipped_tick
  */
 export const zTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick = z.object({
@@ -9458,6 +9504,7 @@ export const zTypedTaggedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedTaggedEventStreamEnvelopeStorageBindingUnconverged.extend({ type: z.literal('storage.binding.unconverged') }),
     zTypedTaggedEventStreamEnvelopeStorageRigImport.extend({ type: z.literal('storage.rig_import') }),
     zTypedTaggedEventStreamEnvelopeStorageRigResidue.extend({ type: z.literal('storage.rig_residue') }),
+    zTypedTaggedEventStreamEnvelopeSupervisorCpuPressureHeldStarts.extend({ type: z.literal('supervisor.cpu_pressure.held_starts') }),
     zTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick.extend({ type: z.literal('supervisor.fs_pressure.skipped_tick') }),
     zTypedTaggedEventStreamEnvelopeSupervisorRequest.extend({ type: z.literal('supervisor.request') }),
     zTypedTaggedEventStreamEnvelopeSupervisorShutdownRequested.extend({ type: z.literal('supervisor.shutdown_requested') }),

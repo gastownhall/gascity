@@ -1400,7 +1400,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | AgentClaimsPayload | BackendCredentialResolvedPayload | BeadClaimFailedPayload | BeadClaimLoopHeldPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlCheckUnlaunchablePayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | FactRecordedPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OpChangedPayload | OpsRecordingDegradedPayload | OrderInapplicablePayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestAcceptedPayload | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionClosedPayload | SessionConfigDriftDeferredPayload | SessionCreateSucceededPayload | SessionCreatedPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionProgramStatusShadowPayload | SessionResetStalledPayload | SessionStrandedClaimsPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StorageRigPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkLadderPayload | WorkRateLimitedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | AgentClaimsPayload | BackendCredentialResolvedPayload | BeadClaimFailedPayload | BeadClaimLoopHeldPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlCheckUnlaunchablePayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | FactRecordedPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OpChangedPayload | OpsRecordingDegradedPayload | OrderInapplicablePayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestAcceptedPayload | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionClosedPayload | SessionConfigDriftDeferredPayload | SessionCreateSucceededPayload | SessionCreatedPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionProgramStatusShadowPayload | SessionResetStalledPayload | SessionStrandedClaimsPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StorageRigPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorCpuPressureHeldStartsPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkLadderPayload | WorkRateLimitedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -6488,6 +6488,25 @@ export type SubmissionCapabilities = {
  */
 export type SubmitIntent = 'default' | 'follow_up' | 'interrupt_now';
 
+export type SupervisorCpuPressureHeldStartsPayload = {
+    /**
+     * The Linux PSI some avg10 value observed for CPU pressure.
+     */
+    avg10: number;
+    /**
+     * Patrol intervals a hold lasts before one start or create is forced through.
+     */
+    max_hold_intervals: number;
+    /**
+     * held when the hold begins, forced when a start or create is forced through it, released when the pressure ends.
+     */
+    outcome: string;
+    /**
+     * The configured avg10 threshold above which starts are held.
+     */
+    threshold: number;
+};
+
 export type SupervisorCitiesOutputBody = {
     /**
      * Managed cities with status info.
@@ -6914,6 +6933,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeStorageRigImport) | ({
     type: 'storage.rig_residue';
 } & TypedEventStreamEnvelopeStorageRigResidue) | ({
+    type: 'supervisor.cpu_pressure.held_starts';
+} & TypedEventStreamEnvelopeSupervisorCpuPressureHeldStarts) | ({
     type: 'supervisor.fs_pressure.skipped_tick';
 } & TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick) | ({
     type: 'supervisor.request';
@@ -9054,6 +9075,24 @@ export type TypedEventStreamEnvelopeStorageRigResidue = {
 };
 
 /**
+ * TypedEventStreamEnvelope supervisor.cpu_pressure.held_starts
+ */
+export type TypedEventStreamEnvelopeSupervisorCpuPressureHeldStarts = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SupervisorCpuPressureHeldStartsPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'supervisor.cpu_pressure.held_starts';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope supervisor.fs_pressure.skipped_tick
  */
 export type TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick = {
@@ -9561,6 +9600,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeStorageRigImport) | ({
     type: 'storage.rig_residue';
 } & TypedTaggedEventStreamEnvelopeStorageRigResidue) | ({
+    type: 'supervisor.cpu_pressure.held_starts';
+} & TypedTaggedEventStreamEnvelopeSupervisorCpuPressureHeldStarts) | ({
     type: 'supervisor.fs_pressure.skipped_tick';
 } & TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick) | ({
     type: 'supervisor.request';
@@ -11814,6 +11855,25 @@ export type TypedTaggedEventStreamEnvelopeStorageRigResidue = {
     subject?: string;
     ts: string;
     type: 'storage.rig_residue';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope supervisor.cpu_pressure.held_starts
+ */
+export type TypedTaggedEventStreamEnvelopeSupervisorCpuPressureHeldStarts = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SupervisorCpuPressureHeldStartsPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'supervisor.cpu_pressure.held_starts';
     workflow?: WorkflowEventProjection;
 };
 

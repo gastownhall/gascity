@@ -133,12 +133,18 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 	}
 	intents, paced := p.paceIdleProbes(&w, intents, now)
 	unregistered = append(unregistered, paced...)
+	trickle, pressureOutcome := p.pressure.observe(w.HostPressure, now, p.patrol())
+	noteHostPressure(p.rec, p.stderr, e.CityName, w.HostPressure, pressureOutcome)
 	res := admit(admitInput{
 		Now: now, Cfg: cfg, Bucket: p.bucket, FairSeed: p.fairSeed, InFlight: w.InFlight, BringUp: w.Census.BringUp(cfg),
 		Endpoints: w.Gates, Backoff: w.Backoff, Paused: w.Paused,
 		BootOpen: w.Boot.open(), // P2
-		Hold:     decideStartHold(startHoldInput{SuspensionErr: w.SuspensionErr, HostPressure: w.HostPressure}),
+		Hold:     decideStartHold(startHoldInput{SuspensionErr: w.SuspensionErr, HostPressure: w.HostPressure, Trickle: trickle}),
 	}, intents)
+	if res.Forced {
+		p.pressure.forced(now)
+		noteHostPressure(p.rec, p.stderr, e.CityName, w.HostPressure, hostPressureOutcomeForced)
+	}
 	res.Deferred = append(res.Deferred, unregistered...)
 	next = earliest(next, res.NextBackoff) // a row backoff's expiry is a row deadline (v5.10d (b))
 	// The planner state admission leaves is stored before any submit. A

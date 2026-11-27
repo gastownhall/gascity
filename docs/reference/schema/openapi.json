@@ -3651,6 +3651,9 @@
             "$ref": "#/components/schemas/StoreMaintenanceFailedPayload"
           },
           {
+            "$ref": "#/components/schemas/SupervisorCPUPressureHeldStartsPayload"
+          },
+          {
             "$ref": "#/components/schemas/SupervisorFSPressureSkippedTickPayload"
           },
           {
@@ -14640,6 +14643,37 @@
         ],
         "type": "string"
       },
+      "SupervisorCPUPressureHeldStartsPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "avg10": {
+            "description": "The Linux PSI some avg10 value observed for CPU pressure.",
+            "format": "double",
+            "type": "number"
+          },
+          "max_hold_intervals": {
+            "description": "Patrol intervals a hold lasts before one start or create is forced through.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "outcome": {
+            "description": "held when the hold begins, forced when a start or create is forced through it, released when the pressure ends.",
+            "type": "string"
+          },
+          "threshold": {
+            "description": "The configured avg10 threshold above which starts are held.",
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "avg10",
+          "threshold",
+          "max_hold_intervals",
+          "outcome"
+        ],
+        "type": "object"
+      },
       "SupervisorCitiesOutputBody": {
         "additionalProperties": false,
         "properties": {
@@ -15119,6 +15153,7 @@
             "storage.binding.unconverged": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingUnconverged",
             "storage.rig_import": "#/components/schemas/TypedEventStreamEnvelopeStorageRigImport",
             "storage.rig_residue": "#/components/schemas/TypedEventStreamEnvelopeStorageRigResidue",
+            "supervisor.cpu_pressure.held_starts": "#/components/schemas/TypedEventStreamEnvelopeSupervisorCpuPressureHeldStarts",
             "supervisor.fs_pressure.skipped_tick": "#/components/schemas/TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick",
             "supervisor.request": "#/components/schemas/TypedEventStreamEnvelopeSupervisorRequest",
             "supervisor.shutdown_requested": "#/components/schemas/TypedEventStreamEnvelopeSupervisorShutdownRequested",
@@ -15485,6 +15520,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeStorageRigResidue"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSupervisorCpuPressureHeldStarts"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick"
@@ -17269,6 +17307,7 @@
                 "worker.operation",
                 "project.identity.stamped",
                 "supervisor.fs_pressure.skipped_tick",
+                "supervisor.cpu_pressure.held_starts",
                 "molecule.resolved",
                 "supervisor.started",
                 "supervisor.shutdown_requested",
@@ -22338,6 +22377,63 @@
         "title": "TypedEventStreamEnvelope storage.rig_residue",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSupervisorCpuPressureHeldStarts": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SupervisorCPUPressureHeldStartsPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "supervisor.cpu_pressure.held_starts",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope supervisor.cpu_pressure.held_starts",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick": {
         "additionalProperties": false,
         "properties": {
@@ -23313,6 +23409,7 @@
             "storage.binding.unconverged": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingUnconverged",
             "storage.rig_import": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageRigImport",
             "storage.rig_residue": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageRigResidue",
+            "supervisor.cpu_pressure.held_starts": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorCpuPressureHeldStarts",
             "supervisor.fs_pressure.skipped_tick": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick",
             "supervisor.request": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorRequest",
             "supervisor.shutdown_requested": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested",
@@ -23679,6 +23776,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageRigResidue"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorCpuPressureHeldStarts"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick"
@@ -25578,6 +25678,7 @@
                 "worker.operation",
                 "project.identity.stamped",
                 "supervisor.fs_pressure.skipped_tick",
+                "supervisor.cpu_pressure.held_starts",
                 "molecule.resolved",
                 "supervisor.started",
                 "supervisor.shutdown_requested",
@@ -30998,6 +31099,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope storage.rig_residue",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSupervisorCpuPressureHeldStarts": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SupervisorCPUPressureHeldStartsPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "supervisor.cpu_pressure.held_starts",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope supervisor.cpu_pressure.held_starts",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick": {

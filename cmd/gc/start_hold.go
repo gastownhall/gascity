@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
@@ -35,17 +36,20 @@ type startHoldInput struct {
 	SuspensionErr error
 	// HostPressure is the pass's CPU pressure reading.
 	HostPressure hostPressure
+	// Trickle is the pressure episode's leave to force one start or create
+	// through the pressure hold (hostPressureEpisode.observe).
+	Trickle bool
 }
 
 // decideStartHold is the pass's start hold. An unreadable suspension file
 // holds every start and create and never trickles; it wins over high CPU
-// pressure, which holds them too.
+// pressure, which holds them too and trickles when the episode allows.
 func decideStartHold(in startHoldInput) startHold {
 	switch {
 	case in.SuspensionErr != nil:
 		return startHold{Cause: causeSuspensionUnreadable}
 	case in.HostPressure.High:
-		return startHold{Cause: causeHostPressure}
+		return startHold{Cause: causeHostPressure, Trickle: in.Trickle}
 	}
 	return startHold{}
 }
@@ -72,9 +76,24 @@ func (cr *CityRuntime) wakeSuspension() (suspensionstate.State, error) {
 	return st, err
 }
 
-// startHold is the legacy tick's start hold over a fresh wake read and CPU
-// pressure reading.
-func (cr *CityRuntime) startHold() startHold {
+// tickStartHold is a legacy start run's hold at now: the main tick's and the
+// control-dispatcher run's, over one shared episode. It carries the
+// CPU-pressure episode, reporting its held and released outcomes, and lets
+// the tick trickle once the hold has lasted maxHostPressureHoldIntervals
+// patrol intervals; forced is the run's report that it forced a start
+// through, which restarts the window.
+func (cr *CityRuntime) tickStartHold(now time.Time) (hold startHold, forced func()) {
 	_, err := cr.wakeSuspension()
-	return decideStartHold(startHoldInput{SuspensionErr: err, HostPressure: readHostPressure(cr.stderr)})
+	pressure := readHostPressure(cr.stderr)
+	cr.hostPressureMu.Lock()
+	trickle, outcome := cr.hostPressure.observe(pressure, now, cr.cfg.Daemon.PatrolIntervalDuration())
+	cr.hostPressureMu.Unlock()
+	noteHostPressure(cr.rec, cr.stderr, cr.cityName, pressure, outcome)
+	forced = func() {
+		cr.hostPressureMu.Lock()
+		cr.hostPressure.forced(now)
+		cr.hostPressureMu.Unlock()
+		noteHostPressure(cr.rec, cr.stderr, cr.cityName, pressure, hostPressureOutcomeForced)
+	}
+	return decideStartHold(startHoldInput{SuspensionErr: err, HostPressure: pressure, Trickle: trickle}), forced
 }

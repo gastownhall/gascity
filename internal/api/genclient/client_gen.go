@@ -7592,6 +7592,21 @@ type SubmissionCapabilities struct {
 // SubmitIntent Semantic delivery choice for a user message on a session submit request.
 type SubmitIntent string
 
+// SupervisorCPUPressureHeldStartsPayload defines model for SupervisorCPUPressureHeldStartsPayload.
+type SupervisorCPUPressureHeldStartsPayload struct {
+	// Avg10 The Linux PSI some avg10 value observed for CPU pressure.
+	Avg10 float64 `json:"avg10"`
+
+	// MaxHoldIntervals Patrol intervals a hold lasts before one start or create is forced through.
+	MaxHoldIntervals int64 `json:"max_hold_intervals"`
+
+	// Outcome held when the hold begins, forced when a start or create is forced through it, released when the pressure ends.
+	Outcome string `json:"outcome"`
+
+	// Threshold The configured avg10 threshold above which starts are held.
+	Threshold float64 `json:"threshold"`
+}
+
 // SupervisorCitiesOutputBody defines model for SupervisorCitiesOutputBody.
 type SupervisorCitiesOutputBody struct {
 	// Items Managed cities with status info.
@@ -9631,6 +9646,22 @@ type TypedEventStreamEnvelopeStorageRigResidue struct {
 	Ts               time.Time                `json:"ts"`
 	Type             string                   `json:"type"`
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeSupervisorCpuPressureHeldStarts defines model for TypedEventStreamEnvelopeSupervisorCpuPressureHeldStarts.
+type TypedEventStreamEnvelopeSupervisorCpuPressureHeldStarts struct {
+	Actor            string                                 `json:"actor"`
+	DependsOnStepIds *[]string                              `json:"depends_on_step_ids,omitempty"`
+	Message          *string                                `json:"message,omitempty"`
+	Payload          SupervisorCPUPressureHeldStartsPayload `json:"payload"`
+	RunId            *string                                `json:"run_id,omitempty"`
+	Seq              int64                                  `json:"seq"`
+	SessionId        *string                                `json:"session_id,omitempty"`
+	StepId           *string                                `json:"step_id,omitempty"`
+	Subject          *string                                `json:"subject,omitempty"`
+	Ts               time.Time                              `json:"ts"`
+	Type             string                                 `json:"type"`
+	Workflow         *WorkflowEventProjection               `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick defines model for TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick.
@@ -11865,6 +11896,23 @@ type TypedTaggedEventStreamEnvelopeStorageRigResidue struct {
 	Ts               time.Time                `json:"ts"`
 	Type             string                   `json:"type"`
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSupervisorCpuPressureHeldStarts defines model for TypedTaggedEventStreamEnvelopeSupervisorCpuPressureHeldStarts.
+type TypedTaggedEventStreamEnvelopeSupervisorCpuPressureHeldStarts struct {
+	Actor            string                                 `json:"actor"`
+	City             string                                 `json:"city"`
+	DependsOnStepIds *[]string                              `json:"depends_on_step_ids,omitempty"`
+	Message          *string                                `json:"message,omitempty"`
+	Payload          SupervisorCPUPressureHeldStartsPayload `json:"payload"`
+	RunId            *string                                `json:"run_id,omitempty"`
+	Seq              int64                                  `json:"seq"`
+	SessionId        *string                                `json:"session_id,omitempty"`
+	StepId           *string                                `json:"step_id,omitempty"`
+	Subject          *string                                `json:"subject,omitempty"`
+	Ts               time.Time                              `json:"ts"`
+	Type             string                                 `json:"type"`
+	Workflow         *WorkflowEventProjection               `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick defines model for TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick.
@@ -15715,6 +15763,32 @@ func (t *EventPayload) FromStoreMaintenanceFailedPayload(v StoreMaintenanceFaile
 
 // MergeStoreMaintenanceFailedPayload performs a merge with any union data inside the EventPayload, using the provided StoreMaintenanceFailedPayload
 func (t *EventPayload) MergeStoreMaintenanceFailedPayload(v StoreMaintenanceFailedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSupervisorCPUPressureHeldStartsPayload returns the union data inside the EventPayload as a SupervisorCPUPressureHeldStartsPayload
+func (t EventPayload) AsSupervisorCPUPressureHeldStartsPayload() (SupervisorCPUPressureHeldStartsPayload, error) {
+	var body SupervisorCPUPressureHeldStartsPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSupervisorCPUPressureHeldStartsPayload overwrites any union data inside the EventPayload as the provided SupervisorCPUPressureHeldStartsPayload
+func (t *EventPayload) FromSupervisorCPUPressureHeldStartsPayload(v SupervisorCPUPressureHeldStartsPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSupervisorCPUPressureHeldStartsPayload performs a merge with any union data inside the EventPayload, using the provided SupervisorCPUPressureHeldStartsPayload
+func (t *EventPayload) MergeSupervisorCPUPressureHeldStartsPayload(v SupervisorCPUPressureHeldStartsPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -20934,6 +21008,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeStorageRigResidu
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSupervisorCpuPressureHeldStarts returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSupervisorCpuPressureHeldStarts
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSupervisorCpuPressureHeldStarts() (TypedEventStreamEnvelopeSupervisorCpuPressureHeldStarts, error) {
+	var body TypedEventStreamEnvelopeSupervisorCpuPressureHeldStarts
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSupervisorCpuPressureHeldStarts overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSupervisorCpuPressureHeldStarts
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSupervisorCpuPressureHeldStarts(v TypedEventStreamEnvelopeSupervisorCpuPressureHeldStarts) error {
+	v.Type = "supervisor.cpu_pressure.held_starts"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSupervisorCpuPressureHeldStarts performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSupervisorCpuPressureHeldStarts
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSupervisorCpuPressureHeldStarts(v TypedEventStreamEnvelopeSupervisorCpuPressureHeldStarts) error {
+	v.Type = "supervisor.cpu_pressure.held_starts"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick() (TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick, error) {
 	var body TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick
@@ -21630,6 +21732,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeStorageRigImport()
 	case "storage.rig_residue":
 		return t.AsTypedEventStreamEnvelopeStorageRigResidue()
+	case "supervisor.cpu_pressure.held_starts":
+		return t.AsTypedEventStreamEnvelopeSupervisorCpuPressureHeldStarts()
 	case "supervisor.fs_pressure.skipped_tick":
 		return t.AsTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick()
 	case "supervisor.request":
@@ -24923,6 +25027,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeStor
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSupervisorCpuPressureHeldStarts returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSupervisorCpuPressureHeldStarts
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSupervisorCpuPressureHeldStarts() (TypedTaggedEventStreamEnvelopeSupervisorCpuPressureHeldStarts, error) {
+	var body TypedTaggedEventStreamEnvelopeSupervisorCpuPressureHeldStarts
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSupervisorCpuPressureHeldStarts overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSupervisorCpuPressureHeldStarts
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSupervisorCpuPressureHeldStarts(v TypedTaggedEventStreamEnvelopeSupervisorCpuPressureHeldStarts) error {
+	v.Type = "supervisor.cpu_pressure.held_starts"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSupervisorCpuPressureHeldStarts performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSupervisorCpuPressureHeldStarts
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSupervisorCpuPressureHeldStarts(v TypedTaggedEventStreamEnvelopeSupervisorCpuPressureHeldStarts) error {
+	v.Type = "supervisor.cpu_pressure.held_starts"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick() (TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick, error) {
 	var body TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick
@@ -25619,6 +25751,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeStorageRigImport()
 	case "storage.rig_residue":
 		return t.AsTypedTaggedEventStreamEnvelopeStorageRigResidue()
+	case "supervisor.cpu_pressure.held_starts":
+		return t.AsTypedTaggedEventStreamEnvelopeSupervisorCpuPressureHeldStarts()
 	case "supervisor.fs_pressure.skipped_tick":
 		return t.AsTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick()
 	case "supervisor.request":

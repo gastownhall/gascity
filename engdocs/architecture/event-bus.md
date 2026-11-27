@@ -307,6 +307,7 @@ API/SSE projection:
 | `WorkerOperation` | `worker.operation` | Worker session handle and runtime handle operation tracing |
 | `ProjectIdentityStamped` | `project.identity.stamped` | Project identity writer when a scope receives or reconciles project identity metadata |
 | `SupervisorFSPressureSkippedTick` | `supervisor.fs_pressure.skipped_tick` | Supervisor filesystem-pressure guard when a scan tick is skipped under pressure |
+| `SupervisorCPUPressureHeldStarts` | `supervisor.cpu_pressure.held_starts` | Controller CPU-pressure start hold: held at episode start, forced when one start is let through a sustained hold, released when pressure ends |
 | `ExtMsgBound` | `extmsg.bound` | External messaging bind handler |
 | `ExtMsgUnbound` | `extmsg.unbound` | External messaging unbind handler |
 | `ExtMsgGroupCreated` | `extmsg.group_created` | External messaging group ensure handler |
