@@ -201,3 +201,81 @@ exit 0
 		t.Fatalf("an empty result must not attempt to walk dependencies, got:\n%s", logged)
 	}
 }
+
+// TestCrossRigDepsSkipsOrderTrackingCloses pins the filter on order-tracking
+// beads. Every order run creates and closes one, so they are nearly all of a
+// busy city's recent closes, and none blocks anything. A lookback holding only
+// tracking closes must cost the query alone: no rig listing, no dependency
+// read.
+func TestCrossRigDepsSkipsOrderTrackingCloses(t *testing.T) {
+	binDir, logPath := fakeGCBin(t, `case "$*" in
+bd\ query\ status=closed*) printf '[{"id":"ga-wisp-1","status":"closed","labels":["exec","order-run:gate-sweep","order-tracking"]},{"id":"ga-wisp-2","status":"closed","labels":["order-tracking"]}]\n' ;;
+esac
+exit 0
+`)
+	out, err := runCrossRigDeps(t, binDir)
+	if err != nil {
+		t.Fatalf("cross-rig-deps.sh failed: %v\n%s", err, out)
+	}
+	logged, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatalf("read gc log: %v", readErr)
+	}
+	if strings.Contains(string(logged), "dep list") || strings.Contains(string(logged), "rig list") {
+		t.Fatalf("order-tracking closes must cost only the query, got:\n%s", logged)
+	}
+}
+
+// TestCrossRigDepsBatchesTheDependentsRead pins the batched read: when no
+// closed bead has an external dependent, one dep list over every closed bead
+// answers the run, and tracking beads are not in it.
+func TestCrossRigDepsBatchesTheDependentsRead(t *testing.T) {
+	binDir, logPath := fakeGCBin(t, `case "$*" in
+bd\ query\ status=closed*) printf '[{"id":"ga-a","status":"closed","labels":["gc:task"]},{"id":"ga-b","status":"closed"},{"id":"ga-wisp-1","status":"closed","labels":["order-tracking"]}]\n' ;;
+rig\ list*) printf '{"rigs":[]}\n' ;;
+bd\ dep\ list*) printf '[{"id":"ga-local-dependent","status":"open"}]\n' ;;
+esac
+exit 0
+`)
+	out, err := runCrossRigDeps(t, binDir)
+	if err != nil {
+		t.Fatalf("cross-rig-deps.sh failed: %v\n%s", err, out)
+	}
+	logged, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatalf("read gc log: %v", readErr)
+	}
+	lists := regexp.MustCompile(`(?m)^gc bd dep list .*$`).FindAllString(string(logged), -1)
+	if len(lists) != 1 || !strings.HasPrefix(lists[0], "gc bd dep list ga-a ga-b --direction=up --type=blocks --json") {
+		t.Fatalf("want one batched dep list over ga-a ga-b, got:\n%s", logged)
+	}
+}
+
+// TestCrossRigDepsWalksEachBeadWhenTheBatchReadFails pins the fallback: a bd
+// that refuses the multi-id read (or any failure of it) leaves the per-bead
+// walk to do the work.
+func TestCrossRigDepsWalksEachBeadWhenTheBatchReadFails(t *testing.T) {
+	binDir, logPath := fakeGCBin(t, `case "$*" in
+bd\ query\ status=closed*) printf '[{"id":"ga-a","status":"closed"},{"id":"ga-b","status":"closed"}]\n' ;;
+rig\ list*) printf '{"rigs":[]}\n' ;;
+bd\ dep\ list\ ga-a\ ga-b*) exit 1 ;;
+bd\ dep\ list\ ga-b*) printf '[{"id":"external:dep-9"}]\n' ;;
+bd\ dep\ list*) printf '[]\n' ;;
+esac
+exit 0
+`)
+	out, err := runCrossRigDeps(t, binDir)
+	if err != nil {
+		t.Fatalf("cross-rig-deps.sh failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "resolved 1 cross-rig dependencies") {
+		t.Fatalf("expected one resolved dependency, got:\n%s", out)
+	}
+	logged, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatalf("read gc log: %v", readErr)
+	}
+	if !strings.Contains(string(logged), "gc bd dep add external:dep-9 external:ga-b --type=related") {
+		t.Fatalf("expected the per-bead walk to convert ga-b's dependent, got:\n%s", logged)
+	}
+}
