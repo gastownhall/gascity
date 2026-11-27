@@ -299,6 +299,96 @@ func (s *Store) ClosedRunsForRetention() ([]OrderRun, error) {
 	return out, nil
 }
 
+// RetentionPage is one bounded page of the closed-tracking retention read.
+type RetentionPage struct {
+	// Runs are the CLOSED tracking beads of the page, newest created first,
+	// decoded with best-effort names like ClosedRunsForRetention's.
+	Runs []OrderRun
+	// Rows is the number of tracking beads the page read, closed or not. A
+	// page with fewer rows than its limit is the last one.
+	Rows int
+	// Oldest is the CreatedAt of the oldest bead the page read: the bound
+	// the next page is read before.
+	Oldest time.Time
+}
+
+// ClosedRunsCreatedBefore reads one page of the closed-tracking retention
+// prune: at most limit tracking beads created before before, newest first,
+// across both tiers, on the LIVE tier. Unlike ClosedRunsForRetention it never
+// reads the whole retained history in one query, so a large history cannot
+// push the read past the store's read budget; the caller walks further pages
+// by passing the page's Oldest as the next before.
+//
+// The query admits every status so that the backing store can apply the
+// limit itself (a native Dolt store pushes a row limit down only for a
+// listing whose backing set is the query's set); open beads are dropped here
+// and still count toward Rows. The bounded read opts into the backing's
+// created-desc tie-break: a page boundary can then split a run of beads that
+// share one CreatedAt, and the next page, read strictly before Oldest, skips
+// the rest of them. A retention walk tolerates that, because it starts again
+// from its cutoff on its next run.
+func (s *Store) ClosedRunsCreatedBefore(before time.Time, limit int) (RetentionPage, error) {
+	if s.store == (beads.OrdersStore{}) || before.IsZero() || limit <= 0 {
+		return RetentionPage{}, nil
+	}
+	list, err := beads.LiveFor(s.store).List(beads.ListQuery{
+		Label:                    labelOrderTracking,
+		IncludeClosed:            true,
+		CreatedBefore:            before,
+		Limit:                    limit,
+		Sort:                     beads.SortCreatedDesc,
+		TierMode:                 beads.TierBoth,
+		AllowBackingCreatedLimit: true,
+	})
+	if err != nil {
+		return RetentionPage{}, err
+	}
+	page := RetentionPage{Rows: len(list), Runs: make([]OrderRun, 0, len(list))}
+	for i, b := range list {
+		if i == 0 || b.CreatedAt.Before(page.Oldest) {
+			page.Oldest = b.CreatedAt
+		}
+		if b.Status != "closed" {
+			continue
+		}
+		name, _ := NameFromTrackingBead(b)
+		page.Runs = append(page.Runs, decodeRun(name, b))
+	}
+	return page, nil
+}
+
+// NewestClosedRuns lists the closed tracking beads of the named order among
+// the newest limit beads that carry its order-run label (newest created
+// first, both tiers, LIVE). The retention prune reads it to learn an order's
+// recent-history floor without reading the order's whole history. Beads with
+// the label that are not tracking beads (wisp roots of the order) count
+// toward limit and are dropped, so the result can hold fewer than limit runs
+// even when the order has more.
+func (s *Store) NewestClosedRuns(name string, limit int) ([]OrderRun, error) {
+	if s.store == (beads.OrdersStore{}) || name == "" || limit <= 0 {
+		return nil, nil
+	}
+	list, err := beads.LiveFor(s.store).List(beads.ListQuery{
+		Label:                    labelOrderRunPrefix + name,
+		IncludeClosed:            true,
+		Limit:                    limit,
+		Sort:                     beads.SortCreatedDesc,
+		TierMode:                 beads.TierBoth,
+		AllowBackingCreatedLimit: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]OrderRun, 0, len(list))
+	for _, b := range list {
+		if b.Status != "closed" || !IsTrackingBead(b) {
+			continue
+		}
+		out = append(out, decodeRun(name, b))
+	}
+	return out, nil
+}
+
 // CloseRuns closes a batch of tracking beads, stamping close_reason so
 // validation.on-close cities accept the close, then re-verifies that every id is
 // closed — retrying a bounded number of times with a short backoff to tolerate a
