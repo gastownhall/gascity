@@ -746,8 +746,25 @@ var transientNeedles = []transientNeedle{
 //
 // When an error matches needles from both tiers, Tier A wins: a store that is
 // also unreachable must never have a semantic budget burned against it.
+//
+// One typed check outranks Tier A: a chain that carries
+// *beads.GraphApplyBudgetExhaustedError is TierNone even when it also reaches
+// context.DeadlineExceeded, the transient boundary marker or an availability
+// needle, because the native store joins that type with the store error the
+// spent budget caused. A caller that joins a budget error with a separate
+// failure, such as a write that timed out afterwards, must classify that
+// failure on its own.
 func ClassifyControllerError(err error) ControllerErrorTier {
 	if err == nil {
+		return TierNone
+	}
+	// A graph apply that spent the budget its store derived for the plan
+	// unwraps to context.DeadlineExceeded, but it is not an outage: a replay
+	// of the same plan derives the same budget and holds a transaction for all
+	// of it on every sweep. It is terminal, so it is matched before the
+	// deadline arm and the "context deadline exceeded" needle.
+	var budgetExhausted *beads.GraphApplyBudgetExhaustedError
+	if errors.As(err, &budgetExhausted) {
 		return TierNone
 	}
 	if errors.Is(err, context.DeadlineExceeded) {

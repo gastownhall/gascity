@@ -476,7 +476,10 @@ func recycleDispatchSubjectSession(cityPath string, store beads.Store, cfg *conf
 // and either retried — quietly once it repeats — or, once the budget expires,
 // quarantined; any other classification quarantines on the first refusal. It
 // returns nil once the bead is quarantined and the (possibly quiet-wrapped)
-// cause when the bead should be retried.
+// cause when the bead should be retried. When the quarantine write itself
+// fails, a transient failure comes back on its own chain, so the sweep retries
+// the still-open bead whatever the cause's tier; any other failure comes back
+// joined with the cause.
 func handleControlDispatchError(cityPath, storePath string, graph beads.GraphStore, bead beads.Bead, beadID string, cause error, stderr io.Writer) error {
 	if errors.Is(cause, dispatch.ErrControlDriftPending) {
 		return handleControlDriftRefusal(cityPath, storePath, graph, bead, beadID, cause, stderr)
@@ -521,6 +524,15 @@ func handleControlDispatchError(cityPath, storePath string, graph beads.GraphSto
 	// lost.
 	settleFailure, quarantineErr := quarantineControlFailureBead(graph, bead, cause)
 	if quarantineErr != nil {
+		if dispatch.IsTransientControllerError(quarantineErr) {
+			// The write that settles the bead never landed, so the bead is
+			// still open and the next sweep retries it. Classify the sweep by
+			// that write alone: joined with a terminal cause, a spent
+			// graph-apply budget would outrank the write's deadline, and the
+			// store that ran the budget out is usually the one failing this
+			// write.
+			return fmt.Errorf("quarantining control bead %s (cause: %s): %w", beadID, cause.Error(), quarantineErr)
+		}
 		return errors.Join(cause, quarantineErr)
 	}
 	if settleFailure != nil {
