@@ -13,6 +13,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	execerr "k8s.io/client-go/util/exec"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // testSnapshotTTL is the pod snapshot TTL the snapshot tests opt into; it
@@ -299,5 +301,81 @@ func TestPodSnapshotRefreshesAfterTTL(t *testing.T) {
 	}
 	if lists := ops.listCalls(); len(lists) != 2 || lists[1] != (listCall{selector: "app=gc-agent"}) {
 		t.Fatalf("LISTs = %+v, want exactly one refresh {selector: app=gc-agent}", lists)
+	}
+}
+
+// TestPodSnapshotInvalidatedByLifecycle: Start, Stop and Relaunch change this
+// process's pods, so once one returns, with or without an error, the next
+// observation read lists again instead of answering from the earlier
+// listing: a session reads running right after its Start and stopped right
+// after its Stop.
+func TestPodSnapshotInvalidatedByLifecycle(t *testing.T) {
+	ctx := context.Background()
+	cfg := runtime.Config{Command: "sleep infinity"}
+	for _, tc := range []struct {
+		name        string
+		setup       func(*fakeK8sOps)
+		op          func(*Provider) error
+		wantErr     bool
+		wantRunning bool
+	}{
+		{
+			name:        "Start success",
+			op:          func(p *Provider) error { return p.Start(ctx, "s", cfg) },
+			wantRunning: true,
+		},
+		{
+			name:    "Start failure",
+			setup:   func(f *fakeK8sOps) { f.createErr = errors.New("quota exceeded") },
+			op:      func(p *Provider) error { return p.Start(ctx, "s", cfg) },
+			wantErr: true,
+		},
+		{
+			name:  "Stop success",
+			setup: func(f *fakeK8sOps) { addRunningPod(f, "s", "s") },
+			op:    func(p *Provider) error { return p.Stop("s") },
+		},
+		{
+			name: "Stop failure",
+			setup: func(f *fakeK8sOps) {
+				addRunningPod(f, "s", "s")
+				f.deleteErr = errors.New("connection refused")
+			},
+			op:          func(p *Provider) error { return p.Stop("s") },
+			wantErr:     true,
+			wantRunning: true,
+		},
+		{
+			name:        "Relaunch success",
+			setup:       func(f *fakeK8sOps) { addRunningPod(f, "s", "s") },
+			op:          func(p *Provider) error { return p.Relaunch(ctx, "s", cfg) },
+			wantRunning: true,
+		},
+		{
+			name:    "Relaunch failure",
+			op:      func(p *Provider) error { return p.Relaunch(ctx, "s", cfg) },
+			wantErr: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ops := newCountingOps()
+			if tc.setup != nil {
+				tc.setup(ops.inner)
+			}
+			p, _ := newSnapshotProvider(ops)
+			p.IsRunning("s") // populate the snapshot
+
+			if err := tc.op(p); (err != nil) != tc.wantErr {
+				t.Fatalf("op error = %v, want error %v", err, tc.wantErr)
+			}
+			before := ops.listCount()
+			if got := p.IsRunning("s"); got != tc.wantRunning {
+				t.Errorf("IsRunning right after the op = %v, want %v", got, tc.wantRunning)
+			}
+			lists := ops.listCalls()
+			if len(lists) != before+1 || lists[before] != (listCall{selector: "app=gc-agent"}) {
+				t.Errorf("LISTs after the op = %+v, want one fresh {selector: app=gc-agent}", lists[before:])
+			}
+		})
 	}
 }

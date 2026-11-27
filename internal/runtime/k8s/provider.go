@@ -172,6 +172,7 @@ func newProviderWithOps(ops k8sOps) *Provider {
 
 // Start creates a new K8s pod running a tmux session with the agent command.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	defer p.snapshot.invalidate()
 	if p.image == "" {
 		return fmt.Errorf("starting session %q: GC_K8S_IMAGE is required", name)
 	}
@@ -396,6 +397,7 @@ func (p *Provider) runPodPostLaunchSetup(ctx context.Context, podName string, cf
 // server itself died (not just the agent), respawn-pane fails and Relaunch
 // returns ErrSessionNotFound so the reconciler reprovisions.
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
+	defer p.snapshot.invalidate()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -470,6 +472,7 @@ func k8sRequiresPostStartLiveness(cfg runtime.Config) bool {
 // genuine Kubernetes NotFound (the pod raced to gone) is treated as idempotent.
 // This mirrors the ssh provider's Stop discrimination.
 func (p *Provider) Stop(name string) error {
+	defer p.snapshot.invalidate()
 	ctx := context.Background()
 	label := SanitizeLabel(name)
 

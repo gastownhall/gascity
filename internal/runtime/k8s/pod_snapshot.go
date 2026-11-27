@@ -24,7 +24,9 @@ const podSnapshotFetchTimeout = 10 * time.Second
 // observation reads for a short TTL, so a session-list request costs one
 // apiserver LIST instead of several per session. A listing is taken lazily by
 // the first read that finds none fresh; there is no watch, timer or goroutine.
-// A failed LIST is returned to its readers and never cached.
+// A failed LIST is returned to its readers and never cached. Start, Stop and
+// Relaunch invalidate the snapshot, so this process's own pod changes are seen
+// by the next read.
 type podSnapshot struct {
 	ttl time.Duration
 
@@ -53,6 +55,17 @@ type snapshotPod struct {
 // newPodSnapshot returns an empty snapshot that serves a listing for ttl.
 func newPodSnapshot(ttl time.Duration) *podSnapshot {
 	return &podSnapshot{ttl: ttl}
+}
+
+// invalidate drops the published listing, so the next read lists again. A
+// nil snapshot (the provider lists per session) has nothing to drop.
+func (s *podSnapshot) invalidate() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.listing = nil
+	s.mu.Unlock()
 }
 
 // projectPod projects a listed pod to its snapshot form.
