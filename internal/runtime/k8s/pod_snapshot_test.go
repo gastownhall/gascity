@@ -19,6 +19,7 @@ import (
 	execerr "k8s.io/client-go/util/exec"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/hybrid"
 )
 
 // testSnapshotTTL is the pod snapshot TTL the snapshot tests opt into; it
@@ -228,8 +229,9 @@ func newProbeOps(sessions []probeSession) *countingOps {
 
 // TestPodSnapshotLookupSemantics pins the snapshot's lookup projection: the
 // first pod in list order wins a shared label, ProcessAlive's empty-names
-// contract needs no LIST, and a deleting or non-Running pod reads false
-// without a pgrep probe.
+// contract needs no LIST, a deleting or non-Running pod reads false without a
+// pgrep probe, and IsRunning and IsAttached probe only a Running pod, as
+// findRunningPod's status.phase=Running selector did.
 func TestPodSnapshotLookupSemantics(t *testing.T) {
 	t.Run("first pod in list order wins a shared label", func(t *testing.T) {
 		ops := newCountingOps()
@@ -294,6 +296,40 @@ func TestPodSnapshotLookupSemantics(t *testing.T) {
 		}
 		if got := ops.execCount(); got != 0 {
 			t.Fatalf("exec count = %d; want 0 (no pgrep into a non-Running pod)", got)
+		}
+	})
+
+	t.Run("a session whose only pod is Pending is neither running nor attached", func(t *testing.T) {
+		ops := newCountingOps()
+		addRunningPod(ops.inner, "s", "s")
+		ops.inner.pods["s"].Status.Phase = corev1.PodPending
+		hasSessionAlive(ops.inner, "s")
+		p, _ := newSnapshotProvider(ops)
+
+		if p.IsRunning("s") {
+			t.Error("IsRunning with only a Pending pod = true; want false")
+		}
+		if p.IsAttached("s") {
+			t.Error("IsAttached with only a Pending pod = true; want false")
+		}
+		if got := ops.execCount(); got != 0 {
+			t.Errorf("exec count = %d; want 0 (no tmux probe into a non-Running pod)", got)
+		}
+	})
+
+	t.Run("a Failed pod listed first does not hide the Running one", func(t *testing.T) {
+		ops := newCountingOps()
+		// countingOps lists by name, so a-failed is first.
+		addFailedPod(ops.inner, "a-failed", "s")
+		addRunningPod(ops.inner, "b-running", "s")
+		hasSessionAlive(ops.inner, "b-running")
+		p, _ := newSnapshotProvider(ops)
+
+		if !p.IsRunning("s") {
+			t.Fatal("IsRunning = false; want true from the Running pod")
+		}
+		if targets := ops.execTargetPods(); !reflect.DeepEqual(targets, []string{"b-running"}) {
+			t.Fatalf("probes ran in pods %v; want only the Running pod b-running", targets)
 		}
 	})
 }
@@ -553,6 +589,39 @@ func TestPodSnapshotCoalescesConcurrentRefresh(t *testing.T) {
 	}
 }
 
+// TestPodSnapshotFlightRechecksBeforeListing: a reader that found no
+// servable listing reaches the flight for its generation only after another
+// flight for that generation published one, when singleflight starts a new
+// flight for it. That flight answers from the published listing and lists
+// nothing; once the listing is past its TTL, the flight lists again.
+func TestPodSnapshotFlightRechecksBeforeListing(t *testing.T) {
+	ops := newCountingOps()
+	addRunningPod(ops.inner, "a", "a")
+	p, clock := newSnapshotProvider(ops)
+	published, err := p.podListing()
+	if err != nil {
+		t.Fatalf("populating the snapshot: %v", err)
+	}
+	_, gen := p.snapshot.servable(clock.now())
+
+	got, err := p.fetchListing(gen)
+	if err != nil || got != published {
+		t.Fatalf("flight over a servable listing of its generation = (%p, %v), want the published %p", got, err, published)
+	}
+	if n := ops.listCount(); n != 1 {
+		t.Fatalf("LISTs = %d, want 1: the flight listed again over a servable listing", n)
+	}
+
+	clock.set(clock.now().Add(testSnapshotTTL))
+	got, err = p.fetchListing(gen)
+	if err != nil || got == nil || got == published {
+		t.Fatalf("flight past the TTL = (%p, %v), want a new listing", got, err)
+	}
+	if n := ops.listCount(); n != 2 {
+		t.Fatalf("LISTs = %d, want 2: one more for the expired listing", n)
+	}
+}
+
 // TestObservationSnapshotLeavesOtherLookupsFresh: only the observation reads
 // use the pod snapshot. With a populated snapshot, every other operation
 // (lifecycle, exec, the carrier verbs, staging, meta, the reconciler's
@@ -617,5 +686,158 @@ func TestObservationSnapshotLeavesOtherLookupsFresh(t *testing.T) {
 				t.Errorf("pod LISTs with a populated snapshot = %+v, want the snapshot-free %+v", got, want)
 			}
 		})
+	}
+}
+
+// markPodDeleting sets a deletionTimestamp on pod, as the apiserver does when
+// another process deletes it: the pod keeps phase Running, and its tmux and
+// agent keep running through the grace period.
+func markPodDeleting(f *fakeK8sOps, pod string) {
+	deleting := metav1.Now()
+	f.pods[pod].DeletionTimestamp = &deleting
+}
+
+// snapshotListCount is how many of ops's LISTs were pod snapshot listings.
+func snapshotListCount(ops *countingOps) int {
+	n := 0
+	for _, c := range ops.listCalls() {
+		if c == (listCall{selector: "app=gc-agent"}) {
+			n++
+		}
+	}
+	return n
+}
+
+// TestFreshLivenessReadSeesAPodDeletedOutOfProcess is the k8s twin of
+// cmd/gc's TestLegacyHealNeverWakesAKilledSeatOnAStaleListing. `gc session
+// kill` deletes the pod through the CLI's own provider, so the controller's
+// pod snapshot keeps the listing taken before the delete until its TTL runs
+// out. The fresh read the heal confirmer and the nudge fence take
+// (runtime.ObserveLivenessSince) does not answer from that listing: it lists
+// again and reads the agent not alive, as the provider without a snapshot
+// does. That holds through the seam-backed provider production builds, on the
+// raw one, and behind the hybrid provider that routes the session to the
+// seam-backed one (cmd/gc's newHybridProvider), which claims no fresh read of
+// its own. A second fresh read for the same since reuses the new listing.
+func TestFreshLivenessReadSeesAPodDeletedOutOfProcess(t *testing.T) {
+	names := []string{"claude"}
+	sessions := []probeSession{{name: "s", pod: true, tmux: true, attached: "0", activity: 1709300000}}
+	seamBacked := func(p *Provider) runtime.Provider {
+		return &seamBackedProvider{Provider: runtime.NewProviderFromSeams(p.Seams()), raw: p}
+	}
+	for _, tc := range []struct {
+		name string
+		wrap func(*Provider) runtime.Provider
+	}{
+		{"seam-backed", seamBacked},
+		{"raw", func(p *Provider) runtime.Provider { return p }},
+		{"hybrid", func(p *Provider) runtime.Provider {
+			return hybrid.New(runtime.NewFake(), seamBacked(p), func(name string) bool { return name == "s" })
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			refOps := newProbeOps(sessions)
+			markPodDeleting(refOps.inner, "s")
+			want := runtime.ObserveLiveness(tc.wrap(newProviderWithOps(refOps)), "s", names)
+			if want.Alive {
+				t.Fatalf("precondition: the snapshot-free read of a deleting pod = %+v, want not alive", want)
+			}
+
+			ops := newProbeOps(sessions)
+			raw, clock := newSnapshotProvider(ops)
+			sp := tc.wrap(raw)
+			if live := runtime.ObserveLiveness(sp, "s", names); !live.Alive {
+				t.Fatalf("precondition: liveness before the delete = %+v, want alive", live)
+			}
+			ops.withFake(func(f *fakeK8sOps) { markPodDeleting(f, "s") })
+			clock.set(clock.now().Add(time.Second))
+			if live := runtime.ObserveLiveness(sp, "s", names); !live.Alive {
+				t.Fatalf("precondition: the plain read inside the TTL = %+v, want alive from the listing taken before the delete", live)
+			}
+
+			since := clock.now()
+			ops.reset()
+			for read := 1; read <= 2; read++ {
+				live, err := runtime.ObserveLivenessSince(sp, "s", names, since)
+				if err != nil {
+					t.Fatalf("fresh read %d: %v", read, err)
+				}
+				if live != want {
+					t.Errorf("fresh read %d = %+v, want the snapshot-free %+v", read, live, want)
+				}
+			}
+			if n := snapshotListCount(ops); n != 1 {
+				t.Errorf("snapshot LISTs for two fresh reads at one since = %d, want 1: the first lists again, the second reuses its listing", n)
+			}
+		})
+	}
+}
+
+// TestFreshLivenessReadAgreesWithThePlainRead: the seam-backed provider's
+// fresh read is its own liveness read, on a listing taken since, so in every
+// session state it equals that provider's read without a snapshot. It never
+// reads alive where that read does not: a Running pod whose tmux is down
+// reads not running and not alive, though a process there matches.
+func TestFreshLivenessReadAgreesWithThePlainRead(t *testing.T) {
+	names := []string{"claude"}
+	seamBacked := func(p *Provider) runtime.Provider {
+		return &seamBackedProvider{Provider: runtime.NewProviderFromSeams(p.Seams()), raw: p}
+	}
+	for _, s := range []probeSession{
+		{name: "live", pod: true, tmux: true, attached: "0", activity: 1709300000},
+		{name: "tmux-down", pod: true},
+		{name: "no-pod"},
+	} {
+		t.Run(s.name, func(t *testing.T) {
+			want := runtime.ObserveLiveness(seamBacked(newProviderWithOps(newProbeOps([]probeSession{s}))), s.name, names)
+			raw, clock := newSnapshotProvider(newProbeOps([]probeSession{s}))
+			got, err := runtime.ObserveLivenessSince(seamBacked(raw), s.name, names, clock.now())
+			if err != nil || got != want {
+				t.Errorf("fresh read = (%+v, %v), want the snapshot-free read %+v", got, err, want)
+			}
+		})
+	}
+}
+
+// TestFreshLivenessReadDoesNotJoinAListStartedBeforeSince: until a listing
+// is published, the first snapshot LIST can still be in flight when a fresh
+// read arrives, and that LIST started before since. The fresh read lists for
+// itself instead of waiting for it, so it reads the pod as it is now, and
+// the read that started the older LIST still answers from that LIST.
+func TestFreshLivenessReadDoesNotJoinAListStartedBeforeSince(t *testing.T) {
+	names := []string{"claude"}
+	ops := newProbeOps([]probeSession{{name: "s", pod: true, tmux: true, attached: "0", activity: 1709300000}})
+	ops.started = make(chan int, 4)
+	gate := ops.gate(0)
+	release := sync.OnceFunc(func() { close(gate) })
+	defer release()
+	p, clock := newSnapshotProvider(ops)
+
+	plain := make(chan bool, 1)
+	go func() { plain <- p.ProcessAlive("s", names) }()
+	if idx := <-ops.started; idx != 0 {
+		t.Fatalf("first LIST index = %d, want 0", idx)
+	}
+	// LIST 0 has read the pod not deleting and is held in flight; no
+	// listing is published yet.
+	ops.withFake(func(f *fakeK8sOps) { markPodDeleting(f, "s") })
+	clock.set(clock.now().Add(time.Second))
+
+	fresh := make(chan runtime.Liveness, 1)
+	go func() {
+		live, _ := runtime.ObserveLivenessSince(p, "s", names, clock.now())
+		fresh <- live
+	}()
+	select {
+	case live := <-fresh:
+		if live.Alive {
+			t.Errorf("fresh read = %+v, want not alive from a LIST of its own", live)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the fresh read waited for the LIST that started before since")
+	}
+	release()
+	if !<-plain {
+		t.Error("the read that started LIST 0 = not alive, want alive from that LIST")
 	}
 }

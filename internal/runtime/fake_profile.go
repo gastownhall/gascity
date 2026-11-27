@@ -146,7 +146,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	case ProfileHerdr:
 		return herdrProfile{core, b, b, b, b, b, localTranscriptTrait{}}
 	case ProfileK8s:
-		return k8sProfile{core, b, b, timed, sharedListingTrait{}}
+		return k8sProfile{core, b, b, timed, sharedListingTrait{}, boolFreshTrait{core}}
 	case ProfileExec, ProfileExecV2:
 		return execProfile{core, b, b, b, b, b, b, b, timed, probeBudgetTrait{}, execObserveTrait{core, b, p == ProfileExecV2}, execHostFSTrait{}}
 	case ProfileSSH:
@@ -175,9 +175,20 @@ type (
 	// (fs.host with locality local): the profiled pack declares neither, so
 	// its transcripts are not local and it cannot scan.
 	execHostFSTrait struct{}
+	// boolFreshTrait is k8s's fresh read: its IsRunning and ProcessAlive
+	// read with a nil error, which the provider serves from a pod listing
+	// taken at or after since. The backend's reads are current, so the
+	// profile answers from them.
+	boolFreshTrait struct{ core Provider }
 )
 
 func (t sleepTrait) SleepCapability(string) SessionSleepCapability { return t.c }
+
+// ObserveLivenessSince implements [FreshLivenessObserver] as k8s does: the
+// IsRunning and ProcessAlive read, never an error.
+func (t boolFreshTrait) ObserveLivenessSince(name string, processNames []string, _ time.Time) (Liveness, error) {
+	return ObserveLiveness(struct{ Provider }{t.core}, name, processNames), nil
+}
 
 func (t turnInterruptTrait) TurnInterruptMode(string) TurnInterruptMode { return t.m }
 
@@ -327,6 +338,7 @@ type (
 		RelaunchProvider
 		sleepTrait
 		sharedListingTrait
+		boolFreshTrait
 	}
 	execProfile struct {
 		Provider

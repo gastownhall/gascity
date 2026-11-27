@@ -381,7 +381,7 @@ const killLivenessTimeout = 5 * time.Second
 // The read is the routed leaf's (runtime.ResolveBackend), as v2's runtime
 // read takes it: a composite (auto, hybrid) routes by name, and hybrid
 // deliberately offers no fresh read of its own (its read is its leaves'
-// cached one), so asking it would fall back to the cache. The route comes
+// cached one), so only the leaf says if it can read fresh. The route comes
 // from the bead (loadSessionBead registers an ACP session's route), so call
 // this after reading the row. A route that is only a guess confirms nothing,
 // nor does a leaf that cannot read fresh (runtime.FreshReadable: herdr, k8s,

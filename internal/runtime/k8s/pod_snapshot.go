@@ -29,7 +29,9 @@ const podSnapshotFetchTimeout = 10 * time.Second
 // flight wait for it rather than listing again (singleflight per generation).
 // There is no watch, timer or goroutine. A failed LIST is returned to its readers and never cached. Start, Stop and
 // Relaunch invalidate the snapshot, so this process's own pod changes are seen
-// by the next read.
+// by the next read. A fresh liveness read ([Provider.ObserveLivenessSince])
+// expires a listing taken before its since, so it also sees the changes other
+// processes made.
 type podSnapshot struct {
 	ttl time.Duration
 
@@ -81,6 +83,24 @@ func (s *podSnapshot) invalidate() {
 	s.mu.Unlock()
 }
 
+// expireBefore opens a new generation, as invalidate does, unless the
+// published listing's LIST started at or after since. The next read is then
+// served from a LIST that started at or after since: that listing while it is
+// within the TTL, else a LIST of its own, never one in flight from before
+// since. Before the first listing is published it always opens one, because a
+// LIST still in flight may have started before since. A nil snapshot (the
+// provider lists per session) reads fresh already.
+func (s *podSnapshot) expireBefore(since time.Time) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.listing == nil || s.listing.startedAt.Before(since) {
+		s.generation++
+	}
+}
+
 // projectPod projects a listed pod to its snapshot form.
 func projectPod(pod *corev1.Pod) snapshotPod {
 	return snapshotPod{name: pod.Name, phase: pod.Status.Phase, deleting: pod.DeletionTimestamp != nil}
@@ -90,22 +110,12 @@ func projectPod(pod *corev1.Pod) snapshotPod {
 // snapshot's TTL, listing the gc-agent pods when the published one is
 // missing, expired or from an earlier generation.
 func (p *Provider) podListing() (*podListing, error) {
-	s := p.snapshot
-	l, gen := s.servable(p.clock())
+	l, gen := p.snapshot.servable(p.clock())
 	if l != nil {
 		return l, nil
 	}
-	v, err, _ := s.flights.Do(strconv.FormatUint(gen, 10), func() (any, error) {
-		// A flight for gen may have published while this reader queued.
-		if l, current := s.servable(p.clock()); l != nil && current == gen {
-			return l, nil
-		}
-		l, err := p.listAgentPods(gen)
-		if err != nil {
-			return nil, err
-		}
-		s.publish(l)
-		return l, nil
+	v, err, _ := p.snapshot.flights.Do(strconv.FormatUint(gen, 10), func() (any, error) {
+		return p.fetchListing(gen)
 	})
 	if err != nil {
 		return nil, err
@@ -114,6 +124,23 @@ func (p *Provider) podListing() (*podListing, error) {
 	if !ok {
 		return nil, fmt.Errorf("k8s pod snapshot: flight returned %T, want *podListing", v)
 	}
+	return l, nil
+}
+
+// fetchListing is the snapshot flight for generation gen. A reader that found
+// no servable listing can reach it after another flight for gen published
+// one, since singleflight starts a new flight once the last one returned: it
+// answers from that listing while it is still servable, and otherwise lists
+// the gc-agent pods and publishes the listing.
+func (p *Provider) fetchListing(gen uint64) (*podListing, error) {
+	if l, current := p.snapshot.servable(p.clock()); l != nil && current == gen {
+		return l, nil
+	}
+	l, err := p.listAgentPods(gen)
+	if err != nil {
+		return nil, err
+	}
+	p.snapshot.publish(l)
 	return l, nil
 }
 
@@ -200,6 +227,30 @@ func (p *Provider) observedPod(ctx context.Context, name string) (snapshotPod, b
 		return snapshotPod{}, false, nil
 	}
 	return pods[0], true, nil
+}
+
+var _ runtime.FreshLivenessObserver = (*Provider)(nil)
+
+// ObserveLivenessSince implements [runtime.FreshLivenessObserver]: the
+// IsRunning and ProcessAlive read [runtime.ObserveLiveness] takes, served from
+// a pod listing whose LIST started at or after since on the provider clock
+// (see [Provider.observeLivenessSince]). Like that read it reports no error:
+// a failed LIST reads not running.
+func (p *Provider) ObserveLivenessSince(name string, processNames []string, since time.Time) (runtime.Liveness, error) {
+	return p.observeLivenessSince(p, name, processNames, since), nil
+}
+
+// observeLivenessSince is [runtime.ObserveLiveness] over sp, whose
+// observation reads are served from p's pod snapshot, answered from a pod
+// listing whose LIST started at or after since. The snapshot learns only of
+// this process's own pod changes, so an older listing can still show a pod
+// another process deleted meanwhile (`gc session kill` stops through the
+// CLI's own provider) as not deleting. The snapshot is expired first unless
+// its listing is that new, and the listing the read then takes serves the
+// other observation reads too.
+func (p *Provider) observeLivenessSince(sp runtime.Provider, name string, processNames []string, since time.Time) runtime.Liveness {
+	p.snapshot.expireBefore(since)
+	return runtime.ObserveLiveness(sp, name, processNames)
 }
 
 // observationConn is the exec connection GetLastActivity reads tmux through:

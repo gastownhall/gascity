@@ -87,13 +87,26 @@ type FreshLivenessObserver interface {
 // [ObserveLivenessWithError]: acp and subprocess probe their control socket on
 // every call, so that read is already fresh. A provider that caches must
 // implement the capability before v2 reads it.
+//
+// A [Router] without the capability (hybrid) routes by name, and its own read
+// answers from its leaves' caches. When its route for name is known
+// ([ResolveBackend]) and the leaf serving name has the capability, that leaf
+// reads fresh, so a session another process killed is not read alive from the
+// leaf's cache. Any other route, and a leaf without the capability, keep the
+// composite's own read.
 func ObserveLivenessSince(sp Provider, name string, processNames []string, since time.Time) (Liveness, error) {
 	if sp == nil || strings.TrimSpace(name) == "" {
 		return Liveness{}, nil
 	}
-	if observer, ok := sp.(FreshLivenessObserver); ok {
-		obs, err := observer.ObserveLivenessSince(name, processNames, since)
-		return normalizeLiveness(obs), err
+	observer, ok := sp.(FreshLivenessObserver)
+	if !ok {
+		if leaf, _, known := ResolveBackend(sp, name); known {
+			observer, ok = leaf.(FreshLivenessObserver)
+		}
 	}
-	return ObserveLivenessWithError(sp, name, processNames)
+	if !ok {
+		return ObserveLivenessWithError(sp, name, processNames)
+	}
+	obs, err := observer.ObserveLivenessSince(name, processNames, since)
+	return normalizeLiveness(obs), err
 }

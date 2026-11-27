@@ -62,6 +62,7 @@ go_test(
     deps = [
         "//internal/bazeltest",
         "//internal/runtime",
+        "//internal/runtime/hybrid",
         "//internal/runtime/runtimetest",
         "//internal/shellquote",
         "//internal/testenv",

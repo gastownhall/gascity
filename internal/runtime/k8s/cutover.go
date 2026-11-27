@@ -24,6 +24,7 @@ var (
 	_ runtime.RelaunchProvider        = (*seamBackedProvider)(nil)
 	_ runtime.ListingAttestation      = (*seamBackedProvider)(nil)
 	_ runtime.SharedListing           = (*seamBackedProvider)(nil)
+	_ runtime.FreshLivenessObserver   = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked constructs a k8s provider served through the seams.
@@ -59,6 +60,16 @@ func (s *seamBackedProvider) IsAttached(name string) bool {
 // does, and otherwise the same poke-discounted activity Observe reports.
 func (s *seamBackedProvider) GetLastActivity(name string) (time.Time, error) {
 	return s.raw.GetLastActivity(name)
+}
+
+// ObserveLivenessSince implements [runtime.FreshLivenessObserver]: this
+// provider's own liveness read (IsRunning, and ProcessAlive through the
+// seams), served from a pod listing whose LIST started at or after since.
+// It reads alive exactly where the plain read would on that listing.
+// Without it runtime.ObserveLivenessSince answers from the pod snapshot,
+// which can still show a pod another process deleted as not deleting.
+func (s *seamBackedProvider) ObserveLivenessSince(name string, processNames []string, since time.Time) (runtime.Liveness, error) {
+	return s.raw.observeLivenessSince(s, name, processNames, since), nil
 }
 
 // SleepCapability passes through to the underlying provider (non-seam).
