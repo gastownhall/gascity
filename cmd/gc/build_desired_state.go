@@ -254,6 +254,61 @@ var (
 	errPoolSessionCreateProviderRed     = errors.New("pool session create skipped: provider red")
 )
 
+const (
+	// poolTerminalCreateCooldown is how long a fresh ephemeral create stays
+	// suppressed after a terminal provider error was recorded for the same
+	// (template, resolved work dir). It is deliberately not configurable: it
+	// bounds the failed-create bead flood a persistent terminal error would
+	// otherwise produce on every reconciler tick.
+	poolTerminalCreateCooldown = 5 * time.Minute
+
+	// poolTerminalCreateClockSkew is how far past the decision time a recorded
+	// failure may be stamped and still count (writers on another clock). A
+	// stamp beyond it cannot be a real past failure and is ignored, so it
+	// cannot hold a create out indefinitely.
+	poolTerminalCreateClockSkew = time.Minute
+)
+
+// poolTerminalCreateCooldownActive reports whether a fresh ephemeral create
+// for template should be suppressed because a terminal provider error was
+// recorded for the same (template, work dir) within poolTerminalCreateCooldown
+// of decisionTime. The work dir key is plannedWorkDir, the plan's routed work
+// dir (pack, workspace or verified worktree) as stamped on the row it would
+// create; when that is empty it falls back to qualifiedInstance's configured
+// work dir. The window is measured on the tick's decision time, never on
+// bp.beaconTime, which is frozen at controller start.
+//
+// It fails open (returns false, allowing the create) whenever it cannot
+// establish a clear, current match, and says so on bp.stderr where the cause is
+// an error: the build is plan-only (no store reads, so no history to consult),
+// the configured fallback work dir cannot be resolved, the history read fails, or the
+// matching rows lack a usable timestamp (see
+// session.Store.LatestEphemeralTerminalFailure). The work dir is resolved
+// without creating it, so evaluating the gate has no filesystem effect.
+func poolTerminalCreateCooldownActive(bp *agentBuildParams, cfgAgent *config.Agent, template, qualifiedInstance, plannedWorkDir string, decisionTime time.Time) bool {
+	if bp.planOnly {
+		return false
+	}
+	workDir := strings.TrimSpace(plannedWorkDir)
+	if workDir == "" {
+		resolved, err := resolveConfiguredWorkDirPath(bp.cityPath, bp.cityName, qualifiedInstance, cfgAgent, bp.rigs)
+		if err != nil {
+			fmt.Fprintf(bp.stderr, "buildDesiredState: pool %q: terminal-cooldown work dir unresolved: %v (fail-open, fresh create allowed)\n", qualifiedInstance, err) //nolint:errcheck
+			return false
+		}
+		workDir = resolved
+	}
+	if strings.TrimSpace(workDir) == "" {
+		return false
+	}
+	failedAt, found, err := sessionFrontDoor(bp.beadStore).LatestEphemeralTerminalFailure(template, workDir, decisionTime.Add(poolTerminalCreateClockSkew))
+	if err != nil {
+		fmt.Fprintf(bp.stderr, "buildDesiredState: pool %q: terminal-cooldown history query failed: %v (fail-open, fresh create allowed)\n", qualifiedInstance, err) //nolint:errcheck
+		return false
+	}
+	return found && decisionTime.Sub(failedAt) < poolTerminalCreateCooldown
+}
+
 // poolSessionCreateFairShareCounter rotates scarce create tokens across
 // contending pools so stable template sort order does not always win.
 var poolSessionCreateFairShareCounter atomic.Uint64
@@ -4300,6 +4355,16 @@ func realizePoolDesiredSessionsAt(
 				return item
 			}
 			if plan != nil {
+				if poolTerminalCreateCooldownActive(bp, cfgAgent, poolState.Template, plan.qualifiedInstance, plan.metadata[beadmeta.LegacyWorkDirMetadataKey], poolDecisionTime) {
+					// The plan already claimed a slot and a create-budget
+					// token; give both back so this tick's other requests
+					// can use them.
+					bp.releasePoolSessionCreate()
+					delete(usedSlots, plan.slot)
+					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: pool session create skipped: terminal cooldown active (fresh create blocked)\n", qualifiedName) //nolint:errcheck
+					item.skip = true
+					return item
+				}
 				item.plan = plan
 				item.slot = plan.poolSlot
 				return item
