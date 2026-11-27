@@ -162,14 +162,23 @@ func (c *v2DemandMigrationsCheck) sweep(fix bool, stderr io.Writer) demandMigrat
 		s.problems = append(s.problems, "assigned collection partial")
 	}
 	repairPoolSlotWorkDirClobber(c.cfg, assigned, writes(demandMigrationRepairs[0], assignedStores, assignedRefs), stderr)
-	canonicalizeLegacyBoundAssignedWork(c.cfg, assigned, writes(demandMigrationRepairs[1], assignedStores, assignedRefs), assignedRefs, sessions, stderr)
+	assignedReport := canonicalizeLegacyBoundAssignedWork(c.cfg, assigned, writes(demandMigrationRepairs[1], assignedStores, assignedRefs), assignedRefs, sessions, stderr)
+	// Only --fix logs the re-home report: a dry run's buffered output is
+	// reported as read problems, and a refused row is not a problem. Refused
+	// rows issue no write, so they are never counted as repairs either.
+	if fix {
+		assignedReport.log(stderr, demandMigrationRepairs[1])
+	}
 
 	routed, routedStores, routedRefs, routedPartial := collectOpenUnassignedRoutedWork(c.cityPath, c.cfg, city, rigs, suspended, stderr, nil, nil)
 	if routedPartial {
 		s.problems = append(s.problems, "unassigned routed collection partial")
 	}
 	repairPoolSlotWorkDirClobber(c.cfg, routed, writes(demandMigrationRepairs[0], routedStores, routedRefs), stderr)
-	canonicalizeLegacyBoundUnassignedRoutedWork(c.cfg, routed, writes(demandMigrationRepairs[2], routedStores, routedRefs), routedRefs, stderr)
+	routedReport := canonicalizeLegacyBoundUnassignedRoutedWork(c.cfg, routed, writes(demandMigrationRepairs[2], routedStores, routedRefs), routedRefs, stderr)
+	if fix {
+		routedReport.log(stderr, demandMigrationRepairs[2])
+	}
 	collapseSlotSuffixedRoutedWork(c.cfg, routed, writes(demandMigrationRepairs[3], routedStores, routedRefs), stderr)
 	return s
 }

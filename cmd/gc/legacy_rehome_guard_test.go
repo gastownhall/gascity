@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
 )
 
 // The #5846 topology: two cities attached to one rig store "qcore". City A
@@ -498,5 +499,48 @@ func TestLegacyRehomeReportLog(t *testing.T) {
 	}
 	if got := strings.Split(strings.TrimRight(out.String(), "\n"), "\n"); !slices.Equal(got, want) {
 		t.Errorf("log lines\n got  %q\n want %q", got, want)
+	}
+}
+
+// AC-8
+
+// TestDoctorV2DemandMigrationsLeavesRefusedSharedRigRows: the doctor sweep runs
+// the same guarded canonicalizers, so a refused rig row is neither counted as a
+// repair nor written by --fix.
+func TestDoctorV2DemandMigrationsLeavesRefusedSharedRigRows(t *testing.T) {
+	const foreign = "rig-A/pool.planner"
+	f := newRepairGoldenFixture(t)
+	cfg := f.env.Cfg
+	cfg.Daemon.SessionReconciler = config.SessionReconcilerV2
+	city := beads.NewMemStoreFrom(0, []beads.Bead{workBead("ga-rlegacy", goldenLegacyPlanner, "", "open", 5)}, nil)
+	rig := beads.NewMemStoreFrom(0, []beads.Bead{workBead("fx-foreign", foreign, "", "open", 5)}, nil)
+	c := demandMigrationsCheckFor(t, cfg, f.env.CityPath, city, map[string]beads.Store{"fixture": rig, "nodisp": beads.NewMemStore()})
+	ctx := &doctor.CheckContext{CityPath: f.env.CityPath}
+
+	sweep := c.sweep(false, io.Discard)
+	wantCounts := map[demandMigrationKey]int{{"canonicalizeLegacyBoundUnassignedRoutedWork", "city"}: 1}
+	if !reflect.DeepEqual(sweep.counts, wantCounts) || len(sweep.problems) != 0 {
+		t.Errorf("dry-run sweep counts = %v problems = %q, want %v and no problems", sweep.counts, sweep.problems, wantCounts)
+	}
+	r := c.Run(ctx)
+	if strings.Contains(r.Message, "read problem") {
+		t.Errorf("dry run message = %q, want no read problem", r.Message)
+	}
+
+	var out bytes.Buffer
+	ctx.Output = &out
+	if err := c.Fix(ctx); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	if got := mustGetBead(t, rig, "fx-foreign").Metadata[beadmeta.RoutedToMetadataKey]; got != foreign {
+		t.Errorf("refused rig row gc.routed_to = %q, want %q", got, foreign)
+	}
+	if got := mustGetBead(t, city, "ga-rlegacy").Metadata[beadmeta.RoutedToMetadataKey]; got != goldenCanonicalPlanner {
+		t.Errorf("own-leg row gc.routed_to = %q, want %q", got, goldenCanonicalPlanner)
+	}
+	logged := out.String()
+	if !strings.Contains(logged, "canonicalizeLegacyBoundUnassignedRoutedWork: rehomed ga-rlegacy on city: ") ||
+		!strings.Contains(logged, `"`+foreign+`" -> "`+goldenCanonicalPlanner+`" (1: fx-foreign)`) {
+		t.Errorf("--fix output = %q, want the rehomed line and the refusal summary", logged)
 	}
 }
