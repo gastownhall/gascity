@@ -247,6 +247,14 @@ func (f *FakeBd) list(flags map[string][]string) ([]byte, error) {
 	if v, ok := lastFlag(flags, "--parent"); ok {
 		query.ParentID = v
 	}
+	if v, ok := lastFlag(flags, "--id"); ok {
+		// bd splits --id on commas and trims each entry.
+		for _, id := range strings.Split(v, ",") {
+			if id = strings.TrimSpace(id); id != "" {
+				query.IDs = append(query.IDs, id)
+			}
+		}
+	}
 	for _, kv := range flags["--metadata-field"] {
 		k, v, _ := strings.Cut(kv, "=")
 		if query.Metadata == nil {
@@ -274,6 +282,12 @@ func (f *FakeBd) list(flags map[string][]string) ([]byte, error) {
 // splitBdQueryAnd splits a bd query expression on " AND " outside
 // double-quoted strings, honoring backslash escapes inside quotes.
 func splitBdQueryAnd(expr string) []string {
+	return splitBdQueryOn(expr, " AND ")
+}
+
+// splitBdQueryOn splits a bd query expression on sep outside double-quoted
+// strings, honoring backslash escapes inside quotes.
+func splitBdQueryOn(expr, sep string) []string {
 	var parts []string
 	inQuote, escaped, start := false, false, 0
 	for i := 0; i < len(expr); i++ {
@@ -285,9 +299,9 @@ func splitBdQueryAnd(expr string) []string {
 			escaped = true
 		case c == '"':
 			inQuote = !inQuote
-		case !inQuote && strings.HasPrefix(expr[i:], " AND "):
+		case !inQuote && strings.HasPrefix(expr[i:], sep):
 			parts = append(parts, expr[start:i])
-			i += len(" AND ") - 1
+			i += len(sep) - 1
 			start = i + 1
 		}
 	}
@@ -310,6 +324,19 @@ func unquoteBdQueryValue(v string) string {
 	return b.String()
 }
 
+// fakeBdQueryIDOr reads the ids of an OR of id clauses, `id=a OR id="b"`.
+func fakeBdQueryIDOr(expr string) ([]string, error) {
+	var ids []string
+	for _, clause := range splitBdQueryOn(expr, " OR ") {
+		k, v, ok := strings.Cut(strings.TrimSpace(clause), "=")
+		if !ok || k != "id" {
+			return nil, fmt.Errorf("fake bd query: unsupported OR clause %q", clause)
+		}
+		ids = append(ids, unquoteBdQueryValue(v))
+	}
+	return ids, nil
+}
+
 // query answers bd's wisp-tier query: `bd query --json "ephemeral=true AND
 // k=v AND ..." [--all] [--limit N]`, ephemeral rows only, for the keys a
 // BdStore sends (id, parent, status, type, label, assignee, metadata.<key>).
@@ -323,7 +350,17 @@ func (f *FakeBd) query(flags map[string][]string, positional []string) ([]byte, 
 	}
 	ephemeral := false
 	for _, clause := range splitBdQueryAnd(positional[0]) {
-		k, v, ok := strings.Cut(strings.TrimSpace(clause), "=")
+		clause = strings.TrimSpace(clause)
+		if strings.HasPrefix(clause, "(") && strings.HasSuffix(clause, ")") {
+			// The one OR a BdStore sends: (id=a OR id=b ...).
+			ids, err := fakeBdQueryIDOr(clause[1 : len(clause)-1])
+			if err != nil {
+				return nil, err
+			}
+			query.IDs = ids
+			continue
+		}
+		k, v, ok := strings.Cut(clause, "=")
 		if !ok {
 			return nil, fmt.Errorf("fake bd query: unsupported clause %q", clause)
 		}

@@ -3191,6 +3191,9 @@ func (s *BdStore) fetchViaBDList(query ListQuery) ([]Bead, *PartialResultError, 
 	if serverQuery.ParentID != "" {
 		args = append(args, "--parent", serverQuery.ParentID)
 	}
+	if ids, ok := bdListIDFilter(serverQuery.IDs); ok {
+		args = append(args, "--id", ids)
+	}
 	if len(serverQuery.Metadata) > 0 {
 		keys := make([]string, 0, len(serverQuery.Metadata))
 		for k := range serverQuery.Metadata {
@@ -3259,9 +3262,10 @@ func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssig
 	if serverQuery.SeekAfter != nil {
 		return true
 	}
-	// IDs is a Go-side-only residual filter (see ListQuery.Matches): bd list
-	// has no --id flag, so a bd-side limit could truncate before the
-	// matching IDs are even fetched.
+	// IDs reach bd as --id only when bdListIDFilter can carry them all; when
+	// it can't, the read is unpredicated by id and a bd-side limit could
+	// truncate before the matching IDs are even fetched. ListQuery.Matches
+	// cuts the exact set either way, so Go applies the limit after it.
 	if len(serverQuery.IDs) > 0 {
 		return true
 	}
@@ -3279,6 +3283,78 @@ func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssig
 
 func bdListShouldIncludeTemplates(query ListQuery) bool {
 	return query.TierMode == TierWisps || (query.TierMode == TierBoth && query.Type != "message")
+}
+
+// bdIDPushdownMaxArgBytes bounds the one argv entry an id pushdown builds
+// (bd list's --id value, bd query's expression). Linux refuses any single
+// argument past MAX_ARG_STRLEN, 128 KiB, so a longer list stays a Go-side
+// filter over an unpredicated read, as every IDs read was before.
+const bdIDPushdownMaxArgBytes = 64 << 10
+
+// bdListIDFilter renders ids as bd list's --id value, sorted so the same set
+// always makes the same argv. bd splits the value on commas and trims each
+// entry (every bd since v0.11.0 has the flag), so an id holding a comma, or
+// space at either end, would reach bd as a different id: then, or for a list
+// past bdIDPushdownMaxArgBytes, ok is false and the read stays unpredicated
+// by id. Empty ids match no bead and are left out. The pushdown only narrows
+// what bd reads: ListQuery.Matches still cuts the exact set.
+func bdListIDFilter(ids []string) (string, bool) {
+	kept := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if strings.Contains(id, ",") || strings.TrimSpace(id) != id {
+			return "", false
+		}
+		kept = append(kept, id)
+	}
+	if len(kept) == 0 {
+		return "", false
+	}
+	sort.Strings(kept)
+	joined := strings.Join(kept, ",")
+	if len(joined) > bdIDPushdownMaxArgBytes {
+		return "", false
+	}
+	return joined, true
+}
+
+// bdQueryIDClause renders ids as a bd query clause, `id="a"` for one and
+// `(id="a" OR id="b")` for more, sorted so the same set always makes the
+// same expression. bd query has no id list: one id is an indexed lookup, but
+// an OR of ids is evaluated over the rows the query's other clauses select,
+// so there the clause shrinks what bd prints and gc parses, not what Dolt
+// reads. Each id is quoted exactly as Get's absence check quotes one; an id
+// that can't travel so (isExactIDQueryable), or a clause past
+// bdIDPushdownMaxArgBytes, makes ok false and leaves the read unpredicated
+// by id. A trailing '*' makes bd match a prefix, a superset that
+// ListQuery.Matches cuts like any other.
+func bdQueryIDClause(ids []string) (string, bool) {
+	kept := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if !isExactIDQueryable(id) {
+			return "", false
+		}
+		// isExactIDQueryable admits only printable ASCII without '"' or '\',
+		// which strconv.Quote leaves unescaped, so this is exactly id="<id>".
+		kept = append(kept, "id="+strconv.Quote(id))
+	}
+	if len(kept) == 0 {
+		return "", false
+	}
+	sort.Strings(kept)
+	clause := strings.Join(kept, " OR ")
+	if len(kept) > 1 {
+		clause = "(" + clause + ")"
+	}
+	if len(clause) > bdIDPushdownMaxArgBytes {
+		return "", false
+	}
+	return clause, true
 }
 
 func bdServerQueryForAssignees(query ListQuery) (ListQuery, bool) {
@@ -3350,6 +3426,9 @@ func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
 	// every metadata filter, and canApplyWispsServerLimit keeps the limit
 	// client-side whenever one is set.
 	clauses = appendBdQueryMetadataClauses(clauses, serverQuery.Metadata)
+	if idClause, ok := bdQueryIDClause(serverQuery.IDs); ok {
+		clauses = append(clauses, idClause)
+	}
 
 	args := []string{"query", "--json", strings.Join(clauses, " AND ")}
 	if serverQuery.IncludeClosed || serverQuery.Status == "closed" {
