@@ -698,6 +698,57 @@ func probeConnector(port int, database string, driverTimeout time.Duration) (dri
 	return mysql.NewConnector(cfg)
 }
 
+// openPinnedSession dials exactly one connection through connector and hands
+// it back inside a throwaway *sql.DB that retains no idle slot, so the caller's
+// close of the *sql.Conn closes the socket and the handle's close retires the
+// wrapper. The caller owns both closes; on success the connection must be
+// closed before the handle (deferring the handle's close first does that).
+//
+// One session is exactly one TCP dial, and the dial is made HERE, outside
+// database/sql, rather than by db.Conn. db.Conn runs its acquisition through
+// DB.retry, which re-dials on any error that errors.Is driver.ErrBadConn — up
+// to maxBadConnRetries (2) more times — so a connector whose handshake failure
+// is spelled ErrBadConn would cost bd's proxy three accepts for one session.
+// That is three sessions against bd's idle watcher, three greetings withheld
+// where the caller reports one, and three rungs of the zombie ladder from one
+// check. go-sql-driver v1.10.0 spells a failed greeting ErrInvalidConn, so
+// today's driver does not reach that path, but earlier releases rewrote exactly
+// that error to ErrBadConn "for sql.Driver to retry", and nothing in a
+// single-session contract may rest on a driver's spelling of the day. Dialing
+// directly returns the first failure as it was produced, and the handle is then
+// opened over a oneSessionConnector that can hand database/sql that one
+// connection and never dial another.
+//
+// Everything after acquisition runs on the pinned *sql.Conn, where database/sql
+// does not retry: Conn.PingContext and Conn.QueryContext go straight to the
+// driver connection they hold (pingDC, queryDC), and a bad-connection error
+// there is returned and the connection discarded.
+func openPinnedSession(ctx context.Context, connector driver.Connector) (*sql.Conn, *sql.DB, error) {
+	// A caller who has already given up is owed no dial at all.
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	session, err := connector.Connect(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	one := &oneSessionConnector{session: session, driver: connector.Driver()}
+	db := sql.OpenDB(one)
+	// One connection, never idle: a single-session caller needs exactly one
+	// session, and it must leave nothing behind for anything to reuse.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(0)
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		// If database/sql never took the session — a context that expired
+		// between the dial and db.Conn — nothing else will close it.
+		one.closeUntaken()
+		_ = db.Close() //nolint:errcheck // the wrapper of a session nobody took
+		return nil, nil, err
+	}
+	return conn, db, nil
+}
+
 // readCursorsOver runs one probe session over connector and closes everything it
 // opened before it returns.
 //
@@ -707,55 +758,68 @@ func probeConnector(port int, database string, driverTimeout time.Duration) (dri
 // which nothing else holds and so cannot outlive this call. A caller's canceled
 // or expired context reaches the same returns through db.Conn and the queries,
 // so a probe the caller has already abandoned still closes its session here.
-//
-// One probe is exactly one TCP session, and the dial is made HERE, outside
-// database/sql, rather than by db.Conn. db.Conn runs its acquisition through
-// DB.retry, which re-dials on any error that errors.Is driver.ErrBadConn — up
-// to maxBadConnRetries (2) more times — so a connector whose handshake failure
-// is spelled ErrBadConn would cost bd's proxy three accepts for one probe. That
-// is three sessions against bd's idle watcher, three greetings withheld where
-// the probe reports one, and three rungs of the zombie ladder from one check.
-// go-sql-driver v1.10.0 spells a failed greeting ErrInvalidConn, so today's
-// driver does not reach that path, but earlier releases rewrote exactly that
-// error to ErrBadConn "for sql.Driver to retry", and nothing in the probe's
-// contract may rest on a driver's spelling of the day. Dialing directly returns
-// the first failure to the classifier as it was produced, and the handle is
-// then opened over a oneSessionConnector that can hand database/sql that one
-// connection and never dial another.
-//
-// Everything after acquisition runs on the pinned *sql.Conn, where database/sql
-// does not retry: Conn.PingContext and Conn.QueryContext go straight to the
-// driver connection they hold (pingDC, queryDC), and a bad-connection error
-// there is returned and the connection discarded.
 func readCursorsOver(ctx context.Context, connector driver.Connector) (CursorReport, error) {
 	var report CursorReport
-	// A caller who has already given up is owed no dial at all.
-	if err := ctx.Err(); err != nil {
-		return report, err
-	}
-	session, err := connector.Connect(ctx)
+	conn, db, err := openPinnedSession(ctx, connector)
 	if err != nil {
 		return report, err
 	}
-	one := &oneSessionConnector{session: session, driver: connector.Driver()}
-	db := sql.OpenDB(one)
-	// One connection, never idle: the probe needs exactly one session, and it
-	// must leave nothing behind for anything to reuse.
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(0)
-	defer db.Close() //nolint:errcheck // the probe's own handle, closed on every path
-	// If database/sql never took the session — a context that expired between
-	// the dial and db.Conn — nothing else will close it.
-	defer one.closeUntaken()
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		return report, err
-	}
-	defer conn.Close() //nolint:errcheck // closes the socket: this handle retains no idle connection
+	defer db.Close()   //nolint:errcheck // second: the wrapper, once the pinned connection is closed
+	defer conn.Close() //nolint:errcheck // first: closes the socket — this handle retains no idle connection
 	if err := conn.PingContext(ctx); err != nil {
 		return report, err
 	}
 	return ReadCursorReportOverConn(ctx, conn)
+}
+
+// OpenSession opens one private SQL session to a proxy's loopback data port,
+// as `root` with no password — the same credentials bd's own CLI uses over the
+// same proxy (see DefaultProbeIO) — and returns it pinned to a single
+// connection together with a close function.
+//
+// It exists for a caller that must run its own statements against the proxied
+// database without registering a handle in internal/doltpool: that registry's
+// handles are never closed and retain idle connections for its own bound, which
+// would defer the proxy's idle retirement exactly the way a probe's session
+// would (see DefaultProbeIO's doc comment). The returned close function closes
+// the session's socket and the throwaway handle, in that order, and is
+// idempotent; a caller that ignores its error still leaves no connection
+// behind. The session dials at most once (openPinnedSession), so a statement
+// failure the caller sees is its own, never a redial's.
+//
+// The caller's context bounds the dial. The driver's socket deadlines sit
+// strictly above that budget (ProbeDriverTimeoutSlack) so a slow proxy's
+// failure is spelled by the context rather than misread as a connection fault.
+func OpenSession(ctx context.Context, port int, database string) (*sql.Conn, func() error, error) {
+	database = strings.TrimSpace(database)
+	if database == "" {
+		return nil, nil, ErrNoDatabase
+	}
+	if port <= 0 {
+		return nil, nil, fmt.Errorf("proxyendpoint: open session requires a data port, got %d", port)
+	}
+	budget := ProbeSessionTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining > budget {
+			budget = remaining
+		}
+	}
+	connector, err := probeConnector(port, database, probeDriverTimeout(budget))
+	if err != nil {
+		return nil, nil, err
+	}
+	conn, db, err := openPinnedSession(ctx, connector)
+	if err != nil {
+		return nil, nil, err
+	}
+	var closed bool
+	return conn, func() error {
+		if closed {
+			return nil
+		}
+		closed = true
+		return errors.Join(conn.Close(), db.Close())
+	}, nil
 }
 
 // ReadCursorReportOverConn reads the database's real migration counters —

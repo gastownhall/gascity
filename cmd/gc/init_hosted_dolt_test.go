@@ -775,6 +775,7 @@ func TestGcInitCommandGenericSelectorRecordsOwnershipBeforeProviderInit(t *testi
 			stubInitDoltAuthorIdentity(t, map[string]string{"user.name": "test", "user.email": "test@example.com"})
 			stubInitRemoteImports(t)
 			disableBootstrapForTests(t)
+			skipProviderOwnedIdentityReconcile(t)
 
 			cityPath := filepath.Join(t.TempDir(), "selector-city")
 			providerLog := filepath.Join(t.TempDir(), "provider.log")

@@ -143,9 +143,21 @@ func TestBeadsInitTopologyMatrix(t *testing.T) {
 		})
 
 		t.Run("restart", func(t *testing.T) {
+			if topo.Name == "M1-proxied-local" {
+				// A ready scope's identity is reconciled on every start, not
+				// only at init: the canonical file removed while the city is
+				// down comes back from the store's own layers, through the
+				// scope's live proxy, on the next start.
+				if err := os.Remove(contract.ProjectIdentityPath(cityRoot)); err != nil {
+					t.Fatalf("remove the city's canonical project identity file before the restart: %v", err)
+				}
+			}
 			run.Start(t)
 			helpers.AssertScopeShape(t, cityRoot, cityRoot, topo.City, topo.Name+" restarted city")
 			helpers.AssertScopeShape(t, cityRoot, rigDir, topo.Rig, topo.Name+" restarted rig")
+			if topo.Name == "M1-proxied-local" {
+				assertProjectIdentityConverged(t, cityRoot, run.Env)
+			}
 
 			// The store has to be the same one, not a fresh empty binding: the
 			// bead created before the stop must still be there.
@@ -165,9 +177,10 @@ func TestBeadsInitTopologyMatrix(t *testing.T) {
 	})
 }
 
-// assertProjectIdentityConverged proves the real provider-owned M1 init wrote
-// one project identity to the canonical file, bd metadata, and its live Dolt
-// database. The proxy root and generation come from the same contract gc uses.
+// assertProjectIdentityConverged proves a real provider-owned M1 scope holds
+// one project identity in the canonical file, bd metadata, and its live Dolt
+// database: after init, and after a restart that had to rewrite the file. The
+// proxy root and generation come from the same contract gc uses.
 func assertProjectIdentityConverged(t *testing.T, scopeRoot string, env *helpers.Env) {
 	t.Helper()
 	// ProviderRoot follows bd's process-environment contract. Match the

@@ -32,6 +32,7 @@ go_test(
         "birth_test.go",
         "idle_test.go",
         "liveness_test.go",
+        "open_session_test.go",
         "poolkey_test.go",
         "post_open_test.go",
         "probe_cursor_reality_test.go",

@@ -300,6 +300,7 @@ func TestEnsureGCOwnedProxiedScopeSharedServerOffSkipsUnmaterializedScope(t *tes
 // proxy and Dolt child in ~/.beads/shared-server. Drives the real start path for
 // an owned city and an owned rig.
 func TestStartPinsOwnedScopesBeforeTheirFirstProviderOp(t *testing.T) {
+	skipProviderOwnedIdentityReconcile(t)
 	city := t.TempDir()
 	rig := filepath.Join(city, "rigs", "r1")
 	logPath := filepath.Join(city, "provider-ops")

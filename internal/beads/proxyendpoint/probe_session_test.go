@@ -385,6 +385,11 @@ const (
 	// listenerAnswersPingThenResets completes the handshake, answers the Ping,
 	// and resets the connection before the session's first statement.
 	listenerAnswersPingThenResets
+	// listenerGreetsAndStays completes the handshake and then never writes
+	// again: a healthy proxy whose client has nothing more to say yet. The
+	// session is established, so OpenSession can hand it back and its close
+	// can be observed through the gone signal of the silent pump.
+	listenerGreetsAndStays
 )
 
 // probeListener is one loopback listener standing in for a proxy's data port.
@@ -438,8 +443,19 @@ func startProbeListener(t *testing.T, behavior probeListenerBehavior) probeListe
 				case listenerGreetsThenResets, listenerAnswersPingThenResets:
 					serveThenReset(conn, behavior == listenerAnswersPingThenResets)
 					return
+				case listenerGreetsAndStays:
+					if writeMySQLPacket(conn, 0, mysqlGreeting()) != nil {
+						return
+					}
+					if skipMySQLPacket(conn) != nil {
+						return
+					}
+					if writeMySQLPacket(conn, 2, mysqlOK()) != nil {
+						return
+					}
 				}
-				// No greeting, ever: the read returns only when the client
+				// Silent from here on (immediately, or once the handshake
+				// above is done): the read returns only when the client
 				// closes, which is what the socket-lifetime test waits for.
 				_, _ = io.Copy(io.Discard, conn)
 				select {

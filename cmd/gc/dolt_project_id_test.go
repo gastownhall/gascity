@@ -251,6 +251,61 @@ func TestResolveProviderOwnedProjectIdentityTarget(t *testing.T) {
 		}
 	})
 
+	// Two live proxies: the scope's own, and bd's shared server's. Which one
+	// the resolver reaches under an inherited BEADS_DOLT_SHARED_SERVER=1 is
+	// decided by whether gc owns the scope, exactly as for the bd it spawns.
+	sharedServerScope := func(t *testing.T, owned bool) (metadataPath string, scopeRecord, sharedRecord proxyendpoint.Record, table proxyendpoint.ProcessTable) {
+		t.Helper()
+		clearProxyEnvironment(t)
+		scope, metadataPath := proxiedScope(t, "")
+		if owned {
+			journalProxiedScope(t, scope, scope, false)
+		}
+		shared := t.TempDir()
+		t.Setenv(proxyendpoint.SharedServerModeEnv, "1")
+		t.Setenv(proxyendpoint.SharedServerDirEnv, shared)
+		roots := map[int]string{
+			4247: filepath.Join(scope, ".beads", proxyendpoint.DefaultRootDirName),
+			4248: filepath.Join(shared, proxyendpoint.DefaultRootDirName),
+		}
+		records := map[int]proxyendpoint.Record{}
+		for pid, root := range roots {
+			if err := os.MkdirAll(root, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			records[pid] = makeProxyRecord(t, root, pid, 41000+pid)
+			writeProxyRecord(t, root, records[pid])
+		}
+		table = proxyendpoint.ProcessTable{
+			Alive: func(pid int) bool { _, ok := roots[pid]; return ok },
+			Argv:  func(pid int) ([]string, error) { return proxyArgv(roots[pid]), nil },
+			Birth: func(pid int) (string, error) { return records[pid].Birth, nil },
+		}
+		return metadataPath, records[4247], records[4248], table
+	}
+
+	t.Run("proxied local resolves an owned scope's own root under an inherited shared-server mode", func(t *testing.T) {
+		metadataPath, scopeRecord, sharedRecord, table := sharedServerScope(t, true)
+		target, err := resolveProviderOwnedProjectIdentityTargetWithProcessTable(metadataPath, filepath.Dir(filepath.Dir(metadataPath)), "hq", "", table)
+		if err != nil {
+			t.Fatalf("resolve provider-owned target: %v", err)
+		}
+		if want := fmt.Sprint(scopeRecord.Port); target.Port != want {
+			t.Fatalf("target = %+v, want the owned scope's own proxy on %s, not the shared server's on %d: gc pins bd's shared-server mode off for a scope it owns", target, want, sharedRecord.Port)
+		}
+	})
+
+	t.Run("proxied local keeps the inherited shared-server mode for a scope gc does not own", func(t *testing.T) {
+		metadataPath, scopeRecord, sharedRecord, table := sharedServerScope(t, false)
+		target, err := resolveProviderOwnedProjectIdentityTargetWithProcessTable(metadataPath, filepath.Dir(filepath.Dir(metadataPath)), "hq", "", table)
+		if err != nil {
+			t.Fatalf("resolve provider-owned target: %v", err)
+		}
+		if want := fmt.Sprint(sharedRecord.Port); target.Port != want {
+			t.Fatalf("target = %+v, want the shared server's proxy on %s, not the scope's own on %d: an unpinned bd serves a scope gc does not own from the shared server", target, want, scopeRecord.Port)
+		}
+	})
+
 	t.Run("proxied local refuses a copied wrong-root record", func(t *testing.T) {
 		clearProxyEnvironment(t)
 		scope, metadataPath := proxiedScope(t, "proxy-root")
