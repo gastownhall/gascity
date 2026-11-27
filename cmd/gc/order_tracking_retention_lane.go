@@ -59,7 +59,7 @@ func (cr *CityRuntime) runOrderTrackingRetentionLanePass(ctx context.Context) {
 	if cr.orderTrackingRetentionShouldSkipForFSPressure() {
 		return
 	}
-	cr.runOrderTrackingRetentionWatchdog(cfg, time.Now())
+	cr.runOrderTrackingRetentionWatchdog(ctx, cfg, time.Now())
 }
 
 // orderTrackingRetentionFSPressureEpisode tracks one run of FS-pressure-skipped
