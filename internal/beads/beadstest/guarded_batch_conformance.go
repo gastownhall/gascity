@@ -34,6 +34,8 @@ func RunGuardedBatchConformance(t *testing.T, name string, open func(t *testing.
 		{"labeled_update_of_missing_row_refuses", guardedLabeledUpdateOfMissingRowRefuses},
 		{"returned_revisions_equal_later_gets", guardedRevisionsEqualLaterGets},
 		{"concurrent_batches_on_one_row_have_one_winner", guardedConcurrentBatchesHaveOneWinner},
+		{"session_history_fence_record_and_cursor", guardedSessionHistoryCommit},
+		{"session_history_cursor_serializes_distinct_sessions", guardedSessionHistoryCursor},
 		{"fields_apply", guardedFieldsApply},
 		{"no_history_and_ephemeral_per_item", guardedStorageTierPerItem},
 		{"closed_no_history_pinned_create", guardedClosedNoHistoryPinnedCreate},
@@ -41,6 +43,120 @@ func RunGuardedBatchConformance(t *testing.T, name string, open func(t *testing.
 	} {
 		t.Run(name+"/"+leg.name, func(t *testing.T) { leg.run(t, newGuardedFixture(t, open)) })
 	}
+}
+
+// guardedSessionHistoryCommit proves the storage prerequisite for a lifecycle
+// journal: a session fence, an immutable record and an explicitly allocated
+// sequence commit together. Revisions are equality guards, never sequences.
+// This does not certify physical process lifetimes or a wall-clock watermark.
+func guardedSessionHistoryCommit(t *testing.T, f *guardedFixture) {
+	session := f.seedWith(beads.Bead{Title: "session", Metadata: map[string]string{"generation": "1"}})
+	cursor := f.seedWith(beads.Bead{Title: "history cursor", Metadata: map[string]string{"sequence": "0"}})
+	recordID := f.pin("history1")
+	batch := historyProofBatch(session, cursor, recordID, "1")
+	// The last item refuses after the record and cursor would have been
+	// written. Neither may escape the transaction without the session mint.
+	stale := session.Revision + 1000
+	batch.Items[2].Update.ExpectedRevision = &stale
+	_, err := f.batcher.ApplyGuarded(t.Context(), batch)
+	if !beads.IsPreconditionFailed(err) {
+		t.Fatalf("stale session fence: %v, want precondition failure", err)
+	}
+	f.wantAbsent(recordID)
+	f.wantUnchanged(session, cursor)
+
+	batch.Items[2].Update.ExpectedRevision = &session.Revision
+	if _, err := f.batcher.ApplyGuarded(t.Context(), batch); err != nil {
+		t.Fatalf("history commit: %v", err)
+	}
+	writtenSession, writtenCursor, record := f.get(session.ID), f.get(cursor.ID), f.get(recordID)
+	if writtenSession.Metadata["generation"] != "2" || writtenCursor.Metadata["sequence"] != "1" ||
+		record.Metadata["sequence"] != "1" || record.Metadata["session_id"] != session.ID || record.Metadata["generation"] != "2" {
+		t.Fatalf("partial history commit: session=%v cursor=%v record=%v", writtenSession.Metadata, writtenCursor.Metadata, record.Metadata)
+	}
+	if record.Ephemeral || record.NoHistory {
+		t.Fatalf("journal record changed the requested retained storage tier: %+v", record)
+	}
+	// A lost acknowledgement can be resolved by the stable record ID. Replay
+	// never mints again or consumes another cursor value.
+	if _, err := f.batcher.ApplyGuarded(t.Context(), batch); !errors.Is(err, beads.ErrAlreadyExists) {
+		t.Fatalf("replay: %v, want already exists", err)
+	}
+	f.wantUnchanged(writtenSession, writtenCursor, record)
+	// Session/wisp cleanup does not remove retained journal rows or cursors.
+	if err := f.store.Delete(session.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.wantUnchanged(writtenCursor, record)
+}
+
+// guardedSessionHistoryCursor races different session fences against one
+// ordered cursor. Exactly one record receives sequence 1; the losing writer
+// leaves no mint or record and must re-read before allocating sequence 2.
+func guardedSessionHistoryCursor(t *testing.T, f *guardedFixture) {
+	sessions := []beads.Bead{
+		f.seedWith(beads.Bead{Title: "session a", Metadata: map[string]string{"generation": "1"}}),
+		f.seedWith(beads.Bead{Title: "session b", Metadata: map[string]string{"generation": "1"}}),
+	}
+	cursor := f.seedWith(beads.Bead{Title: "history cursor", Metadata: map[string]string{"sequence": "0"}})
+	ids := []string{f.pin("historya"), f.pin("historyb")}
+	start := make(chan struct{})
+	results := make(chan struct {
+		i   int
+		err error
+	}, len(sessions))
+	for i, session := range sessions {
+		batch := historyProofBatch(session, cursor, ids[i], "1")
+		go func() {
+			<-start
+			_, err := f.batcher.ApplyGuarded(t.Context(), batch)
+			results <- struct {
+				i   int
+				err error
+			}{i, err}
+		}()
+	}
+	close(start)
+	winner, loser := -1, -1
+	for range sessions {
+		result := <-results
+		switch {
+		case result.err == nil:
+			if winner != -1 {
+				t.Fatal("two sessions consumed the same cursor")
+			}
+			winner = result.i
+		case beads.IsPreconditionFailed(result.err):
+			loser = result.i
+		default:
+			t.Fatalf("racing history commits: %v", result.err)
+		}
+	}
+	if winner < 0 || loser < 0 {
+		t.Fatalf("winner=%d loser=%d, want one of each", winner, loser)
+	}
+	f.wantAbsent(ids[loser])
+	f.wantUnchanged(sessions[loser])
+	committedCursor := f.get(cursor.ID)
+	if committedCursor.Metadata["sequence"] != "1" || f.get(ids[winner]).Metadata["sequence"] != "1" {
+		t.Fatal("cursor did not name the winning record")
+	}
+	if _, err := f.batcher.ApplyGuarded(t.Context(), historyProofBatch(sessions[loser], committedCursor, ids[loser], "2")); err != nil {
+		t.Fatalf("retry after fresh cursor read: %v", err)
+	}
+	if f.get(cursor.ID).Metadata["sequence"] != "2" || f.get(ids[loser]).Metadata["sequence"] != "2" {
+		t.Fatal("retry did not commit the next cursor and record together")
+	}
+}
+
+func historyProofBatch(session, cursor beads.Bead, recordID, sequence string) beads.GuardedBatch {
+	return beads.GuardedBatch{Reason: "history storage proof", Items: []beads.GuardedItem{
+		{Create: &beads.Bead{ID: recordID, Title: "retained history record", Metadata: map[string]string{
+			"sequence": sequence, "session_id": session.ID, "generation": "2", "usage_account_ref": "opaque-reference",
+		}}},
+		{Update: &beads.GuardedUpdate{ID: cursor.ID, ExpectedRevision: &cursor.Revision, Opts: beads.UpdateOpts{Metadata: map[string]string{"sequence": sequence}}}},
+		{Update: &beads.GuardedUpdate{ID: session.ID, ExpectedRevision: &session.Revision, Opts: beads.UpdateOpts{Metadata: map[string]string{"generation": "2"}}}},
+	}}
 }
 
 // guardedGuardMissPersistsNothing: a stale guard on one item refuses the
