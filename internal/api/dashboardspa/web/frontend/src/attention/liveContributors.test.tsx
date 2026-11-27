@@ -350,6 +350,7 @@ describe('useLiveAttentionContributors', () => {
       'captured-city',
       'captured-city',
       'captured-city',
+      'captured-city',
     ]);
   });
 
@@ -358,9 +359,9 @@ describe('useLiveAttentionContributors', () => {
     let calls = 0;
     mockSupervisorApi.listBeads.mockImplementation(() => {
       calls += 1;
-      // Two full cohorts fail (4 listBeads reads each: window + in-progress
-      // leg + decisions + escalations), then the city recovers.
-      if (calls <= 8) {
+      // Two full cohorts fail (5 listBeads reads each: window + in-progress
+      // leg + decisions + escalations + human gates), then the city recovers.
+      if (calls <= 10) {
         return Promise.reject(
           new SupervisorApiError(
             404,
@@ -375,7 +376,7 @@ describe('useLiveAttentionContributors', () => {
 
     const pending = fetchBeadsAttention('captured-city', testOperator.decisionLabel);
     await vi.advanceTimersByTimeAsync(749);
-    expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(8);
+    expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(10);
     await vi.advanceTimersByTimeAsync(1);
     const facts = await pending;
 
@@ -383,7 +384,7 @@ describe('useLiveAttentionContributors', () => {
     expect(facts.error).toBeUndefined();
     expect(facts.decisionsError).toBeUndefined();
     expect(facts.escalationsError).toBeUndefined();
-    expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(12);
+    expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(15);
   });
 
   it('bounds city-unavailable retries and marks the whole cohort for revalidation', async () => {
@@ -402,7 +403,7 @@ describe('useLiveAttentionContributors', () => {
       decisionsError: CITY_NOT_FOUND_DETAIL,
       escalationsError: CITY_NOT_FOUND_DETAIL,
     });
-    expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(20);
+    expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(25);
   });
 
   it('uses the typed problem code instead of matching legacy-looking prose', async () => {
@@ -413,7 +414,7 @@ describe('useLiveAttentionContributors', () => {
     const facts = await fetchBeadsAttention('captured-city', testOperator.decisionLabel);
 
     expect(facts.cityUnavailable).toBeUndefined();
-    expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(4);
+    expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(5);
   });
 
   it('does not retry a non-city-unavailable error', async () => {
@@ -428,7 +429,7 @@ describe('useLiveAttentionContributors', () => {
       decisionsError: 'supervisor unavailable',
       escalationsError: 'supervisor unavailable',
     });
-    expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(4);
+    expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(5);
   });
 
   // The sessions leg is best-effort: it feeds the stall check only. A failure
@@ -449,7 +450,7 @@ describe('useLiveAttentionContributors', () => {
     expect(facts.escalationsError).toBeUndefined();
     expect(facts.cityUnavailable).toBeUndefined();
     // The three sibling reads still ran and still landed.
-    expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(4);
+    expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(5);
     expect(facts.items).toBeDefined();
   });
 
@@ -465,7 +466,7 @@ describe('useLiveAttentionContributors', () => {
 
       expect(facts.sessions).toBeUndefined();
       expect(facts.error).toBeUndefined();
-      expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(4);
+      expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(5);
     } finally {
       mockSupervisorApi.listSessions = withoutSessions;
     }
@@ -489,11 +490,11 @@ describe('useLiveAttentionContributors', () => {
       testOperator.decisionLabel,
       controller.signal,
     );
-    await waitFor(() => expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(5));
 
     controller.abort(new DOMException('obsolete attention read', 'AbortError'));
     const everyReadWasAborted =
-      seenSignals.length === 4 && seenSignals.every((signal) => signal?.aborted === true);
+      seenSignals.length === 5 && seenSignals.every((signal) => signal?.aborted === true);
     if (!everyReadWasAborted) {
       for (const resolve of fallbackResolvers) resolve({ total: 0, items: [] });
     }
@@ -519,7 +520,7 @@ describe('useLiveAttentionContributors', () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(3_750);
     });
-    expect(composeAttention(result.current).byDomain.beads.items).toHaveLength(3);
+    expect(composeAttention(result.current).byDomain.beads.items).toHaveLength(4);
 
     cityAvailable = true;
     await act(async () => {
@@ -527,7 +528,7 @@ describe('useLiveAttentionContributors', () => {
     });
 
     expect(composeAttention(result.current).byDomain.beads.items).toEqual([]);
-    expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(24);
+    expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(30);
   });
 
   it('suppresses an obsolete retry when the active city changes', async () => {
@@ -547,7 +548,7 @@ describe('useLiveAttentionContributors', () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
-    expect(callsForCity('captured-city')).toHaveLength(4);
+    expect(callsForCity('captured-city')).toHaveLength(5);
 
     setActiveCity('later-city');
     rerender();
@@ -555,8 +556,8 @@ describe('useLiveAttentionContributors', () => {
       await vi.runAllTimersAsync();
     });
 
-    expect(callsForCity('captured-city')).toHaveLength(4);
-    expect(callsForCity('later-city')).toHaveLength(4);
+    expect(callsForCity('captured-city')).toHaveLength(5);
+    expect(callsForCity('later-city')).toHaveLength(5);
     expect(composeAttention(result.current).byDomain.beads.items).toEqual([]);
   });
 
@@ -565,6 +566,7 @@ describe('useLiveAttentionContributors', () => {
     const oldAll = deferred<{ total: number; items: Bead[] }>();
     const oldDecisions = deferred<{ total: number; items: Bead[] }>();
     const oldEscalations = deferred<{ total: number; items: Bead[] }>();
+    const oldGates = deferred<{ total: number; items: Bead[] }>();
     const requests: Array<{ path: string; queue: string }> = [];
 
     mockSupervisorApi.listBeads.mockImplementation(
@@ -574,12 +576,15 @@ describe('useLiveAttentionContributors', () => {
             ? 'decisions'
             : query.label === 'gc:escalation'
               ? 'escalations'
-              : 'all';
+              : query.type === 'gate'
+                ? 'gates'
+                : 'all';
         requests.push({ path: `/v0/city/${city}/beads`, queue });
 
         if (city === 'old-city') {
           if (queue === 'decisions') return oldDecisions.promise;
           if (queue === 'escalations') return oldEscalations.promise;
+          if (queue === 'gates') return oldGates.promise;
           return oldAll.promise;
         }
         if (city !== 'new-city') throw new Error(`unexpected city ${city}`);
@@ -601,7 +606,7 @@ describe('useLiveAttentionContributors', () => {
     );
 
     const view = render(<LiveBeadAttentionPanel key="old-city" />);
-    await waitFor(() => expect(requests).toHaveLength(4));
+    await waitFor(() => expect(requests).toHaveLength(5));
 
     setActiveCity('new-city');
     view.rerender(<LiveBeadAttentionPanel key="new-city" />);
@@ -648,7 +653,13 @@ describe('useLiveAttentionContributors', () => {
           },
         ],
       });
-      await Promise.all([oldAll.promise, oldDecisions.promise, oldEscalations.promise]);
+      oldGates.resolve({ total: 0, items: [] });
+      await Promise.all([
+        oldAll.promise,
+        oldDecisions.promise,
+        oldEscalations.promise,
+        oldGates.promise,
+      ]);
     });
 
     // The 'all' queue appears twice per cohort: the windowed read plus the
@@ -658,10 +669,12 @@ describe('useLiveAttentionContributors', () => {
       { path: '/v0/city/old-city/beads', queue: 'all' },
       { path: '/v0/city/old-city/beads', queue: 'decisions' },
       { path: '/v0/city/old-city/beads', queue: 'escalations' },
+      { path: '/v0/city/old-city/beads', queue: 'gates' },
       { path: '/v0/city/new-city/beads', queue: 'all' },
       { path: '/v0/city/new-city/beads', queue: 'all' },
       { path: '/v0/city/new-city/beads', queue: 'decisions' },
       { path: '/v0/city/new-city/beads', queue: 'escalations' },
+      { path: '/v0/city/new-city/beads', queue: 'gates' },
     ]);
     expect(screen.queryByText('Old city decision')).toBeNull();
     expect(screen.queryByText(/Old city ready work/)).toBeNull();
@@ -681,12 +694,12 @@ describe('useLiveAttentionContributors', () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
-    expect(callsForCity('captured-city')).toHaveLength(4);
+    expect(callsForCity('captured-city')).toHaveLength(5);
 
     unmount();
     await vi.runAllTimersAsync();
 
-    expect(callsForCity('captured-city')).toHaveLength(4);
+    expect(callsForCity('captured-city')).toHaveLength(5);
   });
 
   it('projects the shared run-summary source onto the Runs badge facts (gascity-dashboard-2j8e.7)', () => {

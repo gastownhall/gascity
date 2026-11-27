@@ -33,6 +33,7 @@ function select(
   inputs: {
     beads?: readonly Bead[];
     escalations?: readonly Bead[];
+    gates?: readonly Bead[];
     sessions?: readonly BeadAttentionSession[];
   },
   now = NOW,
@@ -41,6 +42,7 @@ function select(
     {
       beads: inputs.beads ?? [],
       escalations: inputs.escalations ?? [],
+      gates: inputs.gates ?? [],
       ...(inputs.sessions === undefined ? {} : { sessions: inputs.sessions }),
     },
     now,
@@ -468,5 +470,44 @@ describe('inProgressCardNote (gp-6xd)', () => {
 
   it('returns null for beads that are not in progress', () => {
     expect(inProgressCardNote(bead({ status: 'open' }), [], NOW)).toBeNull();
+  });
+});
+
+describe('open human gates (gascity#9177)', () => {
+  it('surfaces an open human gate as attention immediately, regardless of age', () => {
+    const gate = bead({
+      id: 'G-1',
+      issue_type: 'gate',
+      title: 'approve the deploy',
+      created_at: '2026-06-07T11:59:00.000Z',
+      metadata: { 'gc.gate_type': 'human' },
+    });
+    const rows = select({ gates: [gate] });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      beadId: 'G-1',
+      reason: 'waiting-human',
+      severity: 'attention',
+    });
+    expect(rows[0]?.summary).toContain('waiting on operator');
+  });
+
+  it('ignores a closed human gate', () => {
+    const gate = bead({
+      id: 'G-2',
+      issue_type: 'gate',
+      status: 'closed',
+      metadata: { 'gc.gate_type': 'human' },
+    });
+    expect(select({ gates: [gate] })).toEqual([]);
+  });
+
+  it('ignores a gate that is not a human gate', () => {
+    const gate = bead({
+      id: 'G-3',
+      issue_type: 'gate',
+      metadata: { 'gc.gate_type': 'timer' },
+    });
+    expect(select({ gates: [gate] })).toEqual([]);
   });
 });
