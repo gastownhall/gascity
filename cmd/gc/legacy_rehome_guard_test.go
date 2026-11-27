@@ -177,3 +177,68 @@ func TestCanonicalizeLegacyRoutedWorkRefusesAddDirectionOnSharedRigLeg(t *testin
 		t.Errorf("report = %+v, want one refused row and none rehomed", report)
 	}
 }
+
+// AC-3
+
+// TestCanonicalizeLegacyAssignedWorkLeavesForeignInFlightOnSharedRigLeg: city
+// B's in-flight row is invisible to city A's session snapshot, so A must not
+// move it; and a row whose two fields get different verdicts is never
+// half-migrated.
+func TestCanonicalizeLegacyAssignedWorkLeavesForeignInFlightOnSharedRigLeg(t *testing.T) {
+	t.Run("both fields foreign", func(t *testing.T) {
+		cfg := sharedRigUnboundOmpCity()
+		wb := workBead("wb-1", sharedRigBoundOmp, sharedRigBoundOmp, "in_progress", 2)
+		mem := beads.NewMemStoreFrom(0, []beads.Bead{wb}, nil)
+		store := &updateCountingStore{Store: mem}
+
+		report := canonicalizeLegacyBoundAssignedWork(cfg, []beads.Bead{wb}, []beads.Store{store}, []string{"qcore"}, newSessionBeadSnapshot(nil), io.Discard)
+
+		if store.updates != 0 {
+			t.Errorf("Update calls = %d, want 0", store.updates)
+		}
+		got := mustGetBead(t, mem, "wb-1")
+		if got.Assignee != sharedRigBoundOmp || got.Metadata[beadmeta.RoutedToMetadataKey] != sharedRigBoundOmp {
+			t.Errorf("assignee/route = %q/%q, want both %q", got.Assignee, got.Metadata[beadmeta.RoutedToMetadataKey], sharedRigBoundOmp)
+		}
+		want := legacyRehomeReport{Refused: []legacyRehomeRow{{
+			ID: "wb-1", Leg: "qcore",
+			Changes: []legacyRehomeChange{
+				{Field: legacyRehomeFieldAssignee, From: sharedRigBoundOmp, To: sharedRigUnboundOmp},
+				{Field: beadmeta.RoutedToMetadataKey, From: sharedRigBoundOmp, To: sharedRigUnboundOmp},
+			},
+		}}}
+		if !reflect.DeepEqual(report, want) {
+			t.Errorf("report = %+v, want %+v", report, want)
+		}
+	})
+
+	t.Run("allowed assignee strip with refused route add", func(t *testing.T) {
+		worker := poolAgent("worker", "qcore", intPtr(3), 0)
+		worker.BindingName = "pool"
+		cfg := &config.City{
+			// "gc" is minted city-wide, so the assignee strip alone is allowed.
+			Imports: map[string]config.Import{"gc": {Source: "./packs/gc"}},
+			Agents:  []config.Agent{poolAgent("omp", "qcore", intPtr(3), 0), worker},
+		}
+		wb := workBead("wb-2", "qcore/worker", "qcore/gc.omp", "in_progress", 2)
+		mem := beads.NewMemStoreFrom(0, []beads.Bead{wb}, nil)
+		store := &updateCountingStore{Store: mem}
+
+		report := canonicalizeLegacyBoundAssignedWork(cfg, []beads.Bead{wb}, []beads.Store{store}, []string{"qcore"}, newSessionBeadSnapshot(nil), io.Discard)
+
+		if store.updates != 0 {
+			t.Errorf("Update calls = %d, want 0 (a half-refused row is not written at all)", store.updates)
+		}
+		got := mustGetBead(t, mem, "wb-2")
+		if got.Assignee != "qcore/gc.omp" || got.Metadata[beadmeta.RoutedToMetadataKey] != "qcore/worker" {
+			t.Errorf("assignee/route = %q/%q, want unchanged", got.Assignee, got.Metadata[beadmeta.RoutedToMetadataKey])
+		}
+		want := legacyRehomeReport{Refused: []legacyRehomeRow{{
+			ID: "wb-2", Leg: "qcore",
+			Changes: []legacyRehomeChange{{Field: beadmeta.RoutedToMetadataKey, From: "qcore/worker", To: "qcore/pool.worker"}},
+		}}}
+		if !reflect.DeepEqual(report, want) {
+			t.Errorf("report = %+v, want %+v", report, want)
+		}
+	})
+}

@@ -6614,8 +6614,11 @@ func stampRunRootFromStep(cfg *config.City, store beads.Store, step beads.Bead, 
 // releaseOrphanedPoolAssignmentsWhenSnapshotsComplete.
 //
 // workRefs names each row's leg, index-aligned with workBeads and workStores
-// (a length mismatch writes nothing). The returned report lists the rows
-// rewritten.
+// (a length mismatch writes nothing). A rig leg may be shared with other cities
+// attached to the same store, so there each field's rewrite must pass
+// legacyRehomeAllowed: only a strip of a binding this city mints on that rig is
+// made, and a row with any refused field is not written at all. The returned
+// report lists the rows rewritten and refused.
 //
 // Idempotent by design: it writes only when the canonical identity differs from
 // what is already on the bead, so steady-state reconciles perform no writes. A
@@ -6659,15 +6662,30 @@ func canonicalizeLegacyBoundAssignedWork(cfg *config.City, workBeads []beads.Bea
 		if _, served := sessionByAssignee[assignee]; served {
 			continue
 		}
-		var changes []legacyRehomeChange
+		// Each field is guarded on its own; a row with any refused field is not
+		// written at all, so it is never left half-migrated.
+		own := legacyRehomeLegIsOwn(workRefs[i])
+		var changes, refused []legacyRehomeChange
 		opts := beads.UpdateOpts{}
 		if assigneeChanged {
-			changes = append(changes, assigneeChange)
-			opts.Assignee = &assigneeChange.To
+			if legacyRehomeAllowed(cfg, own, assigneeChange.From, assigneeAgent) {
+				changes = append(changes, assigneeChange)
+				opts.Assignee = &assigneeChange.To
+			} else {
+				refused = append(refused, assigneeChange)
+			}
 		}
 		if routedChanged {
-			changes = append(changes, routedChange)
-			opts.Metadata = map[string]string{beadmeta.RoutedToMetadataKey: routedChange.To}
+			if legacyRehomeAllowed(cfg, own, routedChange.From, routedAgent) {
+				changes = append(changes, routedChange)
+				opts.Metadata = map[string]string{beadmeta.RoutedToMetadataKey: routedChange.To}
+			} else {
+				refused = append(refused, routedChange)
+			}
+		}
+		if len(refused) > 0 {
+			report.Refused = append(report.Refused, legacyRehomeRow{ID: wb.ID, Leg: workRefs[i], Changes: refused})
+			continue
 		}
 		if err := store.Update(wb.ID, opts); err != nil {
 			if stderr != nil {
