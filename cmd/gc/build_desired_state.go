@@ -710,7 +710,7 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 		// configured canonical identity, so the canonical session the awake/scale
 		// accounting wakes for it can actually surface and claim it (the
 		// agent-side work_query/claim path matches identities by raw string).
-		canonicalizeLegacyBoundAssignedWork(cfg, assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, sessionBeads, stderr)
+		canonicalizeLegacyBoundAssignedWork(cfg, assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, sessionBeads, stderr).log(stderr, "canonicalizeLegacyBoundAssignedWork")
 		// The demand pass's own writes over the assigned snapshot, between the
 		// collect_assigned_work and collect_unassigned_routed records.
 		recordDemandSubPhase(trace, "demand_snapshot.assigned_repairs", repairsStart, map[string]any{
@@ -738,7 +738,7 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 		repairsStart = trace.demandNow()
 		repairPoolSlotWorkDirClobber(cfg, unassignedRoutedBeads, unassignedRoutedStores, stderr)
 		repairDone = trace.demandNow()
-		canonicalizeLegacyBoundUnassignedRoutedWork(cfg, unassignedRoutedBeads, unassignedRoutedStores, unassignedRoutedStoreRefs, stderr)
+		canonicalizeLegacyBoundUnassignedRoutedWork(cfg, unassignedRoutedBeads, unassignedRoutedStores, unassignedRoutedStoreRefs, stderr).log(stderr, "canonicalizeLegacyBoundUnassignedRoutedWork")
 		canonicalizeDone := trace.demandNow()
 		// Same pass, same reason, different legacy form: a route stamped at a
 		// live slot ("<base>-N") is a load-balancing HINT that every raw reader

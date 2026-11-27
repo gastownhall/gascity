@@ -1,6 +1,9 @@
 package main
 
 import (
+	"fmt"
+	"io"
+	"sort"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -107,4 +110,69 @@ func legacyRehomeAllowed(cfg *config.City, own bool, from string, agent *config.
 		return false
 	}
 	return cityMintsBindingOnRig(cfg, rig, binding)
+}
+
+// log writes the report to w under the repair's name: one line per rewritten
+// row (each row is rewritten at most once, so this stays bounded) and at most
+// one summary of the refused rows, in the format of the orphan sweeper's
+// protected-identity summary. An empty report writes nothing.
+func (r legacyRehomeReport) log(w io.Writer, repair string) {
+	if w == nil {
+		return
+	}
+	for _, row := range r.Rehomed {
+		changes := make([]string, 0, len(row.Changes))
+		for _, c := range row.Changes {
+			changes = append(changes, fmt.Sprintf("%s %q -> %q", c.Field, c.From, c.To))
+		}
+		fmt.Fprintf(w, "%s: rehomed %s on %s: %s\n", repair, row.ID, demandMigrationLeg(row.Leg), strings.Join(changes, ", ")) //nolint:errcheck
+	}
+	if summary := r.refusalSummary(); summary != "" {
+		fmt.Fprintf(w, "%s: %s\n", repair, summary) //nolint:errcheck
+	}
+}
+
+// refusalSummary renders the refused rows grouped by rewrite (from -> to),
+// sorted so consecutive passes produce comparable lines, with an exact row
+// count and a bounded sample of IDs per rewrite; "" when nothing was refused.
+// Identities are %q-quoted: they are untrusted text read off rows another city
+// may have written, and an unquoted comma or newline would forge structure.
+// A refused row stays as it is until an operator re-homes it by hand
+// (gc bd update <id> --assignee <to> --set-metadata gc.routed_to=<to>).
+func (r legacyRehomeReport) refusalSummary() string {
+	type rewrite struct{ from, to string }
+	byRewrite := map[rewrite][]string{}
+	for _, row := range r.Refused {
+		for _, c := range row.Changes {
+			key := rewrite{c.From, c.To}
+			if ids := byRewrite[key]; len(ids) == 0 || ids[len(ids)-1] != row.ID {
+				byRewrite[key] = append(ids, row.ID)
+			}
+		}
+	}
+	if len(byRewrite) == 0 {
+		return ""
+	}
+	keys := make([]rewrite, 0, len(byRewrite))
+	for key := range byRewrite {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].from != keys[j].from {
+			return keys[i].from < keys[j].from
+		}
+		return keys[i].to < keys[j].to
+	})
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		ids := byRewrite[key]
+		sample, suffix := ids, ""
+		if len(sample) > protectedForeignAssigneeIDSampleLimit {
+			suffix = fmt.Sprintf(" +%d more", len(sample)-protectedForeignAssigneeIDSampleLimit)
+			sample = sample[:protectedForeignAssigneeIDSampleLimit]
+		}
+		parts = append(parts, fmt.Sprintf("%q -> %q (%d: %s%s)", key.from, key.to, len(ids), strings.Join(sample, ", "), suffix))
+	}
+	return fmt.Sprintf("refused %d legacy re-home(s) on shared rig legs this pass (%d rows): %s",
+		len(keys), len(r.Refused), strings.Join(parts, ", "))
 }

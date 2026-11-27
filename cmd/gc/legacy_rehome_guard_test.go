@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"io"
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -379,5 +383,120 @@ func TestCanonicalizeLegacyRehomeTwoCitiesSharedRigConverges(t *testing.T) {
 	}
 	if b.Assignee != sharedRigBoundOmp || b.Metadata[beadmeta.RoutedToMetadataKey] != sharedRigBoundOmp {
 		t.Errorf("B's row assignee/route = %q/%q, want both %q", b.Assignee, b.Metadata[beadmeta.RoutedToMetadataKey], sharedRigBoundOmp)
+	}
+}
+
+// AC-7
+
+// sharedRigBackstopEnv is the backstop lane's repair fixture with its stores
+// replaced: city holds the city store's rows and the attached rig "fixture"
+// holds rig's. The session snapshot is complete and empty.
+func sharedRigBackstopEnv(t *testing.T, city, rig []beads.Bead) (externalReadsEnv, *writeLog) {
+	t.Helper()
+	f := newRepairGoldenFixture(t)
+	log := &writeLog{}
+	env := f.env
+	env.CityStore = writeLogStore{Store: beads.NewMemStoreFrom(0, city, nil), log: log}
+	env.RigStores = map[string]beads.Store{
+		"fixture": writeLogStore{Store: beads.NewMemStoreFrom(0, rig, nil), log: log},
+		"nodisp":  writeLogStore{Store: beads.NewMemStore(), log: log},
+	}
+	env.Sessions = newSessionBeadSnapshot(nil)
+	return env, log
+}
+
+// TestBackstopDemandRepairsLeavesForeignRowsOnSharedRigLeg drives the v2
+// backstop's repair sequence, which hands both canonicalizers the refs its
+// collections return: the city row re-homes, the rig rows (whose "pool"
+// binding this city does not mint on rig-A) are refused and summarized once
+// per arm.
+func TestBackstopDemandRepairsLeavesForeignRowsOnSharedRigLeg(t *testing.T) {
+	const foreign = "rig-A/pool.planner"
+	env, log := sharedRigBackstopEnv(t,
+		[]beads.Bead{workBead("ga-asg", goldenLegacyPlanner, goldenLegacyPlanner, "in_progress", 5)},
+		[]beads.Bead{
+			workBead("fx-a1", foreign, foreign, "in_progress", 5),
+			workBead("fx-a2", foreign, foreign, "in_progress", 5),
+			workBead("fx-r1", foreign, "", "open", 5),
+		})
+	var stderr bytes.Buffer
+
+	runBackstopDemandRepairs(context.Background(), env, &stderr)
+
+	wantWrites := []string{"Update ga-asg assignee=" + goldenCanonicalPlanner + " " + beadmeta.RoutedToMetadataKey + "=" + goldenCanonicalPlanner}
+	if !slices.Equal(log.ops, wantWrites) {
+		t.Errorf("writes\n got  %q\n want %q", log.ops, wantWrites)
+	}
+	lines := strings.Split(strings.TrimRight(stderr.String(), "\n"), "\n")
+	var rehomed, assignedRefused, routedRefused []string
+	for _, line := range lines {
+		switch {
+		case strings.Contains(line, " rehomed "):
+			rehomed = append(rehomed, line)
+		case strings.HasPrefix(line, "canonicalizeLegacyBoundAssignedWork: refused "):
+			assignedRefused = append(assignedRefused, line)
+		case strings.HasPrefix(line, "canonicalizeLegacyBoundUnassignedRoutedWork: refused "):
+			routedRefused = append(routedRefused, line)
+		}
+	}
+	if len(rehomed) != 1 || !strings.Contains(rehomed[0], "rehomed ga-asg on city: ") {
+		t.Errorf("rehomed lines = %q, want exactly one for ga-asg on city", rehomed)
+	}
+	pair := `"` + foreign + `" -> "` + goldenCanonicalPlanner + `"`
+	if len(assignedRefused) != 1 || !strings.Contains(assignedRefused[0], pair+" (2: fx-a1, fx-a2)") {
+		t.Errorf("assigned refusal summaries = %q, want one with %s (2: fx-a1, fx-a2)", assignedRefused, pair)
+	}
+	if len(routedRefused) != 1 || !strings.Contains(routedRefused[0], pair+" (1: fx-r1)") {
+		t.Errorf("routed refusal summaries = %q, want one with %s (1: fx-r1)", routedRefused, pair)
+	}
+
+	t.Run("a pass with nothing to do logs nothing", func(t *testing.T) {
+		env, _ := sharedRigBackstopEnv(t,
+			[]beads.Bead{workBead("ga-ok", goldenCanonicalPlanner, goldenCanonicalPlanner, "in_progress", 5)},
+			[]beads.Bead{workBead("fx-ok", goldenCanonicalPlanner, "", "open", 5)})
+		var quiet bytes.Buffer
+		runBackstopDemandRepairs(context.Background(), env, &quiet)
+		if quiet.Len() != 0 {
+			t.Errorf("stderr = %q, want nothing", quiet.String())
+		}
+	})
+}
+
+// TestLegacyRehomeReportLog pins the log format: one line per rewritten row on
+// its normalized leg, one refusal summary with %q-quoted identities, exact
+// counts and a five-ID sample, and nothing for an empty report.
+func TestLegacyRehomeReportLog(t *testing.T) {
+	var empty bytes.Buffer
+	legacyRehomeReport{}.log(&empty, "repair")
+	if empty.Len() != 0 {
+		t.Errorf("empty report logged %q", empty.String())
+	}
+
+	forged := "qcore/x,\nfake"
+	report := legacyRehomeReport{
+		Rehomed: []legacyRehomeRow{{ID: "ga-1", Leg: "qcore", Changes: []legacyRehomeChange{
+			{Field: legacyRehomeFieldAssignee, From: "qcore/gc.omp", To: "qcore/omp"},
+			{Field: beadmeta.RoutedToMetadataKey, From: "qcore/gc.omp", To: "qcore/omp"},
+		}}},
+		Refused: []legacyRehomeRow{{ID: "fx-0", Leg: "rig:qcore", Changes: []legacyRehomeChange{{Field: beadmeta.RoutedToMetadataKey, From: forged, To: "qcore/omp"}}}},
+	}
+	for i := 1; i <= 7; i++ {
+		id := "fx-" + string(rune('0'+i))
+		report.Refused = append(report.Refused, legacyRehomeRow{ID: id, Leg: "rig:qcore", Changes: []legacyRehomeChange{
+			{Field: legacyRehomeFieldAssignee, From: sharedRigBoundOmp, To: sharedRigUnboundOmp},
+			{Field: beadmeta.RoutedToMetadataKey, From: sharedRigBoundOmp, To: sharedRigUnboundOmp},
+		}})
+	}
+	var out bytes.Buffer
+	report.log(&out, "repair")
+
+	want := []string{
+		`repair: rehomed ga-1 on rig:qcore: assignee "qcore/gc.omp" -> "qcore/omp", gc.routed_to "qcore/gc.omp" -> "qcore/omp"`,
+		`repair: refused 2 legacy re-home(s) on shared rig legs this pass (8 rows): ` +
+			`"qcore/pool.omp" -> "qcore/omp" (7: fx-1, fx-2, fx-3, fx-4, fx-5 +2 more), ` +
+			`"qcore/x,\nfake" -> "qcore/omp" (1: fx-0)`,
+	}
+	if got := strings.Split(strings.TrimRight(out.String(), "\n"), "\n"); !slices.Equal(got, want) {
+		t.Errorf("log lines\n got  %q\n want %q", got, want)
 	}
 }
