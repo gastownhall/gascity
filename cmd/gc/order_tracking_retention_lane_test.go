@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // retentionListingStore parks the closed order-tracking listing the retention
@@ -230,5 +231,53 @@ func TestCityRuntimeRunReachesReadyWhileRetentionListingBlocks(t *testing.T) {
 	awaitClose(t, h.started, "onStarted while the retention listing is parked")
 	if n := h.store.listed.Load(); n != 0 {
 		t.Fatalf("retention listings returned = %d, want 0: readiness waited for the listing", n)
+	}
+}
+
+// parkedRetentionRuntime is an orders-lane test runtime whose standalone
+// store holds prunable closed tracking runs behind a fresh backup, and parks
+// the retention listing until the returned release runs (also at cleanup).
+func parkedRetentionRuntime(t *testing.T, od orderDispatcher, stderr io.Writer) (*CityRuntime, *retentionListingStore, func()) {
+	t.Helper()
+	cr := ordersLaneTestRuntime(t, od, "1h", stderr)
+	now := time.Now()
+	writeFreshRetentionBackup(t, cr.cityPath, now)
+	gate := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(gate) }) }
+	t.Cleanup(release)
+	store := newRetentionListingStore(beads.NewMemStoreFrom(100, retentionEligibleSeed("park", minClosedOrderTrackingRetained+2, now), nil), gate)
+	cr.standaloneCityStore = store
+	return cr, store, release
+}
+
+// An orders-lane pass must not wait for the retention sweep: with the
+// retention lane parked inside its listing, a pass completes and dispatches.
+func TestOrdersLanePassDoesNotWaitForRetentionSweep(t *testing.T) {
+	od := &recordingOrderDispatcher{}
+	cr, store, release := parkedRetentionRuntime(t, od, nil)
+	cr.managedDoltOwned = func(string) (bool, error) { return false, nil }
+
+	stop := cr.startOrderTrackingRetentionLane(context.Background())
+	t.Cleanup(func() {
+		release()
+		stop()
+	})
+	awaitClose(t, store.entered, "the retention lane reaching its listing")
+
+	passDone := make(chan struct{})
+	go func() {
+		defer close(passDone)
+		cr.runOrdersLanePass(context.Background(), cr.cityPath, ordersLaneReasonCadence)
+	}()
+	// The bound asserts the pass does not wait on the parked listing; it is
+	// the minimum safe deadline for a timer racing a goroutine.
+	select {
+	case <-passDone:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("the orders-lane pass waited on the parked retention listing")
+	}
+	if !od.called.Load() {
+		t.Fatal("the orders-lane pass did not reach the order dispatcher")
 	}
 }

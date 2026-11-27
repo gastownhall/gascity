@@ -546,6 +546,7 @@ go_library(
         "order_exec_windows.go",
         "order_outcome.go",
         "order_store.go",
+        "order_tracking_retention_lane.go",
         "orders_lane.go",
         "path_util.go",
         "pending_create_live_incarnation.go",
