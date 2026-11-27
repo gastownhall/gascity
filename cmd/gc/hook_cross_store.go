@@ -1020,19 +1020,17 @@ func hookRankCandidate(row map[string]any) hookCandidateRank {
 }
 
 // hookClaimReadsPerTick counts the work-query runs one claim attempt performs
-// over a given leg set: one to select, and one to re-validate unless there is
-// nothing to fall back to. It exists so the cost this slice removes is asserted
-// rather than described (TestFederatedClaimTickIssuesOneWorkQueryRun).
+// over a given leg set: one discovery read per leg. The claim acts on that
+// answer with no second read of the selected leg, so the count is asserted
+// rather than described (TestFederatedClaimTickIssuesOneWorkQueryRun,
+// TestFederatedClaimRunsNoReadBetweenSelectionAndCAS).
 //
 // It is a CEILING, not a measurement. A tier-0 hit in the primary store
 // short-circuits bestStoreWithWork before the later legs run, and each RUN is
 // itself a tier ladder that exits on its first hit — so a real tick reads this
 // many times or fewer, never more. Do not quote it as an observed number.
 func hookClaimReadsPerTick(stores []hookStore) int {
-	if len(stores) == 1 {
-		return 1
-	}
-	return len(stores) + 1
+	return len(stores)
 }
 
 // isZeroHookStore reports whether s is the zero hookStore that bestStoreWithWork

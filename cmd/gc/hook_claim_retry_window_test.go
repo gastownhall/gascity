@@ -418,3 +418,38 @@ func TestFederatedClaimTransportCASFailureDrainsClaimsErrored(t *testing.T) {
 		t.Fatalf("result = %+v, want a claims_errored drain, never no_work", result)
 	}
 }
+
+// A claim that selected a store with claimable work goes straight to its CAS:
+// one read per leg, never a second read of the selected leg.
+func TestFederatedClaimRunsNoReadBetweenSelectionAndCAS(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rigs []string
+	}{
+		{name: "two legs", rigs: []string{"alpha"}},
+		{name: "three legs", rigs: []string{"alpha", "beta"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withProductionClaimRetryPacing(t)
+			b := newBudgetClaimHarness()
+			stores := budgetLegs(tc.rigs...)
+			for _, st := range stores[:len(stores)-1] {
+				b.leg(st.dir, time.Second, budgetEmpty)
+			}
+			last := stores[len(stores)-1]
+			b.leg(last.dir, time.Second, hookRunnerAnswer{out: routedRowJSON("work-1")})
+
+			code, _, stderr := b.claim(stores, b.ops())
+
+			if code != 0 || len(b.claims) != 1 {
+				t.Fatalf("exit = %d, claims = %v; want one claim; stderr=%s", code, b.claims, stderr)
+			}
+			if len(b.reads) != len(stores) {
+				t.Fatalf("reads = %v, want exactly one per leg (%d)", b.reads, len(stores))
+			}
+			if got := hookClaimReadsPerTick(stores); got != len(stores) {
+				t.Fatalf("hookClaimReadsPerTick = %d, want %d (one per leg)", got, len(stores))
+			}
+		})
+	}
+}
