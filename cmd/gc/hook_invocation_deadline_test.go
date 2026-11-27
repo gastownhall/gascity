@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -252,5 +253,55 @@ func TestHookClaimReleasesLandingPastDeadline(t *testing.T) {
 				t.Fatalf("result = %+v, want the standing claim delivered as work", result)
 			}
 		})
+	}
+}
+
+// TestHookWithoutDeadlineKeepsDefaultBudgets pins AC-6: an invocation that
+// declares no budget — no --timeout, no valid GC_HOOK_DEADLINE — runs exactly
+// as gc hook did before #5533. The read context carries no deadline and no
+// margin, so each store read keeps only its per-query hookWorkQueryTimeout cap
+// (150s); the claim window resolves to hookClaimWindowDefault (or the
+// GC_HOOK_CLAIM_WINDOW operator override, which keeps winning), and the claim
+// reserve is the full hookClaimMutationTimeout. A deadline-aware path that
+// leaks onto the default invocation would change all three.
+func TestHookWithoutDeadlineKeepsDefaultBudgets(t *testing.T) {
+	t.Setenv(hookDeadlineEnv, "")
+
+	ctx, cancel := hookInvocationReadContext(0, io.Discard)
+	defer cancel()
+	if _, ok := ctx.Deadline(); ok {
+		t.Fatal("read context carries a deadline without --timeout or GC_HOOK_DEADLINE; the per-query hookWorkQueryTimeout cap must bound reads alone")
+	}
+	if margin := hookInvocationReadMargin(ctx); margin != 0 {
+		t.Fatalf("read margin = %s, want 0: no declared deadline leaves no margin to cap a query's cleanup by", margin)
+	}
+
+	ops := hookClaimOps{}
+	ops.applyDefaults()
+	if ops.ClaimWindow != hookClaimWindowDefault {
+		t.Fatalf("claim window = %s, want the derived default %s (hookWorkQueryTimeout + hookClaimMutationTimeout)", ops.ClaimWindow, hookClaimWindowDefault)
+	}
+	if ops.ClaimReserve != hookClaimMutationTimeout {
+		t.Fatalf("claim reserve = %s, want the full %s mutation budget with no deadline to split", ops.ClaimReserve, hookClaimMutationTimeout)
+	}
+	mutCtx, cancelMut := ops.claimMutationContext()
+	defer cancelMut()
+	deadline, ok := mutCtx.Deadline()
+	if !ok {
+		t.Fatal("claim mutation context carries no deadline")
+	}
+	if remaining := time.Until(deadline); remaining < hookClaimMutationTimeout-2*time.Second || remaining > hookClaimMutationTimeout {
+		t.Fatalf("claim mutation deadline = %s away, want the reserved %s budget", remaining, hookClaimMutationTimeout)
+	}
+
+	// The operator escape hatch keeps overriding the window, as before.
+	t.Setenv("GC_HOOK_CLAIM_WINDOW", "13s")
+	overridden := hookClaimOps{}
+	overridden.applyDefaults()
+	if overridden.ClaimWindow != 13*time.Second {
+		t.Fatalf("claim window with GC_HOOK_CLAIM_WINDOW=13s = %s, want the override to keep winning", overridden.ClaimWindow)
+	}
+	if overridden.ClaimReserve != hookClaimMutationTimeout {
+		t.Fatalf("claim reserve with GC_HOOK_CLAIM_WINDOW set = %s, want the unchanged %s", overridden.ClaimReserve, hookClaimMutationTimeout)
 	}
 }
