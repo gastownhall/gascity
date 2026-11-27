@@ -113,6 +113,73 @@ func hookWorkEnd() (end time.Time, ok bool) {
 	return deadline.Add(-hookArchiveMargin(deadline, hookProcessStart)), true
 }
 
+// hookInvocationDeadline resolves the one deadline binding a `gc hook`
+// invocation: the earlier of hookProcessStart+timeout (--timeout) and a valid
+// inherited GC_HOOK_DEADLINE. ok is false when neither applies and the
+// invocation runs with no deadline, as gc hook always did before #5533.
+//
+// An inherited value that does not parse, or that lies in the past when this
+// process started, is ignored with a note on stderr: gc hook run is that
+// environment's only writer and always writes a valid future instant, so such
+// a value is leaked environment — the same values childHookDeadline ignores
+// for the same reason — and honoring it would fail every read of the
+// invocation before it starts.
+func hookInvocationDeadline(timeout time.Duration, stderr io.Writer) (time.Time, bool) {
+	var deadline time.Time
+	ok := timeout > 0
+	if ok {
+		deadline = hookProcessStart.Add(timeout)
+	}
+	inherited, has, err := inheritedHookDeadline()
+	switch {
+	case err != nil:
+		fmt.Fprintf(stderr, "gc hook: ignoring %s: %v\n", hookDeadlineEnv, err) //nolint:errcheck // best-effort stderr
+	case !has:
+	case !inherited.After(hookProcessStart):
+		fmt.Fprintf(stderr, "gc hook: ignoring %s=%s: it is already past\n", hookDeadlineEnv, hookDeadlineEnvValue(inherited)) //nolint:errcheck // best-effort stderr
+	case !ok || inherited.Before(deadline):
+		deadline, ok = inherited, true
+	}
+	return deadline, ok
+}
+
+// hookReadMarginContextKey carries the answer margin of a hook invocation's
+// read context (hookInvocationReadContext), so a store read's command cleanup
+// can be bounded by it wherever the read runs.
+type hookReadMarginContextKey struct{}
+
+// hookInvocationReadContext bounds every store read of one `gc hook`
+// invocation. Its context ends at W = deadline − hookArchiveMargin(deadline,
+// hookProcessStart) — for an inherited deadline exactly hookWorkEnd — so the
+// invocation still has its answer margin left to render the result and exit
+// before the deadline instead of being killed by an outer timeout with no
+// protocol result (#5533). Without a deadline the context is unbounded and
+// each read keeps only its per-query hookWorkQueryTimeout cap, as before.
+//
+// The margin also rides the context (hookReadMarginContextKey) because the
+// stop of a read — killing the query's process group, reaping its pipes —
+// must fit inside the same margin, or a short budget could still be overrun
+// by cleanup.
+func hookInvocationReadContext(timeout time.Duration, stderr io.Writer) (context.Context, context.CancelFunc) {
+	deadline, ok := hookInvocationDeadline(timeout, stderr)
+	if !ok {
+		return context.Background(), func() {}
+	}
+	margin := hookArchiveMargin(deadline, hookProcessStart)
+	ctx, cancel := context.WithDeadline(context.Background(), deadline.Add(-margin))
+	return context.WithValue(ctx, hookReadMarginContextKey{}, margin), cancel
+}
+
+// hookInvocationReadMargin is the answer margin the invocation's read context
+// was built with (hookInvocationReadContext), or 0 for a context no
+// invocation deadline shaped.
+func hookInvocationReadMargin(ctx context.Context) time.Duration {
+	if margin, ok := ctx.Value(hookReadMarginContextKey{}).(time.Duration); ok {
+		return margin
+	}
+	return 0
+}
+
 // hookDeadlineStillLeavesTime reports, now, whether the archive margin still
 // remains before the deadline gc hook run handed this process. It gates the
 // optional writes that follow a destructive step already taken — the archive's

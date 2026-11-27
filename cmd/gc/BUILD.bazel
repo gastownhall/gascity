@@ -1835,6 +1835,7 @@ go_test(
         "hook_identity_test.go",
         "hook_inject_identity_guard_test.go",
         "hook_invocation_cost_test.go",
+        "hook_invocation_deadline_test.go",
         "hook_non_turn_boundary_test.go",
         "hook_output_test.go",
         "hook_store_federated_scope_test.go",

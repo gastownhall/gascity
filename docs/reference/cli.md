@@ -2297,6 +2297,18 @@ managed Dolt server is not running is named on stderr but does not hold the
 answer up. A failed query is also recorded as a session.work_query_failed event,
 one per store that failed, naming it.
 
+--timeout &lt;duration&gt; declares the invocation's own budget: every store read of
+the invocation (with and without --claim) stops at that deadline, and the
+deadline gc hook run hands its child through GC_HOOK_DEADLINE bounds the same
+reads, whichever is earlier. A read stopped that way is a failed query — exit 2
+with GC_HOOK_STORE_UNAVAILABLE, nothing on stdout — named on stderr as "stopped
+at the hook deadline &lt;instant&gt;", so a caller that declares its budget gets a
+protocol answer before it expires instead of an outer kill (rc=124) with no
+answer at all. With --claim, the claim fence and its mutation reserve also fit
+inside the deadline. Without --timeout and without a valid GC_HOOK_DEADLINE,
+each read keeps its own per-query cap (150s) and the claim keeps its own
+window, as before. A negative --timeout is a usage error.
+
 Before the work query, a session keyed by $GC_SESSION_ID is checked for a
 pending drain (the drain fence), with and without --claim. A draining session
 gets the drain result instead of work. If the session row cannot be read, the
@@ -2334,6 +2346,7 @@ gc hook [agent] [flags]
 | `--drain-ack` | bool |  | with --claim, acknowledge runtime drain when no work is available |
 | `--inject` | bool |  | silent legacy Stop-hook compatibility; skip work query and exit 0 |
 | `--json` | bool |  | emit a JSON protocol result (always with --claim; on the discovery door only for a drain refusal) |
+| `--timeout` | duration | `0s` | deadline for this invocation's store reads and claim fence (0 = no invocation deadline) |
 | `--worktree` | bool |  | with --claim, create or verify a gc-owned git worktree for the claimed work (Git LFS content is not smudged) |
 
 | Subcommand | Description |

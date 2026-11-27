@@ -34,6 +34,7 @@ func newHookCmd(stdout, stderr io.Writer) *cobra.Command {
 	var drainAck bool
 	var jsonOut bool
 	var worktree bool
+	var timeout time.Duration
 	cmd := &cobra.Command{
 		Use:   "hook [agent]",
 		Short: "Find routed work for an agent",
@@ -78,6 +79,18 @@ managed Dolt server is not running is named on stderr but does not hold the
 answer up. A failed query is also recorded as a session.work_query_failed event,
 one per store that failed, naming it.
 
+--timeout <duration> declares the invocation's own budget: every store read of
+the invocation (with and without --claim) stops at that deadline, and the
+deadline gc hook run hands its child through GC_HOOK_DEADLINE bounds the same
+reads, whichever is earlier. A read stopped that way is a failed query — exit 2
+with GC_HOOK_STORE_UNAVAILABLE, nothing on stdout — named on stderr as "stopped
+at the hook deadline <instant>", so a caller that declares its budget gets a
+protocol answer before it expires instead of an outer kill (rc=124) with no
+answer at all. With --claim, the claim fence and its mutation reserve also fit
+inside the deadline. Without --timeout and without a valid GC_HOOK_DEADLINE,
+each read keeps its own per-query cap (150s) and the claim keeps its own
+window, as before. A negative --timeout is a usage error.
+
 Before the work query, a session keyed by $GC_SESSION_ID is checked for a
 pending drain (the drain fence), with and without --claim. A draining session
 gets the drain result instead of work. If the session row cannot be read, the
@@ -106,6 +119,10 @@ still the started claim the session must finish.
 The agent is determined from $GC_AGENT or a positional argument.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
+			if timeout < 0 {
+				fmt.Fprintln(stderr, "gc hook: --timeout must be zero or a positive duration") //nolint:errcheck // best-effort stderr
+				return errExit
+			}
 			opts := hookCommandOptions{
 				Inject:     inject,
 				HookFormat: hookFormat,
@@ -113,6 +130,7 @@ The agent is determined from $GC_AGENT or a positional argument.`,
 				DrainAck:   drainAck,
 				JSON:       jsonOut,
 				Worktree:   worktree,
+				Timeout:    timeout,
 			}
 			// exitForCode, not `!= 0 → errExit`: the store-unavailable
 			// contract is exit 2 (reportWorkQueryFailure), and folding it
@@ -127,6 +145,7 @@ The agent is determined from $GC_AGENT or a positional argument.`,
 	cmd.Flags().BoolVar(&drainAck, "drain-ack", false, "with --claim, acknowledge runtime drain when no work is available")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit a JSON protocol result (always with --claim; on the discovery door only for a drain refusal)")
 	cmd.Flags().BoolVar(&worktree, "worktree", false, "with --claim, create or verify a gc-owned git worktree for the claimed work (Git LFS content is not smudged)")
+	cmd.Flags().DurationVar(&timeout, "timeout", 0, "deadline for this invocation's store reads and claim fence (0 = no invocation deadline)")
 	if flag := cmd.Flags().Lookup("hook-format"); flag != nil {
 		flag.Hidden = true
 	}
@@ -309,6 +328,11 @@ type hookCommandOptions struct {
 	DrainAck   bool
 	JSON       bool
 	Worktree   bool
+	// Timeout is the invocation deadline from --timeout. Zero runs with no
+	// invocation deadline: store reads keep only their per-query
+	// hookWorkQueryTimeout cap and the claim fence keeps its own defaults, as
+	// gc hook always did before #5533.
+	Timeout    time.Duration
 	DrainAckFn hookDrainAckFunc
 }
 
@@ -343,6 +367,13 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		fmt.Fprintln(stderr, "gc hook: --worktree requires --claim") //nolint:errcheck
 		return 1
 	}
+	// One invocation deadline (--timeout, or the GC_HOOK_DEADLINE `gc hook run`
+	// hands its child) bounds every store read of BOTH doors: reads stop at the
+	// deadline minus the answer margin, so the hook answers inside its budget
+	// instead of being killed by an outer timeout with no protocol result
+	// (#5533).
+	readCtx, cancelReads := hookInvocationReadContext(opts.Timeout, stderr)
+	defer cancelReads()
 
 	agentName := os.Getenv("GC_ALIAS")
 	if agentName == "" {
@@ -637,12 +668,12 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 				}
 			}
 		}
-		return claimHookWorkProvisioning(context.Background(), city, workQuery, workDir, queryEnv, stores, claimOpts, provisionWorktree, emitQueryFailure, stdout, stderr)
+		return claimHookWorkProvisioning(readCtx, city, workQuery, workDir, queryEnv, stores, claimOpts, provisionWorktree, emitQueryFailure, stdout, stderr)
 	}
 	// The discovery door is fenced too: a draining seat must not be handed its
 	// preassigned continuation sibling by the packs' post-close `gc hook`.
 	visibility := hookDiscoveryVisibility(city, cityName, &a, identityCandidates, routeTargets, stderr)
-	runner := hookDiscoveryRunner(context.Background(), stores, hookRigLegRunner(cityPath, cfg, stores, shellWorkQueryWithEnvContext), visibility, emitQueryFailure, stderr)
+	runner := hookDiscoveryRunner(readCtx, stores, hookRigLegRunner(cityPath, cfg, stores, shellWorkQueryWithEnvContext), visibility, emitQueryFailure, stderr)
 	return hookDiscover(workQuery, workDir, false, hookDiscoveryOptions(assignee, identityCandidates, queryEnv, opts, strictDrainAck), city.claimOps(), runner, stdout, stderr, visibility)
 }
 
@@ -1364,12 +1395,16 @@ func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
 // a short bounded interval so startup hooks cannot strand sessions behind a
 // wedged data-plane command.
 func shellWorkQueryWithEnvContext(ctx context.Context, command, dir string, env []string) (string, error) {
+	// invocation is the caller's context before the per-query cap wraps it, so
+	// the result can name which bound stopped the query (workQueryResult) and
+	// the query's cleanup can be held inside the invocation's answer margin.
+	invocation := ctx
 	if generated := generatedProgram(command); generated != nil {
 		ctx, cancel := context.WithTimeout(ctx, hookWorkQueryTimeout)
 		defer cancel()
 		var stderr bytes.Buffer
 		out, err := generated(ctx, dir, execenv.WithUsageMetricsDisabled(workQueryEnvForDir(env, dir)), &stderr)
-		return workQueryResult(ctx, command, out, &stderr, err)
+		return workQueryResult(ctx, invocation, command, out, &stderr, err)
 	}
 	if reason := runtime.ShellCommandUnavailable(command); reason != "" {
 		return "", fmt.Errorf("work query refused: %s", reason)
@@ -1381,6 +1416,12 @@ func shellWorkQueryWithEnvContext(ctx context.Context, command, dir string, env 
 		return "", fmt.Errorf("running work query %q: %w", command, err)
 	}
 	cmd.WaitDelay = 2 * time.Second
+	if margin := hookInvocationReadMargin(invocation); margin > 0 && margin < cmd.WaitDelay {
+		// Under an invocation deadline the query must be fully reaped inside
+		// the answer margin left before that deadline, or its cleanup could
+		// overrun the budget the answer exists to fit (#5533).
+		cmd.WaitDelay = margin
+	}
 	prepareProviderOpCommand(cmd)
 	if dir != "" {
 		cmd.Dir = dir
@@ -1390,21 +1431,30 @@ func shellWorkQueryWithEnvContext(ctx context.Context, command, dir string, env 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := runWorkQueryCommand(cmd)
-	return workQueryResult(ctx, command, out, &stderr, err)
+	return workQueryResult(ctx, invocation, command, out, &stderr, err)
 }
 
 // workQueryResult turns a finished work query's output and error into
 // shellWorkQueryWithEnv's result. ctx is the query's own, bounded by
-// hookWorkQueryTimeout.
-func workQueryResult(ctx context.Context, command string, out []byte, stderr *bytes.Buffer, err error) (string, error) {
+// hookWorkQueryTimeout on top of invocation, the context the caller handed in:
+// a timeout names whichever bound fired — the invocation's hook deadline (with
+// its instant, so the caller can see its budget, not just a generic hang) or
+// the per-query cap. Both wrap context.DeadlineExceeded so callers can
+// classify the timeout as transient (dispatch.IsTransientControllerError /
+// errors.Is) and as a store that gave no answer
+// (classifyWorkQueryStoreUnavailable): without the wrap, a work-query timeout
+// reads as an opaque fatal error and kills long-running consumers like the
+// control-dispatcher --follow loop even though the timeout is just transient
+// bead-store load. The human-facing "timed out after" text is preserved.
+func workQueryResult(ctx, invocation context.Context, command string, out []byte, stderr *bytes.Buffer, err error) (string, error) {
 	if ctx.Err() == context.DeadlineExceeded {
-		// Wrap context.DeadlineExceeded so callers can classify the timeout as
-		// transient (dispatch.IsTransientControllerError / errors.Is). Without
-		// this, a work-query timeout reads as an opaque fatal error and kills
-		// long-running consumers like the control-dispatcher --follow loop even
-		// though the timeout is just transient bead-store load. The human-facing
-		// "timed out after" text is preserved.
 		msg := strings.TrimSpace(string(out))
+		if deadline, ok := invocation.Deadline(); ok && invocation.Err() != nil {
+			if msg != "" {
+				return string(out), fmt.Errorf("running work query %q: stopped at the hook deadline %s with partial stdout %q: %w", command, deadline.UTC().Format(time.RFC3339), msg, context.DeadlineExceeded)
+			}
+			return "", fmt.Errorf("running work query %q: stopped at the hook deadline %s: %w", command, deadline.UTC().Format(time.RFC3339), context.DeadlineExceeded)
+		}
 		if msg != "" {
 			return string(out), fmt.Errorf("running work query %q: timed out after %s with partial stdout %q: %w", command, hookWorkQueryTimeout, msg, context.DeadlineExceeded)
 		}
