@@ -150,6 +150,8 @@ package and for any selection step that fails. A changed package without a
 BUILD file fails the run until `make bazel-sync` writes one.
 `make check-affected AFFECTED_ACTION=plan` prints the selection without
 running it. The selector is `scripts/affected-preflight`.
+`GO_TEST_BUDGET` (default `15m`) bounds the `go test` step, and a clone
+without an `origin/HEAD` symref should pass `AFFECTED_BASE=origin/main`.
 
 `//go:build integration` tests outside `test/integration` run in the
 `integration-packages` lane, the Bazel form of `go test -tags integration`

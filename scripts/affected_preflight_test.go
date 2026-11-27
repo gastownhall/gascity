@@ -85,6 +85,23 @@ func TestAffectedPreflightSelectsTheDiff(t *testing.T) {
 		)
 	})
 
+	t.Run("embedded file shared by two packages selects both", func(t *testing.T) {
+		f := newAffectedFixture(t)
+		writeTestFile(t, filepath.Join(f.repo, "alpha", "assets", "BUILD.bazel"), "")
+		writeTestFile(t, filepath.Join(f.repo, "alpha", "assets", "assets.go"),
+			"package assets\n\nimport _ \"embed\"\n\n//go:embed msg.txt\nvar Msg string\n")
+		f.git(t, "git add .", "git commit -qm assets", "git branch -f base")
+		f.mergeBase = strings.TrimSpace(f.git(t, "git rev-parse HEAD"))
+		writeTestFile(t, filepath.Join(f.repo, "alpha", "assets", "msg.txt"), "changed\n")
+
+		f.mustRun(t)
+		f.requireMakeCalls(t,
+			f.guards(),
+			[]string{"lint-targets", "LINT_TARGETS=//alpha/assets:all //alpha:all //beta:all"},
+			[]string{"test-go-pkgs", "GO_TEST_PKGS=./alpha ./alpha/assets ./beta"},
+		)
+	})
+
 	t.Run("data file runs its direct readers only", func(t *testing.T) {
 		f := newAffectedFixture(t)
 		writeTestFile(t, filepath.Join(f.repo, "docs", "guide.md"), "changed\n")
@@ -122,6 +139,34 @@ func TestAffectedPreflightSelectsTheDiff(t *testing.T) {
 		f.requireMakeCalls(t, f.guards())
 		f.requireNoBazelCalls(t)
 	})
+}
+
+func TestTestGoPkgsBoundsGoTestByGoTestBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		vars []string
+		want string
+	}{
+		{name: "default", want: "-timeout 15m ./x"},
+		{name: "override", vars: []string{"GO_TEST_BUDGET=3m"}, want: "-timeout 3m ./x"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append([]string{
+				"-n", "--no-print-directory",
+				"-f", filepath.Join(repoRoot(t), "Makefile"),
+				"test-go-pkgs", "GO_TEST_PKGS=./x", "SYS_USR_CGO_FALLBACK=0",
+			}, tc.vars...)
+			cmd := makeCommand(args...)
+			cmd.Dir = repoRoot(t)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("make -n test-go-pkgs: %v\n%s", err, out)
+			}
+			if !strings.Contains(string(out), tc.want) {
+				t.Errorf("make -n test-go-pkgs output does not contain %q:\n%s", tc.want, out)
+			}
+		})
+	}
 }
 
 func TestAffectedPreflightCapsIndirectTests(t *testing.T) {

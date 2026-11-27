@@ -331,7 +331,10 @@ def select(plan: Plan) -> None:
     if shutil.which(bazel) is None:
         raise FullCheck(f"{bazel!r} is not on PATH, so nogo cannot lint the affected packages")
 
-    embedded_by = {embed: pkg.dir for pkg in packages.values() for embed in pkg.embeds}
+    embedded_by: dict[str, set[str]] = {}
+    for pkg in packages.values():
+        for embed in pkg.embeds:
+            embedded_by.setdefault(embed, set()).add(pkg.dir)
     ignored = bazel_ignored_prefixes()
     code_touched: set[str] = set()
     test_touched: set[str] = set()
@@ -348,7 +351,7 @@ def select(plan: Plan) -> None:
         elif name in BUILD_NAMES:
             code_touched.add(directory)
         elif path in embedded_by:
-            code_touched.add(embedded_by[path])
+            code_touched |= embedded_by[path]
         if status == "D" or not os.path.lexists(path):
             if not path.endswith(".go") or is_go_ignored(path):
                 owner = directory
