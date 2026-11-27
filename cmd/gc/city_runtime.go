@@ -31,6 +31,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -238,6 +239,16 @@ type CityRuntime struct {
 	orderTrackingRetentionWatchdogLast time.Time
 	nudgeMailSweepWatchdogLast         time.Time
 	wispIndexMigrationApplied          bool
+
+	// failedMoleculeSweepWatchdogLast is when the orders lane last ran the
+	// failed-molecule sweep; failedMoleculeSweepLastPass holds that pass's
+	// totals until the lane's trace records them; failedMoleculeSweepResume
+	// is where each store's next sweep starts, by its log label, when its
+	// last one stopped short. All are the orders lane's, touched only under
+	// its pass lock.
+	failedMoleculeSweepWatchdogLast time.Time
+	failedMoleculeSweepLastPass     *failedMoleculeSweepPass
+	failedMoleculeSweepResume       map[string]sourceworkflow.FailedMoleculeSweepCursor
 
 	rec events.Recorder
 	cs  *controllerState // nil when controller-managed bead stores are unavailable

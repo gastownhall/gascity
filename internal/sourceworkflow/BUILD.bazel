@@ -2,7 +2,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "sourceworkflow",
-    srcs = ["sourceworkflow.go"],
+    srcs = [
+        "failed_molecules.go",
+        "sourceworkflow.go",
+    ],
     importpath = "github.com/gastownhall/gascity/internal/sourceworkflow",
     visibility = ["//:__subpackages__"],
     deps = [
@@ -20,6 +23,7 @@ go_test(
     name = "sourceworkflow_test",
     srcs = [
         "atomic_root_close_test.go",
+        "failed_molecules_test.go",
         "live_read_through_target_test.go",
         "owned_test.go",
         "sourceworkflow_test.go",
@@ -27,6 +31,7 @@ go_test(
     ],
     embed = [":sourceworkflow"],
     deps = [
+        "//internal/beadmeta",
         "//internal/beads",
         "//internal/beads/beadstest",
         "//internal/session",

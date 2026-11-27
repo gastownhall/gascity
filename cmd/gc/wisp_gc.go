@@ -1468,7 +1468,7 @@ func storeHoldsLiveAttachmentSource(leg beads.FederatedReader, rootID string) bo
 // nothing more. Until a deployment marks its protected roots the guard is a
 // no-op, which is safe because the closer stays dry-run by default.
 func isGCExempt(b beads.Bead) bool {
-	return parseBoolEnv(strings.TrimSpace(b.Metadata[beadmeta.GCExemptMetadataKey]))
+	return beadmeta.GCExempt(b.Metadata)
 }
 
 // beadLastActivity returns the most recent activity timestamp for a bead,

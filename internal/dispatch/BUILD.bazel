@@ -66,6 +66,7 @@ go_test(
         "crash_injection_test.go",
         "cross_store_gate_test.go",
         "drain_conditional_test.go",
+        "drain_failed_molecule_sweep_test.go",
         "drain_test.go",
         "fanout_membership_test.go",
         "finalize_blocked_source_repro_test.go",

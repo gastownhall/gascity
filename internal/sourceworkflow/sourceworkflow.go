@@ -754,9 +754,22 @@ func orderedOpenWorkflowSubtree(store beads.MoleculeTarget, rootID string, exclu
 	if err != nil {
 		return nil, err
 	}
-	byID := make(map[string]beads.Bead, len(matched))
-	for _, bead := range matched {
+	return orderedOpenBeads(store, matched, exclude)
+}
+
+// orderedOpenBeads returns the open beads of members, a close batch's beads
+// (duplicates collapse), ordered deepest-descendant-first by ParentID within
+// members and then blocker-first via closeorder.Order. Closed and
+// controller-owned beads, and any bead a non-nil exclude reports true for,
+// are dropped.
+func orderedOpenBeads(store beads.MoleculeTarget, members []beads.Bead, exclude func(beads.Bead) bool) ([]string, error) {
+	byID := make(map[string]beads.Bead, len(members))
+	for _, bead := range members {
 		byID[bead.ID] = bead
+	}
+	matched := make([]beads.Bead, 0, len(byID))
+	for _, bead := range byID {
+		matched = append(matched, bead)
 	}
 	depthMemo := make(map[string]int, len(matched))
 	const visitingDepth = -1
