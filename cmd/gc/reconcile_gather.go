@@ -122,6 +122,10 @@ type World struct {
 	// Suspension is the suspension state the pass read, for the live-claim
 	// veto's scope (liveClaimVetoApplies, the orphaned signal's L5).
 	Suspension suspensionstate.State
+	// SuspensionErr is the wake read's error when the suspension file exists
+	// but does not parse; Suspension is then the zero State, so nothing
+	// drains on it, and the pass holds its starts (decideStartHold).
+	SuspensionErr error
 	// ExecutionStalled are the execution backstop's drain requests by row
 	// ID, for arm A16 (C7b1).
 	ExecutionStalled map[string]executionStalledRequest
@@ -219,7 +223,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	w := World{Now: now, CityPath: e.CityPath, Env: env, InFlight: p.inflight.view(), Backoff: p.backoff.Snapshot(), Bucket: p.bucket, Paused: p.startsPaused(), SoftReload: p.softReload.Load().view()}
 	var st suspensionstate.State
 	if e.Suspension != nil {
-		st, _ = e.Suspension()
+		st, w.SuspensionErr = e.Suspension()
 	}
 	w.CitySuspended, w.SuspendedRigPaths, w.Suspension = effectiveCitySuspended(cfg, st), suspendedRigPathsWithState(cfg, st), st
 	rec := e.Recording()

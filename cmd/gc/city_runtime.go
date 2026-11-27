@@ -342,6 +342,13 @@ type CityRuntime struct {
 	fsPressureConsecutiveSkips int
 	fsPressureEpisodeLogged    bool
 
+	// suspensionWakeLogged is the last unreadable-suspension-file error the
+	// wake read printed (wakeSuspension), so each distinct error prints once;
+	// a clean read clears it. Guarded by suspensionWakeMu: the planner, the
+	// tick and the orders lane all read.
+	suspensionWakeMu     sync.Mutex
+	suspensionWakeLogged string
+
 	// reapSkips carries worktree-reaper skip history between ticks so an
 	// unchanged skip is reported once instead of on every sweep. Owned by the
 	// serial tick, like the other per-tick state above.
@@ -3622,6 +3629,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 		withStartDeferralMemo(cr.ensureStartDeferralMemo()),
 		withOnDeathGate(cr.onDeathGate()),
 		withPrepareBudget(defaultStartPrepareBudget),
+		withStartHold(cr.startHold()),
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(result.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
 		// The park verdicts over the build's whole assigned-work read (not the
 		// wake-filtered view), as the pool counts above decide them.
@@ -4517,6 +4525,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		// its lease; it rolls back as it did before the memo.
 		withOnDeathGate(cr.onDeathGate()),
 		withPrepareBudget(defaultStartPrepareBudget),
+		withStartHold(cr.startHold()),
 		withParkedSeats(parked),
 	)
 	cr.requestDeferredDrainFollowUpTick()

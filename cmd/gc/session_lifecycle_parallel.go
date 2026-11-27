@@ -486,6 +486,9 @@ type startExecutionOptions struct {
 	// onDeathGate holds names whose on_death hook is queued or running;
 	// their starts wait. Nil holds nothing.
 	onDeathGate *onDeathGate
+	// hold is the pass's controller-wide start hold (decideStartHold). The
+	// zero hold holds nothing.
+	hold startHold
 }
 
 type startExecutionOption func(*startExecutionOptions)
@@ -604,6 +607,13 @@ func withEndpointCapacityGuard(guard *endpointCapacityGuard) startExecutionOptio
 func withOnDeathGate(gate *onDeathGate) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.onDeathGate = gate
+	}
+}
+
+// withStartHold holds the planner call's starts under the pass's start hold.
+func withStartHold(h startHold) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.hold = h
 	}
 }
 
@@ -4846,6 +4856,20 @@ func (m *prepareMeter) deferIfSpent(stderr io.Writer, trace *sessionReconcilerTr
 	return true
 }
 
+// deferIfHeld defers a start candidate the pass's start hold holds: it logs
+// and traces the deferral before any slot, lease, ticket, breaker accounting
+// or write.
+func (h startHold) deferIfHeld(stderr io.Writer, trace *sessionReconcilerTraceCycle, wave int, candidate startCandidate, cfg *config.City) bool {
+	if !h.held() {
+		return false
+	}
+	logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), string(TraceOutcomeDeferredBySuspensionUnreadable), time.Time{}, time.Time{}, nil)
+	if trace != nil {
+		trace.RecordDecision(TraceSiteLifecycleStartRun, TraceReasonStartHold, TraceOutcomeDeferredBySuspensionUnreadable, candidate.tp.TemplateName, candidate.name(), traceRecordPayload{"cause": h.Cause})
+	}
+	return true
+}
+
 func executePlannedStartsTraced(
 	ctx context.Context,
 	candidates []startCandidate,
@@ -5014,6 +5038,12 @@ func executePlannedStartsTraced(
 				// A planner call that has spent its prepare budget defers the
 				// rest before any slot, lease, ticket, breaker accounting or write.
 				if prepareSpend.deferIfSpent(stderr, trace, wave, candidate, cfg) {
+					deferrals.noteGateDeferred(candidate.info.ID)
+					continue
+				}
+				// A pass the controller holds (an unreadable suspension file)
+				// defers every start before any slot, lease, ticket or write.
+				if startOpts.hold.deferIfHeld(stderr, trace, wave, candidate, cfg) {
 					deferrals.noteGateDeferred(candidate.info.ID)
 					continue
 				}

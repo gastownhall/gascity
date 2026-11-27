@@ -60,6 +60,9 @@ var startOutcomeClassification = map[string]startOutcomeClass{
 	"deferred_by_wake_budget":       {records: true},
 	"deferred_by_async_start_limit": {records: true},
 	"deferred_by_prepare_budget":    {records: true},
+	// The start hold re-offers every candidate on the first pass it lifts and
+	// writes nothing; recording keeps the held creates past their lease.
+	"deferred_by_suspension_unreadable": {records: true},
 
 	"blocked_on_dependencies":       {reason: "clause (a): the candidate's own dependencies are not alive"},
 	"deferred_by_on_death_hook":     {reason: "clause (a): its own runtime name's on_death hook is pending"},
@@ -665,9 +668,10 @@ func run(w io.Writer) {
 // driver fails.
 func startGateRecordingDrivers() map[string]func(t *testing.T) {
 	return map[string]func(t *testing.T){
-		"deferred_by_wake_budget":       driveWakeBudgetRecords,
-		"deferred_by_async_start_limit": driveAsyncLimitRecords,
-		"deferred_by_prepare_budget":    drivePrepareBudgetRecords,
+		"deferred_by_wake_budget":           driveWakeBudgetRecords,
+		"deferred_by_async_start_limit":     driveAsyncLimitRecords,
+		"deferred_by_prepare_budget":        drivePrepareBudgetRecords,
+		"deferred_by_suspension_unreadable": driveStartHoldRecords(startHold{Cause: causeSuspensionUnreadable}, TraceOutcomeDeferredBySuspensionUnreadable),
 	}
 }
 
@@ -969,4 +973,28 @@ func driveEndpointCapacityRecordsNothing(t *testing.T) {
 		t.Fatalf("premise: a was not deferred by its endpoint:\n%s", e.log.String())
 	}
 	requireCommitted(t, memo)
+}
+
+// driveStartHoldRecords drives the start hold: every candidate it defers is
+// logged with outcome, traced, and committed to the memo.
+func driveStartHoldRecords(hold startHold, outcome TraceOutcomeCode) func(t *testing.T) {
+	return func(t *testing.T) {
+		e := newPrepareBudgetEnv(t, "a", "b")
+		memo := newStartDeferralMemo()
+		a := e.candidate(t, "a", time.Second)
+		b := e.candidate(t, "b", time.Second)
+		if woken := e.runWith([]startExecutionOption{withStartHold(hold), withStartDeferralMemo(memo), withStartDeferralSeen(neverStartedSet())}, false, a, b); woken != 0 {
+			t.Fatalf("woken = %d, want 0 under the hold", woken)
+		}
+		var traced []string
+		for _, r := range e.records(TraceSiteLifecycleStartRun) {
+			if r.OutcomeCode == outcome && r.ReasonCode == TraceReasonStartHold {
+				traced = append(traced, r.SessionName)
+			}
+		}
+		if strings.Join(traced, ",") != "a,b" {
+			t.Fatalf("traced %s = %v, want a,b\n%s", outcome, traced, e.log.String())
+		}
+		requireCommitted(t, memo, a.info.ID, b.info.ID)
+	}
 }

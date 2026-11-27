@@ -208,6 +208,9 @@ type admitInput struct {
 	// Paused is a provider swap in progress (P7); BootOpen the boot gate (P2).
 	Paused   bool
 	BootOpen bool
+	// Hold is the pass's controller-wide start hold (decideStartHold): it
+	// defers every start and create with its cause.
+	Hold startHold
 }
 
 // admitResult is admit's output: the intents to submit, the rest with their
@@ -402,6 +405,8 @@ func (a *admission) admitOne(it *intent) string {
 		return causeRowBackoff
 	case a.in.Paused && (spec.class == capStarts || spec.class == capCreates):
 		return causeSwapPause
+	case a.in.Hold.held() && (spec.class == capStarts || spec.class == capCreates):
+		return a.in.Hold.Cause
 	}
 	switch spec.class {
 	case capStarts:

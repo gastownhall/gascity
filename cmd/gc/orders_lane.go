@@ -292,8 +292,9 @@ func (cr *CityRuntime) dispatchOrdersLocked(ctx context.Context, cityRoot string
 	}
 	// A suspended city gets no order pass at all: dispatch already skips it,
 	// and the tracking and mail watchdogs below would read every scope's
-	// store, restarting the proxies suspension retired.
-	if effectiveCitySuspended(cfg, loadSuspensionStateBestEffort(cr.cityPath)) {
+	// store, restarting the proxies suspension retired. An unreadable
+	// suspension file is read as suspended: the brake may be on.
+	if st, err := cr.wakeSuspension(); err != nil || effectiveCitySuspended(cfg, st) {
 		return
 	}
 	now := time.Now()
