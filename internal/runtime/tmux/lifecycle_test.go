@@ -1,8 +1,12 @@
 package tmux
 
 import (
+	"context"
 	"errors"
+	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -171,4 +175,158 @@ func containsSetOptionExitEmptyWithValue(args []string, value string) bool {
 		}
 	}
 	return false
+}
+
+// settleObservation records one server socket observation made during
+// KillServer's settle wait: the path observed and how many tmux commands had
+// run when it was made.
+type settleObservation struct {
+	path  string
+	calls int
+}
+
+// TestKillServerWaitsForListenerToClose verifies that KillServer and
+// TeardownServer on a named socket do not return while the server's listener
+// still answers after tmux acknowledged kill-server: an immediate restart would
+// otherwise be refused with ErrServerDegraded reason=live-unix-socket.
+func TestKillServerWaitsForListenerToClose(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		kill func(*Tmux) error
+	}{
+		{name: "KillServer", kill: (*Tmux).KillServer},
+		{name: "TeardownServer", kill: (*Tmux).TeardownServer},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fe := &fakeExecutor{}
+			const liveObservations = 2
+			var observed []settleObservation
+			tm := &Tmux{cfg: Config{SocketName: "gc-settle"}, exec: fe}
+			tm.serverSocketObserver = func(_ context.Context, path string) error {
+				observed = append(observed, settleObservation{path: path, calls: len(fe.calls)})
+				if len(observed) <= liveObservations {
+					return errors.New("path=" + path + " inode=1 peer_pid=42 reason=live-unix-socket")
+				}
+				return nil
+			}
+
+			if err := tc.kill(tm); err != nil {
+				t.Fatalf("%s() error = %v", tc.name, err)
+			}
+			if len(observed) != liveObservations+1 {
+				t.Fatalf("%s returned after %d socket observations; want %d (it must wait until the listener stops answering)", tc.name, len(observed), liveObservations+1)
+			}
+			wantPath := tm.namedServerSocketPath()
+			for i, obs := range observed {
+				if obs.path != wantPath {
+					t.Errorf("observation %d path = %q, want named socket path %q", i, obs.path, wantPath)
+				}
+				if obs.calls != 1 || !slices.Contains(fe.calls[0], "kill-server") {
+					t.Errorf("observation %d made after %d tmux calls %v; want it after exactly the kill-server call", i, obs.calls, fe.calls)
+				}
+			}
+		})
+	}
+}
+
+// TestKillServerReportsListenerThatStaysLive verifies that KillServer reports a
+// listener still answering at the settle bound as ErrServerDegraded with the
+// socket path and the last observation, and never as ErrNoServer, including
+// when the observation itself hangs until the bound.
+func TestKillServerReportsListenerThatStaysLive(t *testing.T) {
+	const bound = 50 * time.Millisecond
+	saved := killServerSettleTimeout
+	killServerSettleTimeout = bound
+	t.Cleanup(func() { killServerSettleTimeout = saved })
+
+	for _, tc := range []struct {
+		name            string
+		observe         func(ctx context.Context, path string) error
+		minObservations int
+	}{
+		{
+			name: "observer reports live",
+			observe: func(_ context.Context, path string) error {
+				return errors.New("path=" + path + " inode=1 peer_pid=42 reason=live-unix-socket")
+			},
+			minObservations: 2,
+		},
+		{
+			name: "observer hangs until the bound",
+			observe: func(ctx context.Context, path string) error {
+				<-ctx.Done()
+				return errors.New("path=" + path + " peer_pid=42 reason=live-unix-socket")
+			},
+			minObservations: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fe := &fakeExecutor{}
+			observations := 0
+			tm := &Tmux{cfg: Config{SocketName: "gc-settle"}, exec: fe}
+			tm.serverSocketObserver = func(ctx context.Context, path string) error {
+				observations++
+				return tc.observe(ctx, path)
+			}
+
+			start := time.Now()
+			err := tm.KillServer()
+			elapsed := time.Since(start)
+
+			if !errors.Is(err, ErrServerDegraded) {
+				t.Fatalf("KillServer() error = %v, want ErrServerDegraded", err)
+			}
+			if errors.Is(err, ErrNoServer) {
+				t.Errorf("KillServer() error = %v wraps ErrNoServer; a live listener must not read as an absent server", err)
+			}
+			path := tm.namedServerSocketPath()
+			for _, want := range []string{"protocol=kill-server-settle", "path=" + path, "peer_pid=42 reason=live-unix-socket"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("KillServer() error = %q, want it to contain %q", err, want)
+				}
+			}
+			if observations < tc.minObservations {
+				t.Errorf("KillServer observed the socket %d times, want at least %d", observations, tc.minObservations)
+			}
+			if elapsed < bound {
+				t.Errorf("KillServer returned after %s, want no sooner than the %s settle bound", elapsed, bound)
+			}
+		})
+	}
+}
+
+// TestKillServerAlreadyGoneSkipsSettle verifies that KillServer waits for the
+// listener only after an acknowledged kill-server on a named socket: an
+// already-gone server, a failed kill-server and the default socket return
+// kill-server's own result without observing the socket.
+func TestKillServerAlreadyGoneSkipsSettle(t *testing.T) {
+	killFailed := errors.New("kill-server: permission denied")
+	for _, tc := range []struct {
+		name    string
+		cfg     Config
+		killErr error
+		wantErr error
+	}{
+		{name: "named socket already gone", cfg: Config{SocketName: "gc-settle"}, killErr: ErrNoServer},
+		{name: "named socket kill-server fails", cfg: Config{SocketName: "gc-settle"}, killErr: killFailed, wantErr: killFailed},
+		{name: "default socket", cfg: DefaultConfig()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fe := &fakeExecutor{err: tc.killErr}
+			observations := 0
+			tm := &Tmux{cfg: tc.cfg, exec: fe}
+			tm.serverSocketObserver = func(context.Context, string) error {
+				observations++
+				return errors.New("peer_pid=42 reason=live-unix-socket")
+			}
+
+			err := tm.KillServer()
+			if err != tc.wantErr { //nolint:errorlint // the error must be kill-server's own, unchanged
+				t.Errorf("KillServer() error = %v, want %v", err, tc.wantErr)
+			}
+			if observations != 0 {
+				t.Errorf("KillServer observed the socket %d times, want 0", observations)
+			}
+		})
+	}
 }
