@@ -1014,6 +1014,16 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 	}
 	report := newHookStoreFailureReport("gc hook --claim", stderr, emitFailure)
 	noteStoreFailure := report.note
+	// answers is this invocation's answer set (hookStoreAnswers): selection
+	// reads each store that answers at most once, and a claim acts only on its
+	// store's fresh re-read.
+	answers := newHookStoreAnswers(run)
+	multiLeg := len(stores) > 1
+	progress := &hookClaimProgress{ops: &ops, stderr: stderr, stores: stores, primary: primary, answers: answers}
+	ops.progress = progress
+	answers.beforeRun = func(dir string, env []string) {
+		progress.phase("reading " + progress.storeLabel(hookStore{dir: dir, env: env}))
+	}
 	remaining := stores
 	// claimsErrored aggregates the per-store signal that a store reported ready
 	// work but every eligible claim mutation errored, so the shared drain below can
@@ -1024,7 +1034,8 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 	// store's claim keeps the invocation quiet about it.
 	var left []beads.Bead
 	for len(remaining) > 0 {
-		discovered, selected, err := selectStoreWithWorkRetrying(workQuery, remaining, primary, run, &ops, noteStoreFailure)
+		selectionMark := answers.runs
+		discovered, selected, err := selectStoreWithWorkRetrying(workQuery, remaining, primary, answers.read, &ops, noteStoreFailure)
 		if err != nil {
 			report.failed(workQuery, err)
 			return reportClaimWorkQueryFailure(err, stderr)
@@ -1033,10 +1044,13 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 			break // no remaining store has ready work
 		}
 		// On a multi-leg city this re-reads the selected store before the
-		// mutation, and a primary-leg failure there is surfaced exactly like a
-		// discovery failure: it is the same read of the same store, moments
-		// later, so it gets the same classification.
-		claimOutput, claimStore, err := claimStoreWithFallback(workQuery, remaining, selected, primary, discovered, run, noteStoreFailure)
+		// mutation. A primary-leg failure there is surfaced exactly like a
+		// discovery failure when this selection read the primary too: it is the
+		// same read of the same store, moments later, so it gets the same
+		// classification. A primary this selection ranked from an answer an
+		// earlier pass saved had no other read in it, so its failed re-read
+		// falls through to the other stores' work (claimStoreWithFallback).
+		claimOutput, claimStore, err := claimStoreWithFallback(workQuery, remaining, selected, primary, discovered, answers, selectionMark, multiLeg, noteStoreFailure)
 		if err != nil {
 			report.failed(workQuery, err)
 			return reportClaimWorkQueryFailure(err, stderr)
@@ -1056,6 +1070,7 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		}
 		storeOps := ops
 		storeOps.Runner = func(string, string) (string, error) { return claimOutput, nil }
+		progress.phase("claiming from " + progress.storeLabel(claimStore))
 		res := tryHookClaim(workQuery, storeDir, &storeOpts, &storeOps, stdout, stderr)
 		if res.terminal {
 			return res.code
@@ -1069,8 +1084,11 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		// every claimable row's claim mutation errored and was skipped. Drop it and
 		// reselect from the remaining stores so routed work in a later federated
 		// store is not stranded behind it; claimsErrored carries any write-failure
-		// signal to the shared drain.
+		// signal to the shared drain. The reselection ranks the answers this
+		// invocation already holds: it runs again only a store whose latest read
+		// failed, and only the store it picks is re-read before the claim.
 		remaining = removeHookStore(remaining, claimStore)
+		progress.storesWithoutClaim++
 	}
 	reportHookClaimLeftToAnotherSession(left, claimOpts.PoolSeat, stderr)
 	return writeHookClaimNoWork(claimOpts, ops, claimsErrored, workDir, stdout, stderr)
@@ -1161,12 +1179,17 @@ var (
 // A failed secondary store with no work anywhere is an error here too
 // (hookSecondaryStoreFailure), so it gets the same bounded retry. noted is
 // forwarded to bestStoreWithWork.
+//
+// The claim loop passes its answer set's read as run (hookStoreAnswers), and a
+// failed read is never saved, so each retry runs only the stores whose latest
+// read failed; the stores that answered are ranked from their saved answers.
 func selectStoreWithWorkRetrying(workQuery string, stores []hookStore, primary hookStore, run hookStoreRunner, ops *hookClaimOps, noted ...hookStoreFailureNote) (string, hookStore, error) {
 	out, selected, err := bestStoreWithWork(workQuery, stores, primary, run, noted...)
 	for attempt := 0; err != nil && attempt < hookClaimQueryRetryAttempts; attempt++ {
 		if ops.claimWindowSpentAfter(hookClaimQueryRetryInterval) {
 			return out, selected, hookClaimRetryWindowClosed(err, ops)
 		}
+		ops.progress.phase(fmt.Sprintf("pausing %s before retrying failed store reads (retry %d of %d)", hookClaimQueryRetryInterval, attempt+1, hookClaimQueryRetryAttempts))
 		ops.sleepOrWallClock(hookClaimQueryRetryInterval)
 		if ops.claimWindowSpentAfter(0) {
 			return out, selected, hookClaimRetryWindowClosed(err, ops)
@@ -1174,6 +1197,65 @@ func selectStoreWithWorkRetrying(workQuery string, stores []hookStore, primary h
 		out, selected, err = bestStoreWithWork(workQuery, stores, primary, run, noted...)
 	}
 	return out, selected, err
+}
+
+// hookClaimProgress reports a `gc hook --claim` invocation that is still
+// working on stderr, so an agent can tell a slow claim from a hung one. Once
+// the invocation is hookClaimProgressInterval old, phase prints one line at the
+// next phase boundary (a store read, a claim attempt, a retry pause), and then
+// at most one line per interval. Time is read only through ops, so a test
+// drives it with a fake clock. Stdout, the exit code and events are untouched.
+type hookClaimProgress struct {
+	ops     *hookClaimOps
+	stderr  io.Writer
+	stores  []hookStore
+	primary hookStore
+	answers *hookStoreAnswers
+	// storesWithoutClaim counts the stores the claim loop dropped after
+	// acquiring nothing from them: rows lost to another claimant, none this
+	// session could take, or claim writes that all errored.
+	storesWithoutClaim int
+	printed            bool
+	printedAt          time.Duration
+}
+
+// phase reports the claim is entering phase, when a progress line is due. A
+// nil receiver reports nothing.
+func (p *hookClaimProgress) phase(phase string) {
+	if p == nil {
+		return
+	}
+	age := p.ops.invocationAge()
+	if age < hookClaimProgressInterval || (p.printed && age-p.printedAt < hookClaimProgressInterval) {
+		return
+	}
+	p.printed, p.printedAt = true, age
+	dropped := "stores"
+	if p.storesWithoutClaim == 1 {
+		dropped = "store"
+	}
+	fmt.Fprintf(p.stderr, "gc hook --claim: still working after %ds of the %ds claim window: %s (%d of %d stores answered, %d %s yielded no claim)\n", //nolint:errcheck // best-effort stderr
+		int(age/time.Second), int(p.ops.claimWindowOrDefault()/time.Second), phase, len(p.answers.saved), len(p.stores), p.storesWithoutClaim, dropped)
+}
+
+// storeLabel names the fan-out store that reads st's dir and env.
+func (p *hookClaimProgress) storeLabel(st hookStore) string {
+	for _, candidate := range p.stores {
+		if sameHookStore(candidate, st) {
+			st = candidate
+			break
+		}
+	}
+	switch {
+	case st.rig != "":
+		return fmt.Sprintf("rig %q store", st.rig)
+	case sameHookStore(st, p.primary):
+		return "this agent's own store"
+	case st.storeRef != "":
+		return fmt.Sprintf("store %q", st.storeRef)
+	default:
+		return fmt.Sprintf("store at %s", st.dir)
+	}
 }
 
 // hookClaimRetryWindowClosed annotates the last claim-read error with the reason
@@ -1680,10 +1762,14 @@ func hookDiscoveryRunner(stores []hookStore, run hookStoreRunner, visibility hoo
 	report := newHookStoreFailureReport("gc hook", stderr, emitFailure)
 	return func(command, _ string) (string, error) {
 		// The primary is the agent's own store, matched by identity, so a later
-		// store never inherits its semantics once it is dropped.
+		// store never inherits its semantics once it is dropped. A reselection
+		// ranks the answers this call already holds (hookStoreAnswers), so each
+		// call reads a store that answers at most once; a store whose read
+		// failed is run again by the next reselection.
+		answers := newHookStoreAnswers(run)
 		remaining := stores
 		for {
-			out, selected, err := bestStoreWithWork(command, remaining, stores[0], run, report.note)
+			out, selected, err := bestStoreWithWork(command, remaining, stores[0], answers.read, report.note)
 			report.failed(command, err)
 			if err != nil || isZeroHookStore(selected) || len(remaining) == 1 || workQueryHasReadyWork(hookListing(out, time.Now(), visibility)) {
 				return out, err

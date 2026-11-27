@@ -1818,6 +1818,7 @@ go_test(
         "hook_budget_born_split_test.go",
         "hook_budget_test.go",
         "hook_city_test.go",
+        "hook_claim_answer_reuse_test.go",
         "hook_claim_assigned_federation_test.go",
         "hook_claim_bead_events_test.go",
         "hook_claim_class_fanout_test.go",
