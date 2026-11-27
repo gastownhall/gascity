@@ -3204,8 +3204,8 @@ func (cr *CityRuntime) reloadConfigTraced(
 	// advertised in the catalog and prompt appendix but never materialized
 	// into (or pruned from) the vendor sink until a full supervisor
 	// restart (#3459). Idempotent — a converged pass creates nothing new;
-	// per-agent errors are logged to stderr internally and never abort
-	// the reload.
+	// per-sink errors are logged to stderr internally, surface as reload
+	// warnings, and never abort the reload.
 	//
 	// Match the start/supervisor invariant: validate skill collisions
 	// before materializing so a colliding live-reload config can't write
@@ -3215,8 +3215,13 @@ func (cr *CityRuntime) reloadConfigTraced(
 	// warning rather than aborting the reload.
 	if err := checkSkillCollisions(nextCfg, cr.cityPath); err != nil {
 		appendWarning(fmt.Sprintf("skill collision; skipping materialization: %v", err))
-	} else {
-		_ = runStage1SkillMaterialization(cr.cityPath, nextCfg, cr.stderr)
+	} else if err := runStage1SkillMaterialization(cr.cityPath, nextCfg, cr.stderr); err != nil {
+		// A sink left unreconciled (a clash between members' sources, an
+		// unreadable agent catalog, a write failure) does not refuse the
+		// reload; each one becomes a warning on the reply.
+		for _, sinkErr := range unwrapJoinedErrors(err) {
+			appendWarning("skill materialization incomplete: " + sinkErr.Error())
+		}
 	}
 
 	// Stage-1 MCP projection runs here for the same reason: it otherwise

@@ -134,3 +134,32 @@ func TestPlanStage1SkillMaterializationReportsWithoutWriting(t *testing.T) {
 		t.Fatalf("plan after the real pass = %q, want nothing to do", lines)
 	}
 }
+
+// TestPlanStage1SkillMaterializationSharedSinkConverges: once a real pass
+// has reconciled a sink shared by a declared agent and the implicit claude
+// agent, the dry-run preview reports nothing to change for it.
+func TestPlanStage1SkillMaterializationSharedSinkConverges(t *testing.T) {
+	clearGCEnv(t)
+	cityPath := t.TempDir()
+	t.Setenv("GC_HOME", t.TempDir())
+	writeSkillSource(t, filepath.Join(cityPath, "skills", "plan"))
+	mayorSkills := filepath.Join(cityPath, "agents", "mayor", "skills")
+	writeSkillSource(t, filepath.Join(mayorSkills, "notes"))
+	cfg := &config.City{
+		PackSkillsDir: filepath.Join(cityPath, "skills"),
+		Session:       config.SessionConfig{Provider: "tmux"},
+		Agents: []config.Agent{
+			{Name: "mayor", Scope: "city", Provider: "claude", SkillsDir: mayorSkills},
+			{Name: "claude", Scope: "city", Provider: "claude"},
+		},
+	}
+
+	var stderr bytes.Buffer
+	if err := runStage1SkillMaterialization(cityPath, cfg, &stderr); err != nil {
+		t.Fatalf("runStage1SkillMaterialization: %v (stderr: %s)", err, stderr.String())
+	}
+	if lines := planStage1SkillMaterialization(cityPath, cfg, &stderr); len(lines) != 0 {
+		t.Fatalf("plan after the real pass = %q, want nothing to do for %s (stderr: %s)",
+			lines, filepath.Join(cityPath, ".claude", "skills"), stderr.String())
+	}
+}

@@ -162,6 +162,13 @@ func decodeSharedCatalogSnapshot(encoded string) (materialize.CityCatalog, error
 	return cat, nil
 }
 
+// materializeSkillsIntoWorkdir runs the stage-2 skill pass of one agent
+// into workdir's vendor sink. It reconciles the sink against this agent's
+// effective set alone. Stage 1 reconciles a sink several agents share
+// against all of them (stage1SkillRequests), but this pass does not: two
+// sessions of different agents sharing a work_dir, or a session whose
+// work_dir is another agent's scope root, can prune each other's
+// agent-local skills (#7547 stage-2 follow-up).
 func materializeSkillsIntoWorkdir(cfg *config.City, agent *config.Agent, cityPath, workdir string, sharedCatalog *materialize.CityCatalog, stdout, stderr io.Writer) error {
 	if cfg == nil || agent == nil {
 		fmt.Fprintln(stderr, "gc internal materialize-skills: missing city config or agent") //nolint:errcheck // best-effort stderr
