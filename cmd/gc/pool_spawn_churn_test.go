@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -289,6 +290,21 @@ func (h *spawnChurnHarness) claimFailed(id, template string) {
 	h.guard.observe(events.Event{Type: events.BeadClaimFailed, Ts: h.now, Subject: "gc-work", SessionID: id, Payload: payload})
 }
 
+// unrecordedClaim feeds the work.started_unrecorded report the hook writes
+// when it delivered a claim to seat id's turn but could not record it in the
+// seat's work_started cell (recordHookWorkStarted fails open).
+func (h *spawnChurnHarness) unrecordedClaim(id, template string) {
+	h.t.Helper()
+	rec := events.NewFake()
+	emitWorkStartedUnrecordedTo(rec, id, template, "gc-work", errors.New("delivered without a work_started record: sessions store unavailable"))
+	if len(rec.Events) != 1 || rec.Events[0].Type != events.WorkStartedUnrecorded {
+		h.t.Fatalf("hook recorded %+v, want one work.started_unrecorded", rec.Events)
+	}
+	evt := rec.Events[0]
+	evt.Ts = h.now
+	h.guard.observe(evt)
+}
+
 // claimedCell is a work_started cell naming one claim at at.
 func claimedCell(at time.Time) string {
 	return session.EncodeWorkStarted(session.WorkStarted{Claims: []session.WorkStartedEntry{{Store: "city", Bead: "gc-work", Gen: 1, At: at, Via: "claim"}}})
@@ -329,6 +345,12 @@ func TestPoolSpawnChurnIgnoresClosesThatAreNotBlindChurn(t *testing.T) {
 			md := with(awake(blindSeat(), h.now), session.WorkStartedKey, claimedCell(h.now))
 			h.seatEvent(events.BeadUpdated, id, template, created, md)
 			h.seatEvent(events.BeadClosed, id, template, created, md)
+		}},
+		{"claim delivered unrecorded", func(h *spawnChurnHarness, template string) {
+			id, created := h.spawn(template, blindSeat())
+			h.seatEvent(events.BeadUpdated, id, template, created, awake(blindSeat(), h.now))
+			h.unrecordedClaim(id, template)
+			h.seatEvent(events.BeadClosed, id, template, created, awake(blindSeat(), h.now))
 		}},
 		{"claims_errored", func(h *spawnChurnHarness, template string) {
 			id, created := h.spawn(template, blindSeat())
@@ -518,6 +540,38 @@ func TestPoolSpawnChurnResumesOnTheFirstClaim(t *testing.T) {
 	}
 }
 
+// A probe seat whose claim the hook delivered without recording it
+// (work.started_unrecorded) ends the episode as a recorded claim does, once:
+// the template's full blind count returns, and the probe's close is no failed
+// probe, so the hold does not double.
+func TestPoolSpawnChurnResumesOnAnUnrecordedClaim(t *testing.T) {
+	h := newSpawnChurnHarness(t)
+	h.now = h.trip("churny")
+	id, created := h.spawn("churny", blindSeat())
+	h.seatEvent(events.BeadUpdated, id, "churny", created, awake(blindSeat(), h.now))
+	h.advance(time.Minute)
+	h.unrecordedClaim(id, "churny")
+	if got := h.guard.allowance(); got != nil {
+		t.Fatalf("allowance = %v, want none after an unrecorded claim", got)
+	}
+	got := h.resumes()
+	if len(got) != 1 || got[0].Template != "churny" || got[0].Cause != events.PoolSpawnChurnCauseClaimed || got[0].Episode != h.coolingDowns()[0].Episode {
+		t.Fatalf("resumed events = %+v, want one, cause claimed, in the trip's episode", got)
+	}
+	h.unrecordedClaim(id, "churny")
+	h.advance(time.Minute)
+	h.seatEvent(events.BeadClosed, id, "churny", created, awake(blindSeat(), created))
+	if len(h.resumes()) != 1 {
+		t.Fatal("a repeat unrecorded claim recorded another resumed event")
+	}
+	if got := h.coolingDowns(); len(got) != 1 {
+		t.Fatalf("cooling-down events = %+v, want only the trip's: the probe's close counted as churn", got)
+	}
+	if got := h.guard.allowance(); got != nil {
+		t.Fatalf("allowance = %v after the probe closed, want none", got)
+	}
+}
+
 // A seat's first claim clears the streak; the same long-lived seat claiming
 // again does not.
 func TestPoolSpawnChurnRepeatClaimByALongLivedSeatDoesNotReset(t *testing.T) {
@@ -613,6 +667,69 @@ func TestPoolSpawnChurnConfigChangeResetsTheTemplate(t *testing.T) {
 	h.churn("churny")
 	if h.held("churny") {
 		t.Fatal("a removed template kept its streak")
+	}
+}
+
+// A deterministic control dispatcher's seats never count: they are pool
+// managed and never trigger-bound, and they serve control work without
+// claiming any and retire when it is drained, so each would read as blind
+// churn, though clampBlindSpawnDemand never limits a dispatcher. Two hours of
+// city and rig dispatcher retirements build no streak, record no event or
+// stderr line, and leave no allowance entry; an ordinary template churning
+// beside them still trips.
+func TestPoolSpawnChurnNeverCountsAControlDispatcher(t *testing.T) {
+	cityDispatcher := config.Agent{Name: config.ControlDispatcherAgentName, BindingName: "core"}
+	cityDispatcher.StartCommand = config.ControlDispatcherStartCommandFor(cityDispatcher.QualifiedName())
+	rigDispatcher := cityDispatcher
+	rigDispatcher.Dir = "gascity"
+	rigDispatcher.StartCommand = config.ControlDispatcherStartCommandFor(rigDispatcher.QualifiedName())
+	cfg := spawnChurnConfig()
+	cfg.Agents = append(cfg.Agents, cityDispatcher, rigDispatcher)
+	h := newSpawnChurnHarness(t)
+	h.guard.configure(cfg)
+	for i := 0; i < 24; i++ {
+		for _, a := range []config.Agent{cityDispatcher, rigDispatcher} {
+			h.churn(a.QualifiedName())
+		}
+		h.advance(5 * time.Minute)
+	}
+	if got := h.guard.allowance(); got != nil {
+		t.Fatalf("allowance = %v, want no entry for a control dispatcher", got)
+	}
+	if len(h.recorded) != 0 || h.stderr.Len() != 0 {
+		t.Fatalf("recorded %+v, stderr %q; want nothing for a control dispatcher", h.recorded, h.stderr.String())
+	}
+	h.trip("churny")
+	if got := h.guard.allowance(); len(got) != 1 || got["churny"] != 0 {
+		t.Fatalf("allowance = %v, want only churny held", got)
+	}
+}
+
+// A config change that makes a held template a deterministic control
+// dispatcher ends its episode (resumed, cause config_changed), and its seats
+// count for nothing from then on.
+func TestPoolSpawnChurnConfigChangeToAControlDispatcherEndsItsEpisode(t *testing.T) {
+	agent := config.Agent{Name: config.ControlDispatcherAgentName, StartCommand: "true"}
+	name := agent.QualifiedName()
+	h := newSpawnChurnHarness(t)
+	h.guard.configure(&config.City{Agents: []config.Agent{agent}})
+	h.trip(name)
+	h.recorded = nil
+	h.advance(time.Second)
+	agent.StartCommand = config.ControlDispatcherStartCommandFor(name)
+	h.guard.configure(&config.City{Agents: []config.Agent{agent}})
+	if got := h.guard.allowance(); got != nil {
+		t.Fatalf("allowance = %v after the change, want none", got)
+	}
+	if got := h.resumes(); len(got) != 1 || got[0].Template != name || got[0].Cause != events.PoolSpawnChurnCauseConfigChanged {
+		t.Fatalf("resumed events = %+v, want one, cause config_changed", got)
+	}
+	for i := 0; i < 3; i++ {
+		h.advance(time.Minute)
+		h.churn(name)
+	}
+	if got := h.guard.allowance(); got != nil || len(h.recorded) != 1 {
+		t.Fatalf("allowance = %v, recorded %+v; want the dispatcher's churn ignored", got, h.recorded)
 	}
 }
 

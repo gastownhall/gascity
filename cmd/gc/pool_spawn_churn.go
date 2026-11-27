@@ -13,11 +13,17 @@ package main
 //   - Input, off the city's event journal (the delta lanes' feed). A seat
 //     COUNTS when the guard saw its session bead created, it is pool managed,
 //     it was never stamped with gc.trigger_bead_id (no demand named work for
-//     it, at any point of its life), and it is neither a named nor a manual
-//     session. A counted seat CHURNS when it closes after it woke without
-//     having claimed any work, unless it closed failed-create or its hook
-//     reported a failed claim write (bead.claim_failed: it drains
-//     claims_errored, a store fault the claim-loop guard watches, not churn).
+//     it, at any point of its life), it is neither a named nor a manual
+//     session, and its template is not a deterministic control dispatcher
+//     (whose seats serve control work without claiming any, and whose count
+//     clampBlindSpawnDemand never limits). A seat has CLAIMED once its
+//     work_started cell names a claim, or once its hook reported
+//     work.started_unrecorded (it delivered a claim it could not record in
+//     the cell: recordHookWorkStarted fails open). A counted seat CHURNS when
+//     it closes after it woke without having claimed any work, unless it
+//     closed failed-create or its hook reported a failed claim write
+//     (bead.claim_failed: it drains claims_errored, a store fault the
+//     claim-loop guard watches, not churn).
 //   - Trip: poolSpawnChurnTrip churned closes of a template's seats, within
 //     poolSpawnChurnWindow, the first and the last at least
 //     poolSpawnChurnMinSpan apart: one pass's burst cannot trip it alone.
@@ -34,8 +40,9 @@ package main
 //   - Resume: the first claim by a counted seat clears the streak and ends
 //     the episode (session.pool_spawn_churn_resumed); a seat claiming again
 //     does not. A config change to the template's scale_check, work_query,
-//     scale_check_authoritative or provider resets it the same way, and
-//     seats created before the change count for nothing.
+//     scale_check_authoritative, provider or control-dispatcher status
+//     resets it the same way, and seats created before the change count for
+//     nothing.
 //
 // It holds no judgment: the thresholds are constants, the comparisons are
 // counts and times, and it never touches a bead; only the controller's spawn
@@ -51,6 +58,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -104,6 +112,9 @@ type poolSpawnChurnTemplate struct {
 type poolSpawnChurnSignature struct {
 	scaleCheck, workQuery, provider string
 	authoritative                   bool
+	// controlDispatcher is config.IsDeterministicControlDispatcher: its
+	// seats never count.
+	controlDispatcher bool
 }
 
 // poolSpawnChurnEpisode is one run of churn, from its trip to what ends it.
@@ -159,10 +170,11 @@ func (g *poolSpawnChurnGuard) configure(cfg *config.City) {
 			a := &cfg.Agents[i]
 			name := a.QualifiedName()
 			signatures[name] = poolSpawnChurnSignature{
-				scaleCheck:    strings.TrimSpace(a.ScaleCheck),
-				workQuery:     strings.TrimSpace(a.WorkQuery),
-				provider:      providers[name],
-				authoritative: a.ScaleCheckAuthoritative,
+				scaleCheck:        strings.TrimSpace(a.ScaleCheck),
+				workQuery:         strings.TrimSpace(a.WorkQuery),
+				provider:          providers[name],
+				authoritative:     a.ScaleCheckAuthoritative,
+				controlDispatcher: config.IsDeterministicControlDispatcher(a),
 			}
 		}
 	}
@@ -208,6 +220,9 @@ func (g *poolSpawnChurnGuard) observe(evt events.Event) {
 	case events.BeadClaimFailed:
 		g.observeClaimFailed(evt)
 		return
+	case events.WorkStartedUnrecorded:
+		g.emit(g.observeUnrecordedClaim(evt))
+		return
 	default:
 		return
 	}
@@ -218,11 +233,34 @@ func (g *poolSpawnChurnGuard) observe(evt events.Event) {
 	if !ok || b.Type != session.BeadType {
 		return
 	}
-	at := evt.Ts
-	if at.IsZero() {
-		at = g.now()
+	g.emit(g.observeSeat(b, evt.Type, g.eventTime(evt)))
+}
+
+// eventTime is when evt happened: its stamp, or now when it has none.
+func (g *poolSpawnChurnGuard) eventTime(evt events.Event) time.Time {
+	if evt.Ts.IsZero() {
+		return g.now()
 	}
-	g.emit(g.observeSeat(b, evt.Type, at))
+	return evt.Ts
+}
+
+// observeUnrecordedClaim folds the hook's work.started_unrecorded report: it
+// delivered a claim to the seat's turn but could not record it in the seat's
+// work_started cell. The claim is the seat's all the same.
+func (g *poolSpawnChurnGuard) observeUnrecordedClaim(evt events.Event) []events.Event {
+	var p api.SessionLifecyclePayload
+	if err := json.Unmarshal(evt.Payload, &p); err != nil {
+		return nil
+	}
+	id := strings.TrimSpace(firstNonEmpty(p.SessionID, evt.SessionID))
+	at := g.eventTime(evt)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	seat := g.seats[id]
+	if seat == nil {
+		return nil
+	}
+	return g.claimedLocked(seat, at)
 }
 
 // observeClaimFailed marks the seat whose claim write failed: unless it
@@ -281,11 +319,8 @@ func (g *poolSpawnChurnGuard) observeSeat(b beads.Bead, kind string, at time.Tim
 		seat.awake = true
 	}
 	var alerts []events.Event
-	if _, claimed := claimStallNewestClaim(b.Metadata[session.WorkStartedKey]); claimed && !seat.claimed {
-		seat.claimed = true
-		if g.countsLocked(seat) {
-			alerts = g.claimedLocked(seat, at)
-		}
+	if _, claimed := claimStallNewestClaim(b.Metadata[session.WorkStartedKey]); claimed {
+		alerts = g.claimedLocked(seat, at)
 	}
 	if kind != events.BeadClosed || seat.closed {
 		return alerts
@@ -300,21 +335,27 @@ func (g *poolSpawnChurnGuard) observeSeat(b beads.Bead, kind string, at time.Tim
 
 // countsLocked reports whether seat counts toward its template: a blind pool
 // seat whose creation the guard saw, since the template's config last
-// changed. A store may keep a creation time to the second only, so the
-// change's is compared to the second too. Caller holds g.mu.
+// changed, of a template that is not a deterministic control dispatcher. A
+// store may keep a creation time to the second only, so the change's is
+// compared to the second too. Caller holds g.mu.
 func (g *poolSpawnChurnGuard) countsLocked(seat *poolSpawnChurnSeat) bool {
-	if !seat.observed || !seat.pool || seat.bound || seat.excluded {
+	if !seat.observed || !seat.pool || seat.bound || seat.excluded || g.signatures[seat.template].controlDispatcher {
 		return false
 	}
 	epoch, ok := g.epochs[seat.template]
 	return !ok || !seat.created.Before(epoch.Truncate(time.Second))
 }
 
-// claimedLocked counts a counted seat's first claim: the template's streak
-// clears and its episode ends. Caller holds g.mu.
+// claimedLocked counts seat's claim at at. A counted seat's first claim
+// clears its template's streak and ends its episode; a seat claiming again
+// changes nothing. Caller holds g.mu.
 func (g *poolSpawnChurnGuard) claimedLocked(seat *poolSpawnChurnSeat, at time.Time) []events.Event {
+	if seat.claimed {
+		return nil
+	}
+	seat.claimed = true
 	t := g.templates[seat.template]
-	if t == nil {
+	if t == nil || !g.countsLocked(seat) {
 		return nil
 	}
 	t.streak = nil
