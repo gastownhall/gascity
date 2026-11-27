@@ -397,3 +397,38 @@ func TestClaimAuthorityWipeKeepsTriggersUntilArmingCityRepublishes(t *testing.T)
 	}
 	unrouted("after the republish")
 }
+
+// AC-6: when city A prunes an ended session's identities from a store it
+// shares with city B, only rows carrying A's tag go; B's live sessions,
+// including one under an identity A also published, still claim there.
+func TestClaimAuthorityPruneIsScopedToTheCityTag(t *testing.T) {
+	f := newClaimAuthorityFixture(t)
+	cityA := testClaimAuthorityPublisher("alpha", ClaimAuthorityModeAuto)
+	cityB := testClaimAuthorityPublisher("bravo", ClaimAuthorityModeAuto)
+	const ended, shared, bOnly = "rig/a-ended", "rig/shared", "rig/b-live"
+	f.reconcile(t, cityA, true, ended, shared)
+	f.reconcile(t, cityB, true, bOnly, shared)
+
+	report := f.reconcile(t, cityA, true)
+	if report.Published.Deleted != 2 {
+		t.Fatalf("city A prune deleted %d rows, want its own 2", report.Published.Deleted)
+	}
+	for identity, want := range map[string]bool{ended: false, shared: true, bOnly: true} {
+		got, err := ClaimAuthorityIdentityAuthorized(t.Context(), f.db, identity)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Errorf("after city A's prune, %s authorized = %v, want %v", identity, got, want)
+		}
+	}
+	for _, identity := range []string{bOnly, shared} {
+		work := f.createRouted(t, false)
+		if _, _, err := f.store.Claim(work.ID, identity); err != nil {
+			t.Fatalf("city B session %s claim after city A's prune: %v", identity, err)
+		}
+	}
+	work := f.createRouted(t, false)
+	_, _, err := f.store.Claim(work.ID, ended)
+	assertClaimAuthorityRefusal(t, "claim by city A's ended session", err)
+}
