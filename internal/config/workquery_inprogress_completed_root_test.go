@@ -278,3 +278,43 @@ func TestInProgressTierSkipsFinishedWorkflowRootWithPaddedKind(t *testing.T) {
 		})
 	}
 }
+
+// liveMemberShapes are member sets of a workflow that can still progress: some
+// member other than the finalizer and the scope/spec latches is not closed.
+func liveMemberShapes(root string) map[string]string {
+	closedStep := memberJSON("step-a", root, "closed", "task")
+	fin := memberJSON("fin", root, "open", "workflow-finalize")
+	return map[string]string{
+		"open step":         jsonRows(closedStep, memberJSON("step-b", root, "open", "task"), fin),
+		"in_progress step":  jsonRows(closedStep, memberJSON("step-b", root, "in_progress", "task"), fin),
+		"dep-blocked step":  jsonRows(closedStep, memberJSON("step-b", root, "blocked", "task"), fin),
+		"open retry":        jsonRows(closedStep, memberJSON("retry", root, "open", "retry"), fin),
+		"open check":        jsonRows(closedStep, memberJSON("check", root, "open", "check"), fin),
+		"open cleanup step": jsonRows(closedStep, memberJSON("cleanup", root, "open", "cleanup"), fin),
+		"open nested workflow": jsonRows(closedStep, memberJSON("nested", root, "open", "workflow"),
+			memberJSON("scope", root, "open", "scope")),
+	}
+}
+
+// TestInProgressTierServesWorkflowRootWithLiveMember covers AC-2: a root whose
+// workflow still has live work stays the session's continuation anchor.
+func TestInProgressTierServesWorkflowRootWithLiveMember(t *testing.T) {
+	for _, stamp := range []struct{ name, meta string }{
+		{"unstamped", ``},
+		{"expanded", `,"gc.workflow_expanded":"true"`},
+	} {
+		for shape, members := range liveMemberShapes("wf-root-1") {
+			for _, form := range inProgressTierForms() {
+				t.Run(stamp.name+"/"+shape+"/"+form.name, func(t *testing.T) {
+					run := runInProgressTierForm(t, form, workflowRootFake{
+						inProgress: jsonRows(workflowRootJSON("wf-root-1", stamp.meta)),
+						members:    members,
+					})
+					if ids := run.ids(t); len(ids) != 1 || ids[0] != "wf-root-1" {
+						t.Fatalf("workflow root with a live member was not served: %v (stdout %q)", ids, run.stdout)
+					}
+				})
+			}
+		}
+	}
+}
