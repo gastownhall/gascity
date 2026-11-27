@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"log"
 	"strings"
 
@@ -38,6 +39,7 @@ type activeBeadIndex struct {
 
 	loaded map[string]bool              // per store name: load attempted
 	first  map[string]map[string]string // per store name: assignee -> first bead id
+	failed []string                     // per failed store: the build's partial errors
 }
 
 // newActiveBeadIndex captures the build's store map and cold-rig set once.
@@ -105,11 +107,19 @@ func (idx *activeBeadIndex) loadStore(rn string) {
 	rows, err := store.List(query)
 	if err != nil {
 		log.Printf("api: listing active work in rig %q: %v", rn, err)
+		idx.failed = append(idx.failed, fmt.Sprintf("rig %q: %v", rn, err))
 		if !beads.IsPartialResult(err) {
 			return
 		}
 	}
 	idx.absorb(rn, rows)
+}
+
+// partialErrors reports the store reads that failed during the build, one
+// per failed store, naming the rig. The response answers partial with them,
+// so a partial list is never cached and the next request re-reads the store.
+func (idx *activeBeadIndex) partialErrors() []string {
+	return idx.failed
 }
 
 // absorb keeps each bead's id as its assignee's first match. Rows arrive
