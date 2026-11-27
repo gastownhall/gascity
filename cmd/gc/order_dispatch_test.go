@@ -4441,6 +4441,38 @@ type orderTrackingRetentionBatchStore struct {
 	batches [][]string
 }
 
+type orderTrackingRetentionConcurrentDeleteStore struct {
+	*orderTrackingRetentionDeleteStore
+	racedID string
+}
+
+func (s *orderTrackingRetentionConcurrentDeleteStore) Delete(id string) error {
+	if s.racedID == "" {
+		s.racedID = id
+		if err := s.MemStore.Delete(id); err != nil {
+			return err
+		}
+	}
+	return s.MemStore.Delete(id)
+}
+
+type orderTrackingRetentionConcurrentBatchDeleteStore struct {
+	*orderTrackingRetentionConcurrentDeleteStore
+	batchCalls int
+}
+
+func (s *orderTrackingRetentionConcurrentBatchDeleteStore) DeleteBatch(ids []string) error {
+	s.batchCalls++
+	if len(ids) == 0 {
+		return nil
+	}
+	s.racedID = ids[0]
+	if err := s.MemStore.Delete(s.racedID); err != nil {
+		return err
+	}
+	return beads.ErrNotFound
+}
+
 func (s *orderTrackingRetentionBatchStore) DeleteBatch(ids []string) error {
 	s.batches = append(s.batches, slices.Clone(ids))
 	for _, id := range ids {
@@ -4498,6 +4530,45 @@ func TestOrderTrackingRetentionDeletesExpiredRunsInOneBatch(t *testing.T) {
 		_, err := store.Get(id)
 		if i < 12 && !errors.Is(err, beads.ErrNotFound) || i >= 12 && err != nil {
 			t.Fatalf("Get(%q) = %v, want only the latest ten retained", id, err)
+		}
+	}
+}
+
+func TestOrderTrackingRetentionTreatsConcurrentNotFoundAsPruned(t *testing.T) {
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	for _, batched := range []bool{false, true} {
+		for _, bounded := range []bool{false, true} {
+			t.Run(fmt.Sprintf("batched=%t/bounded=%t", batched, bounded), func(t *testing.T) {
+				baseStore := &orderTrackingRetentionConcurrentDeleteStore{
+					orderTrackingRetentionDeleteStore: newOrderTrackingRetentionDeleteStore(now, minClosedOrderTrackingRetained+1, ""),
+				}
+				var store beads.Store = baseStore
+				var batchStore *orderTrackingRetentionConcurrentBatchDeleteStore
+				if batched {
+					batchStore = &orderTrackingRetentionConcurrentBatchDeleteStore{orderTrackingRetentionConcurrentDeleteStore: baseStore}
+					store = batchStore
+				}
+				policy := orderTrackingRetentionPolicy{deleteAfterClose: 24 * time.Hour}
+				var deleted int
+				var err error
+				if bounded {
+					deleted, err = sweepClosedOrderTrackingRetentionBounded(store, now, policy, nil, 1)
+				} else {
+					deleted, err = sweepClosedOrderTrackingRetention(store, now, policy, nil)
+				}
+				if err != nil || deleted != 1 {
+					t.Fatalf("sweep = (%d, %v), want (1, nil)", deleted, err)
+				}
+				if baseStore.racedID == "" {
+					t.Fatal("delete was not reached for an expired order-tracking bead")
+				}
+				if batched && batchStore.batchCalls != 1 {
+					t.Fatalf("DeleteBatch calls = %d, want 1", batchStore.batchCalls)
+				}
+				if _, err := baseStore.Get(baseStore.racedID); !errors.Is(err, beads.ErrNotFound) {
+					t.Fatalf("Get(%q) = %v, want ErrNotFound after concurrent prune", baseStore.racedID, err)
+				}
+			})
 		}
 	}
 }
@@ -4571,10 +4642,14 @@ func (s *orderTrackingRetentionFailingBatchStore) DeleteBatch(ids []string) erro
 
 type orderTrackingRetentionFailingDeleteStore struct {
 	*orderTrackingRetentionDeleteStore
+	deleteErr error
 }
 
 func (s *orderTrackingRetentionFailingDeleteStore) Delete(string) error {
 	s.deleteCalls++
+	if s.deleteErr != nil {
+		return s.deleteErr
+	}
 	return errOrderTrackingRetentionDelete
 }
 
@@ -4605,26 +4680,39 @@ func TestOrderTrackingRetentionBatchFailureCountsNothingDeleted(t *testing.T) {
 
 func TestOrderTrackingRetentionFallbackStopsAtFirstDeleteFailure(t *testing.T) {
 	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
-	for _, bounded := range []bool{false, true} {
-		t.Run(fmt.Sprintf("bounded=%t", bounded), func(t *testing.T) {
-			store := &orderTrackingRetentionFailingDeleteStore{
-				orderTrackingRetentionDeleteStore: newOrderTrackingRetentionDeleteStore(now, minClosedOrderTrackingRetained+3, ""),
-			}
-			policy := orderTrackingRetentionPolicy{deleteAfterClose: 24 * time.Hour}
-			var deleted int
-			var err error
-			if bounded {
-				deleted, err = sweepClosedOrderTrackingRetentionBounded(store, now, policy, nil, 3)
-			} else {
-				deleted, err = sweepClosedOrderTrackingRetention(store, now, policy, nil)
-			}
-			if deleted != 0 || !errors.Is(err, errOrderTrackingRetentionDelete) {
-				t.Fatalf("sweep = (%d, %v), want (0, %v)", deleted, err, errOrderTrackingRetentionDelete)
-			}
-			if store.deleteCalls != 1 {
-				t.Fatalf("Delete calls = %d, want 1 (the first failure stops the batch)", store.deleteCalls)
-			}
-		})
+	for _, tc := range []struct {
+		name         string
+		deleteErr    error
+		wantNotFound bool
+	}{
+		{name: "other error", deleteErr: errOrderTrackingRetentionDelete},
+		{name: "not-found joined with other error", deleteErr: errors.Join(beads.ErrNotFound, errOrderTrackingRetentionDelete), wantNotFound: true},
+	} {
+		for _, bounded := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/bounded=%t", tc.name, bounded), func(t *testing.T) {
+				store := &orderTrackingRetentionFailingDeleteStore{
+					orderTrackingRetentionDeleteStore: newOrderTrackingRetentionDeleteStore(now, minClosedOrderTrackingRetained+3, ""),
+					deleteErr:                         tc.deleteErr,
+				}
+				policy := orderTrackingRetentionPolicy{deleteAfterClose: 24 * time.Hour}
+				var deleted int
+				var err error
+				if bounded {
+					deleted, err = sweepClosedOrderTrackingRetentionBounded(store, now, policy, nil, 3)
+				} else {
+					deleted, err = sweepClosedOrderTrackingRetention(store, now, policy, nil)
+				}
+				if deleted != 0 || !errors.Is(err, errOrderTrackingRetentionDelete) {
+					t.Fatalf("sweep = (%d, %v), want (0, %v)", deleted, err, errOrderTrackingRetentionDelete)
+				}
+				if tc.wantNotFound && !errors.Is(err, beads.ErrNotFound) {
+					t.Fatalf("sweep error %v lost the joined ErrNotFound cause", err)
+				}
+				if store.deleteCalls != 1 {
+					t.Fatalf("Delete calls = %d, want 1 (the first failure stops the batch)", store.deleteCalls)
+				}
+			})
+		}
 	}
 }
 

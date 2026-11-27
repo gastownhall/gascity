@@ -3003,7 +3003,10 @@ func deleteWorkflowBeads(store beads.Store, ids []string) (int, []error) {
 // collapses an O(subprocess-per-edge) closure teardown into O(chunks), which
 // keeps a large wisp-GC purge from blocking the controller tick for minutes.
 // It is not dependent-recursive: beads outside the collected closure that
-// depend on a deleted bead are preserved.
+// depend on a deleted bead are preserved. A pure typed not-found from a batch
+// delete triggers per-bead verification; a pure not-found in that fallback
+// means another retention pass already deleted the id. Other delete or
+// rollback errors still fail the batch.
 func deleteWorkflowBeadsBatch(store beads.Store, ids []string) error {
 	if len(ids) == 0 {
 		return nil
@@ -3011,7 +3014,51 @@ func deleteWorkflowBeadsBatch(store beads.Store, ids []string) error {
 	if err := assertWorkflowDeleteSetLeavesNothingStranded(store, ids); err != nil {
 		return err
 	}
-	return deleteWorkflowBeadsBatchGuarded(store, ids)
+	if cd, ok := beads.As[beads.BatchDeleter](store); ok {
+		err := cd.DeleteBatch(ids)
+		switch {
+		case err == nil:
+			return nil
+		case onlyWorkflowDeleteError(err, beads.ErrBatchDeleteUnsupported), onlyWorkflowDeleteError(err, beads.ErrNotFound):
+			// A wrapper may decline batch deletion, or a racing retention pass
+			// may have removed one of these ids. Recheck each bead below.
+		default:
+			return err
+		}
+	}
+	for _, id := range ids {
+		if err := deleteWorkflowBeadUnguarded(store, id); err != nil && !onlyWorkflowDeleteError(err, beads.ErrNotFound) {
+			return err
+		}
+	}
+	return nil
+}
+
+// onlyWorkflowDeleteError reports whether every leaf in err's unwrap tree is
+// target. errors.Is alone is insufficient here: a joined not-found and rollback
+// error must preserve the rollback failure instead of being treated as pruned.
+func onlyWorkflowDeleteError(err, target error) bool {
+	if err == nil || target == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		causes := joined.Unwrap()
+		if len(causes) == 0 {
+			return false
+		}
+		for _, cause := range causes {
+			if !onlyWorkflowDeleteError(cause, target) {
+				return false
+			}
+		}
+		return true
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		if cause := wrapped.Unwrap(); cause != nil {
+			return onlyWorkflowDeleteError(cause, target)
+		}
+	}
+	return errors.Is(err, target)
 }
 
 // deleteWorkflowBeadsBatchGuarded is deleteWorkflowBeadsBatch for a caller
