@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -9,23 +11,25 @@ import (
 // TestAlwaysFreshWakeModeWarningIsNonFatalAndEmitted proves the always+fresh
 // advisory behaves like a warning on both downstream re-classifiers of config
 // warnings: strict mode — on by default for `gc start` — keeps it NON-FATAL,
-// and the agent warning-emit path SURFACES it. The bundled gastown pack trips
+// and the ordinary config load stays QUIET about it, leaving it to the commands
+// that check config. The bundled gastown pack trips
 // this warning, so without the config.IsAlwaysFreshWakeModeWarning wiring
 // `gc start --foreground` / `--controller` / `--dry-run` exits 1 on the shipped
-// example city, and `gc agent` drops the advisory silently.
+// example city.
 //
 // The warning text is derived from config.ValidateNamedSessions rather than
 // hardcoded so this test cannot pass against a string the validator no longer
 // emits.
 func TestAlwaysFreshWakeModeWarningIsNonFatalAndEmitted(t *testing.T) {
-	warnings, err := config.ValidateNamedSessions(&config.City{
+	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents:    []config.Agent{{Name: "watchdog", WakeMode: "fresh"}},
 		NamedSessions: []config.NamedSession{{
 			Template: "watchdog",
 			Mode:     "always",
 		}},
-	})
+	}
+	warnings, err := config.ValidateNamedSessions(cfg)
 	if err != nil {
 		t.Fatalf("config.ValidateNamedSessions: %v", err)
 	}
@@ -41,8 +45,20 @@ func TestAlwaysFreshWakeModeWarningIsNonFatalAndEmitted(t *testing.T) {
 	if len(fatal) != 0 || len(nonFatal) != 1 {
 		t.Errorf("strict split: fatal=%v nonFatal=%v, want the always+fresh warning non-fatal", fatal, nonFatal)
 	}
-	if !shouldEmitLoadCityConfigWarning(w) {
-		t.Error("an always+fresh warning must be emitted to the operator, not swallowed")
+	if shouldEmitLoadCityConfigWarning(w) {
+		t.Error("an always+fresh warning must not print on an ordinary config load")
+	}
+
+	var ordinary bytes.Buffer
+	emitLoadCityConfigWarnings(&ordinary, &config.Provenance{Warnings: []string{w}})
+	if ordinary.Len() != 0 {
+		t.Errorf("ordinary config load printed %q, want nothing", ordinary.String())
+	}
+
+	var checking bytes.Buffer
+	emitAlwaysFreshAdvisories(&checking, cfg)
+	if !strings.Contains(checking.String(), w) {
+		t.Errorf("config-checking path printed %q, want the advisory", checking.String())
 	}
 }
 
