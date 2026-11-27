@@ -628,6 +628,30 @@ func TestClaimReadTraceOnFailedClaims(t *testing.T) {
 	})
 }
 
+// TestSingleLegClaimReadsOnceUnchanged pins the single-leg shape — a split
+// city whose fan-out collapsed to the agent's own store: one work-query read,
+// one claim, the same result and exit code as before the #5693 fixes. A
+// single-leg claim never had a later store to re-validate, so dropping the
+// multi-leg re-read and adding the read budget change nothing here.
+func TestSingleLegClaimReadsOnceUnchanged(t *testing.T) {
+	h := newFailureHookHarness()
+	h.script("/own", hookRunnerAnswer{out: routedRowJSON("work-1")})
+	stores := []hookStore{{dir: "/own", env: []string{"BEADS_DIR=/own"}}}
+	clock := newClaimFanoutClock(time.Second)
+
+	code, result, stderr, rec := runClaimFanout(t, clock, h, stores)
+
+	if rec.reads != 1 {
+		t.Fatalf("work-query reads = %d, want 1 on a single-leg city", rec.reads)
+	}
+	if got := hookClaimReadsPerTick(stores); got != 1 {
+		t.Fatalf("hookClaimReadsPerTick = %d, want 1", got)
+	}
+	if code != 0 || result.Action != "work" || result.Reason != "claimed" || result.BeadID != "work-1" {
+		t.Fatalf("exit=%d result=%+v, want exit 0 claiming work-1 as a fresh claim; stderr=%s", code, result, stderr)
+	}
+}
+
 // End to end through the claim loop: a read that would recover on retry, but
 // only after the window closed, must not be retried into a claim. The
 // invocation keeps the failed-read contract: no drain result, no drain-ack, no
