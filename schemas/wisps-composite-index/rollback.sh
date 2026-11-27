@@ -19,6 +19,7 @@ indexes=$(show_wisps_indexes)
 rows=$(index_rows "$indexes")
 if [ "$rows" -gt 0 ]; then
     verify_index_definition "$indexes"
+    ensure_pre_rows
     dolt_sql -q "
         USE \`$DOLT_DB\`;
         DROP INDEX $INDEX_NAME ON wisps;
@@ -32,6 +33,7 @@ indexes=$(show_wisps_indexes)
 rows=$(status_index_rows "$indexes")
 if [ "$rows" -gt 0 ]; then
     verify_status_index_definition "$indexes"
+    ensure_pre_rows
     dolt_sql -q "
         USE \`$DOLT_DB\`;
         DROP INDEX $STATUS_INDEX_NAME ON wisps;
@@ -45,6 +47,7 @@ indexes=$(show_wisps_indexes)
 rows=$(defer_until_index_rows "$indexes")
 if [ "$rows" -gt 0 ]; then
     verify_defer_until_index_definition "$indexes"
+    ensure_pre_rows
     dolt_sql -q "
         USE \`$DOLT_DB\`;
         DROP INDEX $DEFER_UNTIL_INDEX_NAME ON wisps;
@@ -75,5 +78,12 @@ if [ "$rows" -ne 0 ]; then
     die "rollback failed; index $DEFER_UNTIL_INDEX_NAME is still present"
 fi
 
+# Defensive, and deliberately so: DROP INDEX cannot remove rows, so this
+# assertion is expected to hold on every run. It is kept to kill the whole
+# class in one place — the guard stays symmetric with migrate.sh, and any
+# future statement added to this script inherits the check rather than needing
+# someone to notice it was missing. Do not read it as evidence that this
+# script has a way to lose rows today.
+assert_rows_not_decreased "$PRE_ROWS"
 commit_schema_change "schema: drop wisps planner indexes" >/dev/null
 info "dropped and committed wisps planner indexes"
