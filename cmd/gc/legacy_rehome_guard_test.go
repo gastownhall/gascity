@@ -296,3 +296,52 @@ func TestCanonicalizeLegacyRoutedWorkRehomesOwnMintedBindingOnSharedRigLeg(t *te
 		})
 	}
 }
+
+// AC-5
+
+// TestCanonicalizeLegacyRehomeOwnLegsKeepMigrationRecovery: the #3378 strip
+// and #5293 add recoveries still run on every leg this city owns: the city
+// work store under either vocabulary and a relocated class binding.
+func TestCanonicalizeLegacyRehomeOwnLegsKeepMigrationRecovery(t *testing.T) {
+	fixtures := []struct {
+		name              string
+		cfg               *config.City
+		legacy, canonical string
+	}{
+		{"#3378 strip", legacyBoundRecoveryConfig(), "rig-A/gc.planner", "rig-A/planner"},
+		{"#5293 add", &config.City{Agents: []config.Agent{{
+			Name: "refinery", Dir: "gascity", BindingName: "gastown", MaxActiveSessions: intPtr(1),
+		}}}, "gascity/refinery", "gascity/gastown.refinery"},
+	}
+	for _, fx := range fixtures {
+		for _, leg := range []string{"", "city:city", "class:work"} {
+			t.Run(fx.name+"/assigned/"+leg, func(t *testing.T) {
+				wb := workBead("wb-a", fx.legacy, fx.legacy, "in_progress", 2)
+				mem := beads.NewMemStoreFrom(0, []beads.Bead{wb}, nil)
+
+				report := canonicalizeLegacyBoundAssignedWork(fx.cfg, []beads.Bead{wb}, []beads.Store{mem}, []string{leg}, newSessionBeadSnapshot(nil), io.Discard)
+
+				got := mustGetBead(t, mem, "wb-a")
+				if got.Assignee != fx.canonical || got.Metadata[beadmeta.RoutedToMetadataKey] != fx.canonical {
+					t.Errorf("assignee/route = %q/%q, want both %q", got.Assignee, got.Metadata[beadmeta.RoutedToMetadataKey], fx.canonical)
+				}
+				if len(report.Rehomed) != 1 || len(report.Refused) != 0 {
+					t.Errorf("report = %+v, want one rehomed row", report)
+				}
+			})
+			t.Run(fx.name+"/routed/"+leg, func(t *testing.T) {
+				wb := workBead("wb-r", fx.legacy, "", "open", 2)
+				mem := beads.NewMemStoreFrom(0, []beads.Bead{wb}, nil)
+
+				report := canonicalizeLegacyBoundUnassignedRoutedWork(fx.cfg, []beads.Bead{wb}, []beads.Store{mem}, []string{leg}, io.Discard)
+
+				if got := mustGetBead(t, mem, "wb-r").Metadata[beadmeta.RoutedToMetadataKey]; got != fx.canonical {
+					t.Errorf("gc.routed_to = %q, want %q", got, fx.canonical)
+				}
+				if len(report.Rehomed) != 1 || len(report.Refused) != 0 {
+					t.Errorf("report = %+v, want one rehomed row", report)
+				}
+			})
+		}
+	}
+}
