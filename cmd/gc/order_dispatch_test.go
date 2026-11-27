@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -4394,6 +4395,7 @@ func TestOrderTrackingRetentionDeletesExpiredRunsInOneBatch(t *testing.T) {
 }
 
 func TestOrderTrackingRetentionBatchKeepsRunWithOpenStep(t *testing.T) {
+	ctx := context.Background()
 	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
 	for _, bounded := range []bool{false, true} {
 		t.Run(fmt.Sprintf("bounded=%t", bounded), func(t *testing.T) {
@@ -4404,7 +4406,7 @@ func TestOrderTrackingRetentionBatchKeepsRunWithOpenStep(t *testing.T) {
 			var deleted int
 			var err error
 			if bounded {
-				deleted, err = sweepClosedOrderTrackingRetentionBounded(store, now, policy, nil, 2)
+				deleted, err = sweepClosedOrderTrackingRetentionBounded(ctx, store, now, policy, nil, 2)
 			} else {
 				deleted, err = sweepClosedOrderTrackingRetention(store, now, policy, nil)
 			}
@@ -4426,11 +4428,12 @@ func TestOrderTrackingRetentionBatchKeepsRunWithOpenStep(t *testing.T) {
 }
 
 func TestOrderTrackingRetentionBoundedBatchHonorsLimit(t *testing.T) {
+	ctx := context.Background()
 	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
 	store := &orderTrackingRetentionBatchStore{
 		orderTrackingRetentionDeleteStore: newOrderTrackingRetentionDeleteStore(now, minClosedOrderTrackingRetained+4, ""),
 	}
-	deleted, err := sweepClosedOrderTrackingRetentionBounded(store, now, orderTrackingRetentionPolicy{deleteAfterClose: 24 * time.Hour}, nil, 2)
+	deleted, err := sweepClosedOrderTrackingRetentionBounded(ctx, store, now, orderTrackingRetentionPolicy{deleteAfterClose: 24 * time.Hour}, nil, 2)
 	if err != nil || deleted != 2 {
 		t.Fatalf("sweep = (%d, %v), want (2, nil)", deleted, err)
 	}
@@ -4470,6 +4473,7 @@ func (s *orderTrackingRetentionFailingDeleteStore) Delete(string) error {
 }
 
 func TestOrderTrackingRetentionBatchFailureCountsNothingDeleted(t *testing.T) {
+	ctx := context.Background()
 	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
 	for _, bounded := range []bool{false, true} {
 		t.Run(fmt.Sprintf("bounded=%t", bounded), func(t *testing.T) {
@@ -4480,7 +4484,7 @@ func TestOrderTrackingRetentionBatchFailureCountsNothingDeleted(t *testing.T) {
 			var deleted int
 			var err error
 			if bounded {
-				deleted, err = sweepClosedOrderTrackingRetentionBounded(store, now, policy, nil, 3)
+				deleted, err = sweepClosedOrderTrackingRetentionBounded(ctx, store, now, policy, nil, 3)
 			} else {
 				deleted, err = sweepClosedOrderTrackingRetention(store, now, policy, nil)
 			}
@@ -4495,6 +4499,7 @@ func TestOrderTrackingRetentionBatchFailureCountsNothingDeleted(t *testing.T) {
 }
 
 func TestOrderTrackingRetentionFallbackStopsAtFirstDeleteFailure(t *testing.T) {
+	ctx := context.Background()
 	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
 	for _, bounded := range []bool{false, true} {
 		t.Run(fmt.Sprintf("bounded=%t", bounded), func(t *testing.T) {
@@ -4505,7 +4510,7 @@ func TestOrderTrackingRetentionFallbackStopsAtFirstDeleteFailure(t *testing.T) {
 			var deleted int
 			var err error
 			if bounded {
-				deleted, err = sweepClosedOrderTrackingRetentionBounded(store, now, policy, nil, 3)
+				deleted, err = sweepClosedOrderTrackingRetentionBounded(ctx, store, now, policy, nil, 3)
 			} else {
 				deleted, err = sweepClosedOrderTrackingRetention(store, now, policy, nil)
 			}
@@ -4546,6 +4551,7 @@ func (s *orderTrackingRetentionLateStepStore) List(q beads.ListQuery) ([]beads.B
 }
 
 func TestOrderTrackingRetentionBatchRechecksStrandsBeforeDelete(t *testing.T) {
+	ctx := context.Background()
 	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
 	for _, bounded := range []bool{false, true} {
 		t.Run(fmt.Sprintf("bounded=%t", bounded), func(t *testing.T) {
@@ -4559,7 +4565,7 @@ func TestOrderTrackingRetentionBatchRechecksStrandsBeforeDelete(t *testing.T) {
 			var deleted int
 			var err error
 			if bounded {
-				deleted, err = sweepClosedOrderTrackingRetentionBounded(store, now, policy, nil, 3)
+				deleted, err = sweepClosedOrderTrackingRetentionBounded(ctx, store, now, policy, nil, 3)
 			} else {
 				deleted, err = sweepClosedOrderTrackingRetention(store, now, policy, nil)
 			}
@@ -4583,6 +4589,7 @@ func TestOrderTrackingRetentionBatchRechecksStrandsBeforeDelete(t *testing.T) {
 }
 
 func TestOrderTrackingRetentionFallsBackWithoutBatchDeleter(t *testing.T) {
+	ctx := context.Background()
 	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
 	for _, bounded := range []bool{false, true} {
 		t.Run(fmt.Sprintf("bounded=%t", bounded), func(t *testing.T) {
@@ -4594,7 +4601,7 @@ func TestOrderTrackingRetentionFallsBackWithoutBatchDeleter(t *testing.T) {
 			var deleted int
 			var err error
 			if bounded {
-				deleted, err = sweepClosedOrderTrackingRetentionBounded(store, now, policy, nil, 2)
+				deleted, err = sweepClosedOrderTrackingRetentionBounded(ctx, store, now, policy, nil, 2)
 			} else {
 				deleted, err = sweepClosedOrderTrackingRetention(store, now, policy, nil)
 			}
@@ -4797,6 +4804,7 @@ func TestSweepClosedOrderTrackingRetentionRetainsRootsThatStillOwnOpenSteps(t *t
 }
 
 func TestSweepClosedOrderTrackingRetentionBoundedRetainsRootsThatStillOwnOpenSteps(t *testing.T) {
+	ctx := context.Background()
 	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
 	beadTime := now.Add(-48 * time.Hour)
 	seed := make([]beads.Bead, 0, 14)
@@ -4817,7 +4825,7 @@ func TestSweepClosedOrderTrackingRetentionBoundedRetainsRootsThatStillOwnOpenSte
 	})
 	store := beads.NewMemStoreFrom(100, seed, nil)
 
-	deleted, err := sweepClosedOrderTrackingRetentionBounded(store, now, orderTrackingRetentionPolicy{
+	deleted, err := sweepClosedOrderTrackingRetentionBounded(ctx, store, now, orderTrackingRetentionPolicy{
 		deleteAfterClose: 24 * time.Hour,
 		retainLast:       minClosedOrderTrackingRetained,
 	}, nil, 10)
@@ -10892,6 +10900,7 @@ func TestDispatchClosesNoStoresWhenCitySuspended(t *testing.T) {
 }
 
 func TestSweepClosedOrderTrackingRetentionAcrossStoresBounded_HonorsBudgetAcrossStores(t *testing.T) {
+	ctx := context.Background()
 	now := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
 	policy := orderTrackingRetentionPolicy{
 		deleteAfterClose: 24 * time.Hour,
@@ -10917,7 +10926,7 @@ func TestSweepClosedOrderTrackingRetentionAcrossStoresBounded_HonorsBudgetAcross
 	storeB := makeStore("beta")
 
 	// limit=4: budget spans both stores (3 eligible each = 6 total), stops at 4.
-	deleted, err := sweepClosedOrderTrackingRetentionAcrossStoresBounded(
+	deleted, err := sweepClosedOrderTrackingRetentionAcrossStoresBounded(ctx,
 		[]beads.Store{storeA, storeB}, now, policy, nil, 4)
 	if err != nil {
 		t.Fatalf("sweepClosedOrderTrackingRetentionAcrossStoresBounded: %v", err)
@@ -10928,6 +10937,7 @@ func TestSweepClosedOrderTrackingRetentionAcrossStoresBounded_HonorsBudgetAcross
 }
 
 func TestSweepClosedOrderTrackingRetentionAcrossStoresBounded_ReturnsPartialCountWithNilErrorOnBudgetExhaustion(t *testing.T) {
+	ctx := context.Background()
 	now := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
 	policy := orderTrackingRetentionPolicy{
 		deleteAfterClose: 24 * time.Hour,
@@ -10948,7 +10958,7 @@ func TestSweepClosedOrderTrackingRetentionAcrossStoresBounded_ReturnsPartialCoun
 	store := beads.NewMemStoreFrom(100, seed, nil)
 
 	// limit=2, 5 eligible: returns 2 with nil error.
-	deleted, err := sweepClosedOrderTrackingRetentionAcrossStoresBounded(
+	deleted, err := sweepClosedOrderTrackingRetentionAcrossStoresBounded(ctx,
 		[]beads.Store{store}, now, policy, nil, 2)
 	if err != nil {
 		t.Fatalf("sweepClosedOrderTrackingRetentionAcrossStoresBounded: %v", err)
@@ -10959,6 +10969,7 @@ func TestSweepClosedOrderTrackingRetentionAcrossStoresBounded_ReturnsPartialCoun
 }
 
 func TestSweepClosedOrderTrackingRetentionAcrossStoresBounded_DoesNotBypassRetainFloor(t *testing.T) {
+	ctx := context.Background()
 	now := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
 	policy := orderTrackingRetentionPolicy{
 		deleteAfterClose: 24 * time.Hour,
@@ -10979,7 +10990,7 @@ func TestSweepClosedOrderTrackingRetentionAcrossStoresBounded_DoesNotBypassRetai
 	}
 	store := beads.NewMemStoreFrom(100, seed, nil)
 
-	deleted, err := sweepClosedOrderTrackingRetentionAcrossStoresBounded(
+	deleted, err := sweepClosedOrderTrackingRetentionAcrossStoresBounded(ctx,
 		[]beads.Store{store}, now, policy, nil, 100)
 	if err != nil {
 		t.Fatalf("sweepClosedOrderTrackingRetentionAcrossStoresBounded: %v", err)
@@ -10990,6 +11001,7 @@ func TestSweepClosedOrderTrackingRetentionAcrossStoresBounded_DoesNotBypassRetai
 }
 
 func TestSweepClosedOrderTrackingRetentionAcrossStoresBounded_ZeroLimitDeletesNothing(t *testing.T) {
+	ctx := context.Background()
 	now := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
 	policy := orderTrackingRetentionPolicy{
 		deleteAfterClose: 24 * time.Hour,
@@ -11009,7 +11021,7 @@ func TestSweepClosedOrderTrackingRetentionAcrossStoresBounded_ZeroLimitDeletesNo
 	}
 	store := beads.NewMemStoreFrom(100, seed, nil)
 
-	deleted, err := sweepClosedOrderTrackingRetentionAcrossStoresBounded(
+	deleted, err := sweepClosedOrderTrackingRetentionAcrossStoresBounded(ctx,
 		[]beads.Store{store}, now, policy, nil, 0)
 	if err != nil {
 		t.Fatalf("sweepClosedOrderTrackingRetentionAcrossStoresBounded: %v", err)
@@ -11885,4 +11897,54 @@ func TestOrderFormulaVars(t *testing.T) {
 			t.Fatalf("binding_prefix set for a pack with two bindings: %v", got)
 		}
 	})
+}
+
+// cancelOnListingStore cancels the sweep's context during the closed-tracking
+// listing and returns a normal listing. Any later store call is a tripwire:
+// Delete would dereference the nil embedded store and fail the test loudly.
+type cancelOnListingStore struct {
+	beads.Store
+	cancel context.CancelFunc
+	lists  atomic.Int32
+}
+
+func (s *cancelOnListingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.lists.Add(1)
+	if q.Status == "closed" && q.Label == labelOrderTracking && q.TierMode == beads.TierBoth {
+		s.cancel()
+		return []beads.Bead{{
+			ID:        "canned-00",
+			Title:     "order:canned",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: time.Now().Add(-48 * time.Hour),
+			Labels:    []string{"order-run:canned", labelOrderTracking},
+			Ephemeral: true,
+		}}, nil
+	}
+	return s.Store.List(q)
+}
+
+// A canceled context stops the sweep between store calls: the cancellation
+// itself is not an error, nothing is deleted, and the next store is never
+// listed.
+func TestSweepClosedOrderTrackingRetentionAcrossStoresBoundedStopsOnCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	first := &cancelOnListingStore{cancel: cancel}
+	second := &failingRetentionStore{}
+	deleted, err := sweepClosedOrderTrackingRetentionAcrossStoresBounded(ctx,
+		[]beads.Store{first, second}, time.Now(), orderTrackingRetentionPolicyForConfig(&config.City{}), nil, orderTrackingRetentionWatchdogDeleteBudget)
+	if err != nil {
+		t.Fatalf("sweep on a canceled context returned an error: %v", err)
+	}
+	if deleted != 0 {
+		t.Fatalf("deleted = %d, want 0: a canceled sweep deletes nothing", deleted)
+	}
+	if n := first.lists.Load(); n != 1 {
+		t.Fatalf("first store lists = %d, want 1 (the canceled listing, nothing after)", n)
+	}
+	if n := second.calls.Load(); n != 0 {
+		t.Fatalf("second store lists = %d, want 0: cancellation stops the sweep between stores", n)
+	}
 }

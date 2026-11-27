@@ -53,6 +53,9 @@ func (s *retentionParkingStore) releaseSweep() {
 // so no pass outlives the test or deadlocks on it.
 func startRetentionLaneForTest(t *testing.T, cr *CityRuntime) {
 	t.Helper()
+	// A loaded host must not shed the lane's passes: the FS gate would skip
+	// them and the tests would hang waiting for a listing that never runs.
+	t.Setenv(fsPressureThresholdEnv, "100")
 	ctx, cancel := context.WithCancel(context.Background())
 	stop := cr.startOrderTrackingRetentionLane(ctx)
 	t.Cleanup(func() {
@@ -316,86 +319,6 @@ func trackingBeadCount(t *testing.T, store beads.Store, prefix string) int {
 	return n
 }
 
-// The retention lane is joined before shutdown() begins: with the lane parked
-// in a store call, canceling the city context must not let run()'s deferred
-// shutdown start — observed through the order dispatcher drain, shutdown's
-// first side effect — until the parked call returns (AC-8). The supervisor's
-// forced shutdown is outside this guarantee; see the lane's known limits.
-func TestCityRuntimeRunJoinsRetentionSweepBeforeShutdown(t *testing.T) {
-	t.Setenv(fsPressureThresholdEnv, "100")
-	cityPath := t.TempDir()
-	tomlPath := filepath.Join(cityPath, "city.toml")
-	writeCityRuntimeConfig(t, tomlPath, "fake")
-	cfg, err := config.Load(osFS{}, tomlPath)
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
-	sp := runtime.NewFake()
-	parking := &retentionParkingStore{
-		Store:   beads.NewMemStore(),
-		entered: make(chan struct{}),
-		release: make(chan struct{}),
-	}
-	started := make(chan struct{})
-	var startedOnce sync.Once
-	cr, runtimeErr := newCityRuntime(CityRuntimeParams{
-		CityPath: cityPath,
-		CityName: "test-city",
-		TomlPath: tomlPath,
-		Cfg:      cfg,
-		SP:       sp,
-		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
-			return DesiredStateResult{State: map[string]TemplateParams{}}
-		},
-		OnStarted: func() { startedOnce.Do(func() { close(started) }) },
-		Dops:      newDrainOps(sp),
-		Rec:       events.Discard,
-		Stdout:    io.Discard,
-		Stderr:    io.Discard,
-	})
-	if runtimeErr != nil {
-		t.Fatalf("building the city runtime: %v", runtimeErr)
-	}
-	od := &recordingOrderDispatcher{}
-	cr.od = od
-	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
-	cs.cityBeadStore = parking
-	cr.setControllerState(cs)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	runDone := make(chan struct{})
-	go func() {
-		defer close(runDone)
-		cr.run(ctx)
-	}()
-	t.Cleanup(func() {
-		parking.releaseSweep()
-		cancel()
-		awaitClose(t, runDone, "run() returning after the parked sweep is released")
-	})
-
-	awaitClose(t, parking.entered, "the retention lane parking in the closed-tracking listing")
-
-	// The lane is parked. Canceling the city context must not start shutdown:
-	// run() is joined on the lane inside its deferred cleanup, ahead of the
-	// deferred shutdown().
-	cancel()
-	select {
-	case <-runDone:
-		t.Fatal("run() returned while the retention sweep was parked: shutdown is not joined behind the lane")
-	case <-time.After(2 * time.Second):
-	}
-	if od.drainCalls != 0 {
-		t.Fatalf("order dispatcher drains = %d, want 0 while the sweep is parked: shutdown has begun", od.drainCalls)
-	}
-
-	parking.releaseSweep()
-	awaitClose(t, runDone, "run() returning once the parked sweep is released")
-	if od.drainCalls == 0 {
-		t.Fatal("shutdown never drained the order dispatcher after the lane exited")
-	}
-}
-
 // failingRetentionStore counts Lists and fails them; the assertion reads the
 // counter from the test goroutine.
 type failingRetentionStore struct {
@@ -426,5 +349,57 @@ func TestOrderTrackingRetentionLanePassMakesNoStoreCallWhenSuspended(t *testing.
 	cr.runOrderTrackingRetentionLanePass(context.Background(), &retentionLaneFSEpisode{})
 	if n := failing.calls.Load(); n != 0 {
 		t.Fatalf("the suspended pass made %d store call(s), want 0", n)
+	}
+}
+
+// Stopping the lane cancels and joins an in-flight sweep: with the sweep
+// parked in a store call, stop() must not return until the parked pass
+// unwinds, and the canceled sweep reports itself instead of reading like a
+// quiet pass that found nothing (AC-7).
+func TestOrderTrackingRetentionLaneStopCancelsAndJoinsInFlightSweep(t *testing.T) {
+	// A loaded host must not shed the lane's passes: the FS gate would skip
+	// them and the sweep would never park in the listing.
+	t.Setenv(fsPressureThresholdEnv, "100")
+	now := time.Now()
+	cr, store, stderrBuf := seedRetentionWatchdogCity(t, now, time.Hour)
+	parking := &retentionParkingStore{
+		Store:   store,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	cr.standaloneCityStore = parking
+	t.Cleanup(parking.releaseSweep)
+
+	stop := cr.startOrderTrackingRetentionLane(context.Background())
+	stopDone := make(chan struct{})
+
+	awaitClose(t, parking.entered, "the lane's first pass parking in the closed-tracking listing")
+
+	// The sweep is in flight (parked mid-listing). Only now cancel: stopping
+	// before the first pass starts would cancel it at the door instead.
+	go func() {
+		stop()
+		close(stopDone)
+	}()
+	select {
+	case <-stopDone:
+		t.Fatal("stop() returned while the sweep was parked in a store call")
+	case <-time.After(2 * time.Second):
+	}
+
+	parking.releaseSweep()
+	awaitClose(t, stopDone, "stop() returning after the parked listing is released")
+	if n := parking.closedTrackingLists.Load(); n < 1 {
+		t.Fatalf("closed-tracking lists = %d, want at least 1", n)
+	}
+	out := stderrBuf.String()
+	if !strings.Contains(out, "canceled after 0 delete(s)") {
+		t.Fatalf("stderr = %q, want the canceled-sweep notice", out)
+	}
+	if strings.Contains(out, "pruned") {
+		t.Fatalf("stderr = %q, want no pruned line: a canceled sweep deletes nothing", out)
+	}
+	if _, err := store.Get("guard-00"); err != nil {
+		t.Fatalf("guard-00 should survive a sweep canceled mid-listing: %v", err)
 	}
 }

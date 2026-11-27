@@ -2359,9 +2359,10 @@ func bulkDeleteMaxAge(_ *config.City) time.Duration {
 // runOrderTrackingRetentionWatchdog deletes closed order-tracking beads that
 // are past their TTL (defaulting to 7d) and beyond the retain-10 floor, at
 // most once every orderTrackingRetentionWatchdogInterval. It deletes at most
-// orderTrackingRetentionWatchdogDeleteBudget beads per invocation. The orders
-// lane runs it with its pass's config snapshot.
-func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(cfg *config.City, now time.Time) {
+// orderTrackingRetentionWatchdogDeleteBudget beads per invocation. The
+// order-tracking retention lane runs it on its own goroutine with the config
+// snapshot it reads per pass; ctx cancels the sweep between store calls.
+func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(ctx context.Context, cfg *config.City, now time.Time) {
 	if !cr.orderTrackingRetentionWatchdogLast.IsZero() &&
 		now.Sub(cr.orderTrackingRetentionWatchdogLast) < orderTrackingRetentionWatchdogInterval {
 		return
@@ -2390,9 +2391,20 @@ func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(cfg *config.City, now t
 
 	policy := orderTrackingRetentionPolicyForConfig(cfg)
 	deleted, sweepErr := sweepClosedOrderTrackingRetentionAcrossStoresBounded(
-		stores, now, policy, nil, orderTrackingRetentionWatchdogDeleteBudget)
+		ctx, stores, now, policy, nil, orderTrackingRetentionWatchdogDeleteBudget)
+	// Cancellation ends the sweep with no error of its own, so every error the
+	// sweep returns is reported, including one that preceded a cancel.
 	if err := errors.Join(storeErr, sweepErr); err != nil && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+	}
+	if ctx.Err() != nil {
+		// A sweep cut short says so: a city that updates its stores more often
+		// than the interval cancels every sweep, and a silent one reads
+		// exactly like "nothing was eligible".
+		if cr.stderr != nil {
+			fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: canceled after %d delete(s)\n", cr.logPrefix, deleted) //nolint:errcheck // best-effort stderr
+		}
+		return
 	}
 	if deleted > 0 && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: pruned %d closed bead(s)\n", cr.logPrefix, deleted) //nolint:errcheck // best-effort stderr
