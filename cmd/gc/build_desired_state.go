@@ -815,6 +815,10 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 				fmt.Fprintf(stderr, "buildDesiredState: %v (using named demand=false)\n", err) //nolint:errcheck
 			}
 		}
+		// A template whose blind seats keep churning closed is not blind
+		// spawn demand either (pool_spawn_churn.go): the merge clamps its
+		// count to its named work beads for as long as its hold stands.
+		collected.BlindSpawnAllowance = poolSpawnChurnGuardFor(cityPath).allowance()
 		merged := mergeCollectedDemand(cfg, collected)
 		scaleCheckCounts, scaleCheckDemandByTemplate = merged.ScaleCheckCounts, merged.ScaleCheckDemand
 		poolScaleCheckPartialTemplates = merged.PoolScaleCheckPartial
@@ -2795,6 +2799,11 @@ func mergeCollectedDemand(cfg *config.City, in collectedDemand) mergedDemand {
 	scaleCheckPartialTemplates := mergeScaleCheckPartialTemplates(nil, poolPartialRetentionTemplates)
 	scaleCheckPartialTemplates = mergeScaleCheckPartialTemplates(scaleCheckPartialTemplates, namedScaleCheckPartialTemplates)
 	sort.SliceStable(nameRefusals, func(i, j int) bool { return nameRefusals[i].Template < nameRefusals[j].Template })
+	// A template whose blind seats keep churning closed is not blind spawn
+	// demand (pool_spawn_churn.go): clamp its count to its named work beads
+	// plus its allowance. Control dispatchers never clamp — their demand is
+	// the controller's own machinery, not a blind pull.
+	scaleCheckCounts, scaleCheckDemandByTemplate = clampBlindSpawnDemand(cfg, in.BlindSpawnAllowance, scaleCheckCounts, scaleCheckDemandByTemplate)
 	return mergedDemand{
 		ScaleCheckCounts:          scaleCheckCounts,
 		ScaleCheckDemand:          scaleCheckDemandByTemplate,

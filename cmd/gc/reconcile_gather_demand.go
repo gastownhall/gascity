@@ -113,6 +113,10 @@ func gatherDemand(env demandGatherEnv, reads demandReads) (v demandView, err err
 			fmt.Fprintf(stderr, "gatherDemand: %v (counts above may be a partial of one demand source)\n", probeErr) //nolint:errcheck
 		}
 	}
+	// A template whose blind seats keep churning closed is not blind spawn
+	// demand either (pool_spawn_churn.go): the merge clamps its count to its
+	// named work beads for as long as its hold stands.
+	c.BlindSpawnAllowance = poolSpawnChurnGuardFor(env.CityPath).allowance()
 	if len(targets.defaultNamedScaleTargets) > 0 {
 		var errs []error
 		v.NamedDefault, c.NamedPartials, errs = defaultNamedSessionDemand(targets.defaultNamedScaleTargets, env.Cfg, env.CityName, cache)

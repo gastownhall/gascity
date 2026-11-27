@@ -625,6 +625,12 @@ func computePoolDesiredStatesParkedAt(
 	floorReservations := newNestedCapFloorReservations(cfg, aliasHeldTemplates, limits, floorUsage)
 	allRequests := append([]SessionRequest(nil), resumeRequests...)
 
+	// Churned blind closes present in the rows (pool_spawn_churn.go). The
+	// production snapshots drop closed rows before they reach the planner, so
+	// this is empty there and the journal-fed guard is the mechanism; a
+	// caller that hands closed rows in gets the same trip and hold from them.
+	churnHolds := poolSpawnChurnHoldsFromSessions(cfg, sessionInfos, decisionTime)
+
 	// Merge scale_check demand. In bead-backed reconciliation, scale_check is
 	// the authoritative signal for new unassigned demand only; resume requests
 	// are calculated independently from assigned work and must not be deducted
@@ -666,6 +672,13 @@ func computePoolDesiredStatesParkedAt(
 			if info, ok := sessionInfoByID[req.SessionBeadID]; ok && poolSessionWithinPendingCreateLease(info, cfg, decisionTime) {
 				inFlightFloor++
 			}
+		}
+		if holdEnd, held := churnHolds[template]; held && decisionTime.Before(holdEnd) && !config.IsDeterministicControlDispatcher(agent) {
+			// Only the blind remainder is withheld (pool_spawn_churn.go):
+			// named work beads keep their bound requests, and protected,
+			// in-flight and floor demand still flow through effectiveDemand's
+			// max() below.
+			scaleCount = clampBlindScaleCount(scaleCount, len(scaleCheckDemand[template].WorkBeadIDs), 0)
 		}
 		effectiveDemand := max(scaleCount, len(protected), inFlightFloor)
 		newCount := capNewDemandCount(limits, usage, floorReservations, agent, effectiveDemand)

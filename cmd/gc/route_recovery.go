@@ -106,6 +106,22 @@ func (cr *CityRuntime) claimStallGuardOf() *claimStallGuard {
 	return cr.claimStall
 }
 
+// poolSpawnChurnGuardOf is the runtime's spawn-churn guard, created on first
+// use and configured from the runtime's config. Its events go to the
+// runtime's recorder and stderr.
+func (cr *CityRuntime) poolSpawnChurnGuardOf() *poolSpawnChurnGuard {
+	cr.poolSpawnChurnOnce.Do(func() {
+		record := func(e events.Event) {
+			if cr.rec != nil {
+				cr.rec.Record(e)
+			}
+		}
+		cr.poolSpawnChurn = newPoolSpawnChurnGuard(record, cr.stderr)
+		cr.poolSpawnChurn.configure(cr.cfg)
+	})
+	return cr.poolSpawnChurn
+}
+
 // routeRecoveryEventProvider is the journal the delta feed tails, or nil when
 // this runtime has no controller state (every one-shot and standalone runtime).
 // A nil provider leaves the lane backstop-only, loudly, rather than pretending a
@@ -279,6 +295,10 @@ func (cr *CityRuntime) startTickDeltaLanes(ctx context.Context, prov events.Prov
 	// seat at most, and its holds run out on their own.
 	claimStall := cr.claimStallGuardOf()
 	registerClaimStallGuard(ctx, cr.cityPath, claimStall)
+	// So does the spawn-churn guard: a missed churned close only delays a
+	// hold, and its holds run out on their own.
+	poolSpawnChurn := cr.poolSpawnChurnGuardOf()
+	registerPoolSpawnChurnGuard(ctx, cr.cityPath, poolSpawnChurn)
 	watchJournalForDeltaLanes(ctx, prov,
 		func() {
 			route.force(backstopReasonCursorGap)
@@ -293,6 +313,7 @@ func (cr *CityRuntime) startTickDeltaLanes(ctx context.Context, prov events.Prov
 			cr.absorbCompletionFact(evt)
 			claimLoop.observe(evt)
 			claimStall.observe(evt)
+			poolSpawnChurn.observe(evt)
 		})
 	go cr.runRouteRecoveryBackstopLoop(ctx, route)
 	// The cross-store gate lane reads work stores, so it polls off the tick
