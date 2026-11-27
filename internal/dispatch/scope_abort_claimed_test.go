@@ -3,6 +3,7 @@ package dispatch
 import (
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"testing"
 
@@ -653,5 +654,289 @@ func TestScopeAbortWithoutClaimedMembersClosesBodyAtOnce(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// The shapes below put the claimed bead under a retry or ralph member of the
+// aborting scope instead of in it: the compile-time attempt of a retried
+// member, which carries no scope of its own, and a worker of a nested ralph's
+// iteration, which lives in the inner iteration scope. Neither has a
+// scope-check of the aborting scope, so the abort holds the member's own one.
+
+// claimedNestedRalphFormula is the mol-adopt-pr-v2 body shape: an outer scope
+// over a sibling X and a ralph loop whose iteration runs workers A and B.
+const claimedNestedRalphFormula = `formula = "scope-abort-claimed-nested"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "body"
+title = "Outer body"
+needs = ["loop", "x"]
+metadata = { "gc.kind" = "scope", "gc.scope_role" = "body", "gc.scope_name" = "worktree" }
+
+[[steps]]
+id = "x"
+title = "Outer sibling X"
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
+
+[[steps]]
+id = "loop"
+title = "Iteration loop"
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
+
+[steps.ralph]
+max_attempts = 3
+
+[steps.ralph.check]
+mode = "exec"
+path = "` + ralphHardFailCheckScript + `"
+timeout = "30s"
+
+[[steps.children]]
+id = "a"
+title = "Worker A"
+
+[[steps.children]]
+id = "b"
+title = "Worker B"
+`
+
+// claimedRetryMemberFormula is a scope over a sibling X and a retried member
+// R, the shape of mol-adopt-pr-v2's retried body steps.
+const claimedRetryMemberFormula = `formula = "scope-abort-claimed-retry"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "body"
+title = "Outer body"
+needs = ["r", "x"]
+metadata = { "gc.kind" = "scope", "gc.scope_role" = "body", "gc.scope_name" = "worktree" }
+
+[[steps]]
+id = "x"
+title = "Sibling X"
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
+
+[[steps]]
+id = "r"
+title = "Retried member R"
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
+
+[steps.retry]
+max_attempts = 2
+`
+
+// claimedDescendantShape is a compiled scope whose claimed bead is a logical
+// descendant of the scope's retry or ralph member.
+type claimedDescendantShape struct {
+	name    string
+	formula string
+	text    string
+	// claimedRef is the gc.step_ref suffix of the claimed bead, memberRef that
+	// of the retry or ralph member it runs under, and nextRef a gc.step_ref
+	// fragment only the member's next attempt or iteration would carry.
+	claimedRef, memberRef, nextRef string
+	// crashSweepStopsBefore bounds the crash harness's fault sweep
+	// (crashScenario.stopWritesBeforePrefix); empty sweeps every write.
+	crashSweepStopsBefore string
+}
+
+func claimedDescendantShapes() []claimedDescendantShape {
+	return []claimedDescendantShape{
+		{
+			name: "nested-ralph", formula: "scope-abort-claimed-nested", text: claimedNestedRalphFormula,
+			// A ralph body child's gc.step_ref carries no formula prefix.
+			claimedRef: "loop.iteration.1.b", memberRef: ".loop", nextRef: "loop.iteration.2",
+			// The abort skips this shape in several waves (worker A, then the
+			// iteration body, then the loop control). A fault between two waves
+			// lets a control an earlier wave made ready run before the replay
+			// skips it, which converges with different skip metadata
+			// (ga-vnycm2.27, as TestCrashInjectionCallBudgetMolecule's fail
+			// path). The sweep stops before the first wave, so it covers the
+			// hold's own write; the retry shape skips in one wave and sweeps all.
+			crashSweepStopsBefore: "CloseAll",
+		},
+		{
+			name: "retry", formula: "scope-abort-claimed-retry", text: claimedRetryMemberFormula,
+			claimedRef: ".r.attempt.1", memberRef: ".r", nextRef: ".r.attempt.2",
+		},
+	}
+}
+
+// claimedDescendantStores are the stores the compiled shapes cook on: the
+// permissive MemStore and SQLite store, and the bd close-policy double.
+func claimedDescendantStores() []drainStoreCase {
+	return append(drainUnforcedAbortStores(), drainForcedSettleStores()[0])
+}
+
+// cookClaimedDescendant cooks shape's city on tc's store, has a pool worker
+// claim the descendant and fails sibling X hard. It returns the fixture, the
+// claimed bead and X.
+func cookClaimedDescendant(t *testing.T, tc drainStoreCase, city compiledRalphCity, shape claimedDescendantShape) (ralphDrainFixture, beads.Bead, beads.Bead) {
+	t.Helper()
+	fx := cookRalphDrainFixture(t, tc, city)
+	all := drainStoreAll(t, fx.store)
+	claimed := drainBeadByRefSuffix(t, all, shape.claimedRef)
+	drainClaimed(t, fx.store, claimed)
+	x := drainBeadByRefSuffix(t, all, ".x")
+	workerCloses(t, fx.store, x.ID, workerFailure(beadmeta.FailureClassHard, "x_failed"))
+	return fx, claimed, x
+}
+
+// closeClaimedWork plays the worker holding a claim: given a turn, it closes
+// the first in_progress bead with metadata.
+func closeClaimedWork(store beads.Store, metadata map[string]string) func(t *testing.T) bool {
+	return func(t *testing.T) bool {
+		t.Helper()
+		claimed, err := store.List(beads.ListQuery{Status: "in_progress", AllowScan: true})
+		if err != nil {
+			t.Fatalf("listing claimed work: %v", err)
+		}
+		if len(claimed) == 0 {
+			return false
+		}
+		workerCloses(t, store, claimed[0].ID, metadata)
+		return true
+	}
+}
+
+// TestScopeAbortHoldsBodyForClaimedDescendant pins the abort over claimed work
+// that is not a direct member of the aborting scope. The abort leaves the
+// claimed bead to its worker, skips the retry or ralph control so it starts
+// no further attempt or iteration, and holds the member's scope-check on the
+// claimed bead, so the body stays open recording the failure. The worker's
+// close then settles the body fail, and the workflow after it, whatever the
+// claimed bead's own outcome.
+func TestScopeAbortHoldsBodyForClaimedDescendant(t *testing.T) {
+	t.Parallel()
+	closes := []struct {
+		name string
+		meta map[string]string
+	}{
+		{name: "pass", meta: workerPass},
+		{name: "hard-fail", meta: workerFailure(beadmeta.FailureClassHard, "claimed_failed")},
+	}
+	for _, shape := range claimedDescendantShapes() {
+		for _, closeWith := range closes {
+			for _, tc := range claimedDescendantStores() {
+				t.Run(shape.name+"/"+closeWith.name+"/"+tc.name, func(t *testing.T) {
+					t.Parallel()
+					city := newCompiledRalphCity(t, shape.formula, shape.text, 0)
+					fx, claimed, x := cookClaimedDescendant(t, tc, city, shape)
+					drainServeHeld(t, fx.crashFixture)
+
+					all := drainStoreAll(t, fx.store)
+					body := drainBeadByRefSuffix(t, all, ".body")
+					if body.Status != "open" || body.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail ||
+						body.Metadata[beadmeta.FailureSubjectMetadataKey] != x.ID {
+						t.Fatalf("body = %s outcome %q subject %q, want open, fail and X (%s): the claimed %s holds it",
+							body.Status, body.Metadata[beadmeta.OutcomeMetadataKey], body.Metadata[beadmeta.FailureSubjectMetadataKey], x.ID, claimed.ID)
+					}
+					held := drainBeadByID(t, fx.store, claimed.ID)
+					if held.Status != "in_progress" || held.Assignee != "pool-worker" || held.Metadata[beadmeta.OutcomeMetadataKey] != "" {
+						t.Fatalf("claimed %s = %s by %q outcome %q, want in_progress by pool-worker with no outcome: only its worker closes it",
+							claimed.ID, held.Status, held.Assignee, held.Metadata[beadmeta.OutcomeMetadataKey])
+					}
+					member := drainBeadByRefSuffix(t, all, shape.memberRef)
+					if member.Status != "closed" || member.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeSkipped {
+						t.Fatalf("member control %s = %s/%q, want closed/skipped", member.ID, member.Status, member.Metadata[beadmeta.OutcomeMetadataKey])
+					}
+					memberCheck := drainBeadByRefSuffix(t, all, shape.memberRef+"-scope-check")
+					if memberCheck.Status != "open" || !drainBlocksOn(t, fx.store, memberCheck, claimed.ID) {
+						t.Fatalf("member scope-check %s = %s, want open and blocked on the claimed %s", memberCheck.ID, memberCheck.Status, claimed.ID)
+					}
+					if root := drainBeadByID(t, fx.store, fx.rootID); root.Status == "closed" {
+						t.Fatalf("workflow root closed while the claimed %s runs", claimed.ID)
+					}
+
+					workerCloses(t, fx.store, claimed.ID, closeWith.meta)
+					if errs := serveToQuiescence(t, fx.crashFixture, &writeFaultInjector{}); len(errs) != 0 {
+						t.Fatalf("serving after the claimed bead closed did not converge: %v", errs)
+					}
+
+					all = drainStoreAll(t, fx.store)
+					body = drainBeadByRefSuffix(t, all, ".body")
+					if body.Status != "closed" || body.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail ||
+						body.Metadata[beadmeta.FailureSubjectMetadataKey] != x.ID || body.Metadata[beadmeta.FailureClassMetadataKey] != beadmeta.FailureClassHard {
+						t.Fatalf("body = %s outcome %q subject %q class %q, want closed, fail, X (%s), hard",
+							body.Status, body.Metadata[beadmeta.OutcomeMetadataKey], body.Metadata[beadmeta.FailureSubjectMetadataKey],
+							body.Metadata[beadmeta.FailureClassMetadataKey], x.ID)
+					}
+					if root := drainBeadByID(t, fx.store, fx.rootID); root.Status != "closed" || root.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail {
+						t.Fatalf("workflow root = %s/%q, want closed/fail", root.Status, root.Metadata[beadmeta.OutcomeMetadataKey])
+					}
+					closed := drainBeadByID(t, fx.store, claimed.ID)
+					if closed.Status != "closed" || closed.Metadata[beadmeta.OutcomeMetadataKey] != closeWith.meta[beadmeta.OutcomeMetadataKey] {
+						t.Fatalf("claimed %s = %s/%q, want closed with its worker's %q", claimed.ID, closed.Status,
+							closed.Metadata[beadmeta.OutcomeMetadataKey], closeWith.meta[beadmeta.OutcomeMetadataKey])
+					}
+					if drainHasRefContaining(all, shape.nextRef) {
+						t.Fatalf("a %s bead exists: the skipped member started another attempt or iteration", shape.nextRef)
+					}
+					for _, b := range all {
+						if b.Metadata[beadmeta.RootBeadIDMetadataKey] == fx.rootID && b.Status != "closed" {
+							t.Errorf("%s (%s) is %s after the workflow settled", b.ID, b.Metadata[beadmeta.StepRefMetadataKey], b.Status)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestCrashInjectionScopeAbortClaimedDescendant runs the crash harness over
+// both claimed-descendant shapes: a dispatcher killed at, or failing, any
+// store write of the abort that holds the member's scope-check on the claimed
+// bead (the blocks edge it adds included) or of the settle after the worker
+// closes it converges on the uninterrupted end state.
+func TestCrashInjectionScopeAbortClaimedDescendant(t *testing.T) {
+	t.Parallel()
+	for _, shape := range claimedDescendantShapes() {
+		for _, tc := range []drainStoreCase{drainUnforcedAbortStores()[0], drainForcedSettleStores()[0]} {
+			sc := claimedDescendantCrashScenario(t, tc, shape)
+			t.Run(sc.name, func(t *testing.T) {
+				t.Parallel()
+				runCrashScenario(t, sc)
+			})
+		}
+	}
+}
+
+// claimedDescendantCrashScenario builds shape for the crash harness on a
+// Mem-backed store: X failed hard, the descendant claimed, and its worker
+// closing it passed once the dispatcher has nothing left to do.
+func claimedDescendantCrashScenario(t *testing.T, tc drainStoreCase, shape claimedDescendantShape) crashScenario {
+	t.Helper()
+	// One city for every rebuild: the formula source path is ledger metadata.
+	city := newCompiledRalphCity(t, shape.formula, shape.text, 0)
+	return crashScenario{
+		name:                   shape.name + "/" + tc.name,
+		stopWritesBeforePrefix: shape.crashSweepStopsBefore,
+		build: func(t *testing.T, wrap func(beads.Store) beads.Store) crashFixture {
+			fx, _, _ := cookClaimedDescendant(t, tc, city, shape)
+			fx.work = closeClaimedWork(fx.store, workerPass)
+			fx.dispatch = wrap(fx.store)
+			return fx.crashFixture
+		},
+		check: func(t *testing.T, ledger []ledgerBead) {
+			body := ledgerBeadByRefSuffix(t, ledger, ".body")
+			if body.Status != "closed" || body.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail {
+				t.Fatalf("uninterrupted run: body = %s/%q, want closed/fail", body.Status, body.Metadata[beadmeta.OutcomeMetadataKey])
+			}
+			claimed := ledgerBeadByRefSuffix(t, ledger, shape.claimedRef)
+			if claimed.Status != "closed" || claimed.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass || claimed.Assignee != "pool-worker" {
+				t.Fatalf("uninterrupted run: claimed = %s/%q by %q, want closed/pass by pool-worker", claimed.Status,
+					claimed.Metadata[beadmeta.OutcomeMetadataKey], claimed.Assignee)
+			}
+			memberCheck := ledgerBeadByRefSuffix(t, ledger, shape.memberRef+"-scope-check")
+			if !slices.Contains(memberCheck.Blocks, "blocks:"+claimed.ID) {
+				t.Fatalf("uninterrupted run: member scope-check blocks on %v, want the hold edge on the claimed %s", memberCheck.Blocks, claimed.ID)
+			}
+			if ledgerHasRefContaining(ledger, shape.nextRef) {
+				t.Fatalf("uninterrupted run: a %s bead exists", shape.nextRef)
+			}
+		},
 	}
 }

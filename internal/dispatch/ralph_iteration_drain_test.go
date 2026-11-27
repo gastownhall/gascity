@@ -28,9 +28,9 @@ import (
 // iteration body open, recording gc.outcome=fail, until the sibling's own
 // scope-check settles it; the ralph control is not ready while the body is
 // open. The ralph drain gate stays as defense for ledgers written before
-// that, and for claimed work that has no scope-check of its own: every ralph
-// verdict blocks on each still-running iteration member and defers with
-// ErrControlPending. These tests pin the hold from the #2519 shape: a ralph
+// that, and for claimed work no scope-check of the aborted scope waits on:
+// every ralph verdict blocks on each still-running iteration member and
+// defers with ErrControlPending. These tests pin the hold from the #2519 shape: a ralph
 // over two independent workers, an exec check that always fails, one worker
 // claimed before its sibling fails.
 

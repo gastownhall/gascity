@@ -722,9 +722,9 @@ func abortScopeWith(store beads.GraphStore, snapshot scopeSnapshot, opts Process
 		return 0, fmt.Errorf("%s: aborting scope: %w", traceID, err)
 	}
 	if len(result.running) > 0 {
-		// A claimed member still blocks the body and only its worker closes
-		// it. Record the verdict on the open body; the member's kept
-		// scope-check closes the body fail once the member closes
+		// Claimed work still runs, and only its worker closes it. Record the
+		// verdict on the open body; the scope-check kept waiting on that work
+		// closes the body fail once the last of it closes
 		// (closeScopeAsPassedWith).
 		metadata := snapshot.scopeMemberMetadata()
 		maps.Copy(metadata, scopeFailMetadata(snapshot))
@@ -1030,13 +1030,13 @@ func (s scopeSnapshot) resolveScopeOutputJSON(subject beads.Bead) (string, error
 	return candidate, nil
 }
 
-// skipOpenScopeMembers closes the scope's open members as skipped. It leaves
-// claimed work (isClaimedScopeWork) to its worker and keeps that work's
-// scope-check open, so the member's close re-drives the scope; it returns the
-// number of members skipped and the IDs of the claimed members whose
-// scope-checks it kept, in bead-ID order. skipControlID is the control driving
-// the abort, exempt from the skip, and its subject's scope-check is kept too
-// (preserveScopeCheckForSubject).
+// skipOpenScopeMembers closes the scope's open members as skipped and leaves
+// the scope's claimed work to the workers that hold it: holdClaimedScopeWork
+// keeps open a scope-check of this scope for each claimed bead, so the bead's
+// close re-drives the scope. It returns the number of members skipped and the
+// IDs of the claimed beads the kept scope-checks wait on, in bead-ID order.
+// skipControlID is the control driving the abort, exempt from the skip, and
+// its subject's scope-check is kept too (preserveScopeCheckForSubject).
 func (s scopeSnapshot) skipOpenScopeMembers(store beads.GraphStore, skipControlID string) (int, []string, error) {
 	all := s.all
 	if !s.allComplete {
@@ -1047,15 +1047,13 @@ func (s scopeSnapshot) skipOpenScopeMembers(store beads.GraphStore, skipControlI
 		all = loaded
 	}
 	pending := scopeUnsettledMembers(s.members, all, skipControlID, func(b beads.Bead) bool { return b.Status == "open" })
-	claimed := make(map[string]struct{})
-	for _, bead := range all {
-		if isClaimedScopeWork(bead) {
-			claimed[bead.ID] = struct{}{}
-		}
+	claimed := scopeUnsettledMembers(s.members, all, skipControlID, isClaimedScopeWork)
+	running, err := s.holdClaimedScopeWork(store, claimed, pending)
+	if err != nil {
+		return 0, nil, err
 	}
 
 	skipped := 0
-	var running []string
 	// Termination: nothing is ever added to pending below, and every round that
 	// does not return strictly shrinks it — a preserve deletes its member, a skip
 	// wave deletes every id it closed. So the round count is bounded by the
@@ -1073,12 +1071,6 @@ func (s scopeSnapshot) skipOpenScopeMembers(store beads.GraphStore, skipControlI
 			if preserveScopeCheckForSubject(pending[id], depsByID[id], skipControlID) {
 				delete(pending, id)
 				preserved++
-				continue
-			}
-			if memberID, ok := scopeCheckForClaimedMember(pending[id], depsByID[id], claimed); ok {
-				delete(pending, id)
-				preserved++
-				running = append(running, memberID)
 				continue
 			}
 			if !canSkipScopeMemberWithDeps(depsByID[id], pending) {
@@ -1111,8 +1103,93 @@ func (s scopeSnapshot) skipOpenScopeMembers(store beads.GraphStore, skipControlI
 		skipped += closed
 	}
 
-	slices.Sort(running)
-	return skipped, slices.Compact(running), nil
+	return skipped, running, nil
+}
+
+// holdClaimedScopeWork keeps open, for each bead of claimed (the scope's
+// claimed work, as scopeUnsettledMembers selects it with isClaimedScopeWork),
+// a scope-check of this scope that waits on it, and removes the kept
+// scope-checks from pending so the abort does not skip them. A claimed member
+// keeps its own scope-check. Claimed work under a retry or ralph member of the
+// scope (an attempt, or a bead of an iteration at any depth) has no
+// scope-check of this scope: the member's own scope-check is kept and gains a
+// blocks edge on the claimed bead, while the member's control stays pending
+// and is skipped, so it starts no further attempt or iteration. Only a
+// scope-check of this scope can re-drive it, so a claimed bead with none to
+// wait on it holds nothing and the body settles now. It returns the claimed
+// beads a kept scope-check waits on, in bead-ID order.
+func (s scopeSnapshot) holdClaimedScopeWork(store beads.GraphStore, claimed, pending map[string]beads.Bead) ([]string, error) {
+	if len(claimed) == 0 {
+		return nil, nil
+	}
+	var checkIDs []string
+	for _, id := range sortedPendingIDs(pending) {
+		candidate := pending[id]
+		if candidate.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindScopeCheck &&
+			candidate.Metadata[beadmeta.ScopeRoleMetadataKey] == beadmeta.ScopeRoleControl &&
+			candidate.Metadata[beadmeta.ScopeRefMetadataKey] == s.scopeRef {
+			checkIDs = append(checkIDs, id)
+		}
+	}
+	if len(checkIDs) == 0 {
+		return nil, nil
+	}
+	depsByID, err := loadDownDepsForScopeSkip(store, checkIDs)
+	if err != nil {
+		return nil, err
+	}
+	checkWaitingOn := func(beadID string) (string, bool) {
+		for _, checkID := range checkIDs {
+			for _, dep := range depsByID[checkID] {
+				if dep.Type == "blocks" && dep.DependsOnID == beadID {
+					return checkID, true
+				}
+			}
+		}
+		return "", false
+	}
+
+	var running []string
+	for _, id := range sortedPendingIDs(claimed) {
+		checkID, ok := checkWaitingOn(id)
+		if !ok {
+			owner, owned := s.claimedWorkOwner(claimed[id])
+			if !owned {
+				continue
+			}
+			if checkID, ok = checkWaitingOn(owner.ID); !ok {
+				continue
+			}
+			if err := ensureBlockingDependency(store, checkID, id); err != nil {
+				return nil, fmt.Errorf("holding scope-check %s on claimed %s: %w", checkID, id, err)
+			}
+		}
+		delete(pending, checkID)
+		running = append(running, id)
+	}
+	return running, nil
+}
+
+// claimedWorkOwner returns the retry or ralph member of the scope that claimed
+// work runs under: the first, in bead-ID order, whose logical descendant it is.
+func (s scopeSnapshot) claimedWorkOwner(work beads.Bead) (beads.Bead, bool) {
+	members := slices.Clone(s.members)
+	slices.SortFunc(members, func(a, b beads.Bead) int { return strings.Compare(a.ID, b.ID) })
+	for _, member := range members {
+		switch strings.TrimSpace(member.Metadata[beadmeta.KindMetadataKey]) {
+		case beadmeta.KindRetry, beadmeta.KindRalph:
+		default:
+			continue
+		}
+		switch member.Metadata[beadmeta.ScopeRoleMetadataKey] {
+		case beadmeta.ScopeRoleBody, beadmeta.ScopeRoleTeardown:
+			continue
+		}
+		if isLogicalDescendant(member, work) {
+			return member, true
+		}
+	}
+	return beads.Bead{}, false
 }
 
 // scopeUnsettledMembers collects the scope beads that count as unsettled:
@@ -1122,12 +1199,12 @@ func (s scopeSnapshot) skipOpenScopeMembers(store beads.GraphStore, skipControlI
 // root membership). skipControlID is exempt; the caller that drives the
 // selection owns its own close.
 //
-// unsettled is the status test, and the two live callers must not drift:
-// a scope abort passes "open" — those are the members it skips, and the
-// claimed rest (isClaimedScopeWork) keep their scope-checks — while a ralph
-// iteration drain gate passes isLiveScopeWork, the open and the claimed
-// together: the iteration-boundary defect it exists for is a claimed sibling
-// the abort leaves to its worker (gastownhall/gascity#2519).
+// unsettled is the status test, and the callers must not drift: a scope
+// abort passes "open" for the members it skips and isClaimedScopeWork for
+// the claimed work it leaves to its workers (holdClaimedScopeWork), while a
+// ralph iteration drain gate passes isLiveScopeWork, the open and the claimed
+// work together: the iteration-boundary defect it exists for is a claimed
+// sibling the abort leaves to its worker (gastownhall/gascity#2519).
 func scopeUnsettledMembers(members, all []beads.Bead, skipControlID string, unsettled func(beads.Bead) bool) map[string]beads.Bead {
 	pending := make(map[string]beads.Bead)
 	for _, member := range members {
@@ -1212,28 +1289,6 @@ func preserveScopeCheckForSubject(candidate beads.Bead, deps []beads.Dep, subjec
 		}
 	}
 	return false
-}
-
-// scopeCheckForClaimedMember reports whether candidate is the scope-check of a
-// claimed scope member (one whose ID is in claimed) and returns that member's
-// ID. Its worker owns the member's close, and the kept scope-check is what
-// settles the aborted scope once the member closes.
-func scopeCheckForClaimedMember(candidate beads.Bead, deps []beads.Dep, claimed map[string]struct{}) (string, bool) {
-	if candidate.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindScopeCheck {
-		return "", false
-	}
-	if candidate.Metadata[beadmeta.ScopeRoleMetadataKey] != "control" {
-		return "", false
-	}
-	for _, dep := range deps {
-		if dep.Type != "blocks" {
-			continue
-		}
-		if _, ok := claimed[dep.DependsOnID]; ok {
-			return dep.DependsOnID, true
-		}
-	}
-	return "", false
 }
 
 // beadOutcomeFailed reports whether a closed bead counts as failed for

@@ -422,9 +422,10 @@ func isLiveScopeWork(b beads.Bead) bool {
 	return b.Status != "closed" && !beadmeta.IsControlKind(b.Metadata[beadmeta.KindMetadataKey])
 }
 
-// isClaimedScopeWork reports whether a scope member is live work a worker
-// holds (any status but open). A scope abort never skips it: only its worker
-// closes it, and the abort keeps its scope-check open to settle the scope then.
+// isClaimedScopeWork reports whether a scope bead is live work a worker holds
+// (any status but open). A scope abort never skips it: only its worker closes
+// it, and the abort keeps a scope-check of the scope waiting on it, which
+// settles the scope then (holdClaimedScopeWork).
 func isClaimedScopeWork(b beads.Bead) bool {
 	return b.Status != "open" && isLiveScopeWork(b)
 }
