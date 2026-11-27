@@ -8,7 +8,7 @@
 #    cp contrib/k8s/example-city.toml my-k8s-city/city.toml
 #    cp contrib/k8s/pack.toml my-k8s-city/pack.toml
 #    cp -r contrib/k8s/agents my-k8s-city/agents
-#    gc init --from my-k8s-city <city-path>
+#    gc init --from my-k8s-city --no-start <city-path>   # --no-start: start it later, per the mode below
 #    gc doctor --fix --city <city-path>   # pins the builtin core and bd pack imports
 #
 # Two deployment modes:
