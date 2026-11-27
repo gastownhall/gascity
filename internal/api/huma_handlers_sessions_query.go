@@ -82,9 +82,10 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	}
 	keyedTranscriptPaths := session.ResolveKeyedTranscriptPaths(sessionTranscriptLookupCandidates(pageSessions), s.sessionLogPaths(), sessionTranscriptProviderFallback(cfg))
 	page := make([]sessionResponse, len(pageSessions))
+	activeBeads := s.newActiveBeadIndex()
 	for j, sess := range pageSessions {
 		page[j] = sessionResponseWithReason(sess, responseByID[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
-		s.enrichSessionResponseWithKeyedPaths(&page[j], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0, keyedTranscriptPaths)
+		s.enrichSessionResponseWithKeyedPaths(&page[j], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, activeBeads.lookup, false, 0, keyedTranscriptPaths)
 	}
 	if input.WakeReasons {
 		s.setSessionListWakeReasons(page, pageSessions, listings)
@@ -183,7 +184,7 @@ func (s *Server) humaHandleSessionGet(ctx context.Context, input *SessionGetInpu
 	}
 	wantPeek := input.Peek && !input.PeekStrict
 	resp := sessionResponseWithReason(info, pr, cfg, s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
-	s.enrichSessionResponse(&resp, info, cfg, sp, wantPeek, true, true, input.PeekLines)
+	s.enrichSessionResponse(&resp, info, cfg, sp, wantPeek, true, input.PeekLines)
 	if input.PeekStrict {
 		resp.LastOutput = strictOutput
 	}
