@@ -45,7 +45,7 @@ type activeBeadQueryStore struct {
 }
 
 func (s *activeBeadQueryStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	if query.Status == "in_progress" && (query.Assignee != "" || len(query.Assignees) > 0) {
+	if query.Status == "in_progress" {
 		s.queries = append(s.queries, query)
 	}
 	return s.Store.List(query)

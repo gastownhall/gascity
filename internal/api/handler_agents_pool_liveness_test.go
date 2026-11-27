@@ -364,3 +364,41 @@ func TestAgentAndRigViewsOnASuspendedCityReadNoSessionStore(t *testing.T) {
 		t.Fatal("GET /agents on a resumed city did not read the session store")
 	}
 }
+
+// activeWorkCountingStore counts the in_progress reads made through it.
+type activeWorkCountingStore struct {
+	beads.Store
+	activeReads int
+}
+
+func (s *activeWorkCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Status == "in_progress" {
+		s.activeReads++
+	}
+	return s.Store.List(query)
+}
+
+// TestAgentListReadsEachBeadStoreOnceForActiveWork pins the cost of the
+// active-bead join on GET /agents: one in_progress read per bead store per
+// request, however many agents the list carries, not one per identity per
+// agent per store.
+func TestAgentListReadsEachBeadStoreOnceForActiveWork(t *testing.T) {
+	st := newFakeState(t)
+	st.cfg.NamedSessions = nil
+	st.cfg.Agents = nil
+	for i := 1; i <= 8; i++ {
+		st.cfg.Agents = append(st.cfg.Agents, config.Agent{
+			Name: "worker" + string(rune('0'+i)), Dir: "myrig", Provider: "test-agent", MaxActiveSessions: intPtr(1),
+		})
+	}
+	counting := &activeWorkCountingStore{Store: st.stores["myrig"]}
+	st.stores["myrig"] = counting
+
+	items := getAgentList(t, st, "").Items
+	if len(items) != 8 {
+		t.Fatalf("GET /agents rows = %v, want 8 agents", agentNames(items))
+	}
+	if counting.activeReads != 1 {
+		t.Errorf("GET /agents over 8 agents made %d in_progress reads of the one bead store, want 1", counting.activeReads)
+	}
+}
