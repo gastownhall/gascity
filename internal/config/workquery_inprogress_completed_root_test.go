@@ -63,7 +63,8 @@ type workflowRootFake struct {
 	// inProgress holds the in_progress rows the crash-recovery read returns,
 	// filtered by --assignee: the workflow root first, then anything behind it.
 	inProgress string
-	// members holds every row stamped gc.root_bead_id=<root>, whatever status.
+	// members holds every workflow member row, whatever status; a member read
+	// returns the ones stamped with the root it asks for.
 	members string
 	// memberRead is "" for a normal member read, "fail" for one that exits 1,
 	// and "garbage" for one that prints output jq cannot parse.
@@ -106,20 +107,22 @@ inprog='` + orEmpty(f.inProgress) + `'
 anchor_ready='` + orEmpty(f.anchorReady) + `'
 assigned_ready='` + orEmpty(f.assignedReady) + `'
 pool='` + orEmpty(f.pool) + `'
-statuses=""; limit=""; assignee=""; prev=""
+statuses=""; limit=""; assignee=""; root=""; prev=""
 for a in "$@"; do
   case "$prev" in --status) statuses="$a" ;; --limit) limit="$a" ;; esac
   case "$a" in
     --status=*) statuses="${a#--status=}" ;;
     --limit=*) limit="${a#--limit=}" ;;
     --assignee=*) assignee="${a#--assignee=}" ;;
+    gc.root_bead_id=*) root="${a#gc.root_bead_id=}" ;;
   esac
   prev="$a"
 done
 filter_rows() {
-  printf '%s' "$1" | jq -c --arg s "$statuses" --arg l "$limit" --arg a "$assignee" '
+  printf '%s' "$1" | jq -c --arg s "$statuses" --arg l "$limit" --arg a "$assignee" --arg r "$root" '
     [.[] | select(if $s == "" then .status != "closed" else (.status as $st | $s | split(",") | index($st)) != null end)
-         | select($a == "" or .assignee == $a)]
+         | select($a == "" or .assignee == $a)
+         | select($r == "" or .metadata["gc.root_bead_id"] == $r)]
     | if ($l | length) > 0 and ($l | tonumber) > 0 then .[:($l | tonumber)] else . end'
 }
 case "$*" in
@@ -408,5 +411,147 @@ func TestInProgressTierSkipsMemberReadForNonWorkflowCandidate(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// combinedQueryForm is one generated shape of the combined work query, run for
+// an agent whose pool target is hello-world/worker (or its legacy
+// workflow-control twin).
+type combinedQueryForm struct {
+	name      string
+	command   string
+	ephemeral bool
+}
+
+func combinedQueryForms() []combinedQueryForm {
+	worker := Agent{Name: "worker", Dir: "hello-world"}
+	control := Agent{Name: ControlDispatcherAgentName, Dir: "hello-world"}
+	return []combinedQueryForm{
+		{name: "stock", command: worker.EffectiveWorkQueryFor(QueryTopology{})},
+		{name: "legacy-control", command: control.EffectiveWorkQueryFor(QueryTopology{})},
+		{name: "federated", command: worker.EffectiveWorkQueryFor(federatedTopology())},
+		{name: "bd104-ephemeral", command: worker.EffectiveWorkQueryFor(QueryTopology{}), ephemeral: true},
+	}
+}
+
+// runCombinedQueryForm runs one combined query form and returns the ids it
+// printed. The origin gate ends the query with no output when it has nothing to
+// flush, which reads as no work, the same as "[]".
+func runCombinedQueryForm(t *testing.T, form combinedQueryForm, env map[string]string, fake workflowRootFake) []string {
+	t.Helper()
+	fake.ephemeral = form.ephemeral
+	run := runWorkflowRootQuery(t, form.command, env, fake)
+	if run.exit != 0 {
+		t.Fatalf("%s: query exited %d; stderr=%s", form.name, run.exit, run.stderr)
+	}
+	if strings.TrimSpace(run.stdout) == "" {
+		return nil
+	}
+	return run.ids(t)
+}
+
+// TestCombinedWorkQueryPassesOverFinishedWorkflowHead covers AC-5: when the
+// session's in_progress head is a finished graph.v2 root, no part of the
+// combined query prints it, and the query answers with the session's next
+// servable work, or none.
+func TestCombinedWorkQueryPassesOverFinishedWorkflowHead(t *testing.T) {
+	finishedRoot := workflowRootJSON("wf-root-1", ``)
+	finishedMembers := finishedMemberShapes("wf-root-1")["finalizer open"]
+	liveRoot := `{"id":"wf-root-2","status":"in_progress","assignee":"alias-1","issue_type":"task",` +
+		`"metadata":{"gc.kind":"workflow","gc.formula_contract":"graph.v2","gc.routed_to":"hello-world/worker"}}`
+	liveMembers := []string{memberJSON("live-a", "wf-root-2", "closed", "task"), memberJSON("live-b", "wf-root-2", "open", "task")}
+	members := func(extra ...string) string {
+		rows := []string{memberJSON("step-a", "wf-root-1", "closed", "task"), memberJSON("fin", "wf-root-1", "open", "workflow-finalize")}
+		return jsonRows(append(rows, extra...)...)
+	}
+	ephemeralOrigin := map[string]string{"GC_SESSION_ID": "sess-1", "GC_SESSION_ORIGIN": "ephemeral"}
+	namedOrigin := map[string]string{"GC_SESSION_ID": "sess-1", "GC_SESSION_ORIGIN": "named"}
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+		fake workflowRootFake
+		want []string
+	}{
+		{
+			name: "in_progress step behind the finished head",
+			env:  ephemeralOrigin,
+			fake: workflowRootFake{
+				inProgress: jsonRows(finishedRoot,
+					`{"id":"other-step","status":"in_progress","assignee":"sess-1","metadata":{"gc.kind":"task"}}`),
+				members: finishedMembers,
+				pool:    jsonRows(`{"id":"pool-1","status":"open","metadata":{"gc.routed_to":"hello-world/worker"}}`),
+			},
+			want: []string{"other-step"},
+		},
+		{
+			name: "assigned-ready row",
+			env:  ephemeralOrigin,
+			fake: workflowRootFake{
+				inProgress:    jsonRows(finishedRoot),
+				members:       finishedMembers,
+				assignedReady: jsonRows(`{"id":"ready-1","status":"open","assignee":"sess-1","metadata":{"gc.kind":"task"}}`),
+			},
+			want: []string{"ready-1"},
+		},
+		{
+			name: "pool demand",
+			env:  ephemeralOrigin,
+			fake: workflowRootFake{
+				inProgress: jsonRows(finishedRoot),
+				members:    finishedMembers,
+				pool:       jsonRows(`{"id":"pool-1","status":"open","metadata":{"gc.routed_to":"hello-world/worker"}}`),
+			},
+			want: []string{"pool-1"},
+		},
+		{
+			name: "nothing else, through the fallback",
+			env:  ephemeralOrigin,
+			fake: workflowRootFake{inProgress: jsonRows(finishedRoot), members: finishedMembers},
+		},
+		{
+			name: "nothing else, through the origin gate",
+			env:  namedOrigin,
+			fake: workflowRootFake{inProgress: jsonRows(finishedRoot), members: finishedMembers},
+		},
+		{
+			name: "live anchor under the alias, through the fallback",
+			env:  map[string]string{"GC_SESSION_ID": "sess-1", "GC_ALIAS": "alias-1", "GC_SESSION_ORIGIN": "ephemeral"},
+			fake: workflowRootFake{inProgress: jsonRows(finishedRoot, liveRoot), members: members(liveMembers...)},
+			want: []string{"wf-root-2"},
+		},
+		{
+			name: "live anchor under the alias, through the origin gate",
+			env:  map[string]string{"GC_SESSION_ID": "sess-1", "GC_ALIAS": "alias-1", "GC_SESSION_ORIGIN": "named"},
+			fake: workflowRootFake{inProgress: jsonRows(finishedRoot, liveRoot), members: members(liveMembers...)},
+			want: []string{"wf-root-2"},
+		},
+	} {
+		for _, form := range combinedQueryForms() {
+			t.Run(tc.name+"/"+form.name, func(t *testing.T) {
+				ids := runCombinedQueryForm(t, form, tc.env, tc.fake)
+				if strings.Join(ids, ",") != strings.Join(tc.want, ",") {
+					t.Fatalf("combined query served %v, want %v", ids, tc.want)
+				}
+			})
+		}
+	}
+}
+
+// TestCombinedWorkQueryKeepsLiveWorkflowRootWithNoReadyStep pins that "no
+// ready step" is not "done": a live root whose open step is not ready is still
+// emitted by the anchor fallback.
+func TestCombinedWorkQueryKeepsLiveWorkflowRootWithNoReadyStep(t *testing.T) {
+	fake := workflowRootFake{
+		inProgress: jsonRows(workflowRootJSON("wf-root-1", ``)),
+		members: jsonRows(memberJSON("step-a", "wf-root-1", "closed", "task"),
+			memberJSON("step-b", "wf-root-1", "open", "task")),
+	}
+	for _, form := range combinedQueryForms() {
+		t.Run(form.name, func(t *testing.T) {
+			ids := runCombinedQueryForm(t, form, map[string]string{"GC_SESSION_ID": "sess-1", "GC_SESSION_ORIGIN": "ephemeral"}, fake)
+			if len(ids) != 1 || ids[0] != "wf-root-1" {
+				t.Fatalf("live workflow root with no ready step was not emitted by the fallback: %v", ids)
+			}
+		})
 	}
 }

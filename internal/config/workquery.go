@@ -679,6 +679,10 @@ func standardAssignedWorkQueryScript(topo QueryTopology) string {
 // ready tiers look for executable work. If no ready work exists, buildWorkQuery
 // emits the remembered root as the compatibility fallback.
 //
+// A head row passed over as a finished workflow root (workflowHeadDoneVar)
+// also triggers that bounded second read, so the root never hides the next
+// in_progress row the session owns; it is never remembered as the anchor.
+//
 // The assigned-in-progress-only query deliberately keeps the original
 // standardAssignedInProgressWorkQueryScript behavior: callers asking for that
 // tier alone still receive the anchor.
@@ -686,11 +690,12 @@ func standardAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo QueryTop
 	return workflowWorkDoneFunctionScript(topo) +
 		`gc_assigned_workflow_anchor_json=""; ` +
 		identityLoopHead() +
+		workflowHeadDoneVar + `=0; ` +
 		assignedInProgressTierCommand("id", topo) +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
 		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(topo.FederatedReady, true) +
 		`fi; ` +
-		`if [ -n "$gc_assigned_workflow_anchor_json" ]; then ` +
+		`if ` + deferredInProgressSecondReadCond + `; then ` +
 		assignedInProgressCandidatesTierCommand("id", topo) +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
 		serveOrdinaryInProgressCandidateScript(topo.FederatedReady, true) +
@@ -920,8 +925,21 @@ func inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(federated bool, che
 		`if [ -n "$graph_anchor_id" ]; then ` +
 		`[ -n "$gc_assigned_workflow_anchor_json" ] || gc_assigned_workflow_anchor_json="$r"; ` +
 		`else printf "%s" "$r" && exit 0; fi; `
-	return inProgressBlockedByEnrichmentScriptWithServeAction(federated, checkHold, true, serveAction)
+	return inProgressBlockedByEnrichmentScriptWithServeAction(federated, checkHold, true, serveAction) +
+		`if [ "$nwfdone" = "1" ]; then ` + workflowHeadDoneVar + `=1; fi; `
 }
+
+// workflowHeadDoneVar is set, per identity, when the deferring tier passed over
+// its head row because it is a workflow root whose work is done. The bounded
+// second read (deferredInProgressSecondReadCond) then looks behind that root,
+// as it does behind a live anchor, so a finished root cannot hide another
+// in_progress row the session owns.
+const workflowHeadDoneVar = "gc_wf_head_done"
+
+// deferredInProgressSecondReadCond is the condition for the deferring tier's
+// bounded second read: a live anchor was remembered, or the head was a
+// finished workflow root.
+const deferredInProgressSecondReadCond = `[ -n "$gc_assigned_workflow_anchor_json" ] || [ "$` + workflowHeadDoneVar + `" = "1" ]`
 
 func graphWorkflowAnchorJQPredicate() string {
 	return `(` + jqMeta(beadmeta.KindMetadataKey) + ` == "` + beadmeta.KindWorkflow + `") and (` +
@@ -1163,11 +1181,12 @@ func legacyControlAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo Que
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
+		workflowHeadDoneVar + `=0; ` +
 		assignedInProgressTierCommand("cand", topo) +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
 		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(topo.FederatedReady, true) +
 		`fi; ` +
-		`if [ -n "$gc_assigned_workflow_anchor_json" ]; then ` +
+		`if ` + deferredInProgressSecondReadCond + `; then ` +
 		assignedInProgressCandidatesTierCommand("cand", topo) +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
 		serveOrdinaryInProgressCandidateScript(topo.FederatedReady, true) +
@@ -1252,7 +1271,7 @@ func ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor(shellVar string,
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
 		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(false, false) +
 		`fi; ` +
-		`if [ -n "$gc_assigned_workflow_anchor_json" ]; then ` +
+		`if ` + deferredInProgressSecondReadCond + `; then ` +
 		`r=$(printf "%s" "$gc_open_ephemeral_in_progress" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(baseFilter+` | .[:20]`) + ` 2>/dev/null); ` +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
 		serveOrdinaryInProgressCandidateScript(false, false) +
