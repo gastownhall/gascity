@@ -104,3 +104,45 @@ func TestClaimHookWorkLostRaceReselectsFromSavedAnswers(t *testing.T) {
 	}
 	assertStoreReads(t, h, map[string]int{"/city": 1, "/riga": 2, "/rigb": 2, "/rigc": 1})
 }
+
+// AC-2: the selected store emptied between discovery and its claim-time
+// re-read. The fallback reselects from saved answers, and the store it picks is
+// re-read before the claim acts on it, so the claim takes the fresh row against
+// that store's dir and env.
+func TestClaimHookWorkEmptiedSelectionFallsBackWithoutAFullPass(t *testing.T) {
+	withFastClaimRetries(t)
+	stores := answerReuseStores()[:3]
+	h := newFailureHookHarness()
+	h.script("/riga",
+		hookRunnerAnswer{out: routedRowWithPriorityJSON("ra-1", 1)},
+		hookRunnerAnswer{out: "[]"},
+	)
+	h.script("/rigb",
+		hookRunnerAnswer{out: routedRowWithPriorityJSON("rb-1", 2)},
+		hookRunnerAnswer{out: routedRowWithPriorityJSON("rb-2", 2)},
+	)
+	var claimEnv []string
+	ops := h.ops()
+	var won []string
+	ops.Claim = func(_ context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
+		won = append(won, dir+"#"+beadID)
+		claimEnv = env
+		return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "rig/worker"}}, true, nil
+	}
+
+	result, code, stderr := runAnswerReuseClaim(t, h, stores, ops)
+
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr)
+	}
+	if result.Action != "work" || result.BeadID != "rb-2" {
+		t.Fatalf("result = %+v, want rb-2 from rigb's second read", result)
+	}
+	if len(won) != 1 || won[0] != "/rigb#rb-2" {
+		t.Fatalf("claims = %v, want [/rigb#rb-2]", won)
+	}
+	if !strings.Contains(strings.Join(claimEnv, " "), "GC_STORE=rigb") {
+		t.Fatalf("claim env = %v, want rigb's env", claimEnv)
+	}
+	assertStoreReads(t, h, map[string]int{"/city": 1, "/riga": 2, "/rigb": 2})
+}

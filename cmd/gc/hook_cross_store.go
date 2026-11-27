@@ -1033,8 +1033,8 @@ func hookRankCandidate(row map[string]any) hookCandidateRank {
 //
 // A re-validation error on the selected store is returned as itself only when
 // that store is the primary (own) store. A secondary store erroring at claim
-// time falls through to re-selection, which reads every store again under
-// bestStoreWithWork's rules: work in a store that answers is taken, and with no
+// time falls through to re-selection under bestStoreWithWork's rules, which
+// reads that store again: work in a store that answers is taken, and with no
 // work anywhere that store's failed read is the answer.
 //
 // # One leg means nothing to fall back TO, so there is nothing to re-validate
@@ -1067,23 +1067,35 @@ func claimStoreWithFallback(command string, stores []hookStore, selected, primar
 // last store standing was selected from a saved answer and still needs its
 // fresh read.
 //
+// The fallback repeats until a claim has a fresh answer to act on. A store the
+// fallback picks from a saved answer is re-read in turn: a fresh empty read
+// replaces its saved answer, so it cannot be picked again, and a failed
+// secondary re-read removes it, so the next selection reads it afresh and that
+// read is the one acted on. Each store is therefore re-read at most once here.
+//
 // noted is forwarded to bestStoreWithWork for its failed-secondary reports.
 func claimStoreWithFallbackFrom(command string, stores []hookStore, selected, primary hookStore, discovered string, answers *hookStoreAnswers, multiLeg bool, noted ...hookStoreFailureNote) (string, hookStore, error) {
 	if !multiLeg {
 		return discovered, selected, nil
 	}
-	selectedOut, err := answers.reread(hookStoreCommand(selected, command), selected.dir, selected.env)
-	if err != nil {
-		if sameHookStore(selected, primary) {
+	mark := answers.runs
+	for {
+		selectedOut, err := answers.reread(hookStoreCommand(selected, command), selected.dir, selected.env)
+		if err != nil && sameHookStore(selected, primary) {
 			return "", hookStore{}, err
 		}
-		return bestStoreWithWork(command, stores, primary, answers.read, noted...)
+		if err == nil {
+			ready := filterUnreadyHookCandidates(normalizeWorkQueryOutput(strings.TrimSpace(selectedOut)), time.Now())
+			if workQueryHasReadyWork(ready) {
+				return selectedOut, selected, nil
+			}
+		}
+		out, next, err := bestStoreWithWork(command, stores, primary, answers.read, noted...)
+		if err != nil || isZeroHookStore(next) || answers.answeredSince(hookStoreCommand(next, command), next, mark) {
+			return out, next, err
+		}
+		selected = next
 	}
-	ready := filterUnreadyHookCandidates(normalizeWorkQueryOutput(strings.TrimSpace(selectedOut)), time.Now())
-	if workQueryHasReadyWork(ready) {
-		return selectedOut, selected, nil
-	}
-	return bestStoreWithWork(command, stores, primary, answers.read, noted...)
 }
 
 // hookClaimReadsPerTick counts the work-query runs one claim attempt performs
@@ -1095,6 +1107,13 @@ func claimStoreWithFallbackFrom(command string, stores []hookStore, selected, pr
 // short-circuits bestStoreWithWork before the later legs run, and each RUN is
 // itself a tier ladder that exits on its first hit — so a real tick reads this
 // many times or fewer, never more. Do not quote it as an observed number.
+//
+// The whole invocation has its own ceiling. With no failed reads, one claim
+// invocation over N legs reads at most 2N times, however many races it loses
+// or selections empty: each store once when a selection first needs it
+// (hookStoreAnswers), and once more before a claim acts on it
+// (claimStoreWithFallbackFrom). A retried read error adds one run per failed
+// store per retry.
 func hookClaimReadsPerTick(stores []hookStore) int {
 	if len(stores) == 1 {
 		return 1
@@ -1210,4 +1229,11 @@ func (a *hookStoreAnswers) reread(command, dir string, env []string) (string, er
 	}
 	a.saved[key] = hookStoreAnswer{out: out, run: a.runs}
 	return out, nil
+}
+
+// answeredSince reports whether st's saved answer to command came from a run
+// after mark (a value of runs), so it is fresh to whoever took the mark.
+func (a *hookStoreAnswers) answeredSince(command string, st hookStore, mark int) bool {
+	saved, ok := a.saved[hookStoreAnswerKey(command, st.dir, st.env)]
+	return ok && saved.run > mark
 }
