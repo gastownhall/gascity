@@ -275,12 +275,23 @@ func startDirectManagedDolt(t *testing.T) (managedDoltStartedProcess, string) {
 }
 
 func TestManagedDoltSpawnWrappedInInfraScope(t *testing.T) {
-	t.Run("from a session", func(t *testing.T) {
-		logPath := installInfraScopeHost(t, wrappableFromSession)
-		started, configPath := startDirectManagedDolt(t)
-		waitForSystemdRunInvocation(t, logPath, " -- dolt sql-server --config "+configPath)
-		assertScopedInvocation(t, logPath, started.InfraScope, "gascity infra: managed dolt")
-	})
+	for _, tc := range []struct {
+		name string
+		host infraScopeHost
+	}{
+		{name: "from a session", host: wrappableFromSession},
+		// A gc process without a session identity under user@<uid>.service
+		// (a user or bot service, a timer unit) is scoped too: its unit stop
+		// would otherwise SIGTERM the store (issue #5910).
+		{name: "outside a session, from a user service", host: infraScopeHost{linger: true, cgroup: userServiceCgroup}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logPath := installInfraScopeHost(t, tc.host)
+			started, configPath := startDirectManagedDolt(t)
+			waitForSystemdRunInvocation(t, logPath, " -- dolt sql-server --config "+configPath)
+			assertScopedInvocation(t, logPath, started.InfraScope, "gascity infra: managed dolt")
+		})
+	}
 	// Each of these stays in its caller's cgroup.
 	for _, tc := range []struct {
 		name     string
