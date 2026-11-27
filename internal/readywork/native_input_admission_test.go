@@ -377,3 +377,49 @@ func TestNativeInputAdmissionReadErrorNamesBeadAndStore(t *testing.T) {
 		}
 	}
 }
+
+// TestNativeInputAdmissionReadyAndDemand is the #8832 report's two-door
+// reproduction: on a unified city and on split work/graph stores, a native
+// step whose input is held is neither returned by the ready read nor kept by
+// the leg gate the controller's demand pass applies — which records the
+// withheld verdict for the lane to read — while a sibling workflow whose input
+// is clean is served by both.
+func TestNativeInputAdmissionReadyAndDemand(t *testing.T) {
+	for city, open := range openCities {
+		t.Run(city, func(t *testing.T) {
+			work, graph, legs := open(t)
+			held := newNativeWorkflow(t, work, graph, beads.Bead{Labels: []string{"hold:external"}})
+			free := newNativeWorkflow(t, work, graph, beads.Bead{})
+
+			ids := readyIDs(t, legs, poolQuery)
+			if slices.Contains(ids, held.step.ID) || !slices.Contains(ids, free.step.ID) {
+				t.Fatalf("Ready = %v, want %s (clean input) and not %s (input %s held)", ids, free.step.ID, held.step.ID, held.input.ID)
+			}
+
+			own := slices.IndexFunc(legs, func(l Leg) bool { return l.Store == graph })
+			rows, err := graph.Ready()
+			if err != nil {
+				t.Fatalf("Ready on the graph store: %v", err)
+			}
+			gate := NewLegGate(legs, beads.ReadyQuery{})
+			gated, err := gate.Gate(context.Background(), own, rows)
+			if err != nil {
+				t.Fatalf("Gate: %v", err)
+			}
+			kept := make([]string, 0, len(gated))
+			for _, b := range gated {
+				kept = append(kept, b.ID)
+			}
+			if slices.Contains(kept, held.step.ID) || !slices.Contains(kept, free.step.ID) {
+				t.Fatalf("Gate = %v, want %s (clean input) and not %s (input %s held)", kept, free.step.ID, held.step.ID, held.input.ID)
+			}
+			verdict, ok := gate.Withheld()[held.step.ID]
+			if !ok || verdict.InputID != held.input.ID || verdict.RootID != held.root.ID || verdict.ConvoyID != held.convoy.ID {
+				t.Fatalf("Withheld()[%s] = %+v (recorded %v), want input %s, root %s, convoy %s", held.step.ID, verdict, ok, held.input.ID, held.root.ID, held.convoy.ID)
+			}
+			if _, ok := gate.Withheld()[free.step.ID]; ok {
+				t.Fatalf("Withheld() records %s, whose input is clean", free.step.ID)
+			}
+		})
+	}
+}
