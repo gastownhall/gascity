@@ -265,3 +265,23 @@ func TestChurnHoldNeverWithholdsControlDispatcher(t *testing.T) {
 		t.Fatalf("merged control-dispatcher count under a 0 allowance = %d, want 3 unchanged", got)
 	}
 }
+
+// AC-7: a hold is one template's: the planner still emits another
+// template's blind requests in full.
+func TestPoolPlannerChurnHoldLeavesOtherTemplatesBlindDemandAlone(t *testing.T) {
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	cfg := &config.City{Agents: []config.Agent{
+		poolAgent("claude", "", intPtr(5), 0),
+		poolAgent("cursor", "", intPtr(5), 0),
+	}}
+	sessions := churnedClosedRows("claude", now)
+	states := computePoolDesiredStatesParkedAt(
+		cfg, &assignedWorkDemand{}, sessions,
+		map[string]int{"claude": 1, "cursor": 2}, nil, now, nil, nil)
+	if _, blind, _ := countNewRequests(states, "claude"); blind != 0 {
+		t.Fatalf("claude's blind new requests under its hold = %d, want 0", blind)
+	}
+	if _, blind, _ := countNewRequests(states, "cursor"); blind != 2 {
+		t.Fatalf("cursor's blind new requests under claude's hold = %d, want 2 unchanged", blind)
+	}
+}

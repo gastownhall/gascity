@@ -42,9 +42,9 @@ func newPoolSpawnChurnHarness(t *testing.T) *poolSpawnChurnHarness {
 }
 
 // seatEvent feeds one session-bead notification about id, stamped now.
-func (h *poolSpawnChurnHarness) seatEvent(typ, id string, created time.Time, md map[string]string) {
+func (h *poolSpawnChurnHarness) seatEvent(typ, id, template string, created time.Time, md map[string]string) {
 	h.t.Helper()
-	meta := map[string]string{"template": "claude"}
+	meta := map[string]string{"template": template}
 	for k, v := range md {
 		meta[k] = v
 	}
@@ -61,17 +61,17 @@ func (h *poolSpawnChurnHarness) seatEvent(typ, id string, created time.Time, md 
 
 // churnBlindSeat feeds one blind pool seat through its whole short life:
 // created by the pool, woken, closed churned — everything stamped at h.now.
-func (h *poolSpawnChurnHarness) churnBlindSeat() {
+func (h *poolSpawnChurnHarness) churnBlindSeat(template string) {
 	h.t.Helper()
 	h.seats++
 	id := fmt.Sprintf("gcg-session-%d", h.seats)
 	pool := map[string]string{"pool_managed": "true"}
-	h.seatEvent(events.BeadCreated, id, h.now, pool)
-	h.seatEvent(events.BeadUpdated, id, h.now, map[string]string{
+	h.seatEvent(events.BeadCreated, id, template, h.now, pool)
+	h.seatEvent(events.BeadUpdated, id, template, h.now, map[string]string{
 		"pool_managed":         "true",
 		"creation_complete_at": h.now.UTC().Format(time.RFC3339),
 	})
-	h.seatEvent(events.BeadClosed, id, h.now, pool)
+	h.seatEvent(events.BeadClosed, id, template, h.now, pool)
 }
 
 func TestPoolSpawnChurnGuardTripsAfterThreeChurnedCloses(t *testing.T) {
@@ -79,7 +79,12 @@ func TestPoolSpawnChurnGuardTripsAfterThreeChurnedCloses(t *testing.T) {
 	base := h.now
 	for i := 0; i < 3; i++ {
 		h.now = base.Add(time.Duration(i) * 3 * time.Minute)
-		h.churnBlindSeat()
+		h.churnBlindSeat("claude")
+	}
+	// cursor churns too, below the trip: its own streak, never claude's hold.
+	for i := 0; i < 2; i++ {
+		h.now = base.Add(time.Duration(i) * 3 * time.Minute)
+		h.churnBlindSeat("cursor")
 	}
 	allow := h.guard.allowance()
 	if got, ok := allow["claude"]; !ok || got != 0 {
@@ -97,7 +102,7 @@ func TestPoolSpawnChurnGuardTwoClosesDoNotTrip(t *testing.T) {
 	base := h.now
 	for i := 0; i < 2; i++ {
 		h.now = base.Add(time.Duration(i) * 3 * time.Minute)
-		h.churnBlindSeat()
+		h.churnBlindSeat("claude")
 	}
 	allow := h.guard.allowance()
 	if _, ok := allow["claude"]; ok {
@@ -110,7 +115,7 @@ func TestPoolSpawnChurnGuardOneBurstDoesNotTripAlone(t *testing.T) {
 	base := h.now
 	for i := 0; i < 3; i++ {
 		h.now = base.Add(time.Duration(i) * 30 * time.Second)
-		h.churnBlindSeat()
+		h.churnBlindSeat("claude")
 	}
 	allow := h.guard.allowance()
 	if _, ok := allow["claude"]; ok {
@@ -119,7 +124,7 @@ func TestPoolSpawnChurnGuardOneBurstDoesNotTripAlone(t *testing.T) {
 	// A fourth close minutes later is churn over time, not one burst: the
 	// streak carries the burst and the span now qualifies.
 	h.now = base.Add(3 * time.Minute)
-	h.churnBlindSeat()
+	h.churnBlindSeat("claude")
 	if got := h.guard.allowance()["claude"]; got != 0 {
 		t.Fatalf("allowance after a burst plus one later close = %d, want 0", got)
 	}
@@ -128,11 +133,11 @@ func TestPoolSpawnChurnGuardOneBurstDoesNotTripAlone(t *testing.T) {
 func TestPoolSpawnChurnGuardStreakDropsClosesOlderThanTheWindow(t *testing.T) {
 	h := newPoolSpawnChurnHarness(t)
 	base := h.now
-	h.churnBlindSeat() // 35 minutes before the rest: out of the window
+	h.churnBlindSeat("claude") // 35 minutes before the rest: out of the window
 	h.now = base.Add(35 * time.Minute)
-	h.churnBlindSeat()
+	h.churnBlindSeat("claude")
 	h.now = base.Add(38 * time.Minute)
-	h.churnBlindSeat()
+	h.churnBlindSeat("claude")
 	allow := h.guard.allowance()
 	if _, ok := allow["claude"]; ok {
 		t.Fatalf("a close 35 minutes old still counted: %v, want only the two recent closes in the streak", allow)
@@ -157,7 +162,7 @@ func TestPoolSpawnChurnGuardRegistryRoundtrip(t *testing.T) {
 
 // churnSeatOpts feeds one pool seat through its life with md merged into
 // every event's metadata.
-func (h *poolSpawnChurnHarness) churnSeatOpts(md map[string]string) {
+func (h *poolSpawnChurnHarness) churnSeatOpts(template string, md map[string]string) {
 	h.t.Helper()
 	h.seats++
 	id := fmt.Sprintf("gcg-session-%d", h.seats)
@@ -172,11 +177,11 @@ func (h *poolSpawnChurnHarness) churnSeatOpts(md map[string]string) {
 		}
 		return out
 	}
-	h.seatEvent(events.BeadCreated, id, h.now, merge(md))
-	h.seatEvent(events.BeadUpdated, id, h.now, merge(map[string]string{
+	h.seatEvent(events.BeadCreated, id, template, h.now, merge(md))
+	h.seatEvent(events.BeadUpdated, id, template, h.now, merge(map[string]string{
 		"creation_complete_at": h.now.UTC().Format(time.RFC3339),
 	}))
-	h.seatEvent(events.BeadClosed, id, h.now, merge(md))
+	h.seatEvent(events.BeadClosed, id, template, h.now, merge(md))
 }
 
 // AC-4 (ga-s5l1ms): the closes that never count as churn — a bound seat, a
@@ -202,7 +207,7 @@ func TestPoolSpawnChurnGuardExcludedClosesDoNotCount(t *testing.T) {
 			base := h.now
 			for i := 0; i < 3; i++ {
 				h.now = base.Add(time.Duration(i) * 3 * time.Minute)
-				h.churnSeatOpts(tc.md)
+				h.churnSeatOpts("claude", tc.md)
 			}
 			if allow := h.guard.allowance(); len(allow) != 0 {
 				t.Fatalf("excluded closes counted toward a hold: %v", allow)
@@ -222,12 +227,12 @@ func TestPoolSpawnChurnGuardClearedStampStillBinds(t *testing.T) {
 		id := fmt.Sprintf("gcg-session-%d", h.seats)
 		pool := map[string]string{"pool_managed": "true"}
 		bound := map[string]string{"pool_managed": "true", beadmeta.TriggerBeadIDMetadataKey: "bd-9"}
-		h.seatEvent(events.BeadCreated, id, h.now, bound)
-		h.seatEvent(events.BeadUpdated, id, h.now, map[string]string{
+		h.seatEvent(events.BeadCreated, id, "claude", h.now, bound)
+		h.seatEvent(events.BeadUpdated, id, "claude", h.now, map[string]string{
 			"pool_managed":         "true",
 			"creation_complete_at": h.now.UTC().Format(time.RFC3339),
 		}) // the stamp is gone from this snapshot on
-		h.seatEvent(events.BeadClosed, id, h.now, pool)
+		h.seatEvent(events.BeadClosed, id, "claude", h.now, pool)
 	}
 	if allow := h.guard.allowance(); len(allow) != 0 {
 		t.Fatalf("a cleared stamp unbound a seat: %v", allow)
@@ -245,11 +250,11 @@ func TestPoolSpawnChurnGuardSeatFirstSeenMidLifeDoesNotCount(t *testing.T) {
 		h.seats++
 		id := fmt.Sprintf("gcg-session-%d", h.seats)
 		pool := map[string]string{"pool_managed": "true"}
-		h.seatEvent(events.BeadUpdated, id, h.now, map[string]string{
+		h.seatEvent(events.BeadUpdated, id, "claude", h.now, map[string]string{
 			"pool_managed":         "true",
 			"creation_complete_at": h.now.UTC().Format(time.RFC3339),
 		})
-		h.seatEvent(events.BeadClosed, id, h.now, pool)
+		h.seatEvent(events.BeadClosed, id, "claude", h.now, pool)
 	}
 	if allow := h.guard.allowance(); len(allow) != 0 {
 		t.Fatalf("a seat first seen mid-life counted: %v", allow)
@@ -265,7 +270,7 @@ func TestPoolSpawnChurnGuardRecordsCoolingDownOncePerEpisode(t *testing.T) {
 	since := h.now
 	for i := 0; i < 3; i++ {
 		h.now = base.Add(time.Duration(i) * 3 * time.Minute)
-		h.churnBlindSeat()
+		h.churnBlindSeat("claude")
 	}
 	for i := 0; i < 3; i++ {
 		h.guard.allowance() // repeated passes within the hold
@@ -303,7 +308,7 @@ func TestPoolSpawnChurnGuardProbeFailureDoublesTheHold(t *testing.T) {
 	base := h.now
 	for i := 0; i < 3; i++ {
 		h.now = base.Add(time.Duration(i) * 3 * time.Minute)
-		h.churnBlindSeat()
+		h.churnBlindSeat("claude")
 	}
 	probeFailures := func() (n int, last events.PoolSpawnChurnPayload) {
 		for _, e := range h.recorded {
@@ -332,7 +337,7 @@ func TestPoolSpawnChurnGuardProbeFailureDoublesTheHold(t *testing.T) {
 	_ = wantUntil
 	for i, hold := range holds {
 		h.now = at
-		h.churnBlindSeat() // the probe seat churns
+		h.churnBlindSeat("claude") // the probe seat churns
 		wantUntil = at.Add(hold)
 		if got := h.guard.allowance()["claude"]; got != 0 {
 			t.Fatalf("allowance after probe failure %d = %d, want 0", i+1, got)
@@ -360,7 +365,7 @@ func TestPoolSpawnChurnGuardIgnoresStragglerClosesDuringAProbe(t *testing.T) {
 	base := h.now
 	for i := 0; i < 3; i++ {
 		h.now = base.Add(time.Duration(i) * 3 * time.Minute)
-		h.churnBlindSeat()
+		h.churnBlindSeat("claude")
 	}
 	h.now = base.Add(11*time.Minute + time.Second)
 	if got := h.guard.allowance()["claude"]; got != 1 {
@@ -371,12 +376,12 @@ func TestPoolSpawnChurnGuardIgnoresStragglerClosesDuringAProbe(t *testing.T) {
 	h.seats++
 	id := fmt.Sprintf("gcg-session-%d", h.seats)
 	pool := map[string]string{"pool_managed": "true"}
-	h.seatEvent(events.BeadCreated, id, base.Add(7*time.Minute), pool)
-	h.seatEvent(events.BeadUpdated, id, base.Add(8*time.Minute), map[string]string{
+	h.seatEvent(events.BeadCreated, id, "claude", base.Add(7*time.Minute), pool)
+	h.seatEvent(events.BeadUpdated, id, "claude", base.Add(8*time.Minute), map[string]string{
 		"pool_managed":         "true",
 		"creation_complete_at": base.Add(8 * time.Minute).UTC().Format(time.RFC3339),
 	})
-	h.seatEvent(events.BeadClosed, id, h.now, pool)
+	h.seatEvent(events.BeadClosed, id, "claude", h.now, pool)
 	if got := h.guard.allowance()["claude"]; got != 1 {
 		t.Fatalf("a straggler close ended the probe: allowance = %d, want still 1", got)
 	}
@@ -400,19 +405,19 @@ func TestPoolSpawnChurnGuardClaimEndsEpisodeWithResumedEvent(t *testing.T) {
 	base := h.now
 	for i := 0; i < 3; i++ {
 		h.now = base.Add(time.Duration(i) * 3 * time.Minute)
-		h.churnBlindSeat()
+		h.churnBlindSeat("claude")
 	}
 	h.now = base.Add(7 * time.Minute)
 	h.seats++
 	id := fmt.Sprintf("gcg-session-%d", h.seats)
 	pool := map[string]string{"pool_managed": "true"}
-	h.seatEvent(events.BeadCreated, id, h.now, pool)
-	h.seatEvent(events.BeadUpdated, id, h.now, map[string]string{
+	h.seatEvent(events.BeadCreated, id, "claude", h.now, pool)
+	h.seatEvent(events.BeadUpdated, id, "claude", h.now, map[string]string{
 		"pool_managed":         "true",
 		"creation_complete_at": h.now.UTC().Format(time.RFC3339),
 	})
 	claimCell := fmt.Sprintf(`{"v":1,"claims":[{"store":"city","bead":"bd-7","gen":2,"at":%q,"via":"claim"}]}`, h.now.UTC().Format(time.RFC3339Nano))
-	h.seatEvent(events.BeadUpdated, id, h.now, map[string]string{
+	h.seatEvent(events.BeadUpdated, id, "claude", h.now, map[string]string{
 		"pool_managed": "true",
 		"work_started": claimCell,
 	})
@@ -448,7 +453,7 @@ func TestPoolSpawnChurnGuardConfigChangeEndsHold(t *testing.T) {
 	h.guard.configure(&config.City{Agents: []config.Agent{{Name: "claude"}}})
 	for i := 0; i < 3; i++ {
 		h.now = base.Add(time.Duration(i) * 3 * time.Minute)
-		h.churnBlindSeat()
+		h.churnBlindSeat("claude")
 	}
 	if got := h.guard.allowance()["claude"]; got != 0 {
 		t.Fatalf("allowance under the hold = %d, want 0", got)
@@ -474,5 +479,28 @@ func TestPoolSpawnChurnGuardConfigChangeEndsHold(t *testing.T) {
 	}
 	if resumed != 1 {
 		t.Fatalf("resumed events = %d, want exactly 1", resumed)
+	}
+}
+
+// AC-7 (ga-s5l1ms): a hold is one template's: another template's blind
+// demand is unaffected, at the guard and in the planner.
+func TestPoolSpawnChurnGuardHoldsOnlyTheChurningTemplate(t *testing.T) {
+	h := newPoolSpawnChurnHarness(t)
+	base := h.now
+	for i := 0; i < 3; i++ {
+		h.now = base.Add(time.Duration(i) * 3 * time.Minute)
+		h.churnBlindSeat("claude")
+	}
+	// cursor churns too, below the trip: its own streak, never claude's hold.
+	for i := 0; i < 2; i++ {
+		h.now = base.Add(time.Duration(i) * 3 * time.Minute)
+		h.churnBlindSeat("cursor")
+	}
+	allow := h.guard.allowance()
+	if got, ok := allow["claude"]; !ok || got != 0 {
+		t.Fatalf("claude's allowance = %v, want 0 under its hold", allow)
+	}
+	if _, ok := allow["cursor"]; ok {
+		t.Fatalf("cursor picked up claude's hold: %v", allow)
 	}
 }
