@@ -193,6 +193,31 @@ func TestReconcileSessionBeads_OrphanedCanonicalSingletonClosesKeepingIdentityCl
 	}
 }
 
+// AC-1 with a floor: a min_active_sessions = 1 singleton's orphaned seat
+// closes the same way, keeping its alias claims, since the floor is met by a
+// fresh seat under the alias, not by this dead row.
+func TestReconcileSessionBeads_OrphanedCanonicalSingletonWithFloorCloses(t *testing.T) {
+	agent := singletonOrphanAgent()
+	agent.MinActiveSessions = intPtr(1)
+	e := newSingletonOrphanEnv(t, agent)
+	identity := e.cfg.Agents[0].QualifiedName()
+
+	records := e.tick(t)
+
+	if len(records) != 1 || records[0].OutcomeCode != TraceOutcomeClosed {
+		t.Fatalf("close_orphan outcomes = %v, want [closed]", closeOrphanOutcomes(records))
+	}
+	if got := records[0].Fields["preserved_identity"]; got != identity {
+		t.Fatalf("close_orphan preserved_identity = %v, want %q", got, identity)
+	}
+	if got := e.get(t, e.seat.ID).Status; got != "closed" {
+		t.Fatalf("seat status = %q, want closed", got)
+	}
+	if got := e.get(t, e.claim.ID); got.Assignee != identity || got.Status != "open" {
+		t.Fatalf("claim assignee=%q status=%q, want kept on %q and open", got.Assignee, got.Status, identity)
+	}
+}
+
 // AC-3: a claim under the seat's own identifiers (its bead ID or
 // session_name) is the row's, so the identity-preserving close does not fire
 // over it and the orphan close reports today's no_change.
