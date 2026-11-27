@@ -948,7 +948,16 @@ func claimHookWorkProvisioning(city *hookCity, workQuery, workDir string, queryE
 	// whatever is left on the way out (a release, a reclaim, a claim that
 	// stopped on an error).
 	defer ops.announceBeadEvents()
-	run := hookRigLegRunner(city.path, city.cfg, stores, shellWorkQueryWithEnv)
+	// The ops defaults are applied BEFORE the leg runner is built: the runner's
+	// parent context is the invocation read deadline derived from them (#5693).
+	// applyDefaults fills only unset fields, so its call inside
+	// claimHookWorkWithRunner is unaffected.
+	ops.applyDefaults()
+	readCtx, cancelReadCtx := ops.claimReadContext()
+	defer cancelReadCtx()
+	run := hookRigLegRunner(city.path, city.cfg, stores, func(command, dir string, env []string) (string, error) {
+		return shellWorkQueryWithEnvContext(readCtx, command, dir, env)
+	})
 	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, run, emitFailure, stdout, stderr)
 }
 
@@ -1013,6 +1022,11 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 	if len(stores) > 0 {
 		primary = stores[0]
 	}
+	// The invocation read budget (#5693): one read share of the claim window
+	// for the whole invocation, enforced at the runner seam so every read —
+	// every fan-out leg, every paced retry — shares it, whatever runner is
+	// injected.
+	run = (&hookClaimReadGuard{ops: &ops, stores: stores, primary: primary}).runner(run)
 	report := newHookStoreFailureReport("gc hook --claim", stderr, emitFailure)
 	noteStoreFailure := report.note
 	remaining := stores
@@ -1144,17 +1158,17 @@ var (
 // the ERROR case only. It returns the first successful selection, or the last
 // error once the budget is spent.
 //
-// The retry budget is also bounded by the invocation's claim window (F-B). Three
-// paced retries on top of a work query that may itself run to
-// hookWorkQueryTimeout can carry a `gc hook --claim` process well past the turn
-// that invoked it, and a read that lands past the window buys nothing: any claim
-// it leads to is refused on arrival. So a retry runs only when it would start
-// strictly inside the window, both before the pacing sleep (the sleep must not
-// run past the window) and after it (the sleep may have overrun). When the window
-// cuts the budget short, the last read error is returned, annotated, so the
-// caller keeps its failed-read contract instead of treating a dead invocation
-// as an idle store: no drain, and reportClaimWorkQueryFailure classifies the
-// code (2 if the read failed transport-class or timed out, else 1).
+// The retry budget is also bounded by the invocation read budget (F-B, #5693):
+// InvokedAt+ClaimWindow−reserve, the one read share of the window every
+// claim-path read must fit in. A retry whose answer could only land at or after
+// the read deadline buys nothing — the read is cut as a timed-out read — so a
+// retry runs only when it would start strictly inside the budget, both before
+// the pacing sleep (the sleep must not run past the deadline) and after it (the
+// sleep may have overrun). When the budget cuts the retries short, the last
+// read error is returned, annotated, so the caller keeps its failed-read
+// contract instead of treating a dead invocation as an idle store: no drain,
+// and reportClaimWorkQueryFailure classifies the code (2 if the read failed
+// transport-class or timed out, else 1).
 //
 // A failed secondary store with no work anywhere is an error here too
 // (hookSecondaryStoreFailure), so it gets the same bounded retry. noted is
@@ -1162,11 +1176,11 @@ var (
 func selectStoreWithWorkRetrying(workQuery string, stores []hookStore, primary hookStore, run hookStoreRunner, ops *hookClaimOps, noted ...hookStoreFailureNote) (string, hookStore, error) {
 	out, selected, err := bestStoreWithWork(workQuery, stores, primary, run, noted...)
 	for attempt := 0; err != nil && attempt < hookClaimQueryRetryAttempts; attempt++ {
-		if ops.claimWindowSpentAfter(hookClaimQueryRetryInterval) {
+		if ops.readBudgetSpentAfter(hookClaimQueryRetryInterval) {
 			return out, selected, hookClaimRetryWindowClosed(err, ops)
 		}
 		ops.sleepOrWallClock(hookClaimQueryRetryInterval)
-		if ops.claimWindowSpentAfter(0) {
+		if ops.readBudgetSpentAfter(0) {
 			return out, selected, hookClaimRetryWindowClosed(err, ops)
 		}
 		out, selected, err = bestStoreWithWork(workQuery, stores, primary, run, noted...)
@@ -1178,7 +1192,8 @@ func selectStoreWithWorkRetrying(workQuery string, stores []hookStore, primary h
 // the retry budget stopped early. It is a wrapped suffix, so errors.Is/As and the
 // kill/timeout markers classifyWorkQueryFailure matches on stay intact.
 func hookClaimRetryWindowClosed(err error, ops *hookClaimOps) error {
-	return fmt.Errorf("%w (claim-read retries stopped: the %s claim window closes before the next retry could run)", err, ops.claimWindowOrDefault())
+	window := ops.claimWindowOrDefault()
+	return fmt.Errorf("%w (claim-read retries stopped: the claim window's %s read budget closes before the next retry could run)", err, window-hookClaimReadReserve(window))
 }
 
 func hookClaimPrimaryRouteTarget(a *config.Agent) string {
@@ -1351,17 +1366,27 @@ var hookWorkQueryTimeout = 150 * time.Second
 // a short bounded interval so startup hooks cannot strand sessions behind a
 // wedged data-plane command.
 func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
+	return shellWorkQueryWithEnvContext(context.Background(), command, dir, env)
+}
+
+// shellWorkQueryWithEnvContext is shellWorkQueryWithEnv under a parent context.
+// The claim path passes the invocation read deadline
+// (hookClaimOps.claimReadContext); the earlier of that deadline and the
+// per-read hookWorkQueryTimeout bounds the query, and the timeout message
+// names the budget that fired.
+func shellWorkQueryWithEnvContext(parent context.Context, command, dir string, env []string) (string, error) {
+	budget := shellWorkQueryBudget(parent)
 	if generated := generatedProgram(command); generated != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), hookWorkQueryTimeout)
+		ctx, cancel := context.WithTimeout(parent, hookWorkQueryTimeout)
 		defer cancel()
 		var stderr bytes.Buffer
 		out, err := generated(ctx, dir, execenv.WithUsageMetricsDisabled(workQueryEnvForDir(env, dir)), &stderr)
-		return workQueryResult(ctx, command, out, &stderr, err)
+		return workQueryResult(ctx, budget, command, out, &stderr, err)
 	}
 	if reason := runtime.ShellCommandUnavailable(command); reason != "" {
 		return "", fmt.Errorf("work query refused: %s", reason)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), hookWorkQueryTimeout)
+	ctx, cancel := context.WithTimeout(parent, hookWorkQueryTimeout)
 	defer cancel()
 	cmd, err := runtime.ShellCommandContext(ctx, command)
 	if err != nil {
@@ -1377,13 +1402,31 @@ func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := runWorkQueryCommand(cmd)
-	return workQueryResult(ctx, command, out, &stderr, err)
+	return workQueryResult(ctx, budget, command, out, &stderr, err)
+}
+
+// shellWorkQueryBudget is the effective budget of one work-query read: the
+// per-read hookWorkQueryTimeout, or what remains of the parent's deadline when
+// that is earlier — on the claim path, the invocation read deadline. Never
+// negative.
+func shellWorkQueryBudget(parent context.Context) time.Duration {
+	budget := hookWorkQueryTimeout
+	if deadline, ok := parent.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining < budget {
+			if remaining < 0 {
+				remaining = 0
+			}
+			budget = remaining
+		}
+	}
+	return budget
 }
 
 // workQueryResult turns a finished work query's output and error into
-// shellWorkQueryWithEnv's result. ctx is the query's own, bounded by
-// hookWorkQueryTimeout.
-func workQueryResult(ctx context.Context, command string, out []byte, stderr *bytes.Buffer, err error) (string, error) {
+// shellWorkQueryWithEnv's result. ctx is the query's own, bounded by the
+// earlier of hookWorkQueryTimeout and the parent's deadline; budget is that
+// effective bound, named in the timeout message.
+func workQueryResult(ctx context.Context, budget time.Duration, command string, out []byte, stderr *bytes.Buffer, err error) (string, error) {
 	if ctx.Err() == context.DeadlineExceeded {
 		// Wrap context.DeadlineExceeded so callers can classify the timeout as
 		// transient (dispatch.IsTransientControllerError / errors.Is). Without
@@ -1393,9 +1436,9 @@ func workQueryResult(ctx context.Context, command string, out []byte, stderr *by
 		// "timed out after" text is preserved.
 		msg := strings.TrimSpace(string(out))
 		if msg != "" {
-			return string(out), fmt.Errorf("running work query %q: timed out after %s with partial stdout %q: %w", command, hookWorkQueryTimeout, msg, context.DeadlineExceeded)
+			return string(out), fmt.Errorf("running work query %q: timed out after %s with partial stdout %q: %w", command, budget, msg, context.DeadlineExceeded)
 		}
-		return "", fmt.Errorf("running work query %q: timed out after %s: %w", command, hookWorkQueryTimeout, context.DeadlineExceeded)
+		return "", fmt.Errorf("running work query %q: timed out after %s: %w", command, budget, context.DeadlineExceeded)
 	}
 	if err != nil {
 		msg := strings.TrimSpace(stderr.String())

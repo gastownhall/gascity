@@ -389,6 +389,53 @@ func TestFederatedClaimLostCASFallsThroughToLaterLeg(t *testing.T) {
 	}
 }
 
+// TestClaimReadsStopAtTheInvocationReadBudget pins the one-invocation read
+// budget (#5693): claim-path reads must finish by
+// InvokedAt+ClaimWindow−reserve (150s of the default 160s window), so a
+// three-leg fan-out whose last leg would answer with work at 180s is cut as a
+// timed-out read, not a claim that spent the window finding work it cannot
+// take. The invocation keeps the failed-read contract: exit 2 with the
+// store-unavailable token, a work-query-failure event naming the leg that was
+// cut, no drain result, no drain-ack, no claim mutation, and no
+// execution.claim_window_expired — at base the incident's shape: work
+// discovered at 180s, CAS refused at 180s.
+func TestClaimReadsStopAtTheInvocationReadBudget(t *testing.T) {
+	withProductionClaimRetryPacing(t)
+	h := newFailureHookHarness()
+	h.script("/own", hookRunnerAnswer{out: "[]"})
+	h.script("/alpha", hookRunnerAnswer{out: "[]"})
+	h.script("/beta", hookRunnerAnswer{out: routedRowJSON("work-1")})
+	stores := federatedClaimLegs(2) // /own, /alpha, /beta
+	clock := newClaimFanoutClock(60 * time.Second)
+
+	code, result, stderr, rec := runClaimFanout(t, clock, h, stores)
+
+	if code != 2 {
+		t.Fatalf("exit=%d, want 2: the third read's answer lands at 180s, at/after the 150s read deadline, so it is a timed-out read; stderr=%s", code, stderr)
+	}
+	if !strings.Contains(stderr, hookStoreUnavailableToken) {
+		t.Fatalf("stderr = %q, want the store-unavailable token for a read cut by the budget", stderr)
+	}
+	if !strings.Contains(stderr, "read budget") {
+		t.Fatalf("stderr = %q, want the failure to name the read budget", stderr)
+	}
+	if !strings.Contains(stderr, "beta") {
+		t.Fatalf("stderr = %q, want the failure to name the leg that was cut", stderr)
+	}
+	if result.Action != "" || h.drained {
+		t.Fatalf("result=%+v drained=%v; a cut read keeps the failed-read contract: no drain result, no drain-ack", result, h.drained)
+	}
+	if len(rec.claims) != 0 {
+		t.Fatalf("claims = %v, want none: no answer reached a CAS", rec.claims)
+	}
+	if len(rec.windowExpired) != 0 {
+		t.Fatalf("execution.claim_window_expired fired %d times; a cut read is a read failure, not a window refusal", len(rec.windowExpired))
+	}
+	if len(h.events) == 0 || !strings.Contains(h.events[0].Message, "beta") {
+		t.Fatalf("events = %+v, want a work-query failure naming the cut leg", h.events)
+	}
+}
+
 // End to end through the claim loop: a read that would recover on retry, but
 // only after the window closed, must not be retried into a claim. The
 // invocation keeps the failed-read contract: no drain result, no drain-ack, no

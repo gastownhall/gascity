@@ -468,6 +468,7 @@ go_library(
         "hook_city.go",
         "hook_claim_bead_events.go",
         "hook_claim_input_purge.go",
+        "hook_claim_read_budget.go",
         "hook_cross_store.go",
         "hook_deadline.go",
         "hook_identity.go",
