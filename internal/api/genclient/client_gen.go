@@ -4640,6 +4640,16 @@ type PoolOverride struct {
 	OnDeath      *string `json:"OnDeath"`
 }
 
+// PoolSpawnChurnPayload defines model for PoolSpawnChurnPayload.
+type PoolSpawnChurnPayload struct {
+	Cause    string     `json:"cause"`
+	Episode  string     `json:"episode"`
+	Seats    *int64     `json:"seats,omitempty"`
+	Since    time.Time  `json:"since"`
+	Template string     `json:"template"`
+	Until    *time.Time `json:"until,omitempty"`
+}
+
 // ProjectIdentityStampedPayload defines model for ProjectIdentityStampedPayload.
 type ProjectIdentityStampedPayload struct {
 	Layer     string  `json:"layer"`
@@ -9297,6 +9307,38 @@ type TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline struct {
 	Workflow         *WorkflowEventProjection                     `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown defines model for TypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown.
+type TypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          PoolSpawnChurnPayload    `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeSessionPoolSpawnChurnResumed defines model for TypedEventStreamEnvelopeSessionPoolSpawnChurnResumed.
+type TypedEventStreamEnvelopeSessionPoolSpawnChurnResumed struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          PoolSpawnChurnPayload    `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeSessionProgramStatusShadow defines model for TypedEventStreamEnvelopeSessionProgramStatusShadow.
 type TypedEventStreamEnvelopeSessionProgramStatusShadow struct {
 	Actor            string                            `json:"actor"`
@@ -11508,6 +11550,40 @@ type TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline struct 
 	Ts               time.Time                                    `json:"ts"`
 	Type             string                                       `json:"type"`
 	Workflow         *WorkflowEventProjection                     `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown defines model for TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown.
+type TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          PoolSpawnChurnPayload    `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnResumed defines model for TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnResumed.
+type TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnResumed struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          PoolSpawnChurnPayload    `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow defines model for TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow.
@@ -14909,6 +14985,32 @@ func (t *EventPayload) FromOutboundEventPayload(v OutboundEventPayload) error {
 
 // MergeOutboundEventPayload performs a merge with any union data inside the EventPayload, using the provided OutboundEventPayload
 func (t *EventPayload) MergeOutboundEventPayload(v OutboundEventPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsPoolSpawnChurnPayload returns the union data inside the EventPayload as a PoolSpawnChurnPayload
+func (t EventPayload) AsPoolSpawnChurnPayload() (PoolSpawnChurnPayload, error) {
+	var body PoolSpawnChurnPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromPoolSpawnChurnPayload overwrites any union data inside the EventPayload as the provided PoolSpawnChurnPayload
+func (t *EventPayload) FromPoolSpawnChurnPayload(v PoolSpawnChurnPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergePoolSpawnChurnPayload performs a merge with any union data inside the EventPayload, using the provided PoolSpawnChurnPayload
+func (t *EventPayload) MergePoolSpawnChurnPayload(v PoolSpawnChurnPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -20346,6 +20448,62 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionPoolSlotR
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown() (TypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown, error) {
+	var body TypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown(v TypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown) error {
+	v.Type = "session.pool_spawn_churn_cooling_down"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown(v TypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown) error {
+	v.Type = "session.pool_spawn_churn_cooling_down"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeSessionPoolSpawnChurnResumed returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionPoolSpawnChurnResumed
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionPoolSpawnChurnResumed() (TypedEventStreamEnvelopeSessionPoolSpawnChurnResumed, error) {
+	var body TypedEventStreamEnvelopeSessionPoolSpawnChurnResumed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionPoolSpawnChurnResumed overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionPoolSpawnChurnResumed
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionPoolSpawnChurnResumed(v TypedEventStreamEnvelopeSessionPoolSpawnChurnResumed) error {
+	v.Type = "session.pool_spawn_churn_resumed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionPoolSpawnChurnResumed performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionPoolSpawnChurnResumed
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionPoolSpawnChurnResumed(v TypedEventStreamEnvelopeSessionPoolSpawnChurnResumed) error {
+	v.Type = "session.pool_spawn_churn_resumed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionProgramStatusShadow returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionProgramStatusShadow
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionProgramStatusShadow() (TypedEventStreamEnvelopeSessionProgramStatusShadow, error) {
 	var body TypedEventStreamEnvelopeSessionProgramStatusShadow
@@ -21588,6 +21746,10 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeSessionPendingCleared()
 	case "session.pool_slot_retired_at_drain_deadline":
 		return t.AsTypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline()
+	case "session.pool_spawn_churn_cooling_down":
+		return t.AsTypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown()
+	case "session.pool_spawn_churn_resumed":
+		return t.AsTypedEventStreamEnvelopeSessionPoolSpawnChurnResumed()
 	case "session.program_status_shadow":
 		return t.AsTypedEventStreamEnvelopeSessionProgramStatusShadow()
 	case "session.quarantined":
@@ -24335,6 +24497,62 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSess
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown() (TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown(v TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown) error {
+	v.Type = "session.pool_spawn_churn_cooling_down"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown(v TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown) error {
+	v.Type = "session.pool_spawn_churn_cooling_down"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnResumed returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnResumed
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnResumed() (TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnResumed, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnResumed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnResumed overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnResumed
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnResumed(v TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnResumed) error {
+	v.Type = "session.pool_spawn_churn_resumed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnResumed performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnResumed
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnResumed(v TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnResumed) error {
+	v.Type = "session.pool_spawn_churn_resumed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionProgramStatusShadow returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionProgramStatusShadow() (TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow
@@ -25577,6 +25795,10 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeSessionPendingCleared()
 	case "session.pool_slot_retired_at_drain_deadline":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline()
+	case "session.pool_spawn_churn_cooling_down":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown()
+	case "session.pool_spawn_churn_resumed":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnResumed()
 	case "session.program_status_shadow":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionProgramStatusShadow()
 	case "session.quarantined":

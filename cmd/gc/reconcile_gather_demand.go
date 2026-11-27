@@ -120,6 +120,9 @@ func gatherDemand(env demandGatherEnv, reads demandReads) (v demandView, err err
 			fmt.Fprintf(stderr, "gatherDemand: %v (using named demand=false)\n", probeErr) //nolint:errcheck
 		}
 	}
+	// A template whose blind seats keep churning spawns none for a while
+	// (pool_spawn_churn.go).
+	c.BlindSpawnAllowance = poolSpawnChurnGuardFor(env.CityPath).allowance()
 	v.ProbeStores = demandProbeStores(targets)
 	v.RelocatedClaimRefs = assignedWorkRelocatedClaimRefs(env.CityPath, env.Cfg, env.CityStore)
 	v.WakeClaimRefs = assignedWorkClaimRefs(env.CityPath, env.Cfg, env.CityStore)

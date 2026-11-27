@@ -197,6 +197,10 @@ type CityRuntime struct {
 	// same journal feed; created on first use.
 	claimStall     *claimStallGuard
 	claimStallOnce sync.Once
+	// poolSpawnChurn is the pool spawn-churn guard (pool_spawn_churn.go), fed
+	// by the same journal feed; created on first use.
+	poolSpawnChurn     *poolSpawnChurnGuard
+	poolSpawnChurnOnce sync.Once
 
 	// ordersLane runs order dispatch off the tick (orders_lane.go). It owns
 	// od, retiredOrderDispatchers, the order-set bookkeeping and the watchdog
@@ -5622,6 +5626,7 @@ func (cr *CityRuntime) adoptConfigRevision(rev string) {
 	if rev != cr.configRev {
 		cr.claimLoopGuardOf().configChanged()
 		cr.claimStallGuardOf().configure(cr.cfg)
+		cr.poolSpawnChurnGuardOf().configure(cr.cfg)
 	}
 	cr.configRev = rev
 }
