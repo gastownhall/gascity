@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -563,5 +564,175 @@ func TestListBuildSharingIsolation(t *testing.T) {
 	}
 	awaitSlotState(t, srv, "the probe key's slot to drain", func() bool {
 		return srv.listBuilds[probeKey] == nil
+	})
+}
+
+// panicOnceStore makes its first List panic and serves every later one from
+// the wrapped store, so a test can break one shared build and let the next
+// one through.
+type panicOnceStore struct {
+	beads.Store
+	mu       sync.Mutex
+	armed    bool
+	panicked bool
+}
+
+func (p *panicOnceStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	p.mu.Lock()
+	fire := p.armed
+	p.panicked = p.panicked || fire
+	p.armed = false
+	p.mu.Unlock()
+	if fire {
+		panic("boom from the store read")
+	}
+	return p.Store.List(query)
+}
+
+// TestListBuildSharingFailure pins how the shared list build fails: a panic
+// inside a build is a typed 500 to its waiters and leaves the slot recovered,
+// so the next request starts a fresh build and succeeds; and a waiter whose
+// request ends while the build runs gets a typed 503 that is its alone — the
+// build keeps running and the reader behind it is still served by it.
+func TestListBuildSharingFailure(t *testing.T) {
+	// A panic inside the build: the store's first read panics.
+	st := newFakeState(t)
+	st.cfg.NamedSessions = nil
+	st.cfg.Agents = []config.Agent{
+		{Name: "worker1", Dir: "myrig", Provider: "test-agent", MaxActiveSessions: intPtr(1)},
+	}
+	panicStore := &panicOnceStore{Store: st.stores["myrig"], armed: true}
+	st.stores["myrig"] = panicStore
+	srv := New(st)
+	h := newTestCityHandlerWith(t, st, srv)
+
+	oldTTL, oldFloor := responseCacheTTL, agentListResponseTTLFloor
+	responseCacheTTL, agentListResponseTTLFloor = 0, 0
+	t.Cleanup(func() {
+		responseCacheTTL, agentListResponseTTLFloor = oldTTL, oldFloor
+	})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(st, "/agents"), nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("a panicking build answered status %d, want 500: a panic in a build is a typed failure to its waiters", rec.Code)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "building the list panicked") {
+		t.Errorf("a panicking build answered %q, want the typed panic detail: the waiters' error names the failure, not the panic itself", body)
+	}
+	awaitSlotState(t, srv, "the failed build's slot to drain", func() bool {
+		return len(srv.listBuilds) == 0
+	})
+
+	// The slot recovered: the next request starts a fresh build, the store
+	// no longer panics, and it succeeds.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(st, "/agents"), nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("the request after a panicking build answered status %d, want 200: the slot recovered, the next reader starts a fresh build", rec.Code)
+	}
+	panicStore.mu.Lock()
+	panicked := panicStore.panicked
+	panicStore.mu.Unlock()
+	if !panicked {
+		t.Error("the store never panicked: the first request's build did not reach it, so nothing was tested")
+	}
+	awaitSlotState(t, srv, "the recovered build's slot to drain", func() bool {
+		return len(srv.listBuilds) == 0
+	})
+
+	// A waiter whose request ends while the build runs: a typed 503 that is
+	// its alone, the build unaffected, the reader behind it served.
+	st2 := newFakeState(t)
+	st2.cfg.NamedSessions = nil
+	st2.cfg.Agents = []config.Agent{
+		{Name: "worker1", Dir: "myrig", Provider: "test-agent", MaxActiveSessions: intPtr(1)},
+	}
+	gates := []chan struct{}{make(chan struct{}), make(chan struct{})}
+	arrived := []chan struct{}{make(chan struct{}), make(chan struct{})}
+	gated := &gatedActiveWorkStore{Store: st2.stores["myrig"], gates: gates, arrived: arrived}
+	st2.stores["myrig"] = gated
+	srv2 := New(st2)
+	h2 := newTestCityHandlerWith(t, st2, srv2)
+
+	releases := make([]func(), len(gates))
+	for i := range gates {
+		g := gates[i]
+		releases[i] = sync.OnceFunc(func() { close(g) })
+	}
+	t.Cleanup(func() {
+		for _, r := range releases {
+			r()
+		}
+	})
+
+	type agentCall struct {
+		id   int
+		code int
+		body string
+	}
+	calls := make(chan agentCall, 2)
+	anyBuildRunning := func() bool {
+		for _, slot := range srv2.listBuilds {
+			if slot.running != nil {
+				return true
+			}
+		}
+		return false
+	}
+	queuedBehindRunning := func() bool {
+		for _, slot := range srv2.listBuilds {
+			if slot.running != nil && slot.queued != nil {
+				return true
+			}
+		}
+		return false
+	}
+
+	// The canceled waiter starts the build and leaves while it holds.
+	ctxA, cancelA := context.WithCancel(context.Background())
+	go func() {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, cityURL(st2, "/agents"), nil).WithContext(ctxA)
+		h2.ServeHTTP(rec, req)
+		calls <- agentCall{id: 1, code: rec.Code, body: rec.Body.String()}
+	}()
+	awaitSlotState(t, srv2, "the canceled waiter's build to start", anyBuildRunning)
+	awaitSignal(t, arrived[0], "the canceled waiter's build's in_progress read")
+	cancelA()
+	rA := <-calls
+	if rA.id != 1 {
+		t.Fatalf("the canceled waiter's response is reader %d's", rA.id)
+	}
+	if rA.code != http.StatusServiceUnavailable {
+		t.Errorf("a waiter whose request ended while the build ran answered status %d, want 503: the cancelation is the waiter's alone", rA.code)
+	}
+	if !strings.Contains(rA.body, "did not finish before the request ended") {
+		t.Errorf("a canceled waiter answered %q, want the typed cancelation detail", rA.body)
+	}
+
+	// The build the canceled waiter left behind still serves the reader
+	// that joins the build queued behind it.
+	go func() {
+		rec := httptest.NewRecorder()
+		h2.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(st2, "/agents"), nil))
+		calls <- agentCall{id: 2, code: rec.Code, body: rec.Body.String()}
+	}()
+	awaitSlotState(t, srv2, "a queued build to form behind the running one", queuedBehindRunning)
+	releases[0]()
+	awaitSignal(t, arrived[1], "the queued build's in_progress read")
+	releases[1]()
+	rB := <-calls
+	if rB.id != 2 {
+		t.Fatalf("the second waiter's response is reader %d's", rB.id)
+	}
+	if rB.code != http.StatusOK {
+		t.Errorf("the reader behind the canceled waiter answered status %d, want 200: the build keeps running and the queued build serves its own reader", rB.code)
+	}
+	if gated.reads != 2 {
+		t.Errorf("GET /agents ran %d builds for the two readers, want 2: the canceled waiter's build ended, the queued one served the next reader", gated.reads)
+	}
+	awaitSlotState(t, srv2, "the slots to drain once both builds end", func() bool {
+		return len(srv2.listBuilds) == 0
 	})
 }
