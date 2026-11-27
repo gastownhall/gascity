@@ -42,11 +42,11 @@ func (s *Server) humaHandleSessionList(ctx context.Context, input *SessionListIn
 	// A list without peek output shares a fresh build with the identical
 	// readers that arrive while it runs (listBuildSharer). The list has no
 	// response cache: every reader gets a build that started after it
-	// arrived.
+	// arrived, and the event index captured when that build started.
 	key := cacheKeyFor("sessions", input) + "#cfg=" + strconv.FormatUint(s.configGeneration(cfg), 10)
 	in := *input
 	return s.sessionListBuilds.share(ctx, s, key, func(context.Context) (*ListOutput[sessionResponse], error) {
-		return s.buildSessionList(&in, store, cfg, seek, index)
+		return s.buildSessionList(&in, store, cfg, seek, s.latestIndex())
 	})
 }
 

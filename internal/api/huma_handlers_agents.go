@@ -124,10 +124,14 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 		return s.buildAgentList(ctx, input, cfg, cacheKey, index, started, bucket)
 	}
 	// A cache miss shares a fresh build with the identical readers that miss
-	// while it runs (listBuildSharer).
+	// while it runs (listBuildSharer). A shared build captures its event
+	// index and start time when it starts, not when its first reader queued
+	// it, so its list and its index agree.
 	in := *input
 	return s.agentListBuilds.share(ctx, s, cacheKey, func(ctx context.Context) (*ListOutput[agentResponse], error) {
-		return s.buildAgentList(ctx, &in, cfg, cacheKey, index, started, bucket)
+		index := s.latestIndex()
+		started := time.Now()
+		return s.buildAgentList(ctx, &in, cfg, cacheKey, index, started, responseCacheTimeBucket(started))
 	})
 }
 
