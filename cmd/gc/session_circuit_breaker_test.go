@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"io"
 	"reflect"
 	"strings"
 	"testing"
@@ -656,6 +657,83 @@ func TestPersistSessionCircuitBreakerMetadataWritesAutoResetClosedState(t *testi
 	}
 	if got := updated.Metadata[sessionCircuitOpenedAtMetadata]; got != "" {
 		t.Fatalf("persisted opened_at = %q, want cleared", got)
+	}
+}
+
+// sessionCircuitTestRow creates a session row for identity and returns its
+// front door and id, for the breaker helpers that persist to the row.
+func sessionCircuitTestRow(t *testing.T, identity string) (*sessionpkg.Store, string) {
+	t.Helper()
+	store := beads.NewMemStore()
+	row, err := store.Create(beads.Bead{
+		Title:    "session-a",
+		Type:     sessionBeadType,
+		Metadata: map[string]string{namedSessionIdentityMetadata: identity},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	return sessionFrontDoor(store), row.ID
+}
+
+// TestSessionCircuitBreakerUndoRestartKeepsALaterRestart: a restart recorded
+// after the one being undone is restart accounting the undo must not erase;
+// the entry stands with both, and so does the row's metadata.
+func TestSessionCircuitBreakerUndoRestartKeepsALaterRestart(t *testing.T) {
+	const identity = "rig-a/session-a"
+	t0 := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	sessFront, id := sessionCircuitTestRow(t, identity)
+	cb := breakerAt(30*time.Minute, 5)
+	_, restart, err := recordSessionCircuitBreakerRestart(sessFront, id, cb, identity, t0)
+	if err != nil {
+		t.Fatalf("recording the restart: %v", err)
+	}
+	cb.RecordRestart(identity, t0.Add(time.Second))
+	cb.undoRestart(sessFront, id, restart, t0.Add(time.Second), io.Discard)
+	if snap := cb.Snapshot(t0.Add(2 * time.Second)); len(snap) != 1 || snap[0].RestartCount != 2 {
+		t.Fatalf("breaker = %+v, want one entry with both restarts", snap)
+	}
+	state, err := sessFront.CircuitState(id)
+	if err != nil {
+		t.Fatalf("reading the row's circuit state: %v", err)
+	}
+	if !strings.Contains(state.Restarts, formatCircuitTime(t0)) || !strings.Contains(state.Restarts, formatCircuitTime(t0.Add(time.Second))) {
+		t.Fatalf("persisted restart history = %q, want both restarts", state.Restarts)
+	}
+}
+
+// TestSessionCircuitBreakerUndoRestartAfterResetRestoresTheResetEntry: the
+// record snapshots the entry it undoes to in its own hold of the breaker's
+// lock, so a manual Reset that lands before the record is in that snapshot,
+// and undoing the restart restores the reset entry, never the history the
+// Reset cleared. (The undo compares and restores in one hold, so a Reset
+// lands before the record, between the record and the undo, which the undo
+// sees as a new reset generation and leaves standing, or after the undo.)
+func TestSessionCircuitBreakerUndoRestartAfterResetRestoresTheResetEntry(t *testing.T) {
+	const identity = "rig-a/session-a"
+	t0 := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	sessFront, id := sessionCircuitTestRow(t, identity)
+	cb := breakerAt(30*time.Minute, 5)
+	cb.RecordRestart(identity, t0.Add(-time.Minute))
+	generation := cb.Reset(identity)
+	_, restart, err := recordSessionCircuitBreakerRestart(sessFront, id, cb, identity, t0)
+	if err != nil {
+		t.Fatalf("recording the restart: %v", err)
+	}
+	if restart.before.existed || restart.before.resetGeneration != generation || restart.after.resetGeneration != generation {
+		t.Fatalf("record snapshots = before{existed %t, generation %d} after{generation %d}, want the reset entry (none) under generation %d",
+			restart.before.existed, restart.before.resetGeneration, restart.after.resetGeneration, generation)
+	}
+	cb.undoRestart(sessFront, id, restart, t0, io.Discard)
+	if snap := cb.Snapshot(t0); len(snap) != 0 {
+		t.Fatalf("breaker = %+v after the undo, want no entry: the Reset cleared the history before the record", snap)
+	}
+	state, err := sessFront.CircuitState(id)
+	if err != nil {
+		t.Fatalf("reading the row's circuit state: %v", err)
+	}
+	if state.Restarts != "" || state.LastRestart != "" {
+		t.Fatalf("persisted circuit state = restarts %q, last restart %q; want none", state.Restarts, state.LastRestart)
 	}
 }
 

@@ -214,27 +214,32 @@ const (
 	TraceReasonStartGateDeferred     TraceReasonCode = "start_gate_deferred"
 	TraceReasonOnDeathHookPending    TraceReasonCode = "on_death_hook_pending"
 	TraceReasonPrepareBudgetSpent    TraceReasonCode = "prepare_budget_spent"
+	TraceReasonPrepareFailureHold    TraceReasonCode = "prepare_failure_hold"
 	TraceReasonInterruptedClose      TraceReasonCode = "interrupted_close"
 )
 
 type TraceOutcomeCode string
 
 const (
-	TraceOutcomeUnknown                 TraceOutcomeCode = "unknown"
-	TraceOutcomeComplete                TraceOutcomeCode = "complete"
-	TraceOutcomePartial                 TraceOutcomeCode = "partial"
-	TraceOutcomeApplied                 TraceOutcomeCode = "applied"
-	TraceOutcomeNoChange                TraceOutcomeCode = "no_change"
-	TraceOutcomeFailed                  TraceOutcomeCode = "failed"
-	TraceOutcomeSuccess                 TraceOutcomeCode = "success"
-	TraceOutcomeDeferredByWakeBudget    TraceOutcomeCode = "deferred_by_wake_budget"
-	TraceOutcomeSessionExists           TraceOutcomeCode = "session_exists"
-	TraceOutcomeSessionExistsConverged  TraceOutcomeCode = "session_exists_converged"
-	TraceOutcomeBlockedOnDependencies   TraceOutcomeCode = "blocked_on_dependencies"
-	TraceOutcomeProviderError           TraceOutcomeCode = "provider_error"
-	TraceOutcomePanicRecovered          TraceOutcomeCode = "panic_recovered"
-	TraceOutcomeDeadlineExceeded        TraceOutcomeCode = "deadline_exceeded"
-	TraceOutcomeCanceled                TraceOutcomeCode = "canceled"
+	TraceOutcomeUnknown                TraceOutcomeCode = "unknown"
+	TraceOutcomeComplete               TraceOutcomeCode = "complete"
+	TraceOutcomePartial                TraceOutcomeCode = "partial"
+	TraceOutcomeApplied                TraceOutcomeCode = "applied"
+	TraceOutcomeNoChange               TraceOutcomeCode = "no_change"
+	TraceOutcomeFailed                 TraceOutcomeCode = "failed"
+	TraceOutcomeSuccess                TraceOutcomeCode = "success"
+	TraceOutcomeDeferredByWakeBudget   TraceOutcomeCode = "deferred_by_wake_budget"
+	TraceOutcomeSessionExists          TraceOutcomeCode = "session_exists"
+	TraceOutcomeSessionExistsConverged TraceOutcomeCode = "session_exists_converged"
+	TraceOutcomeBlockedOnDependencies  TraceOutcomeCode = "blocked_on_dependencies"
+	TraceOutcomeProviderError          TraceOutcomeCode = "provider_error"
+	TraceOutcomePanicRecovered         TraceOutcomeCode = "panic_recovered"
+	TraceOutcomeDeadlineExceeded       TraceOutcomeCode = "deadline_exceeded"
+	TraceOutcomeCanceled               TraceOutcomeCode = "canceled"
+	// TraceOutcomeContextCanceled marks a start dropped because its context
+	// ended before it could run or launch; it matches the lifecycle log's
+	// context_canceled outcome.
+	TraceOutcomeContextCanceled         TraceOutcomeCode = "context_canceled"
 	TraceOutcomeSlowStorageDegraded     TraceOutcomeCode = "slow_storage_degraded"
 	TraceOutcomeLowSpaceDegraded        TraceOutcomeCode = "low_space_degraded"
 	TraceOutcomePromotionPartialContext TraceOutcomeCode = "promotion_partial_context"
@@ -317,6 +322,10 @@ const (
 	// TraceOutcomeDeferredByPrepareBudget marks a start deferred before any
 	// write because the planner call's cumulative prepare time spent its budget.
 	TraceOutcomeDeferredByPrepareBudget TraceOutcomeCode = "deferred_by_prepare_budget"
+	// TraceOutcomeDeferredByPrepareFailure marks an async start deferred
+	// before any write because its session's last async preparation failed
+	// less than a hold ago (asyncPrepareFailureHold).
+	TraceOutcomeDeferredByPrepareFailure TraceOutcomeCode = "deferred_by_prepare_failure"
 	// TraceOutcomeSkippedPresent marks an on_death hook skipped because its
 	// name was listed again when the hook was due.
 	TraceOutcomeSkippedPresent TraceOutcomeCode = "skipped_present"
@@ -684,6 +693,19 @@ func traceRecentRecords(records []SessionReconcilerTraceRecord, limit int) []Ses
 	copy(out, records[len(records)-limit:])
 	return out
 }
+
+// Fields of a start record that report preparation time: the prepare
+// budget's cumulative charge and budget on a deferral, and a final-outcome
+// record's preparation phases with their total.
+const (
+	traceFieldSpentMS         = "spent_ms"
+	traceFieldBudgetMS        = "budget_ms"
+	traceFieldLockGetMS       = "lock_get_ms"
+	traceFieldPreWakeMS       = "prewake_ms"
+	traceFieldNamedSnapshotMS = "named_snapshot_ms"
+	traceFieldBuildMS         = "build_ms"
+	traceFieldPrepareMS       = "prepare_ms"
+)
 
 type traceRecordPayload map[string]any
 

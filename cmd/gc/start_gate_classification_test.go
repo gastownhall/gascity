@@ -63,6 +63,7 @@ var startOutcomeClassification = map[string]startOutcomeClass{
 
 	"blocked_on_dependencies":       {reason: "clause (a): the candidate's own dependencies are not alive"},
 	"deferred_by_on_death_hook":     {reason: "clause (a): its own runtime name's on_death hook is pending"},
+	"deferred_by_prepare_failure":   {reason: "clause (a): its own last async preparation failed, so its session sits out a hold"},
 	"deferred_by_runtime_lease":     {reason: "clause (a): its own runtime name is leased by another holder"},
 	"deferred_by_endpoint_capacity": {reason: "own hold: endpointCapacityGuard.HoldsPendingCreate already keeps the row"},
 	"user_held":                     {reason: "clause (a): the session's own state, held by the user"},
@@ -788,27 +789,23 @@ func driveAsyncLimitRecords(t *testing.T) {
 	requireCommitted(t, memo, a.info.ID)
 }
 
-// A spent prepare budget defers the rest of the planner call before any slot,
-// lease, ticket or write: shared throughput, nothing refused, nothing written.
-// The candidate that spent the budget was admitted and is not recorded.
+// A spent prepare budget defers the rest of a synchronous planner call before
+// any slot, lease, ticket or write: shared throughput, nothing refused,
+// nothing written. The candidate that spent the budget was admitted and is not
+// recorded. The budget does not apply to an async pass, which prepares on its
+// start goroutines.
 func drivePrepareBudgetRecords(t *testing.T) {
-	for _, async := range []bool{false, true} {
-		name := "sync"
-		if async {
-			name = "async"
-		}
-		t.Run(name, func(t *testing.T) {
-			e := newPrepareBudgetEnv(t, "a", "b", "c")
-			memo := newStartDeferralMemo()
-			a := e.candidate(t, "a", testPrepareBudget+time.Second)
-			b := e.candidate(t, "b", time.Second)
-			c := e.candidate(t, "c", time.Second)
+	t.Run("sync", func(t *testing.T) {
+		e := newPrepareBudgetEnv(t, "a", "b", "c")
+		memo := newStartDeferralMemo()
+		a := e.candidate(t, "a", testPrepareBudget+time.Second)
+		b := e.candidate(t, "b", time.Second)
+		c := e.candidate(t, "c", time.Second)
 
-			e.run(testPrepareBudget, async, []startExecutionOption{withStartDeferralMemo(memo), withStartDeferralSeen(neverStartedSet())}, a, b, c)
-			e.requireDeferred(t, async, "b", "c")
-			requireCommitted(t, memo, b.info.ID, c.info.ID)
-		})
-	}
+		e.run(testPrepareBudget, false, []startExecutionOption{withStartDeferralMemo(memo), withStartDeferralSeen(neverStartedSet())}, a, b, c)
+		e.requireDeferred(t, "b", "c")
+		requireCommitted(t, memo, b.info.ID, c.info.ID)
+	})
 	t.Run("a budget that is not spent records nothing", func(t *testing.T) {
 		e := newPrepareBudgetEnv(t, "a", "b")
 		memo := newStartDeferralMemo()
@@ -830,7 +827,7 @@ func drivePrepareBudgetRecords(t *testing.T) {
 		e.capacityEnv.clk.Time = time.Now().UTC().Add(time.Minute)
 
 		e.run(testPrepareBudget, false, []startExecutionOption{withStartDeferralMemo(memo), withStartDeferralSeen(neverStartedSet())}, a, b)
-		e.requireDeferred(t, false, "b")
+		e.requireDeferred(t, "b")
 		info := e.sessionInfo(b.info.ID)
 		anchor := pendingCreateLeaseAnchor(info)
 		if anchor.IsZero() {

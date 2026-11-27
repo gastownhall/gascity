@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"maps"
 	"os"
 	"runtime"
@@ -16,10 +19,12 @@ import (
 	"github.com/gastownhall/gascity/internal/resilience"
 )
 
-// The cumulative prepare-time budget (ga-r7s62t, Refs #7170): one planner call
-// stops preparing new candidates once the calls to prepareStartCandidateForCity
-// have together spent the budget, and defers the rest to the next tick before
-// any slot, lease, ticket, breaker accounting or write.
+// The cumulative prepare-time budget (ga-r7s62t, Refs #7170): one synchronous
+// planner call stops preparing new candidates once the calls to
+// prepareStartCandidateForCity have together spent the budget, and defers the
+// rest to the next tick before any slot, lease, ticket, breaker accounting or
+// write. An async pass prepares on its start goroutines, off the planner, and
+// the budget does not apply to it.
 
 const (
 	prepareBudgetOutcome = "deferred_by_prepare_budget"
@@ -193,19 +198,10 @@ func (e *prepareBudgetEnv) deferredByBudget() []string {
 }
 
 // requireDeferred asserts the named candidates were deferred by the budget:
-// logged on stderr and recorded as trace decisions. An async pass flushes the
-// cycle's records after enqueueing its starts, so there the decisions are
-// counted instead of read back.
-func (e *prepareBudgetEnv) requireDeferred(t *testing.T, async bool, want ...string) {
+// logged on stderr and recorded as trace decisions.
+func (e *prepareBudgetEnv) requireDeferred(t *testing.T, want ...string) {
 	t.Helper()
-	if async {
-		e.trace.mu.Lock()
-		got := e.trace.decisionCounts[string(TraceSiteLifecycleStartRun)]
-		e.trace.mu.Unlock()
-		if got != len(want) {
-			t.Fatalf("lifecycle_start_run trace decisions = %d, want %d\n%s", got, len(want), e.log.String())
-		}
-	} else if got := e.deferredByBudget(); strings.Join(got, ",") != strings.Join(want, ",") {
+	if got := e.deferredByBudget(); strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("trace deferred_by_prepare_budget = %v, want %v\n%s", got, want, e.log.String())
 	}
 	for _, name := range want {
@@ -237,57 +233,75 @@ func (e *prepareBudgetEnv) requireUntouched(t *testing.T, c startCandidate, befo
 
 // Kills: no bound on the cumulative time a planner call spends preparing.
 func TestExecutePlannedStarts_PrepareBudgetDefersRestOnceSpent(t *testing.T) {
-	for _, async := range []bool{false, true} {
-		name := "sync"
-		if async {
-			name = "async"
-		}
-		t.Run(name, func(t *testing.T) {
-			e := newPrepareBudgetEnv(t, "a", "b", "c")
-			a := e.candidate(t, "a", testPrepareBudget+time.Second)
-			b := e.candidate(t, "b", time.Second)
-			c := e.candidate(t, "c", time.Second)
-			bBefore, cBefore := e.bead(t, b.info.ID), e.bead(t, c.info.ID)
+	e := newPrepareBudgetEnv(t, "a", "b", "c")
+	a := e.candidate(t, "a", testPrepareBudget+time.Second)
+	b := e.candidate(t, "b", time.Second)
+	c := e.candidate(t, "c", time.Second)
+	bBefore, cBefore := e.bead(t, b.info.ID), e.bead(t, c.info.ID)
 
-			if woken := e.run(testPrepareBudget, async, nil, a, b, c); woken != 1 {
-				t.Fatalf("woken = %d, want 1 (only a is prepared)", woken)
-			}
-			if n := e.sp.CountCalls("Start", "a"); n != 1 {
-				t.Fatalf("a Start calls = %d, want 1", n)
-			}
-			e.requireDeferred(t, async, "b", "c")
-			e.requireUntouched(t, b, bBefore)
-			e.requireUntouched(t, c, cBefore)
-			if n := strings.Count(e.log.String(), "prepare budget exhausted"); n != 1 {
-				t.Fatalf("summary lines = %d, want exactly one per planner call:\n%s", n, e.log.String())
-			}
-		})
+	if woken := e.run(testPrepareBudget, false, nil, a, b, c); woken != 1 {
+		t.Fatalf("woken = %d, want 1 (only a is prepared)", woken)
+	}
+	if n := e.sp.CountCalls("Start", "a"); n != 1 {
+		t.Fatalf("a Start calls = %d, want 1", n)
+	}
+	e.requireDeferred(t, "b", "c")
+	e.requireUntouched(t, b, bBefore)
+	e.requireUntouched(t, c, cBefore)
+	if n := strings.Count(e.log.String(), "prepare budget exhausted"); n != 1 {
+		t.Fatalf("summary lines = %d, want exactly one per planner call:\n%s", n, e.log.String())
 	}
 }
 
-// The slot, tracker entry, lease and capacity ticket of an async start are all
-// taken after the gate, so a deferred candidate holds none of them.
-func TestExecutePlannedStarts_PrepareBudgetDeferralTakesNoAsyncSlotOrLease(t *testing.T) {
+// The budget bounds the planner goroutine's own preparation. An async pass
+// prepares on its start goroutines, so with a budget configured and every
+// preparation outlasting it, one planner call admits all three candidates.
+func TestExecutePlannedStarts_AsyncPreparesIgnorePrepareBudget(t *testing.T) {
+	e := newPrepareBudgetEnv(t, "a", "b", "c")
+	a := e.candidate(t, "a", testPrepareBudget+time.Second)
+	b := e.candidate(t, "b", testPrepareBudget+time.Second)
+	c := e.candidate(t, "c", testPrepareBudget+time.Second)
+
+	if woken := e.run(testPrepareBudget, true, nil, a, b, c); woken != 3 {
+		t.Fatalf("woken = %d, want 3: an async pass defers nothing by the prepare budget\n%s", woken, e.log.String())
+	}
+	enqueued := map[string]int{}
+	for _, line := range strings.Split(e.log.String(), "\n") {
+		for _, name := range []string{"a", "b", "c"} {
+			if strings.Contains(line, "session="+name+" ") && strings.Contains(line, "outcome="+string(TraceOutcomeStartEnqueued)) {
+				enqueued[name]++
+			}
+		}
+	}
+	for _, name := range []string{"a", "b", "c"} {
+		if enqueued[name] != 1 {
+			t.Fatalf("%s start_enqueued lines = %d, want 1\n%s", name, enqueued[name], e.log.String())
+		}
+		if n := e.sp.CountCalls("Start", name); n != 1 {
+			t.Fatalf("%s Start calls = %d, want 1\n%s", name, n, e.log.String())
+		}
+	}
+	e.trace.mu.Lock()
+	deferred := e.trace.outcomeCounts[string(TraceOutcomeDeferredByPrepareBudget)]
+	e.trace.mu.Unlock()
+	if deferred != 0 {
+		t.Fatalf("trace records with outcome %s = %d, want 0\n%s", TraceOutcomeDeferredByPrepareBudget, deferred, e.log.String())
+	}
+	if n := strings.Count(e.log.String(), "prepare budget exhausted"); n != 0 {
+		t.Fatalf("summary lines = %d, want none:\n%s", n, e.log.String())
+	}
+}
+
+// The runtime lease of a start is taken after the gate, so a candidate the
+// budget defers holds none of it.
+func TestExecutePlannedStarts_PrepareBudgetDeferralTakesNoLease(t *testing.T) {
 	e := newPrepareBudgetEnv(t, "a", "b")
 	a := e.candidate(t, "a", testPrepareBudget)
 	b := e.candidate(t, "b", time.Second)
-	limiter := newAsyncStartLimiter(1)
 
-	e.run(testPrepareBudget, true, []startExecutionOption{withAsyncStartLimiter(limiter)}, a, b)
+	e.run(testPrepareBudget, false, nil, a, b)
 
-	e.requireDeferred(t, true, "b")
-	// a's start released its slot; with b never reserving one the limiter is
-	// empty and a one-slot limiter admitted a without ever refusing b for a
-	// full slot.
-	if strings.Contains(e.log.String(), "session=b template=b outcome=deferred_by_async_start_limit") {
-		t.Fatalf("b was refused a slot instead of being deferred by the budget:\n%s", e.log.String())
-	}
-	limiter.mu.Lock()
-	inFlight := limiter.inFlight
-	limiter.mu.Unlock()
-	if inFlight != 0 {
-		t.Fatalf("async slots in flight = %d, want 0", inFlight)
-	}
+	e.requireDeferred(t, "b")
 	if rec := e.sessionInfo(b.info.ID); rec.SessionName != "b" {
 		t.Fatalf("b row unreadable: %+v", rec)
 	}
@@ -371,7 +385,7 @@ func TestExecutePlannedStarts_PrepareBudgetCarriesAcrossWaves(t *testing.T) {
 	if woken := e.run(testPrepareBudget, false, nil, a, b); woken != 1 {
 		t.Fatalf("woken = %d, want 1", woken)
 	}
-	e.requireDeferred(t, false, "b")
+	e.requireDeferred(t, "b")
 	e.requireUntouched(t, b, bBefore)
 }
 
@@ -389,7 +403,7 @@ func TestExecutePlannedStarts_PrepareBudgetCountsSlowFailingPrepare(t *testing.T
 	if !strings.Contains(e.log.String(), "session=a template=a outcome=failed") {
 		t.Fatalf("a's failed prepare not logged:\n%s", e.log.String())
 	}
-	e.requireDeferred(t, false, "b")
+	e.requireDeferred(t, "b")
 	e.requireUntouched(t, b, bBefore)
 }
 
@@ -606,7 +620,7 @@ func TestExecutePlannedStarts_PrepareBudgetDeferralTakesNoCapacityTicket(t *test
 		if n := e.sp.CountCalls("Start", "a"); n != 1 {
 			t.Fatalf("Start calls for the probe taker a = %d, want 1\n%s", n, e.log.String())
 		}
-		e.requireDeferred(t, false, "b")
+		e.requireDeferred(t, "b")
 		if got := capacityDeferred(e); len(got) != 0 {
 			t.Fatalf("deferred_by_endpoint_capacity for %v, want none (the budget gate precedes admission)\n%s", got, e.log.String())
 		}
@@ -633,7 +647,7 @@ func TestExecutePlannedStarts_PrepareBudgetDeferralLeavesDueProbeUntaken(t *test
 
 	e.run(testPrepareBudget, false, nil, a, b)
 
-	e.requireDeferred(t, false, "b")
+	e.requireDeferred(t, "b")
 	if st := e.breakerStatus(capacityTestEndpoint); st.State != resilience.StateOpen {
 		t.Fatalf("endpoint state after the deferral = %v, want open (b must not have been admitted as the probe)\n%s", st.State, e.log.String())
 	}
@@ -653,7 +667,7 @@ func TestExecutePlannedStarts_PrepareBudgetDeferralPayload(t *testing.T) {
 
 	e.run(testPrepareBudget, false, nil, a, b)
 
-	e.requireDeferred(t, false, "b")
+	e.requireDeferred(t, "b")
 	var found int
 	for _, r := range e.records(TraceSiteLifecycleStartRun) {
 		if string(r.OutcomeCode) != prepareBudgetOutcome {
@@ -675,16 +689,12 @@ func TestExecutePlannedStarts_PrepareBudgetDeferralPayload(t *testing.T) {
 	}
 }
 
-// The option is wired at the two controller reconcile sites and not at the
-// one-shot `gc start`.
+// The option is wired into the control dispatcher's synchronous planner call
+// only. The main tick's pass is async, prepares on its start goroutines and
+// is bounded by its start slots, and the one-shot `gc start` does not opt in.
 func TestPrepareBudgetWiring(t *testing.T) {
-	const wiring = "withPrepareBudget(defaultStartPrepareBudget)"
-	rt, err := os.ReadFile("city_runtime.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n := strings.Count(string(rt), wiring); n != 2 {
-		t.Fatalf("city_runtime.go wires the prepare budget %d times, want 2 (reconcileStartOptions, controlDispatcherTick)", n)
+	if sites := startOptionCallers(t, "city_runtime.go", "withPrepareBudget"); len(sites) != 1 || sites[0] != "controlDispatcherTick" {
+		t.Fatalf("city_runtime.go calls withPrepareBudget from %v, want exactly [controlDispatcherTick]", sites)
 	}
 	start, err := os.ReadFile("cmd_start.go")
 	if err != nil {
@@ -695,6 +705,50 @@ func TestPrepareBudgetWiring(t *testing.T) {
 	}
 }
 
+// Async start execution is wired into the main tick's pass only: the control
+// dispatcher's synchronous planner call and the one-shot `gc start` keep
+// preparing inline on the planner goroutine (AC-8).
+func TestAsyncStartExecutionWiring(t *testing.T) {
+	if sites := startOptionCallers(t, "city_runtime.go", "withAsyncStartExecution"); len(sites) != 1 || sites[0] != "beadReconcileTick" {
+		t.Fatalf("city_runtime.go calls withAsyncStartExecution from %v, want exactly [beadReconcileTick]", sites)
+	}
+	start, err := os.ReadFile("cmd_start.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(start), "withAsyncStartExecution") {
+		t.Fatal("cmd_start.go (one-shot gc start) must not use async start execution")
+	}
+}
+
+// startOptionCallers names, in source order, the functions in file that call
+// the named start execution option.
+func startOptionCallers(t *testing.T, file, option string) []string {
+	t.Helper()
+	parsed, err := parser.ParseFile(token.NewFileSet(), file, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", file, err)
+	}
+	var callers []string
+	for _, decl := range parsed.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if id, ok := call.Fun.(*ast.Ident); ok && id.Name == option {
+				callers = append(callers, fn.Name.Name)
+			}
+			return true
+		})
+	}
+	return callers
+}
+
 // The harness charges the clock inside prepare itself, which is what the
 // budget tests rely on.
 func TestPrepareLatencyStore_ChargesInsidePrepare(t *testing.T) {
@@ -702,7 +756,7 @@ func TestPrepareLatencyStore_ChargesInsidePrepare(t *testing.T) {
 	a := e.candidate(t, "a", 7*time.Second)
 	before := e.clk.Now()
 
-	if _, err := prepareStartCandidateForCity(a, e.city, "", e.cfg, e.sp, e.lat, e.clk, &e.log, nil, dispatchOptionSources{}); err != nil {
+	if _, _, err := prepareStartCandidateForCity(a, e.city, "", e.cfg, e.sp, e.lat, e.clk, &e.log, nil, dispatchOptionSources{}); err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
 	if got := e.clk.Now().Sub(before); got != 7*time.Second {

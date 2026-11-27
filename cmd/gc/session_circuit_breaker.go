@@ -654,19 +654,25 @@ func persistSessionCircuitBreakerMetadata(
 	return nil
 }
 
+// recordSessionCircuitBreakerRestart records a restart of identity at now and
+// persists the row's breaker metadata. It returns the state after the record
+// and the record itself, which undoRestart takes back for a start that never
+// ran. When nothing was recorded (no store, row or identity) the record is the
+// zero value; when the persist fails, the restart is rolled back and the error
+// returned.
 func recordSessionCircuitBreakerRestart(
 	sessFront *session.Store,
 	id string,
 	cb *sessionCircuitBreaker,
 	identity string,
 	now time.Time,
-) (circuitBreakerStateKind, error) {
+) (circuitBreakerStateKind, sessionCircuitBreakerRestart, error) {
 	if sessFront == nil || strings.TrimSpace(id) == "" {
-		return circuitClosed, nil
+		return circuitClosed, sessionCircuitBreakerRestart{}, nil
 	}
 	identity = strings.TrimSpace(identity)
 	if identity == "" {
-		return circuitClosed, nil
+		return circuitClosed, sessionCircuitBreakerRestart{}, nil
 	}
 	if cb == nil {
 		cb = defaultSessionCircuitBreaker()
@@ -674,56 +680,131 @@ func recordSessionCircuitBreakerRestart(
 
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
-	previous, hadPrevious := cloneCircuitBreakerEntry(cb.entries[identity]), cb.entries[identity] != nil
+	before := cb.entrySnapshotLocked(identity)
 	state := cb.recordRestartLocked(identity, now)
 	metadata, err := cb.metadataLocked(identity, now)
 	if err != nil {
-		cb.restoreEntryLocked(identity, previous, hadPrevious)
-		return state, err
+		cb.restoreEntryLocked(identity, before.entry, before.existed)
+		return state, sessionCircuitBreakerRestart{}, err
 	}
 	current, err := sessFront.CircuitState(id)
 	if err != nil {
-		cb.restoreEntryLocked(identity, previous, hadPrevious)
-		return state, fmt.Errorf("loading session circuit breaker metadata for %s: %w", id, err)
+		cb.restoreEntryLocked(identity, before.entry, before.existed)
+		return state, sessionCircuitBreakerRestart{}, fmt.Errorf("loading session circuit breaker metadata for %s: %w", id, err)
 	}
-	if current == session.CircuitStateFromMetadata(metadata) {
-		return state, nil
+	if current != session.CircuitStateFromMetadata(metadata) {
+		if err := sessFront.ApplyPatch(id, metadata); err != nil {
+			cb.restoreEntryLocked(identity, before.entry, before.existed)
+			return state, sessionCircuitBreakerRestart{}, fmt.Errorf("persisting session circuit breaker metadata for %s: %w", id, err)
+		}
 	}
-	if err := sessFront.ApplyPatch(id, metadata); err != nil {
-		cb.restoreEntryLocked(identity, previous, hadPrevious)
-		return state, fmt.Errorf("persisting session circuit breaker metadata for %s: %w", id, err)
-	}
-	return state, nil
+	return state, sessionCircuitBreakerRestart{identity: identity, before: before, after: cb.entrySnapshotLocked(identity)}, nil
 }
 
-// sessionCircuitBreakerEntrySnapshot is an identity's breaker entry before a
-// restart was recorded.
+// sessionCircuitBreakerEntrySnapshot is an identity's breaker entry and reset
+// generation at one instant.
 type sessionCircuitBreakerEntrySnapshot struct {
 	entry   *circuitBreakerEntry
 	existed bool
+	// resetGeneration is identity's reset generation when the snapshot was
+	// taken; a manual Reset after it advances the generation.
+	resetGeneration uint64
 }
 
-// entrySnapshot captures identity's entry, to undo a restart that turned out
-// not to happen (restoreEntrySnapshot).
+// entrySnapshot captures identity's entry and reset generation.
 func (b *sessionCircuitBreaker) entrySnapshot(identity string) sessionCircuitBreakerEntrySnapshot {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return sessionCircuitBreakerEntrySnapshot{entry: cloneCircuitBreakerEntry(b.entries[identity]), existed: b.entries[identity] != nil}
+	return b.entrySnapshotLocked(identity)
 }
 
-// restoreEntrySnapshot undoes a restart recorded for a start that never ran
-// (its PreWake was refused): identity's entry goes back to snap and the row's
-// breaker metadata follows. No identity is a no-op.
-func (b *sessionCircuitBreaker) restoreEntrySnapshot(sessFront *session.Store, id, identity string, snap sessionCircuitBreakerEntrySnapshot, now time.Time, stderr io.Writer) {
-	if b == nil || identity == "" {
+// entrySnapshotLocked is entrySnapshot for a caller that holds b.mu.
+func (b *sessionCircuitBreaker) entrySnapshotLocked(identity string) sessionCircuitBreakerEntrySnapshot {
+	return sessionCircuitBreakerEntrySnapshot{
+		entry:           cloneCircuitBreakerEntry(b.entries[identity]),
+		existed:         b.entries[identity] != nil,
+		resetGeneration: b.resetGenerationLocked(identity),
+	}
+}
+
+// sessionCircuitBreakerRestart is one restart recordSessionCircuitBreakerRestart
+// recorded: identity's entry and reset generation just before and just after
+// it, both taken in the same hold of the breaker's lock as the record, so no
+// Reset or observation lands between either snapshot and the record. The zero
+// value recorded nothing.
+type sessionCircuitBreakerRestart struct {
+	identity string
+	before   sessionCircuitBreakerEntrySnapshot
+	after    sessionCircuitBreakerEntrySnapshot
+}
+
+// undoRestart takes back restart, recorded for a start that never ran (its
+// PreWake was refused), while identity's reset generation and restart
+// accounting still equal the record's after-snapshot: the entry goes back to
+// the record's before-snapshot. A manual Reset, another restart, a progress
+// observation or a trip since the record wins, and the current entry stands,
+// so a phantom restart may stay counted, which only errs toward tripping. An
+// observation that found no progress does not block the undo
+// (restartAccountingUnchangedLocked); its bookkeeping goes back with the
+// entry. The comparison and the restore are one hold of the breaker's lock, so
+// nothing lands between them; the row's breaker metadata then follows the
+// entry, written after the lock is released. A zero restart is a no-op.
+func (b *sessionCircuitBreaker) undoRestart(sessFront *session.Store, id string, restart sessionCircuitBreakerRestart, now time.Time, stderr io.Writer) {
+	if b == nil || restart.identity == "" {
 		return
 	}
 	b.mu.Lock()
-	b.restoreEntryLocked(identity, snap.entry, snap.existed)
+	if b.restartAccountingUnchangedLocked(restart.identity, restart.after) {
+		b.restoreEntryLocked(restart.identity, cloneCircuitBreakerEntry(restart.before.entry), restart.before.existed)
+	}
 	b.mu.Unlock()
-	if err := persistSessionCircuitBreakerMetadata(sessFront, id, b, identity, now); err != nil {
+	if err := persistSessionCircuitBreakerMetadata(sessFront, id, b, restart.identity, now); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
+}
+
+// restartAccountingUnchangedLocked reports whether identity's reset generation
+// and restart accounting still equal after's. Restart accounting is the
+// restart history, the last restart, the progress stamp the trip decision
+// reads, and the circuit's state. It leaves out the bookkeeping an
+// observation that finds no progress moves: lastObserved, observedSig and
+// progressSig (a signature moves without a progress stamp only on its first
+// observation, which counts as no progress), and loggedOpenOnce, which moves
+// only while the circuit is open. A history that lost restarts off its front,
+// trimmed out of the rolling window (trimLocked), gained none. The caller
+// holds b.mu.
+func (b *sessionCircuitBreaker) restartAccountingUnchangedLocked(identity string, after sessionCircuitBreakerEntrySnapshot) bool {
+	if b.resetGenerationLocked(identity) != after.resetGeneration {
+		return false
+	}
+	current := b.entries[identity]
+	if after.existed != (current != nil) {
+		return false
+	}
+	if current == nil {
+		return true
+	}
+	return current.lastRestart.Equal(after.entry.lastRestart) &&
+		current.lastProgress.Equal(after.entry.lastProgress) &&
+		current.state == after.entry.state &&
+		current.openedAt.Equal(after.entry.openedAt) &&
+		current.openRestartCnt == after.entry.openRestartCnt &&
+		restartHistoryTrimmedFrom(current.restarts, after.entry.restarts)
+}
+
+// restartHistoryTrimmedFrom reports whether history is from with zero or more
+// of its oldest restarts trimmed off: a suffix of from.
+func restartHistoryTrimmedFrom(history, from []time.Time) bool {
+	if len(history) > len(from) {
+		return false
+	}
+	tail := from[len(from)-len(history):]
+	for i := range history {
+		if !history[i].Equal(tail[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func cloneCircuitBreakerEntry(e *circuitBreakerEntry) *circuitBreakerEntry {

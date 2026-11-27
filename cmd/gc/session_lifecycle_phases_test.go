@@ -7,6 +7,31 @@ import (
 	"time"
 )
 
+// TestAddPrepareTimingFieldsReportsPhasesThatRan: a preparation phase that
+// ran is on the record even when it took under a millisecond, and a phase
+// that did not run is absent.
+func TestAddPrepareTimingFieldsReportsPhasesThatRan(t *testing.T) {
+	var timings prepareTimings
+	timings.record(preparePhaseLockGet, 200*time.Microsecond)
+	timings.record(preparePhasePreWake, 0)
+	timings.record(preparePhaseBuild, 7*time.Millisecond)
+	timings.Total = 8 * time.Millisecond
+	fields := traceRecordPayload{}
+	addPrepareTimingFields(fields, timings, nil)
+	want := map[string]int64{"lock_get_ms": 0, "prewake_ms": 0, "build_ms": 7, "prepare_ms": 8}
+	for field, ms := range want {
+		got, ok := fields[field]
+		if !ok || got != ms {
+			t.Fatalf("%s = %v (on the record %t), want %d", field, got, ok, ms)
+		}
+	}
+	for _, field := range []string{"named_snapshot_ms", "spent_ms"} {
+		if got, ok := fields[field]; ok {
+			t.Fatalf("%s = %v on the record, want absent: the phase did not run", field, got)
+		}
+	}
+}
+
 // TestStartPhaseTimingsFormatLog covers the formatLog helper that gc-67o
 // uses to emit per-phase wall-clock segments in the session lifecycle log.
 // Zero-valued phases must elide entirely so a healthy synchronous start
@@ -109,6 +134,36 @@ func TestStartPhaseTimingsFormatLog(t *testing.T) {
 				StartCall: 500 * time.Microsecond,
 			},
 			want: " phases=[start_call=1ms]",
+		},
+		{
+			// Preparation precedes the start, so its phases lead the segment.
+			name: "prepare phases lead the start phases",
+			phases: startPhaseTimings{
+				Prepare: prepareTimings{
+					LockGet:       7 * time.Millisecond,
+					PreWake:       5 * time.Millisecond,
+					NamedSnapshot: 3 * time.Millisecond,
+					Build:         2 * time.Millisecond,
+				},
+				StartCall: 40 * time.Millisecond,
+			},
+			want: " phases=[lock_get=7ms prewake=5ms named_snapshot=3ms build=2ms start_call=40ms]",
+		},
+		{
+			// A preparation that failed in its first phase has only that one.
+			name: "a failed preparation shows only the phase that ran",
+			phases: startPhaseTimings{
+				Prepare: prepareTimings{LockGet: 1500 * time.Millisecond, Total: 1500 * time.Millisecond},
+			},
+			want: " phases=[lock_get=1.5s]",
+		},
+		{
+			name: "sub-millisecond prepare phases elide",
+			phases: startPhaseTimings{
+				Prepare:   prepareTimings{LockGet: 200 * time.Microsecond, Build: 300 * time.Microsecond},
+				StartCall: 2 * time.Second,
+			},
+			want: " phases=[start_call=2s]",
 		},
 	}
 	for _, tc := range cases {

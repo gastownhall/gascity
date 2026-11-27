@@ -95,7 +95,10 @@ The worker operation event names its session from the persisted record only
 (`Manager.EnrichInfo`) makes provider calls that cannot be canceled, and the
 event is named before and after every operation, so a wedged provider would hold
 a kill on the reconciler tick or a start on its async slot before the operation
-ran (`SESSION-RUNTIME-034`). Do not add a provider call to
+ran (`SESSION-RUNTIME-034`). An async start holds that slot and its runtime
+lease from admission through its preparation, which runs on its own goroutine
+off the tick, and dependency liveness counts it as in-flight from admission
+(`SESSION-RUNTIME-036`). Do not add a provider call to
 `populateOperationEventIdentity`.
 
 ## Turn sources

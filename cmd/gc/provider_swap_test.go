@@ -822,8 +822,16 @@ func TestEnqueuedAsyncStartIsCountedUntilItReturns(t *testing.T) {
 		gate := make(chan struct{})
 		enqueuePreparedStartWaveForCity(
 			context.Background(),
-			[]asyncPreparedStart{{item: item, release: func() { <-gate }, tracker: &tracker}},
-			testCity, runtime.NewFake(), store, nil, clk, events.NewFake(), postStartTimeout, 1, io.Discard, io.Discard, nil, nil,
+			[]asyncAdmittedStart{{
+				candidate:    item.candidate,
+				undoPrepared: func(error, ...startPhaseTimings) {},
+				drop:         func(string, error, ...startPhaseTimings) {},
+				release:      func() { <-gate },
+				tracker:      &tracker,
+			}},
+			testCity, runtime.NewFake(), store, nil, clk, events.NewFake(),
+			func(startCandidate) (*preparedStart, prepareTimings, error) { return &item, prepareTimings{}, nil },
+			postStartTimeout, 1, io.Discard, io.Discard, nil, nil,
 			immediateStartStabilityWaiter, immediateSessionStaleKeyDetectionWaiter, nil,
 		)
 		synctest.Wait()

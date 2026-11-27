@@ -911,7 +911,7 @@ func TestPrepareStartCandidateRepairsConcretePoolTemplateWorkDir(t *testing.T) {
 		}},
 	}
 
-	prepared, err := prepareStartCandidateForCity(startCandidate{
+	prepared, _, err := prepareStartCandidateForCity(startCandidate{
 		info: sessiontest.SeedBead(t, session),
 		tp: TemplateParams{
 			TemplateName: template,
@@ -1002,7 +1002,7 @@ func TestPrepareStartCandidateRepairsConcretePoolTemplateWorkDir_SymlinkedCityPa
 		}},
 	}
 
-	prepared, err := prepareStartCandidateForCity(startCandidate{
+	prepared, _, err := prepareStartCandidateForCity(startCandidate{
 		info: sessiontest.SeedBead(t, session),
 		tp: TemplateParams{
 			TemplateName: template,
@@ -1478,7 +1478,7 @@ func TestPrepareStartCandidate_UsesAssignedWorkSnapshotForTaskWorkDir(t *testing
 		t.Fatal(err)
 	}
 
-	prepared, err := prepareStartCandidateForCity(startCandidate{
+	prepared, _, err := prepareStartCandidateForCity(startCandidate{
 		info: sessiontest.SeedBead(t, session),
 		tp: TemplateParams{
 			TemplateName: "frontend/worker",
@@ -3128,7 +3128,8 @@ func TestCityRuntimeForceShutdownStopsALateStartItCanceled(t *testing.T) {
 }
 
 func TestExecutePlannedStartsTraced_AsyncPrepareFailureClearsPreWakeLease(t *testing.T) {
-	testCity, trackStarts := asyncStartCity(t)
+	testCity := t.TempDir()
+	var trackStarts asyncStartTracker
 	store := &failSetMetadataStore{MemStore: beads.NewMemStore(), failKey: "session_key"}
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 27, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -3173,9 +3174,14 @@ func TestExecutePlannedStartsTraced_AsyncPrepareFailureClearsPreWakeLease(t *tes
 		ioDiscard{},
 		nil,
 		withAsyncStartExecution(),
-		trackStarts,
-	); got != 0 {
-		t.Fatalf("woken = %d, want 0 when async preparation fails after preWake", got)
+		withAsyncStartTracker(&trackStarts),
+	); got != 1 {
+		t.Fatalf("woken = %d, want 1: an async start is admitted and counted before its off-tick preparation fails", got)
+	}
+	// The failure's undo runs on the start goroutine; wait for it before
+	// judging the row.
+	if !trackStarts.wait(hangBudget) {
+		t.Fatal("async start did not finish within the hang budget")
 	}
 	sp.ensureNoFurtherStart(t, 100*time.Millisecond)
 	updated, err := store.Get(session.ID)
@@ -3486,6 +3492,37 @@ func TestAsyncStartTrackerWaitZeroDoesNotBlock(t *testing.T) {
 	done()
 	if !tracker.wait(time.Second) {
 		t.Fatal("tracker should report completion after async work finishes")
+	}
+}
+
+// A start unmarks its admission when it counts done, after its runtime lease
+// is released, so a later admission of the same name can register first. The
+// earlier start's unmark must leave the later admission's record in place,
+// and each unmark is idempotent.
+func TestAsyncStartTrackerUnmarkKeepsLaterAdmissionOfSameName(t *testing.T) {
+	var tracker asyncStartTracker
+	unmarkFirst := tracker.markStartInFlight("worker-a")
+	if !tracker.startInFlight("worker-a") {
+		t.Fatal("first admission not visible to startInFlight")
+	}
+	// The first start released its lease; the next tick admits the name again
+	// before the first start's done runs.
+	unmarkSecond := tracker.markStartInFlight("worker-a")
+	unmarkFirst()
+	if !tracker.startInFlight("worker-a") {
+		t.Fatal("the first start's unmark removed the second admission's record")
+	}
+	unmarkFirst()
+	if !tracker.startInFlight("worker-a") {
+		t.Fatal("a repeated unmark of the first start removed the second admission's record")
+	}
+	unmarkSecond()
+	if tracker.startInFlight("worker-a") {
+		t.Fatal("record still present after the second admission's unmark")
+	}
+	unmarkSecond()
+	if tracker.startInFlight("worker-a") {
+		t.Fatal("a repeated unmark brought the record back")
 	}
 }
 
@@ -6871,7 +6908,7 @@ func TestCandidateWaveOrder_FallsBackToSerialOnCycle(t *testing.T) {
 		},
 	}
 
-	waves, ok := candidateWaveOrder(candidates, cfg, map[string]TemplateParams{}, runtime.NewFake(), "city", nil, clock.Real{})
+	waves, ok := candidateWaveOrder(candidates, cfg, map[string]TemplateParams{}, runtime.NewFake(), "city", nil, clock.Real{}, nil)
 	if ok {
 		t.Fatal("expected serial fallback for cycle")
 	}
@@ -6937,7 +6974,7 @@ func TestCandidateWaveOrder_UsesLegacyAgentLabelTemplate(t *testing.T) {
 		},
 	}
 
-	waves, ok := candidateWaveOrder(candidates, cfg, map[string]TemplateParams{}, runtime.NewFake(), "city", store, clock.Real{})
+	waves, ok := candidateWaveOrder(candidates, cfg, map[string]TemplateParams{}, runtime.NewFake(), "city", store, clock.Real{}, nil)
 	if !ok {
 		t.Fatal("unexpected serial fallback")
 	}
@@ -9563,7 +9600,7 @@ func TestLegacyFailedStartClassifiesARetainedConversation(t *testing.T) {
 				} else {
 					env.sp.StartErrors["worker"] = fmt.Errorf("%w: session %q; last pane output:\n%s", runtime.ErrSessionDiedDuringStartup, "worker", c.pane)
 				}
-				prepared, err := prepareStartCandidateForCity(startCandidate{info: env.sessionInfo(session.ID), tp: tp}, "", "", cfg, env.sp, env.store, env.clk, io.Discard, nil, dispatchOptionSources{})
+				prepared, _, err := prepareStartCandidateForCity(startCandidate{info: env.sessionInfo(session.ID), tp: tp}, "", "", cfg, env.sp, env.store, env.clk, io.Discard, nil, dispatchOptionSources{})
 				if err != nil {
 					t.Fatalf("prepareStartCandidateForCity: %v", err)
 				}
@@ -9641,7 +9678,7 @@ func TestLegacyPostStartDeathClassifiesARefusedResume(t *testing.T) {
 					sp = &zombieAfterStartProvider{Fake: env.sp}
 					stability = immediateStartStabilityWaiter
 				}
-				prepared, err := prepareStartCandidateForCity(startCandidate{info: env.sessionInfo(session.ID), tp: tp}, "", "", cfg, sp, env.store, env.clk, io.Discard, nil, dispatchOptionSources{})
+				prepared, _, err := prepareStartCandidateForCity(startCandidate{info: env.sessionInfo(session.ID), tp: tp}, "", "", cfg, sp, env.store, env.clk, io.Discard, nil, dispatchOptionSources{})
 				if err != nil {
 					t.Fatalf("prepareStartCandidateForCity: %v", err)
 				}
@@ -9723,7 +9760,7 @@ func TestPrepareStartCandidateForCity_ClearsStaleNamedTriggerEnv(t *testing.T) {
 		t.Fatalf("create session bead: %v", err)
 	}
 
-	prepared, err := prepareStartCandidateForCity(startCandidate{
+	prepared, _, err := prepareStartCandidateForCity(startCandidate{
 		info:  sessiontest.SeedBead(t, session),
 		tp:    TemplateParams{TemplateName: "worker", SessionName: sessionName},
 		order: 0,
@@ -9778,7 +9815,7 @@ func TestPrepareStartCandidateForCity_SurvivingNamedTriggerLaunchesWithOnlyTheDe
 		t.Fatalf("create session bead: %v", err)
 	}
 
-	prepared, err := prepareStartCandidateForCity(startCandidate{
+	prepared, _, err := prepareStartCandidateForCity(startCandidate{
 		info:  sessiontest.SeedBead(t, session),
 		tp:    TemplateParams{TemplateName: "worker", SessionName: sessionName},
 		order: 0,

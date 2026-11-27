@@ -129,6 +129,19 @@ The start pipeline is:
 7. Before dispatching a later wave, dependency liveness is revalidated at
    the wave boundary. A dependency template counts as satisfied only if
    it still has a currently alive instance at dispatch time.
+8. A dependency template also counts as unsatisfied while one of its
+   starts is admitted but still preparing (async starts prepare off the
+   reconciler tick, holding their slot and runtime lease from admission):
+   in-flight admitted starts block dependents ahead of liveness, so a
+   dependent never starts against an older incarnation of a dependency
+   whose replacement start is still preparing
+   (SESSION-RUNTIME-036).
+9. An async start whose preparation fails holds its session out of
+   async admission for one patrol interval and then requests a
+   follow-up pass. That pass runs the rest of a wave whose
+   dependency-sensitive batch yielded on the failed start, and the
+   starts its wake or slot deferred, without admitting the failed
+   session again (`deferred_by_prepare_failure`; SESSION-RUNTIME-036).
 
 This matches current semantics for both singleton and pool dependencies:
 dependents only need “an alive instance” of the dependency template.
@@ -363,6 +376,7 @@ operator-visible outcome:
 - `skipped_due_to_failed_dependency`
 - `deferred_by_wake_budget`
 - `deferred_by_prepare_budget`
+- `deferred_by_prepare_failure`
 - `already_satisfied`
 - `stop_failed`
 - `stop_slow_survivor`
