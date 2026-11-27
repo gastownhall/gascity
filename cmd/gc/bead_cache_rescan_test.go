@@ -235,3 +235,41 @@ func TestSupervisorReloadRescanWaitsForAClosedGate(t *testing.T) {
 		})
 	}
 }
+
+// TestSupervisorReloadDoesNotWaitForAScan: the per-city reload poke returns
+// while a cache's scan is blocked in its backing List, and the request it
+// made gets one scan of its own once that scan is released.
+func TestSupervisorReloadDoesNotWaitForAScan(t *testing.T) {
+	backing := &rescanListStore{Store: beads.NewMemStore(), entered: make(chan struct{}), release: make(chan struct{})}
+	cache, _ := primedRescanCache(t, backing, nil)
+	cs := &controllerState{beadStores: map[string]beads.Store{"r": cache}, pokeCh: make(chan struct{}, 1)}
+
+	backing.armed.Store(true)
+	scanned := make(chan struct{})
+	go func() {
+		defer close(scanned)
+		cache.ReconcileNowForTest()
+	}()
+	<-backing.entered
+
+	poked := make(chan struct{})
+	go func() {
+		defer close(poked)
+		pokeStartedCitiesOnReload(reloadSnapshot(startedCity("city", cs)), io.Discard)
+	}()
+	select {
+	case <-poked:
+	case <-time.After(time.Second):
+		close(backing.release)
+		t.Fatal("the reload poke waited on a blocked scan")
+	}
+
+	close(backing.release)
+	<-scanned
+	lists := backing.lists.Load()
+	cache.ReconcileIfDueForTest()
+	cache.ReconcileIfDueForTest()
+	if got := backing.lists.Load() - lists; got != 1 {
+		t.Fatalf("after the blocked scan: backing listed %d times over two loop steps, want 1 for the reload's request", got)
+	}
+}
