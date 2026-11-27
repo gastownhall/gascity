@@ -1111,7 +1111,7 @@ func TestHandleSessionListActiveBeadUsesCachedLookup(t *testing.T) {
 	resp := sessionResponse{}
 	srv.enrichSessionResponse(&resp, info, fs.Config(), sessionResponseCapabilityHandle{
 		state: worker.State{Phase: worker.PhaseReady},
-	}, false, false, false, 0)
+	}, false, srv.newActiveBeadIndex().lookup, false, 0)
 
 	if !resp.Running {
 		t.Fatal("Running = false, want true")
@@ -1403,7 +1403,7 @@ func TestHandleSessionListActiveBeadUsesCachedListWhenAvailable(t *testing.T) {
 	resp := sessionResponse{}
 	srv.enrichSessionResponse(&resp, info, fs.Config(), sessionResponseCapabilityHandle{
 		state: worker.State{Phase: worker.PhaseReady},
-	}, false, false, false, 0)
+	}, false, srv.newActiveBeadIndex().lookup, false, 0)
 
 	if got := resp.ActiveBead; got != work.ID {
 		t.Fatalf("active_bead = %q, want cached %q", got, work.ID)
@@ -1441,7 +1441,7 @@ func TestHandleSessionGetActiveBeadUsesLiveLookup(t *testing.T) {
 	resp := sessionResponse{}
 	srv.enrichSessionResponse(&resp, info, fs.Config(), sessionResponseCapabilityHandle{
 		state: worker.State{Phase: worker.PhaseReady},
-	}, false, true, true, 0)
+	}, false, srv.findLiveActiveBeadForAssignees, true, 0)
 
 	if !resp.Running {
 		t.Fatal("Running = false, want true")
@@ -9118,4 +9118,54 @@ func TestHandleSessionListActiveBeadSkipsSuspendedRig(t *testing.T) {
 	if !found {
 		t.Fatalf("session %s not listed in %+v", info.ID, resp.Items)
 	}
+}
+
+// sessionActiveWorkCountingStore counts the in_progress reads made through it.
+type sessionActiveWorkCountingStore struct {
+	beads.Store
+	activeReads int
+}
+
+func (s *sessionActiveWorkCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Status == "in_progress" {
+		s.activeReads++
+	}
+	return s.Store.List(query)
+}
+
+// TestSessionListReadsEachStoreOnce pins the cost of the active-bead join on
+// the session lists: one in_progress read per bead store per page, however
+// many sessions the page carries, not one per identity per session per store.
+func TestSessionListReadsEachStoreOnce(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	counting := &sessionActiveWorkCountingStore{Store: fs.stores["myrig"]}
+	fs.stores["myrig"] = counting
+	for i := 0; i < 3; i++ {
+		createTestSession(t, fs.cityBeadStore, fs.sp, fmt.Sprintf("Session %d", i))
+	}
+
+	t.Run("huma", func(t *testing.T) {
+		counting.activeReads = 0
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(fs, "/sessions"), nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /sessions status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		if counting.activeReads != 1 {
+			t.Errorf("GET /sessions over 3 sessions made %d in_progress reads of the one bead store, want 1", counting.activeReads)
+		}
+	})
+	t.Run("legacy", func(t *testing.T) {
+		counting.activeReads = 0
+		rec := httptest.NewRecorder()
+		srv.legacySessionHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v0/sessions", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /v0/sessions status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		if counting.activeReads != 1 {
+			t.Errorf("GET /v0/sessions over 3 sessions made %d in_progress reads of the one bead store, want 1", counting.activeReads)
+		}
+	})
 }

@@ -7,6 +7,13 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
+// activeBeadLookup is the active-bead lookup a list build hands its rows: a
+// rig scope ("" reads every reachable store) plus the row's assignee
+// identities in priority order. List views pass the build's index lookup
+// (activeBeadIndex.lookup); detail views pass the live lookup
+// (findLiveActiveBeadForAssignees).
+type activeBeadLookup func(rig string, assignees ...string) string
+
 // activeBeadIndex answers a list build's per-row active-bead lookups from one
 // in_progress read per reached bead store, however many rows or identities
 // the list carries. The agent list used to run one cached List per identity

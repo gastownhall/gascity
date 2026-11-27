@@ -352,11 +352,14 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 		pageSessions[i] = sessions[row]
 	}
 	keyedTranscriptPaths := session.ResolveKeyedTranscriptPaths(sessionTranscriptLookupCandidates(pageSessions), s.sessionLogPaths(), sessionTranscriptProviderFallback(cfg))
+	// The page's active-bead join reads each reached bead store once, not
+	// once per identity per row (activeBeadIndex).
+	activeBeads := s.newActiveBeadIndex()
 	items := make([]sessionResponse, len(pageSessions))
 	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
 	for i, sess := range pageSessions {
 		items[i] = sessionResponseWithReason(sess, responseByID[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
-		s.enrichSessionResponseWithKeyedPaths(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0, keyedTranscriptPaths)
+		s.enrichSessionResponseWithKeyedPaths(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, activeBeads.lookup, false, 0, keyedTranscriptPaths)
 	}
 
 	if !pp.IsPaging {
@@ -416,7 +419,7 @@ func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 	resp := sessionResponseWithReason(info, pr, cfg, s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
 	handle, err := s.workerHandleForSession(store, id)
 	if err == nil {
-		s.enrichSessionResponse(&resp, info, cfg, handle, wantPeek, true, true, 0)
+		s.enrichSessionResponse(&resp, info, cfg, handle, wantPeek, s.findLiveActiveBeadForAssignees, true, 0)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -649,14 +652,14 @@ const defaultSessionPeekLines = 5
 //
 // peekLines controls the line count for the preview when wantPeek is true.
 // Zero means "use default" (defaultSessionPeekLines).
-func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info, cfg *config.City, runtimeHandle any, wantPeek, liveActiveBead, allowWorkdirTranscriptDiscovery bool, peekLines int) {
-	s.enrichSessionResponseWithKeyedPaths(resp, info, cfg, runtimeHandle, wantPeek, liveActiveBead, allowWorkdirTranscriptDiscovery, peekLines, nil)
+func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info, cfg *config.City, runtimeHandle any, wantPeek bool, activeBead activeBeadLookup, allowWorkdirTranscriptDiscovery bool, peekLines int) {
+	s.enrichSessionResponseWithKeyedPaths(resp, info, cfg, runtimeHandle, wantPeek, activeBead, allowWorkdirTranscriptDiscovery, peekLines, nil)
 }
 
 // enrichSessionResponseWithKeyedPaths accepts an optional page-level map of
 // exact transcript paths. A non-nil map is authoritative, including misses,
 // so list callers can batch Codex discovery once instead of scanning per row.
-func (s *Server) enrichSessionResponseWithKeyedPaths(resp *sessionResponse, info session.Info, cfg *config.City, runtimeHandle any, wantPeek, liveActiveBead, allowWorkdirTranscriptDiscovery bool, peekLines int, keyedTranscriptPaths map[string]string) {
+func (s *Server) enrichSessionResponseWithKeyedPaths(resp *sessionResponse, info session.Info, cfg *config.City, runtimeHandle any, wantPeek bool, activeBead activeBeadLookup, allowWorkdirTranscriptDiscovery bool, peekLines int, keyedTranscriptPaths map[string]string) {
 	if info.Closed || runtimeHandle == nil {
 		return
 	}
@@ -684,10 +687,8 @@ func (s *Server) enrichSessionResponseWithKeyedPaths(resp *sessionResponse, info
 	// A previous fix accidentally passed info.Alias as the first positional
 	// (rig) argument, which silently narrowed the search to a rig named after
 	// the alias — so alias-assigned work still disappeared from ActiveBead.
-	if liveActiveBead {
-		resp.ActiveBead = s.findLiveActiveBeadForAssignees("", info.ID, info.SessionName, info.Alias, info.Template)
-	} else {
-		resp.ActiveBead = s.findActiveBeadForAssignees("", info.ID, info.SessionName, info.Alias, info.Template)
+	if activeBead != nil {
+		resp.ActiveBead = activeBead("", info.ID, info.SessionName, info.Alias, info.Template)
 	}
 
 	// Peek preview (opt-in, only when running). peekLines=0 means "use
