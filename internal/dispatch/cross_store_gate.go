@@ -132,8 +132,9 @@ import (
 // check-then-create and so not race-safe, which is why production stores pin.
 
 // CrossStoreGateLabel marks a gate bead that mirrors a blocker held in another
-// store.
-const CrossStoreGateLabel = "gc:cross-store-gate"
+// store. It is beadmeta.CrossStoreGateLabel, declared in the leaf so packages
+// below the dispatcher can recognize a gate.
+const CrossStoreGateLabel = beadmeta.CrossStoreGateLabel
 
 // crossStoreGateType is the gate bead's type. "gate" is excluded from Ready by
 // every backend and by beads.IsReadyExcludedType, so the gate is never offered

@@ -250,6 +250,10 @@ type SlingResult struct {
 	// BeadCheckResult.RouteOnly).
 	routeOnly bool
 
+	// RoutedMembers is the number of expanded-workflow members the sling
+	// routed alongside the root (issue #9039): 0 for every other shape.
+	RoutedMembers int
+
 	// Structured warnings (callers decide how to display).
 	AgentSuspended bool     // target agent is suspended
 	CitySuspended  bool     // the city is effectively suspended
