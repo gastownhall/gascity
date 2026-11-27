@@ -11,18 +11,20 @@ import (
 )
 
 // detectStrandedClaims is the stranded-work detector (owner ruling O5,
-// revised). A close that keeps a claim no lane serves stamps it with the
-// closed seat (strand); on D6's cadence the detector lists the stamped claims
-// on every work leg (beadmeta.StrandedMetadataKey, one cached query per
-// leg), keeps those still assigned as they were kept, to a seat not open
-// again, held by no other open session and released by
-// no sweep (the dead-assignee sweep's rule, laneDirect), and raises
-// session.stranded_claims for each seat; a seat it no longer finds (its
-// claims rerouted, released or closed: a release clears the stamp) ends its
-// episode. The stamp covers what a seat's identities cannot find: a claim
-// under an alias, on an archived row, or with no route of its own. A leg it
-// cannot read ends no episode. A seat is read once per process, on first
-// sight (sessions).
+// revised). A close that keeps a claim stamps it with the closed seat
+// (strand): one no lane serves, one no release can detach — a workflow
+// member bound to a foreign root, whose stamp holds whatever its route reads
+// (city-8ym) — or one the close's budget ran out on. On D6's cadence the
+// detector lists the stamped claims on every work leg (beadmeta.
+// StrandedMetadataKey, one cached query per leg), keeps those still assigned
+// as they were kept, to a seat not open again, held by no other open session
+// and released by no sweep (the dead-assignee sweep's rule, laneDirect — a
+// bound member by no sweep at all, save the drain hand-off), and raises session.stranded_claims for
+// each seat; a seat it no longer finds (its claims rerouted, released or
+// closed: a release clears the stamp) ends its episode. The stamp covers
+// what a seat's identities cannot find: a claim under an alias, on an
+// archived row, or with no route of its own. A leg it cannot read ends no
+// episode. A seat is read once per process, on first sight (sessions).
 func detectStrandedClaims(legs WorkLegs, sessions beads.Store, open []session.Info, alerts *strandedClaimAlerts, now time.Time) {
 	if alerts == nil || legs.unusable() != nil || !alerts.scanDue(now) {
 		return
@@ -62,6 +64,12 @@ func detectStrandedClaims(legs WorkLegs, sessions beads.Store, open []session.In
 				clearStrandedStamp(store, b.ID, seat, live[seat])
 				continue
 			case heldElsewhere(assignee, seat):
+				continue
+			}
+			if stepBoundToSeat(store, b) {
+				// A bound workflow member no sweep releases either (city-8ym):
+				// its stamp holds whatever its route reads.
+				held[seat] = append(held[seat], strandedClaim{id: b.ID, reason: keptStepBound})
 				continue
 			}
 			if route, served := releaseRoute(legs.cfg, b, "", laneDirect); !served {
