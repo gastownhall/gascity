@@ -310,6 +310,10 @@ type CityRuntime struct {
 	// deadAssigneeKeeps dedupes the dead-assignee sweep's keep log across
 	// ticks.
 	deadAssigneeKeeps deadAssigneeKeepLog
+	// nudgeOrphanPredecessors carries the nudge dispatcher's settled reads of
+	// orphaned items' fenced sessions from one pass to the next
+	// (nudge_orphans.go).
+	nudgeOrphanPredecessors nudgeOrphanPredecessorMemo
 
 	// liveSweepMemos carries the live model-usage sweep's per-session memo: the
 	// resolved transcript path, whether discovery definitively found nothing, and
@@ -4386,7 +4390,7 @@ func (cr *CityRuntime) nudgeDispatchTick(_ context.Context) {
 	if sessionBeads == nil {
 		return
 	}
-	if _, err := dispatchAllQueuedNudges(cr.cityPath, cr.cfg, store.Store, cr.sessionsBeadStore().Store, cr.sp, sessionBeads, cr.stderr); err != nil {
+	if _, err := dispatchAllQueuedNudges(cr.cityPath, cr.cfg, store.Store, cr.sessionsBeadStore().Store, cr.sp, sessionBeads, &cr.nudgeOrphanPredecessors, cr.stderr); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: %v\n", cr.logPrefix, err) //nolint:errcheck
 	}
 }

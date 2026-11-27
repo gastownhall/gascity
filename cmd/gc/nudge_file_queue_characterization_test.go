@@ -877,7 +877,7 @@ func TestNudgeFileQueueCharacterizationDispatch(t *testing.T) {
 	}
 	snapshot := newSessionBeadSnapshot([]beads.Bead{session("s-alpha", "alpha"), session("s-beta", "beta"), session("s-gamma", "gamma")})
 	h.step("dispatch one supervisor pass", func() string {
-		delivered, err := dispatchAllQueuedNudges(h.city, supervisorCfg(), h.store(), nil, runtime.NewFake(), snapshot, nil)
+		delivered, err := dispatchAllQueuedNudges(h.city, supervisorCfg(), h.store(), nil, runtime.NewFake(), snapshot, nil, nil)
 		return fmt.Sprintf("delivered=%d err=%s", delivered, nqCharErr(err))
 	})
 	h.step("read the dispatch skip counters", func() string {

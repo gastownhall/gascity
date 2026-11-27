@@ -108,24 +108,28 @@ func startNudgeWakeListener(ctx context.Context, cityPath string, wakeCh chan<- 
 // This is a no-op when the dispatcher is configured for "legacy" mode —
 // the per-session `gc nudge poll` processes own delivery in that case.
 //
+// orphans carries the fenced-session reads a pass settled to the next pass
+// (nudgeOrphanPredecessorMemo); the caller keeps one for the dispatcher's
+// lifetime, and nil carries nothing.
+//
 // debugOut receives one GC_DEBUG-gated line per silently-skipped target (see
 // logNudgeDispatchSkip); pass nil to suppress (skip counts still accumulate
 // into the persisted queue state's DispatchSkips regardless of debugOut, so
 // `gc nudge status` stays informative even with GC_DEBUG unset).
-func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, debugOut io.Writer) (int, error) {
+func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, orphans *nudgeOrphanPredecessorMemo, debugOut io.Writer) (int, error) {
 	if cfg == nil || sessionBeads == nil || cityPath == "" {
 		return 0, nil
 	}
 	if !nudgeDispatcherIsSupervisor(cfg) {
 		return 0, nil
 	}
-	return dispatchQueuedNudges(openNudgeQueue(cityPath, beads.NudgesStore{Store: store}), cityPath, cfg, store, sessStore, sp, sessionBeads, debugOut)
+	return dispatchQueuedNudges(openNudgeQueue(cityPath, beads.NudgesStore{Store: store}), cityPath, cfg, store, sessStore, sp, sessionBeads, orphans, debugOut)
 }
 
 // dispatchQueuedNudges is the dispatcher pass of dispatchAllQueuedNudges over
 // queue. A DueKeys read that comes back partial still dispatches the agents it
 // read, and the pass reports its error.
-func dispatchQueuedNudges(queue nudgeQueueHandle, cityPath string, cfg *config.City, store, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, debugOut io.Writer) (int, error) {
+func dispatchQueuedNudges(queue nudgeQueueHandle, cityPath string, cfg *config.City, store, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, orphans *nudgeOrphanPredecessorMemo, debugOut io.Writer) (int, error) {
 	now := time.Now()
 	// Run the queue's TTL/max-attempts maintenance sweep unconditionally,
 	// independent of whether any item below matches an open session. The
@@ -151,6 +155,7 @@ func dispatchQueuedNudges(queue nudgeQueueHandle, cityPath string, cfg *config.C
 		firstErr = fmt.Errorf("loading nudge queue: %w", err)
 	}
 	if len(dueKeys) == 0 {
+		orphans.forget()
 		return 0, firstErr
 	}
 	pendingAgents := make(map[string]bool, len(dueKeys))
@@ -175,8 +180,25 @@ func dispatchQueuedNudges(queue nudgeQueueHandle, cityPath string, cfg *config.C
 	// no benefit (the counters only need tick-granularity, not per-item).
 	skipCounts := make(map[string]int64)
 	snapshotCensus := nudgeFenceCensusFromSnapshot(sessionBeads)
-	for _, info := range sessionBeads.OpenInfos() {
-		target := resolveNudgeTargetFromSessionInfo(cityPath, cfg, info)
+	infos := sessionBeads.OpenInfos()
+	targets := make([]nudgeTarget, len(infos))
+	for i, info := range infos {
+		targets[i] = resolveNudgeTargetFromSessionInfo(cityPath, cfg, info)
+	}
+	// A due key that no open session lists reaches no branch of the loop
+	// below: hand each the pass can resolve to a target, and count the rest
+	// orphaned (nudge_orphans.go). A fenced session the snapshot does not list
+	// (a closed row) is read through the session front door, which returns
+	// closed rows too.
+	var lookupSession func(id string) (sessionpkg.Info, error)
+	if sessStore != nil {
+		lookupSession = sessionFrontDoor(sessStore).Get
+	}
+	if err := adoptNudgeOrphanKeys(queue, dueKeys, infos, targets, lookupSession, orphans, now, skipCounts, debugOut); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	for i, info := range infos {
+		target := targets[i]
 		if target.sessionName == "" {
 			skipCounts["no-target"]++
 			logNudgeDispatchSkip(debugOut, "no-target", info.AgentName, info.ID, "")

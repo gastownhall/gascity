@@ -181,6 +181,11 @@ type nudgeTarget struct {
 	// city's sessions: the dispatcher's snapshot census, or the poll gate's
 	// cached one. No claim reads it.
 	starvationCensus func() (map[string]struct{}, bool)
+	// inheritedKeys are queue keys a dispatch pass hands this target for
+	// that pass only: the orphaned keys of a predecessor that held the same
+	// pool seat (nudge_orphans.go). The claim's Leg B still decides whether
+	// their fenced items move.
+	inheritedKeys []string
 }
 
 type nudgeStatusJSON struct {
@@ -239,7 +244,7 @@ func (t nudgeTarget) pollerKey() string {
 func (t nudgeTarget) queueKeys() []string {
 	sources := [][]string{t.claimKeys}
 	if !t.fromClaim {
-		sources = [][]string{{t.alias, t.sessionID, t.agent.QualifiedName(), t.identity, t.sessionName}, t.aliasHistory}
+		sources = [][]string{{t.alias, t.sessionID, t.agent.QualifiedName(), t.identity, t.sessionName}, t.aliasHistory, t.inheritedKeys}
 	}
 	var keys []string
 	seen := map[string]bool{}
@@ -345,7 +350,7 @@ was asleep or was not at a safe interactive boundary yet.`,
 }
 
 func newNudgeStatusCmd(stdout, stderr io.Writer) *cobra.Command {
-	var jsonOutput bool
+	var jsonOutput, orphaned bool
 	cmd := &cobra.Command{
 		Use:   "status [session]",
 		Short: "Show queued and dead-letter nudges for a session",
@@ -364,16 +369,32 @@ open or answer, or an op row does not decode), it names what it could not
 read on stderr and exits 1: the text view still lists the rest, and --json
 prints the failure record instead of a partial result.
 
-Defaults to $GC_ALIAS or $GC_SESSION_ID when run inside a session.`,
+Defaults to $GC_ALIAS or $GC_SESSION_ID when run inside a session.
+
+With --orphaned it takes no session and lists, city-wide, every pending,
+in-flight and dead item whose key no open session matches: an item left for
+a session that has closed. Each row names the item's queue and shadow bead
+IDs, key, bucket, due and expiry times, the session it is fenced to and that
+session's state, and its resolution: "successor <session>" when the one open
+session holding the fenced session's pool seat will adopt it on the next
+dispatch pass, or the reason none will (seat-vacant, seat-ambiguous,
+not-pool-seat, fenced-session-live, fenced-session-unknown, unfenced,
+startup-turn, lookup-error). An item nobody adopts is dead-lettered when it
+expires; remove one sooner with "gc nudge drop <id>".`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdNudgeStatus(args, jsonOutput, stdout, stderr) != 0 {
+			run := cmdNudgeStatus
+			if orphaned {
+				run = cmdNudgeStatusOrphaned
+			}
+			if run(args, jsonOutput, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON")
+	cmd.Flags().BoolVar(&orphaned, "orphaned", false, "List the city's queued nudges whose key no open session matches")
 	return cmd
 }
 
@@ -430,7 +451,9 @@ func newNudgeDropCmd(stdout, stderr io.Writer) *cobra.Command {
 
 Each dropped nudge is terminalized through the same dead-letter path a
 failed delivery attempt uses, so it lands in "gc nudge status" as dead
-rather than disappearing silently. Find IDs with "gc nudge status".
+rather than disappearing silently. Find IDs with "gc nudge status", and
+the IDs of nudges left for sessions that have closed with
+"gc nudge status --orphaned".
 
 Dropping an in-flight nudge dead-letters it even if it was already
 injected into the session but not yet acked.

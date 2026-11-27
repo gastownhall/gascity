@@ -5,13 +5,26 @@
     "schema_version",
     "ok",
     "command",
-    "city_path",
-    "agent",
-    "session",
-    "counts",
-    "pending",
-    "in_flight",
-    "dead"
+    "city_path"
+  ],
+  "anyOf": [
+    {
+      "description": "The per-session view: gc nudge status [session].",
+      "required": [
+        "agent",
+        "session",
+        "counts",
+        "pending",
+        "in_flight",
+        "dead"
+      ]
+    },
+    {
+      "description": "The city-wide orphan view: gc nudge status --orphaned.",
+      "required": [
+        "orphaned"
+      ]
+    }
   ],
   "properties": {
     "schema_version": {
@@ -71,6 +84,12 @@
       "type": "array",
       "items": {
         "$ref": "#/$defs/nudge"
+      }
+    },
+    "orphaned": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/orphan"
       }
     }
   },
@@ -156,6 +175,78 @@
         }
       },
       "additionalProperties": true
+    },
+    "orphan": {
+      "type": "object",
+      "required": [
+        "id",
+        "agent",
+        "bucket",
+        "source",
+        "deliver_after",
+        "expires_at",
+        "resolution",
+        "message"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "bead_id": {
+          "type": "string"
+        },
+        "agent": {
+          "type": "string"
+        },
+        "bucket": {
+          "enum": [
+            "pending",
+            "in_flight",
+            "dead"
+          ]
+        },
+        "source": {
+          "type": "string"
+        },
+        "deliver_after": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "dead_reason": {
+          "type": "string"
+        },
+        "fence_session_id": {
+          "type": "string"
+        },
+        "fence_session_state": {
+          "type": "string"
+        },
+        "resolution": {
+          "enum": [
+            "successor",
+            "seat-vacant",
+            "seat-ambiguous",
+            "not-pool-seat",
+            "fenced-session-live",
+            "fenced-session-unknown",
+            "unfenced",
+            "startup-turn",
+            "lookup-error",
+            "lookup-deferred"
+          ]
+        },
+        "successor": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": true
