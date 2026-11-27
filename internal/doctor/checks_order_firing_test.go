@@ -411,6 +411,23 @@ CUSTOM_ORDER_FLAG = "enabled"
 	}
 }
 
+// A malformed order file is a scan error, not a skipped order: the config
+// load no longer parses order files, so doctor is where it surfaces.
+func TestOrderFiringCurrent_ReportsMalformedOrderFile(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "cleanup-cooldown", "cooldown", "4h")
+	writeOrderFiringRawOrder(t, cityPath, "broken", "[order\nformula = ")
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusError {
+		t.Fatalf("status = %v, want Error; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	if !strings.Contains(result.Message, "scan orders") || !strings.Contains(result.Message, "broken") {
+		t.Fatalf("message = %q, want the malformed order named in a scan error", result.Message)
+	}
+}
+
 func TestOrderFiringCurrent_SkipsReservedExecEnvDuringScan(t *testing.T) {
 	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
 	cityPath, cfg := orderFiringTestCity(t)

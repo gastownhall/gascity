@@ -110,6 +110,66 @@ CUSTOM_ORDER_FLAG = "enabled"
 	}
 }
 
+// The config load checks a pack's order layout without parsing its orders:
+// a malformed flat order file does not fail the load. Orders are parsed, and
+// a malformed one reported, where they are consumed (order discovery, gc
+// doctor, gc config show --validate).
+func TestExpandPacksDoesNotParseFlatOrders(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "packs/tools/pack.toml", `
+[pack]
+name = "tools"
+version = "1.0.0"
+schema = 1
+`)
+	writeFile(t, dir, "packs/tools/orders/broken.toml", "[order\nformula = ")
+
+	cfg := &City{
+		Rigs: []Rig{
+			{Name: "demo", Path: "/work", Includes: []string{"packs/tools"}},
+		},
+	}
+
+	if err := ExpandPacks(cfg, fsys.OSFS{}, dir, nil); err != nil {
+		t.Fatalf("ExpandPacks: %v, want a malformed flat order to be left to the order consumers", err)
+	}
+}
+
+func TestExpandPacksRejectsLegacyOrderLayouts(t *testing.T) {
+	for _, tc := range []struct {
+		name, path, hint string
+	}{
+		{"orders subdirectory", "packs/tools/orders/deploy/order.toml", "rename to orders/deploy.toml"},
+		{"formula-layer orders", "packs/tools/formulas/orders/deploy/order.toml", "move to orders/deploy.toml"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, dir, "packs/tools/pack.toml", `
+[pack]
+name = "tools"
+version = "1.0.0"
+schema = 1
+`)
+			// Unparseable on purpose: the layout alone is what the load rejects.
+			writeFile(t, dir, tc.path, "[order\nformula = ")
+
+			cfg := &City{
+				Rigs: []Rig{
+					{Name: "demo", Path: "/work", Includes: []string{"packs/tools"}},
+				},
+			}
+
+			err := ExpandPacks(cfg, fsys.OSFS{}, dir, nil)
+			if err == nil {
+				t.Fatal("ExpandPacks succeeded, want the deprecated order layout rejected")
+			}
+			if !strings.Contains(err.Error(), "unsupported PackV1 order path") || !strings.Contains(err.Error(), tc.hint) {
+				t.Fatalf("ExpandPacks error = %v, want an unsupported PackV1 order path finding with hint %q", err, tc.hint)
+			}
+		})
+	}
+}
+
 func TestExpandPacks_MultipleRigs(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "packs/gastown/pack.toml", `
