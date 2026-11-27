@@ -158,15 +158,17 @@ func hookDeadlineAllowsNudgeAck(what string, stderr io.Writer) bool {
 	return true
 }
 
-// hookInvocationDeadline is the deadline this gc hook invocation answers by:
+// hookInvocationDeadline is this gc hook invocation's deadline:
 // hookProcessStart plus timeout (gc hook --timeout; zero for none), or the
 // deadline gc hook run handed it in hookDeadlineEnv, whichever is earlier. ok
-// is false when there is neither. An inherited value that does not parse, or
-// that had already passed when this process started, is ignored with a note on
-// stderr, as childHookDeadline ignores it: gc hook run, its only writer, always
-// writes a valid future instant, so such a value is leaked environment. One
-// that passes during startup is still this invocation's deadline: its reads
-// stop at once and the hook answers that they did.
+// is false when there is neither. It bounds the store reads (hookReadContext)
+// and, with --claim, the claim fence and mutation (hookClaimOps.Deadline);
+// nothing else in the invocation runs under it. An inherited value that does
+// not parse, or that had already passed when this process started, is ignored
+// with a note on stderr, as childHookDeadline ignores it: gc hook run, its
+// only writer, always writes a valid future instant, so such a value is leaked
+// environment. One that passes during startup is still this invocation's
+// deadline: its reads stop at once and the hook answers that they did.
 func hookInvocationDeadline(timeout time.Duration, stderr io.Writer) (time.Time, bool) {
 	var deadline time.Time
 	ok := false

@@ -652,7 +652,8 @@ func TestClaimStoreWithFallbackUsesSelectedStoreWhenStillReady(t *testing.T) {
 
 // pinHookStoreLegsSerial reads store legs one at a time, in store order, for
 // the rest of t: tests that assert the order of reads, or record them in a
-// shared slice, pin it.
+// shared slice, pin it. A runner that only counts or keys its reads guards
+// them with a lock instead, so the test still reads the legs concurrently.
 func pinHookStoreLegsSerial(t *testing.T) {
 	t.Helper()
 	prev := hookStoreLegConcurrency
@@ -690,6 +691,39 @@ func TestBestStoreWithWorkOverlapsStoreLegs(t *testing.T) {
 	}
 	if strings.TrimSpace(out) != "[]" || !isZeroHookStore(selected) {
 		t.Fatalf("out = %q, store = %+v; want the no-work answer []", out, selected)
+	}
+}
+
+// TestHookStoreLegsNameEveryLegTheDeadlineStops pins how a store leg reports a
+// read context that ended before the leg started (#5533): a hook deadline that
+// had already passed when the legs were dispatched, or that passed while a leg
+// waited for a slot. Such a leg answers as a leg the deadline stopped mid-read
+// does, naming its own command and the hook deadline, never with a bare
+// context error. The dispatcher picks at random between starting a leg and
+// seeing the context done, so every round reads the legs afresh.
+func TestHookStoreLegsNameEveryLegTheDeadlineStops(t *testing.T) {
+	const command = "shared query"
+	deadline := time.Now().Add(-time.Second)
+	stores := []hookStore{{dir: "city"}, {dir: "riga", command: "riga query"}, {dir: "rigb"}}
+	// run answers as shellWorkQueryWithEnvContext does for a read its context
+	// stopped.
+	run := func(ctx context.Context, query, _ string, _ []string) (string, error) {
+		<-ctx.Done()
+		return "", fmt.Errorf("running work query %q: %w", query, context.Cause(ctx))
+	}
+	for round := range 64 {
+		ctx, cancel := context.WithDeadlineCause(context.Background(), deadline, &errHookDeadlineReached{deadline: deadline})
+		legs := startHookStoreLegs(ctx, command, stores, run)
+		for i, st := range stores {
+			_, err := legs.result(i)
+			var reached *errHookDeadlineReached
+			if !errors.As(err, &reached) || !errors.Is(err, context.DeadlineExceeded) ||
+				!strings.Contains(fmt.Sprint(err), fmt.Sprintf("%q", hookStoreCommand(st, command))) {
+				t.Fatalf("round %d: leg %s answered %v; want its command and the hook deadline named", round, st.dir, err)
+			}
+		}
+		legs.cancel()
+		cancel()
 	}
 }
 
@@ -857,7 +891,10 @@ func TestBestStoreWithWorkSelectionIndependentOfCompletionOrder(t *testing.T) {
 				return
 			}
 			// The answering store is fast and every later leg would take far
-			// longer: an early answer must cancel them, not wait them out.
+			// longer: an early answer must cancel them, not wait them out. The
+			// answering leg returns only once every later leg has entered, so
+			// the cancel reaches running legs. A leg the cancel reaches before
+			// it starts is never run (TestHookStoreLegsNameEveryLegTheDeadlineStops).
 			const slow = 5 * time.Second
 			answering := 0
 			for i, st := range row.stores {
@@ -866,6 +903,7 @@ func TestBestStoreWithWorkSelectionIndependentOfCompletionOrder(t *testing.T) {
 				}
 			}
 			later := len(row.stores) - answering - 1
+			entered := make(chan struct{}, later)
 			canceled := make(chan string, later)
 			run := func(ctx context.Context, _, dir string, _ []string) (string, error) {
 				i := 0
@@ -875,9 +913,21 @@ func TestBestStoreWithWorkSelectionIndependentOfCompletionOrder(t *testing.T) {
 					}
 				}
 				a := row.answers[dir]
-				if i <= answering {
+				if i < answering {
 					return a.out, a.err
 				}
+				if i == answering {
+					timeout := time.After(slow)
+					for n := 0; n < later; n++ {
+						select {
+						case <-entered:
+						case <-timeout:
+							return "", fmt.Errorf("only %d of %d later legs started while answering leg %s waited %s", n, later, dir, slow)
+						}
+					}
+					return a.out, a.err
+				}
+				entered <- struct{}{}
 				select {
 				case <-time.After(slow):
 					return a.out, a.err

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -191,13 +192,13 @@ func TestHookClaimRefusesCandidatePastDeadlineFence(t *testing.T) {
 
 // TestHookClaimReleasesLandingPastDeadline pins AC-5 of #5533: under
 // `gc hook --claim --timeout 15s`, a claim mutation that starts inside the
-// fence runs on the 4s claim reserve, never past the 12s at which the hook
-// must answer, and a claim that still lands after those 12s is released as a
-// straddle (claim_window_straddled) with nothing on stdout, rather than
-// handed to a caller whose budget is gone.
+// fence runs on the 4s claim reserve, never past the 12s by which the claim
+// must land (the deadline less its 3s answer margin), and a claim that still
+// lands after those 12s is released as a straddle (claim_window_straddled)
+// with nothing on stdout, rather than handed to a caller whose budget is gone.
 func TestHookClaimReleasesLandingPastDeadline(t *testing.T) {
 	t.Setenv("GC_HOOK_CLAIM_WINDOW", "")
-	answerBy := 12 * time.Second
+	claimBy := 12 * time.Second
 
 	landingAt := func(c *deadlineClaim, landed time.Duration) {
 		claim := c.ops.Claim
@@ -218,9 +219,9 @@ func TestHookClaimReleasesLandingPastDeadline(t *testing.T) {
 		if !ok {
 			t.Fatal("the claim ran with no deadline")
 		}
-		if limit := c.t0.Add(answerBy); deadline.After(limit) {
-			t.Fatalf("claim deadline = %s past the invocation, want at most %s: the claim must not run past the time the hook answers by",
-				deadline.Sub(c.t0).Round(time.Millisecond), answerBy)
+		if limit := c.t0.Add(claimBy); deadline.After(limit) {
+			t.Fatalf("claim deadline = %s past the invocation, want at most %s: the claim must not run past the deadline less its answer margin",
+				deadline.Sub(c.t0).Round(time.Millisecond), claimBy)
 		}
 		if code == 0 {
 			t.Fatalf("exit = 0, want non-zero; stdout=%q stderr=%s", stdout, stderr)
@@ -250,4 +251,157 @@ func TestHookClaimReleasesLandingPastDeadline(t *testing.T) {
 			t.Fatalf("result = %+v, want work-1 delivered", result)
 		}
 	})
+}
+
+// TestHookClaimDeadlineBoundsOnlyTheReadsAndTheClaim pins how far the --claim
+// deadline reaches with every readback and write around the claim slow. The
+// store read and the claim mutation run under contexts that end by the
+// deadline less its answer margin. Nothing after them runs under the
+// deadline: the post-claim drain re-read, the identity stamp and its readback,
+// the work_started record, the current-claim stamp and an adopted claim's
+// ownership readback each keep their own budget, so the answer comes after
+// the deadline, as gc hook --help says it can. Their time is never charged to
+// the claim: a claim that landed in time is still handed out, and an adopted
+// claim is still served.
+//
+// Each slow step advances the clock the claim fences read (ops.Now) instead of
+// sleeping. The read and claim contexts are wall-clock contexts built from t0,
+// and the test ends long before any of them would.
+func TestHookClaimDeadlineBoundsOnlyTheReadsAndTheClaim(t *testing.T) {
+	t.Setenv("GC_HOOK_CLAIM_WINDOW", "")
+	// A 1.5s budget keeps a 500ms answer margin, so the read and the claim end
+	// by 1s: a 667ms claim window and a 333ms reserve. Five 400ms steps after
+	// a prompt read and claim end past the 1.5s deadline.
+	const (
+		budget    = 1500 * time.Millisecond
+		stepDelay = 400 * time.Millisecond
+	)
+	for _, tc := range []struct {
+		name, output, reason string
+		minted               bool
+		steps                []string
+	}{
+		{
+			name: "a claim minted in time", output: startedRoutedWork, reason: "claimed", minted: true,
+			steps: []string{"drain_pending", "stamp", "readback", "record", "current"},
+		},
+		{
+			name: "an adopted claim", output: startedAssignedWork, reason: "existing_assignment",
+			steps: []string{"readback", "stamp", "readback", "record", "current"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t0 := time.Now()
+			clock := t0
+			prevStart := hookProcessStart
+			hookProcessStart = t0
+			t.Cleanup(func() { hookProcessStart = prevStart })
+			deadline := t0.Add(budget)
+			claimBy := deadline.Add(-hookArchiveMargin(deadline, t0))
+
+			l := &startedLog{}
+			ops := l.ops(tc.output, nil, func(string, hookStartedFence, hookStartedKey, string) (hookStartedResult, error) {
+				return hookStartedRecorded, nil
+			})
+			ops.Runner = nil
+			ops.InvokedAt, ops.Deadline = t0, deadline
+			ops.Now = func() time.Time { return clock }
+			ops.Sleep = func(d time.Duration) { clock = clock.Add(d) }
+			ops.ListContinuation = func(context.Context, string, []string, string, string) ([]beads.Bead, error) {
+				return nil, nil
+			}
+			var (
+				claimed  bool
+				claimCtx context.Context
+				steps    []string
+				// stepEnds holds the deadline of each step that takes a context.
+				stepEnds []time.Time
+			)
+			slow := func(step string) {
+				steps = append(steps, step)
+				clock = clock.Add(stepDelay)
+			}
+			slowWithin := func(ctx context.Context, step string) {
+				end, _ := ctx.Deadline()
+				stepEnds = append(stepEnds, end)
+				slow(step)
+			}
+			claim := ops.Claim
+			ops.Claim = func(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
+				claimCtx, claimed = ctx, true
+				return claim(ctx, dir, env, beadID, assignee)
+			}
+			// The drain probe also runs before the claim; only its re-read
+			// after the claim landed is part of what follows the claim.
+			ops.DrainPending = func(string) (bool, error) {
+				if claimed {
+					slow("drain_pending")
+				}
+				return false, nil
+			}
+			ops.StampWorkMeta = func(ctx context.Context, _ string, _ []string, _, _ string, _ map[string]string) error {
+				slowWithin(ctx, "stamp")
+				return nil
+			}
+			ops.ReadWorkMeta = func(ctx context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, error) {
+				slowWithin(ctx, "readback")
+				return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee}, nil
+			}
+			record := ops.RecordWorkStarted
+			ops.RecordWorkStarted = func(sessionID string, fence hookStartedFence, key hookStartedKey, via string) (hookStartedResult, error) {
+				slow("record")
+				return record(sessionID, fence, key, via)
+			}
+			stampClaim := ops.StampSessionClaim
+			ops.StampSessionClaim = func(sessionID, beadID string) error {
+				slow("current")
+				return stampClaim(sessionID, beadID)
+			}
+
+			// The session env rides on the store leg: the claim takes its env
+			// from there, and without it every session-scoped step is skipped.
+			env := startedEnv(startedToken, "7")
+			var readCtx context.Context
+			run := func(ctx context.Context, _, _ string, _ []string) (string, error) {
+				readCtx = ctx
+				return tc.output, nil
+			}
+			var stdout, stderr bytes.Buffer
+			code := claimHookWorkWithRunner("q", "/rig", env, []hookStore{{dir: "/rig", env: env}}, startedOpts(env), ops, run, func(string, error) {}, &stdout, &stderr)
+			answered := clock.Sub(t0)
+
+			if code != 0 || len(l.releases) != 0 {
+				t.Fatalf("exit = %d, releases = %v; want the claim handed out; stderr=%s", code, l.releases, stderr.String())
+			}
+			if got := decodeTurnBoundResult(t, stdout.String()); got.Action != "work" || got.BeadID != "work-1" || got.Reason != tc.reason {
+				t.Fatalf("result = %+v, want work-1 handed out as %s", got, tc.reason)
+			}
+			if readCtx == nil {
+				t.Fatal("the store was never read")
+			}
+			if end, ok := readCtx.Deadline(); !ok || !end.Equal(claimBy) {
+				t.Fatalf("store read ran until %s in (deadline set %t), want %s in: the deadline less its answer margin",
+					end.Sub(t0), ok, claimBy.Sub(t0))
+			}
+			if tc.minted {
+				if claimCtx == nil {
+					t.Fatal("no claim mutation ran")
+				}
+				if end, ok := claimCtx.Deadline(); !ok || end.After(claimBy) {
+					t.Fatalf("claim mutation ran until %s in (deadline set %t), want at most %s in", end.Sub(t0), ok, claimBy.Sub(t0))
+				}
+			}
+			if !slices.Equal(steps, tc.steps) {
+				t.Fatalf("slow steps = %v, want %v", steps, tc.steps)
+			}
+			for i, end := range stepEnds {
+				if !end.After(deadline) {
+					t.Fatalf("step %d with a context ran until %s in, want its own budget, past the %s deadline", i, end.Sub(t0), budget)
+				}
+			}
+			if answered <= budget {
+				t.Fatalf("answered %s in, want past the %s deadline: the slow steps after the claim did not run", answered.Round(time.Millisecond), budget)
+			}
+		})
+	}
 }

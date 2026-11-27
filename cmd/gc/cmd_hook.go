@@ -80,15 +80,24 @@ answer up. A failed query is also recorded as a session.work_query_failed event,
 one per store that failed, naming it.
 
 With --timeout <duration>, or a GC_HOOK_DEADLINE inherited from gc hook run,
-the hook answers before that deadline (the earlier of the two). The stores are
-read concurrently, and a read still running when only the answer margin is
-left (a third of the budget, at most 3s) is stopped, its process group killed:
-it is a failed read like any other, so with no other store serving work the
-hook exits 2 with GC_HOOK_STORE_UNAVAILABLE and the hook deadline named on
-stderr. With --claim, the claim fence and its mutation reserve also fit
-inside the deadline. An inherited GC_HOOK_DEADLINE that does not parse or had
-already passed when the hook started is ignored with a note on stderr. With
-neither, each store read is bounded only by its own 150s timeout.
+the earlier of the two is the hook deadline. It bounds the store reads: the
+stores are read concurrently, and a read still running when only the answer
+margin is left (a third of the budget, at most 3s) is stopped, its process
+group killed. A stopped read is a failed read like any other, so with no
+other store serving work the hook exits 2 with GC_HOOK_STORE_UNAVAILABLE and
+the hook deadline named on stderr. With --claim it bounds the claim too: the
+claim fence and the claim mutation end by that same point, and a claim that
+lands later is released rather than handed out. Nothing else runs under the
+deadline. The session row reads and writes (the drain fences and drain-ack,
+the work_started record, the current-claim stamp), an adopted claim's
+ownership readback, a late claim's release, and the claimed bead's identity
+stamps, continuation assignment and --worktree provisioning keep their own
+budgets, so the answer can come after the deadline: a caller that kills a
+--claim at the deadline can lose the answer to a claim that landed, and the
+session's next --claim serves that claim again. An inherited GC_HOOK_DEADLINE
+that does not parse or had already passed when the hook started is ignored
+with a note on stderr. With neither, each store read is bounded only by its
+own 150s timeout.
 
 Before the work query, a session keyed by $GC_SESSION_ID is checked for a
 pending drain (the drain fence), with and without --claim. A draining session
@@ -139,7 +148,7 @@ The agent is determined from $GC_AGENT or a positional argument.`,
 	cmd.Flags().BoolVar(&claim, "claim", false, "atomically claim one routed work item for the current session")
 	cmd.Flags().BoolVar(&drainAck, "drain-ack", false, "with --claim, acknowledge runtime drain when no work is available")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit a JSON protocol result (always with --claim; on the discovery door only for a drain refusal)")
-	cmd.Flags().DurationVar(&timeout, "timeout", 0, "answer before this budget runs out: store reads stop early enough to report it (0: no budget; an inherited GC_HOOK_DEADLINE also bounds it)")
+	cmd.Flags().DurationVar(&timeout, "timeout", 0, "end the store reads and the claim mutation a margin before this budget runs out (0: no budget; an inherited GC_HOOK_DEADLINE also bounds them)")
 	cmd.Flags().BoolVar(&worktree, "worktree", false, "with --claim, create or verify a gc-owned git worktree for the claimed work (Git LFS content is not smudged)")
 	if flag := cmd.Flags().Lookup("hook-format"); flag != nil {
 		flag.Hidden = true
@@ -951,7 +960,8 @@ func claimHookWork(city *hookCity, workQuery, workDir string, queryEnv []string,
 // claimHookWorkProvisioning is claimHookWork with the claimed bead's worktree
 // provisioned before its receipt is delivered (gc hook --claim --worktree).
 // A nil provisionWorktree is the plain claim. deadline is the invocation
-// deadline the claim answers by (hookInvocationDeadline), zero for none.
+// deadline (hookInvocationDeadline), zero for none: it bounds the claim's
+// reads, fence and mutation, not the writes after the claim lands.
 func claimHookWorkProvisioning(city *hookCity, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, provisionWorktree hookProvisionWorktreeFunc, deadline time.Time, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
 	// The city relocates a class and its front door could not be projected.
 	// Claiming through the work store anyway would write ownership into a

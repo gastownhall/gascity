@@ -347,11 +347,12 @@ type hookClaimOps struct {
 	// fresh one each time the loop copies the ops.
 	InvokedAt   time.Time
 	ClaimWindow time.Duration
-	// Deadline is the invocation deadline this claim answers by (gc hook
-	// --timeout, or an inherited GC_HOOK_DEADLINE), zero for none. With one,
-	// applyDefaults fits ClaimWindow and ClaimReserve inside it, so a claim
-	// that starts inside the window lands before the deadline less the answer
-	// margin.
+	// Deadline is the invocation deadline (gc hook --timeout, or an inherited
+	// GC_HOOK_DEADLINE), zero for none. With one, applyDefaults fits
+	// ClaimWindow and ClaimReserve inside it, so a claim that starts inside the
+	// window lands before the deadline less the answer margin or is released.
+	// Only the claim is fitted: the readbacks and writes around it keep their
+	// own budgets.
 	Deadline time.Time
 	// ClaimReserve is the budget a claim mutation that passed the window gets
 	// (claimMutationContext): hookClaimMutationTimeout without a deadline, a
@@ -804,9 +805,10 @@ func (ops *hookClaimOps) applyDefaults() {
 	}
 	// The window and the reserve share the time from the invocation to the
 	// deadline less the answer margin, so a claim that starts inside the
-	// window lands by the time the hook must answer. Both floor at 1ns: zero
-	// reads as unset (claimWindowOrDefault), and a spent budget must read as
-	// spent.
+	// window lands by then or is released (claimLandingWindowSpent). The
+	// writes after it lands are not fitted: they keep their own budgets and
+	// can run past the deadline. Both floor at 1ns: zero reads as unset
+	// (claimWindowOrDefault), and a spent budget must read as spent.
 	work := ops.Deadline.Add(-hookArchiveMargin(ops.Deadline, hookProcessStart)).Sub(ops.InvokedAt)
 	ops.ClaimReserve = max(min(hookClaimMutationTimeout, work/3), time.Nanosecond)
 	ops.ClaimWindow = max(min(ops.ClaimWindow, work-ops.ClaimReserve), time.Nanosecond)
@@ -888,7 +890,7 @@ func (ops *hookClaimOps) claimWindowOrDefault() time.Duration {
 // inside it owns a separate, full mutation budget (claimMutationContext), so
 // only a CAS that overran that reserved budget is a straddle. Under an
 // invocation deadline the window plus the reserve ends at the deadline less
-// the answer margin, so a claim landing after the hook must answer is released.
+// the answer margin, so a claim landing after that point is released.
 //
 // landedAt is the instant the claim CAS returned, stamped by the tier that ran
 // it, and the landing age is taken there rather than now. The question is

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"unicode/utf8"
 
@@ -322,9 +323,13 @@ func TestClaimHookWorkRecordsEachFailedRigOnceAcrossRetries(t *testing.T) {
 		{dir: "riga", env: []string{"GC_STORE=riga"}, rig: "riga"},
 		{dir: "rigb", env: []string{"GC_STORE=rigb"}, rig: "rigb"},
 	}
+	// The legs run concurrently, so the read count is locked.
+	var mu sync.Mutex
 	reads := map[string]int{}
 	run := hookRigLegRunner("/city", nil, stores, func(_ context.Context, _, dir string, _ []string) (string, error) {
+		mu.Lock()
 		reads[dir]++
+		mu.Unlock()
 		if dir == "city" {
 			return "[]", nil
 		}
@@ -338,8 +343,11 @@ func TestClaimHookWorkRecordsEachFailedRigOnceAcrossRetries(t *testing.T) {
 	if code != 1 || stdout.Len() != 0 {
 		t.Fatalf("claim over failing rigs = %d stdout=%q, want 1 with no result; stderr=%s", code, stdout.String(), stderr.String())
 	}
-	if reads["riga"] < 2 {
-		t.Fatalf("riga read %d times, want the bounded retry to re-read it", reads["riga"])
+	mu.Lock()
+	rigaReads := reads["riga"]
+	mu.Unlock()
+	if rigaReads < 2 {
+		t.Fatalf("riga read %d times, want the bounded retry to re-read it", rigaReads)
 	}
 	if len(rec.Events) != 2 {
 		t.Fatalf("events = %+v, want one per failed rig", rec.Events)

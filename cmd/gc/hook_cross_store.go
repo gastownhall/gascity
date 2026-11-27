@@ -131,8 +131,10 @@ type hookStoreLegResult struct {
 // hookStoreLegs reads the legs of one bestStoreWithWork call. Legs are started
 // in store order, at most hookStoreLegConcurrency at once, and their answers
 // are taken in store order (result), so the selection over them is the one a
-// serial read makes. cancel stops every leg still running; a canceled leg's
-// answer is never taken.
+// serial read makes. Once its caller takes no more answers, cancel stops
+// every leg still running. A leg the read context ended before it started (the
+// hook deadline) answers with its own command and that context's cause, as
+// shellWorkQueryWithEnvContext answers for a read the deadline stopped.
 type hookStoreLegs struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
@@ -162,8 +164,8 @@ func startHookStoreLegs(ctx context.Context, command string, stores []hookStore,
 			select {
 			case slots <- struct{}{}:
 			case <-legCtx.Done():
-				for _, pending := range legs.results[i:] {
-					pending <- hookStoreLegResult{err: legCtx.Err()}
+				for j := i; j < len(stores); j++ {
+					legs.results[j] <- hookStoreLegResult{err: fmt.Errorf("running work query %q: not started: %w", hookStoreCommand(stores[j], command), context.Cause(legCtx))}
 				}
 				return
 			}

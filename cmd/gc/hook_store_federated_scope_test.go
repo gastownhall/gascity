@@ -6,6 +6,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -216,14 +217,20 @@ func TestBestStoreWithWorkRunsEachStoresOwnCommand(t *testing.T) {
 		{dir: "city", env: []string{"GC_STORE=city"}},
 		{dir: "riga", env: []string{"GC_STORE=riga"}, command: "single-store query"},
 	}
+	// The legs run concurrently, so the record of what each ran is locked.
+	var mu sync.Mutex
 	ran := map[string]string{}
 	run := func(_ context.Context, command, dir string, _ []string) (string, error) {
+		mu.Lock()
+		defer mu.Unlock()
 		ran[dir] = command
 		return `[]`, nil
 	}
 	if _, _, err := bestStoreWithWork(context.Background(), "federated query", stores, stores[0], run); err != nil {
 		t.Fatalf("bestStoreWithWork: %v", err)
 	}
+	mu.Lock()
+	defer mu.Unlock()
 	if ran["city"] != "federated query" {
 		t.Fatalf("primary store ran %q, want the shared federated query", ran["city"])
 	}

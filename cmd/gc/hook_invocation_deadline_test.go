@@ -63,21 +63,18 @@ func runHookForDeadline(opts hookCommandOptions) hookRun {
 	return hookRun{code: code, stdout: stdout.String(), stderr: stderr.String(), elapsed: time.Since(start)}
 }
 
-// hookTestProcessGone reports whether pid has exited: no such process, or a
-// zombie waiting to be reaped.
-func hookTestProcessGone(pid int) bool {
-	if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
-		return true
-	}
-	raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-	if err != nil {
-		return false
-	}
-	i := bytes.LastIndexByte(raw, ')')
-	return i >= 0 && i+2 < len(raw) && raw[i+2] == 'Z'
-}
+// slowLegStopGrace bounds how long assertSlowLegsKilled waits for a killed
+// slow leg to exit. It is a safety deadline: a leg the hook killed is gone, or
+// a zombie, within milliseconds of the answer.
+const slowLegStopGrace = 2 * time.Second
 
-// assertSlowLegsKilled fails unless every PID the slow legs logged has exited.
+// assertSlowLegsKilled fails unless every PID the slow legs logged has
+// stopped: gone, or a zombie (pidAlive). SIGKILL to a slow leg's process group
+// is delivered by the time the hook answers, but the exit itself is the
+// kernel's to finish, and nothing signals it to the test, so this polls the
+// process table on a ticker, as waitForProviderOwnedPIDStopped does. A leg
+// still running at slowLegStopGrace is killed, and the test fails with its
+// last observed state.
 func assertSlowLegsKilled(t *testing.T, pidLog string) {
 	t.Helper()
 	raw, err := os.ReadFile(pidLog)
@@ -87,20 +84,27 @@ func assertSlowLegsKilled(t *testing.T, pidLog string) {
 	if err != nil {
 		t.Fatalf("read pid log: %v", err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), slowLegStopGrace)
+	defer cancel()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
 	for _, field := range strings.Fields(string(raw)) {
 		pid, err := strconv.Atoi(field)
 		if err != nil {
 			t.Fatalf("pid log entry %q: %v", field, err)
 		}
-		// SIGKILL to the leg's process group is delivered by the time the
-		// hook answers; the exit itself is the kernel's to finish.
-		gone := time.Now().Add(2 * time.Second)
-		for !hookTestProcessGone(pid) {
-			if time.Now().After(gone) {
+		for pidAlive(pid) {
+			select {
+			case <-ctx.Done():
+				stat, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+				state := strings.TrimSpace(string(stat))
+				if err != nil {
+					state = err.Error()
+				}
 				_ = syscall.Kill(pid, syscall.SIGKILL)
-				t.Fatalf("slow leg pid %d still running after the hook answered", pid)
+				t.Fatalf("slow leg pid %d still running %s after the hook answered; last state: %s", pid, slowLegStopGrace, state)
+			case <-ticker.C:
 			}
-			time.Sleep(10 * time.Millisecond)
 		}
 	}
 }
@@ -190,6 +194,18 @@ func TestHookDiscoveryAnswersBeforeDeadline(t *testing.T) {
 			t.Errorf("stderr = %q, want the deadline honored, not ignored", got.stderr)
 		}
 		assertAnsweredAtDeadline(t, got, pidLog)
+	})
+	t.Run("a GC_HOOK_DEADLINE that passes during startup stops every store's read", func(t *testing.T) {
+		// Two stores: the legs are dispatched under a read context that is
+		// already done, so a leg is either never started or stopped at once,
+		// and the agent's own store must name the hook deadline either way.
+		pidLog := deadlineHookCity(t, "[[rigs]]\nname = \"riga\"\npath = \"rigs/riga\"\n\n"+customQuery(slowLegScript), "")
+		if err := os.MkdirAll(filepath.Join(os.Getenv("GC_CITY"), "rigs", "riga"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		hookProcessStart = time.Now().Add(-time.Second)
+		t.Setenv(hookDeadlineEnv, hookDeadlineEnvValue(time.Now().Add(-time.Millisecond)))
+		assertAnsweredAtDeadline(t, runHookForDeadline(hookCommandOptions{}), pidLog)
 	})
 	t.Run("--inject ignores --timeout and reads nothing", func(t *testing.T) {
 		pidLog := deadlineHookCity(t, singleStore, slowLegScript)

@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,6 +28,8 @@ type failureHookHarness struct {
 	// answers is consulted per (dir, attempt): the runner pops the next scripted
 	// answer for that leg, repeating the last one forever after.
 	answers map[string][]hookRunnerAnswer
+	// mu guards calls: the legs of a multi-store claim run concurrently.
+	mu      sync.Mutex
 	calls   map[string]int
 	drained bool
 	events  []events.Event
@@ -45,8 +49,10 @@ func (h *failureHookHarness) script(dir string, answers ...hookRunnerAnswer) {
 }
 
 func (h *failureHookHarness) run(_ context.Context, _, dir string, _ []string) (string, error) {
+	h.mu.Lock()
 	n := h.calls[dir]
 	h.calls[dir]++
+	h.mu.Unlock()
 	scripted := h.answers[dir]
 	if len(scripted) == 0 {
 		return "[]", nil
@@ -55,6 +61,13 @@ func (h *failureHookHarness) run(_ context.Context, _, dir string, _ []string) (
 		n = len(scripted) - 1
 	}
 	return scripted[n].out, scripted[n].err
+}
+
+// reads is a snapshot of how many times the runner has read each dir.
+func (h *failureHookHarness) reads() map[string]int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return maps.Clone(h.calls)
 }
 
 func (h *failureHookHarness) ops() hookClaimOps {
@@ -160,8 +173,8 @@ func TestClaimQueryFailureIsRetriedThenReportedNotDrained(t *testing.T) {
 	if h.drained {
 		t.Fatal("drain was acknowledged for a failed read; the seat must be retained")
 	}
-	if want := 1 + hookClaimQueryRetryAttempts; h.calls["/rig"] != want {
-		t.Fatalf("primary-leg reads = %d, want %d (one attempt plus %d bounded retries)", h.calls["/rig"], want, hookClaimQueryRetryAttempts)
+	if want := 1 + hookClaimQueryRetryAttempts; h.reads()["/rig"] != want {
+		t.Fatalf("primary-leg reads = %d, want %d (one attempt plus %d bounded retries)", h.reads()["/rig"], want, hookClaimQueryRetryAttempts)
 	}
 	if len(h.events) == 0 {
 		t.Fatal("no session.work_query_failed event recorded for an ordinary query failure")
@@ -246,8 +259,8 @@ func TestClaimQueryEmptyStillDrainsWithoutAnEvent(t *testing.T) {
 	if len(h.events) != 0 {
 		t.Fatalf("events = %v, want none for a genuinely empty read", h.events)
 	}
-	if h.calls["/rig"] != 1 {
-		t.Fatalf("reads = %d, want exactly 1 (emptiness is not retried)", h.calls["/rig"])
+	if h.reads()["/rig"] != 1 {
+		t.Fatalf("reads = %d, want exactly 1 (emptiness is not retried)", h.reads()["/rig"])
 	}
 }
 
