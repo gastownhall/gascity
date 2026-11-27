@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -257,7 +258,9 @@ func invocationCost(registry *pricing.Registry, family string, u sessionlog.Tail
 // had no entry for the (family, model) pair; cost is then left zero and must be
 // read as "not measured", never as a free invocation. At prefers the
 // transcript entry's own Timestamp when the extractor populated one, falling
-// back to now for providers whose tail extraction leaves it zero.
+// back to now for providers whose tail extraction leaves it zero. That
+// fallback is the event time only: UsageStart and UsageEnd stay zero when
+// the transcript did not prove them, and are never filled from At or now.
 func modelUsageFact(u sessionlog.TailUsage, meta map[string]string, beadID, sessionID, worker, providerFamily string, cost float64, priced bool, now time.Time, formulaName string) usage.Fact {
 	// beadID and sessionID are the session bead id and the run-id fallback — the
 	// same fields the retired ResolveRunID(bead.Metadata, bead.ID, sessionID) read
@@ -278,6 +281,14 @@ func modelUsageFact(u sessionlog.TailUsage, meta map[string]string, beadID, sess
 	if !u.Timestamp.IsZero() {
 		at = u.Timestamp
 	}
+	var usageStart, usageEnd int64
+	if !u.Timestamp.IsZero() {
+		usageEnd = u.Timestamp.UnixMilli()
+	}
+	if !u.StartedAt.IsZero() && (u.Timestamp.IsZero() || u.StartedAt.Before(u.Timestamp)) {
+		usageStart = u.StartedAt.UnixMilli()
+	}
+	generation, epoch := provenSessionIncarnation(meta)
 	return usage.Fact{
 		RunID:     runID,
 		SessionID: strings.TrimSpace(sessionID),
@@ -289,14 +300,43 @@ func modelUsageFact(u sessionlog.TailUsage, meta map[string]string, beadID, sess
 		Provider:            strings.TrimSpace(providerFamily),
 		InputTokens:         u.InputTokens,
 		OutputTokens:        u.OutputTokens,
+		ReasoningTokens:     u.ReasoningTokens,
 		CacheReadTokens:     u.CacheReadTokens,
 		CacheCreationTokens: u.CacheCreationTokens,
+		UsageStart:          usageStart,
+		UsageEnd:            usageEnd,
+		RuntimeGeneration:   generation,
+		RuntimeEpoch:        epoch,
+		AccountRef:          strings.TrimSpace(meta[usage.AccountRefMetadataKey]),
 		CostUSDEstimate:     cost,
 		Unpriced:            !priced,
 		UpstreamReqID:       reqID,
 		At:                  at.UnixMilli(),
 		IdempotencyKey:      usage.ModelIdempotencyKey(runID, reqID),
 	}
+}
+
+// provenSessionIncarnation reads the session row's generation and
+// continuation epoch, the same keys Incarnation.IdentityPatch records.
+// Both must be positive integers. A missing, malformed, or non-positive
+// value leaves the incarnation unknown: this does not substitute
+// session.DefaultGeneration the way InputFenceFor does, because a default
+// would record an incarnation the row did not prove.
+func provenSessionIncarnation(meta map[string]string) (generation, epoch int64) {
+	g, gOK := positiveMetaInt(meta["generation"])
+	e, eOK := positiveMetaInt(meta["continuation_epoch"])
+	if !gOK || !eOK {
+		return 0, 0
+	}
+	return g, e
+}
+
+func positiveMetaInt(raw string) (int64, bool) {
+	n, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 // invocationUsageSpec binds one transcript provider family to its bounded

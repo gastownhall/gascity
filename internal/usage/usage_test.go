@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -49,7 +50,9 @@ func TestUsageFactJSONRoundTrip(t *testing.T) {
 		FormulaName: "my-formula",
 		Kind:        KindModel,
 		Upstream:    "manifold", Model: "coder", Backing: "claude-opus-4-8", Provider: "anthropic",
-		InputTokens: 100, OutputTokens: 200, CacheReadTokens: 50, CacheCreationTokens: 10,
+		InputTokens: 100, OutputTokens: 200, ReasoningTokens: 7, CacheReadTokens: 50, CacheCreationTokens: 10,
+		UsageStart: 1_700_000_000_000, UsageEnd: 1_700_000_030_000,
+		RuntimeGeneration: 4, RuntimeEpoch: 2, AccountRef: "acct-opaque",
 		CostUSDEstimate: 0.0042, Unpriced: false,
 		UpstreamReqID: "msg-abc", At: 1_700_000_000_000,
 		IdempotencyKey: ModelIdempotencyKey("run-1", "msg-abc"),
@@ -86,6 +89,48 @@ func TestUnpricedFactKeepsTokensZeroCost(t *testing.T) {
 	}
 	if got["unpriced"] != true {
 		t.Fatal("unpriced flag must be present so rollups can exclude it")
+	}
+}
+
+func TestUsageFactOmitsUnknownSpanAndIdentity(t *testing.T) {
+	b, err := json.Marshal(Fact{Kind: KindModel, InputTokens: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{
+		"reasoning_tokens", "usage_start", "usage_end",
+		"runtime_generation", "runtime_epoch", "account_ref",
+	} {
+		if strings.Contains(string(b), key) {
+			t.Errorf("zero %s must be omitted, got %s", key, b)
+		}
+	}
+}
+
+func TestTotalsIgnoreSpanAndReasoning(t *testing.T) {
+	var got Totals
+	got.Add(Fact{
+		Kind:                KindModel,
+		InputTokens:         10,
+		OutputTokens:        4,
+		CacheReadTokens:     3,
+		CacheCreationTokens: 2,
+		ReasoningTokens:     99,
+		UsageStart:          1000,
+		UsageEnd:            2000,
+		RuntimeGeneration:   5,
+		RuntimeEpoch:        6,
+		AccountRef:          "acct",
+	})
+	want := Totals{
+		Invocations:         1,
+		InputTokens:         10,
+		OutputTokens:        4,
+		CacheReadTokens:     3,
+		CacheCreationTokens: 2,
+	}
+	if got != want {
+		t.Fatalf("Add folded span or reasoning into totals: got %+v, want %+v", got, want)
 	}
 }
 

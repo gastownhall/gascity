@@ -142,6 +142,17 @@ func TestExtractCodexTailUsage(t *testing.T) {
 	if first.ContextWindowTokens != 258400 {
 		t.Errorf("first.ContextWindowTokens = %d, want 258400", first.ContextWindowTokens)
 	}
+	wantFirstStart, err := time.Parse(time.RFC3339Nano, "2026-04-16T21:49:30.901Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantFirstEnd, err := time.Parse(time.RFC3339Nano, "2026-04-16T21:49:38.304Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.StartedAt.Equal(wantFirstStart) || !first.Timestamp.Equal(wantFirstEnd) {
+		t.Errorf("first span = %s .. %s, want turn %s .. token %s", first.StartedAt, first.Timestamp, wantFirstStart, wantFirstEnd)
+	}
 
 	second := usages[1]
 	if second.MessageID != "total:34114" {
@@ -167,6 +178,17 @@ func TestExtractCodexTailUsage(t *testing.T) {
 	}
 	if second.ContextWindowTokens != 258400 {
 		t.Errorf("second.ContextWindowTokens = %d, want 258400", second.ContextWindowTokens)
+	}
+	wantSecondStart, err := time.Parse(time.RFC3339Nano, "2026-04-16T21:49:40.000Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSecondEnd, err := time.Parse(time.RFC3339Nano, "2026-04-16T21:49:45.100Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.StartedAt.Equal(wantSecondStart) || !second.Timestamp.Equal(wantSecondEnd) {
+		t.Errorf("second span = %s .. %s, want first observation %s .. %s (duplicate must not move it)", second.StartedAt, second.Timestamp, wantSecondStart, wantSecondEnd)
 	}
 }
 
@@ -239,6 +261,84 @@ func TestExtractCodexTailUsageDuplicateKeepsFirstModel(t *testing.T) {
 	}
 	if usages[1].Model != "gpt-5.5" {
 		t.Errorf("second.Model = %q, want gpt-5.5 (new invocation under the new turn_context)", usages[1].Model)
+	}
+	wantKeptStart, err := time.Parse(time.RFC3339Nano, "2026-04-16T21:49:30.901Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !usages[0].StartedAt.Equal(wantKeptStart) {
+		t.Errorf("first.StartedAt = %s, want the original turn %s (the re-emission's turn_context is not this invocation)", usages[0].StartedAt, wantKeptStart)
+	}
+	wantSecondStart, err := time.Parse(time.RFC3339Nano, "2026-04-16T21:49:40.000Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSecondEnd, err := time.Parse(time.RFC3339Nano, "2026-04-16T21:49:45.100Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !usages[1].StartedAt.Equal(wantSecondStart) || !usages[1].Timestamp.Equal(wantSecondEnd) {
+		t.Errorf("second span = %s .. %s, want %s .. %s", usages[1].StartedAt, usages[1].Timestamp, wantSecondStart, wantSecondEnd)
+	}
+}
+
+func TestExtractCodexTailUsageLeavesStartUnknown(t *testing.T) {
+	cases := []struct {
+		name  string
+		lines []string
+	}{
+		{
+			name: "no turn",
+			lines: []string{
+				codexTokenCountLine("2026-04-16T21:49:38.304Z", 15917, 15562, 10624, 355, 166),
+			},
+		},
+		{
+			name: "unparseable turn clears an earlier one",
+			lines: []string{
+				codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-5.4"),
+				codexTurnContextLine("not-a-time", "gpt-5.4"),
+				codexTokenCountLine("2026-04-16T21:49:38.304Z", 15917, 15562, 10624, 355, 166),
+			},
+		},
+		{
+			name: "turn not strictly before the token",
+			lines: []string{
+				codexTurnContextLine("2026-04-16T21:49:38.304Z", "gpt-5.4"),
+				codexTokenCountLine("2026-04-16T21:49:38.304Z", 15917, 15562, 10624, 355, 166),
+			},
+		},
+		{
+			name: "duplicate does not fill a missing start",
+			lines: []string{
+				codexTokenCountLine("2026-04-16T21:49:38.304Z", 15917, 15562, 10624, 355, 166),
+				codexTurnContextLine("2026-04-16T21:49:40.000Z", "gpt-5.5"),
+				codexTokenCountLine("2026-04-16T21:49:40.470Z", 15917, 15562, 10624, 355, 166),
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "rollout.jsonl")
+			writeCodexUsageLines(t, path, tc.lines)
+			usages, err := ExtractCodexTailUsage(path)
+			if err != nil {
+				t.Fatalf("ExtractCodexTailUsage: %v", err)
+			}
+			if len(usages) != 1 {
+				t.Fatalf("got %d usages, want 1: %+v", len(usages), usages)
+			}
+			if !usages[0].StartedAt.IsZero() {
+				t.Fatalf("StartedAt = %s, want unknown", usages[0].StartedAt)
+			}
+			wantEnd, err := time.Parse(time.RFC3339Nano, "2026-04-16T21:49:38.304Z")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !usages[0].Timestamp.Equal(wantEnd) {
+				t.Fatalf("Timestamp = %s, want the first token_count %s", usages[0].Timestamp, wantEnd)
+			}
+		})
 	}
 }
 

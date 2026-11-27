@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -256,6 +257,10 @@ func TestModelUsageFact(t *testing.T) {
 	if priced.At != now.UnixMilli() {
 		t.Fatalf("At = %d, want %d", priced.At, now.UnixMilli())
 	}
+	if priced.ReasoningTokens != 0 || priced.UsageStart != 0 || priced.UsageEnd != 0 ||
+		priced.RuntimeGeneration != 0 || priced.RuntimeEpoch != 0 || priced.AccountRef != "" {
+		t.Fatalf("unproven span, reasoning, incarnation, and account must stay unknown: %+v", priced)
+	}
 
 	// Unpriced collapses cost to zero regardless of the cost argument.
 	unp := modelUsageFact(u, bead.Metadata, bead.ID, "session-1", "w", "claude", 0.02, false, now, "")
@@ -284,6 +289,9 @@ func TestModelUsageFactPrefersEntryTimestampOverNow(t *testing.T) {
 	if f.At != entryTime.UnixMilli() {
 		t.Fatalf("At = %d, want the entry's own timestamp %d, not now (%d)", f.At, entryTime.UnixMilli(), now.UnixMilli())
 	}
+	if f.UsageEnd != entryTime.UnixMilli() || f.UsageStart != 0 {
+		t.Fatalf("span = %d..%d, want start unknown and end %d", f.UsageStart, f.UsageEnd, entryTime.UnixMilli())
+	}
 
 	// A zero Timestamp (older transcript format, or a provider whose tail
 	// extraction doesn't populate it) must fall back to now unchanged.
@@ -292,6 +300,96 @@ func TestModelUsageFactPrefersEntryTimestampOverNow(t *testing.T) {
 	fallback := modelUsageFact(uNoTimestamp, bead.Metadata, bead.ID, "session-1", "w", "claude", 0.02, true, now, "")
 	if fallback.At != now.UnixMilli() {
 		t.Fatalf("At = %d, want now (%d) when Timestamp is zero", fallback.At, now.UnixMilli())
+	}
+	if fallback.UsageStart != 0 || fallback.UsageEnd != 0 {
+		t.Fatalf("a zero transcript timestamp must not invent a span from now: start=%d end=%d at=%d", fallback.UsageStart, fallback.UsageEnd, fallback.At)
+	}
+}
+
+func TestModelUsageFactCopiesProvenSpanReasoningIncarnationAndAccount(t *testing.T) {
+	now := time.Unix(1000, 0).UTC()
+	start := time.Unix(30, 0).UTC()
+	end := time.Unix(40, 0).UTC()
+	u := sessionlog.TailUsage{
+		MessageID:       "msg-9",
+		Model:           "claude-opus-4-7",
+		InputTokens:     100,
+		OutputTokens:    50,
+		ReasoningTokens: 11,
+		StartedAt:       start,
+		Timestamp:       end,
+	}
+	meta := map[string]string{
+		"molecule_id":               "mol-7",
+		"generation":                "4",
+		"continuation_epoch":        "2",
+		usage.AccountRefMetadataKey: "acct-a",
+		"instance_token":            "secret-tok",
+	}
+	first := modelUsageFact(u, meta, "b1", "session-1", "w", "claude", 0.02, true, now, "")
+	if first.ReasoningTokens != 11 || first.OutputTokens != 50 {
+		t.Fatalf("reasoning must stay off the output channel: %+v", first)
+	}
+	if first.UsageStart != start.UnixMilli() || first.UsageEnd != end.UnixMilli() || first.At != end.UnixMilli() {
+		t.Fatalf("span/at = %d..%d at %d, want %d..%d", first.UsageStart, first.UsageEnd, first.At, start.UnixMilli(), end.UnixMilli())
+	}
+	if first.RuntimeGeneration != 4 || first.RuntimeEpoch != 2 || first.AccountRef != "acct-a" {
+		t.Fatalf("incarnation/account = %d/%d %q", first.RuntimeGeneration, first.RuntimeEpoch, first.AccountRef)
+	}
+	raw, err := json.Marshal(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "secret-tok") || strings.Contains(string(raw), "instance_token") {
+		t.Fatalf("fact leaked the instance token: %s", raw)
+	}
+
+	// A later rewrite of the session row must not change the fact already built.
+	meta["generation"] = "9"
+	meta["continuation_epoch"] = "8"
+	meta[usage.AccountRefMetadataKey] = "acct-b"
+	meta["instance_token"] = "secret-tok-2"
+	second := modelUsageFact(u, meta, "b1", "session-1", "w", "claude", 0.02, true, now, "")
+	if first.AccountRef != "acct-a" || first.RuntimeGeneration != 4 || first.RuntimeEpoch != 2 {
+		t.Fatalf("recorded fact changed after the row was rewritten: %+v", first)
+	}
+	if second.AccountRef != "acct-b" || second.RuntimeGeneration != 9 || second.RuntimeEpoch != 8 {
+		t.Fatalf("second fact = gen %d epoch %d account %q", second.RuntimeGeneration, second.RuntimeEpoch, second.AccountRef)
+	}
+
+	inverted := u
+	inverted.StartedAt = end
+	inverted.Timestamp = start
+	if got := modelUsageFact(inverted, meta, "b1", "session-1", "w", "claude", 0.02, true, now, ""); got.UsageStart != 0 || got.UsageEnd != start.UnixMilli() {
+		t.Fatalf("inverted span = %d..%d, want start unknown and end %d", got.UsageStart, got.UsageEnd, start.UnixMilli())
+	}
+	same := u
+	same.StartedAt = end
+	if got := modelUsageFact(same, meta, "b1", "session-1", "w", "claude", 0.02, true, now, ""); got.UsageStart != 0 || got.UsageEnd != end.UnixMilli() {
+		t.Fatalf("equal span = %d..%d, want start unknown", got.UsageStart, got.UsageEnd)
+	}
+	startOnly := u
+	startOnly.Timestamp = time.Time{}
+	if got := modelUsageFact(startOnly, meta, "b1", "session-1", "w", "claude", 0.02, true, now, ""); got.UsageStart != start.UnixMilli() || got.UsageEnd != 0 || got.At != now.UnixMilli() {
+		t.Fatalf("start-only = start %d end %d at %d, want start %d, end unknown, at now", got.UsageStart, got.UsageEnd, got.At, start.UnixMilli())
+	}
+
+	padded := map[string]string{"generation": " 4 ", "continuation_epoch": " 2 ", usage.AccountRefMetadataKey: "  acct-a  "}
+	if got := modelUsageFact(u, padded, "b1", "session-1", "w", "claude", 0, true, now, ""); got.RuntimeGeneration != 4 || got.RuntimeEpoch != 2 || got.AccountRef != "acct-a" {
+		t.Fatalf("padded row = %+v", got)
+	}
+	for _, meta := range []map[string]string{
+		{"generation": "1"},
+		{"continuation_epoch": "2"},
+		{"generation": "0", "continuation_epoch": "2"},
+		{"generation": "nope", "continuation_epoch": "2"},
+		{"generation": "4", "continuation_epoch": "0"},
+		nil,
+	} {
+		got := modelUsageFact(u, meta, "b1", "session-1", "w", "claude", 0, true, now, "")
+		if got.RuntimeGeneration != 0 || got.RuntimeEpoch != 0 {
+			t.Fatalf("meta %v recorded incarnation %d/%d, want unknown (not DefaultGeneration %d)", meta, got.RuntimeGeneration, got.RuntimeEpoch, sessionpkg.DefaultGeneration)
+		}
 	}
 }
 

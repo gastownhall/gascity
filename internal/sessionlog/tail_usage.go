@@ -39,9 +39,19 @@ type TailUsage struct {
 	// ContextWindowTokens is the model context window reported by the
 	// provider for this invocation, when available.
 	ContextWindowTokens int
-	// Timestamp is the transcript entry's own timestamp, when the provider
-	// format carries one. Zero when absent or unparseable.
+	// Timestamp is the usage-bearing entry's own timestamp, when the
+	// provider format carries one: the claude assistant entry, the codex
+	// token_count line, or the opencode completion time. It is the span
+	// end when that entry is the end of the invocation. Zero when absent
+	// or unparseable. It is never filled with the current time.
 	Timestamp time.Time
+	// StartedAt is the request or turn timestamp that opened this
+	// invocation, when the transcript proves one: the claude user entry
+	// that parented the assistant response, the codex turn_context that
+	// preceded the token_count, or the opencode message created time.
+	// Zero means the transcript did not prove a start. It is not Timestamp
+	// and it is never filled with the current time.
+	StartedAt time.Time
 	// ReportedCostUSD is the cost the provider's own transcript recorded for
 	// this invocation, valid only when HasReportedCost is set. Families whose
 	// transcripts carry no cost leave both zero and are priced from the
@@ -202,46 +212,80 @@ func containsCursor(usages []TailUsage, cursorID string) bool {
 // It fails rather than returning a prefix when the window carries a line the
 // splitter cannot hold: a truncated parse would drop the newest invocations
 // silently, which is the loss this package is trying to prevent.
+// claudeTailNode is one decoded transcript line. Usage is set only for an
+// assistant entry that carries a non-zero token count. The parent index is
+// built from every line so a usage entry can walk back to the user request
+// that produced it, including lines that themselves carry no usage.
+type claudeTailNode struct {
+	typ    string
+	uuid   string
+	parent string
+	ts     time.Time
+	usage  *TailUsage
+}
+
 func parseTailUsage(data []byte) ([]TailUsage, error) {
 	lines, err := splitLines(data)
 	if err != nil {
 		return nil, err
 	}
-	var usages []TailUsage
-	// byMessageID maps a message identity to its index in usages so the
-	// content-block copies of one API response collapse to a single entry.
-	byMessageID := make(map[string]int)
+	nodes := make([]claudeTailNode, 0, len(lines))
+	index := make(map[string]int)
 	for _, line := range lines {
 		var entry tailEntry
 		if err := json.Unmarshal(line, &entry); err != nil {
 			continue
 		}
-		if entry.Type != "assistant" || entry.UUID == "" || len(entry.Message) == 0 {
+		node := claudeTailNode{typ: entry.Type, uuid: entry.UUID, parent: entry.ParentUUID, ts: entry.Timestamp.Time}
+		if entry.Type == "assistant" && entry.UUID != "" && len(entry.Message) > 0 {
+			var msg assistantMessage
+			if err := json.Unmarshal(unwrapJSONString(entry.Message), &msg); err == nil && msg.Usage != nil {
+				u := TailUsage{
+					EntryUUID:           entry.UUID,
+					MessageID:           msg.ID,
+					Model:               msg.Model,
+					InputTokens:         msg.Usage.InputTokens,
+					OutputTokens:        msg.Usage.OutputTokens,
+					ReasoningTokens:     msg.Usage.ReasoningTokens,
+					CacheReadTokens:     msg.Usage.CacheReadInputTokens,
+					CacheCreationTokens: msg.Usage.CacheCreationInputTokens,
+					Timestamp:           entry.Timestamp.Time,
+				}
+				if u.InputTokens > 0 || u.OutputTokens > 0 || u.ReasoningTokens > 0 || u.CacheReadTokens > 0 || u.CacheCreationTokens > 0 {
+					node.usage = &u
+				}
+			}
+		}
+		if node.uuid != "" {
+			index[node.uuid] = len(nodes)
+		}
+		nodes = append(nodes, node)
+	}
+
+	var usages []TailUsage
+	// byMessageID maps a message identity to its index in usages so the
+	// content-block copies of one API response collapse to a single entry.
+	byMessageID := make(map[string]int)
+	for i := range nodes {
+		if nodes[i].usage == nil {
 			continue
 		}
-		var msg assistantMessage
-		if err := json.Unmarshal(unwrapJSONString(entry.Message), &msg); err != nil {
-			continue
-		}
-		if msg.Usage == nil {
-			continue
-		}
-		u := TailUsage{
-			EntryUUID:           entry.UUID,
-			MessageID:           msg.ID,
-			Model:               msg.Model,
-			InputTokens:         msg.Usage.InputTokens,
-			OutputTokens:        msg.Usage.OutputTokens,
-			CacheReadTokens:     msg.Usage.CacheReadInputTokens,
-			CacheCreationTokens: msg.Usage.CacheCreationInputTokens,
-			Timestamp:           entry.Timestamp.Time,
-		}
-		if u.InputTokens <= 0 && u.OutputTokens <= 0 && u.CacheReadTokens <= 0 && u.CacheCreationTokens <= 0 {
-			continue
-		}
+		u := *nodes[i].usage
+		u.StartedAt = claudeRequestStart(nodes, index, nodes[i].parent)
 		if u.MessageID != "" {
-			if i, seen := byMessageID[u.MessageID]; seen {
-				usages[i] = u
+			if j, seen := byMessageID[u.MessageID]; seen {
+				// The last content block is the end of the response. A block
+				// whose own parent chain does not reach a timestamped user
+				// entry keeps a start an earlier block of the same response
+				// already proved. A block with no timestamp keeps the earlier
+				// block's end rather than forgetting it.
+				if u.StartedAt.IsZero() {
+					u.StartedAt = usages[j].StartedAt
+				}
+				if u.Timestamp.IsZero() {
+					u.Timestamp = usages[j].Timestamp
+				}
+				usages[j] = u
 				continue
 			}
 			byMessageID[u.MessageID] = len(usages)
@@ -249,6 +293,32 @@ func parseTailUsage(data []byte) ([]TailUsage, error) {
 		usages = append(usages, u)
 	}
 	return usages, nil
+}
+
+// claudeRequestStart walks parentUuid to the nearest user entry and returns
+// that entry's timestamp. The walk stops at the first user entry, at a
+// parent the window does not contain, or at a cycle. A user entry with no
+// timestamp returns the zero time: the request is present but its start is
+// unknown, and an older ancestor is not substituted.
+func claudeRequestStart(nodes []claudeTailNode, index map[string]int, parent string) time.Time {
+	seen := make(map[string]struct{})
+	id := parent
+	for id != "" {
+		if _, ok := seen[id]; ok {
+			return time.Time{}
+		}
+		seen[id] = struct{}{}
+		i, ok := index[id]
+		if !ok {
+			return time.Time{}
+		}
+		n := nodes[i]
+		if n.typ == "user" {
+			return n.ts
+		}
+		id = n.parent
+	}
+	return time.Time{}
 }
 
 // ExtractTailUsageSinceFromSearchPaths reads cursor-aware tail usage only

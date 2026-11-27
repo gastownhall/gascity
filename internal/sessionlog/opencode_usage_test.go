@@ -64,6 +64,9 @@ func TestExtractOpenCodeTailUsage(t *testing.T) {
 	if want := time.UnixMilli(1792100545840); !first.Timestamp.Equal(want) {
 		t.Errorf("Timestamp = %v, want %v", first.Timestamp, want)
 	}
+	if want := time.UnixMilli(1792100522671); !first.StartedAt.Equal(want) {
+		t.Errorf("StartedAt = %v, want created %v", first.StartedAt, want)
+	}
 
 	// An explicit zero cost (a free model) is a reported cost, not a missing one.
 	if !got[1].HasReportedCost || got[1].ReportedCostUSD != 0 {
@@ -72,6 +75,38 @@ func TestExtractOpenCodeTailUsage(t *testing.T) {
 	// An absent cost field is not reported, so callers fall back to the price table.
 	if got[2].MessageID != "msg_nocost" || got[2].HasReportedCost {
 		t.Errorf("no-cost entry = %+v", got[2])
+	}
+}
+
+func TestExtractOpenCodeTailUsageLeavesStartUnknown(t *testing.T) {
+	const body = `{
+	  "messages": [
+	    {"info": {"id": "no-created", "role": "assistant", "modelID": "m",
+	      "tokens": {"input": 3, "output": 1},
+	      "time": {"completed": 1792100545840}}},
+	    {"info": {"id": "equal", "role": "assistant", "modelID": "m",
+	      "tokens": {"input": 3, "output": 1},
+	      "time": {"created": 1792100545840, "completed": 1792100545840}}},
+	    {"info": {"id": "inverted", "role": "assistant", "modelID": "m",
+	      "tokens": {"input": 3, "output": 1},
+	      "time": {"created": 1792100545841, "completed": 1792100545840}}}
+	  ]
+	}`
+	path := writeOpenCodeUsageExport(t, t.TempDir(), "ses.json", body)
+	got, err := ExtractOpenCodeTailUsage(path)
+	if err != nil {
+		t.Fatalf("ExtractOpenCodeTailUsage: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d usages, want 3: %+v", len(got), got)
+	}
+	for _, u := range got {
+		if !u.StartedAt.IsZero() {
+			t.Errorf("%s StartedAt = %s, want unknown", u.MessageID, u.StartedAt)
+		}
+		if want := time.UnixMilli(1792100545840); !u.Timestamp.Equal(want) {
+			t.Errorf("%s Timestamp = %s, want completed %s", u.MessageID, u.Timestamp, want)
+		}
 	}
 }
 

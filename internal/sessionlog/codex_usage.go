@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"slices"
+	"time"
 )
 
 // codexTokenUsage mirrors the token-usage object the codex CLI embeds in
@@ -519,6 +520,7 @@ func ExtractCodexTailUsage(path string) ([]TailUsage, error) {
 	// duplicate token_count emissions collapse to a single entry.
 	byMessageID := make(map[string]int)
 	turnModel := seedModel
+	var turnStart time.Time
 	for _, line := range lines {
 		var entry codexRawEntry
 		if err := json.Unmarshal(line, &entry); err != nil {
@@ -532,12 +534,16 @@ func ExtractCodexTailUsage(path string) ([]TailUsage, error) {
 			if payload.Model != "" {
 				turnModel = payload.Model
 			}
+			// A new turn replaces the previous start. An unparseable
+			// timestamp clears it: the earlier turn did not open this one.
+			turnStart = parseCodexSessionTime(entry.Timestamp)
 			continue
 		}
 		u, ok := codexTokenCountUsage(entry, payload, turnModel)
 		if !ok {
 			continue
 		}
+		u.StartedAt = codexProvenStart(turnStart, u.Timestamp)
 		if i, seen := byMessageID[u.MessageID]; seen {
 			// The CLI re-emits the prior turn's final cumulative snapshot
 			// after a new turn_context; the first-observed model is the one
@@ -550,9 +556,13 @@ func ExtractCodexTailUsage(path string) ([]TailUsage, error) {
 			// NEXT turn_context, so the first line's time is when the
 			// invocation actually completed. EntryUUID stays last-wins
 			// (pinned by TestExtractCodexTailUsageDuplicateKeepsFirstModel).
+			// The span start stays the first observation too, including when
+			// that observation proved none: the new turn_context is not this
+			// invocation's start.
 			if !usages[i].Timestamp.IsZero() {
 				u.Timestamp = usages[i].Timestamp
 			}
+			u.StartedAt = usages[i].StartedAt
 			usages[i] = u
 			continue
 		}
@@ -560,6 +570,16 @@ func ExtractCodexTailUsage(path string) ([]TailUsage, error) {
 		usages = append(usages, u)
 	}
 	return usages, nil
+}
+
+// codexProvenStart is the turn_context timestamp that opened a token_count
+// when that timestamp parses and falls strictly before the token_count line.
+// Anything else is unknown.
+func codexProvenStart(turnStart, end time.Time) time.Time {
+	if turnStart.IsZero() || end.IsZero() || !turnStart.Before(end) {
+		return time.Time{}
+	}
+	return turnStart
 }
 
 // codexTokenCountUsage converts a token_count entry into a TailUsage labeled
@@ -746,6 +766,7 @@ func codexHistoryUsage(entries []codexEntry) []TailUsage {
 	var usages []TailUsage
 	seen := make(map[string]bool)
 	var model string
+	var turnStart time.Time
 	for _, entry := range entries {
 		if entry.raw.Type != "turn_context" && entry.raw.Type != "event_msg" {
 			continue
@@ -758,12 +779,17 @@ func codexHistoryUsage(entries []codexEntry) []TailUsage {
 			if payload.Model != "" {
 				model = payload.Model
 			}
+			turnStart = parseCodexSessionTime(entry.raw.Timestamp)
 			continue
 		}
 		usage, ok := codexTokenCountUsage(entry.raw, payload, model)
 		if !ok || seen[usage.MessageID] {
 			continue
 		}
+		// The first observation of a cumulative total fixes the span. A
+		// later duplicate is skipped above, so a following turn_context
+		// cannot move the start.
+		usage.StartedAt = codexProvenStart(turnStart, usage.Timestamp)
 		seen[usage.MessageID] = true
 		usages = append(usages, usage)
 	}

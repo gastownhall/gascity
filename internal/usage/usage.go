@@ -52,14 +52,39 @@ type Fact struct {
 	Kind Kind `json:"kind"`
 
 	// Model facts (Kind == KindModel).
-	Upstream            string `json:"upstream,omitempty"` // who served the model
-	Model               string `json:"model,omitempty"`    // the label the harness sent
-	Backing             string `json:"backing,omitempty"`  // backing model id, if rewritten
-	Provider            string `json:"provider,omitempty"` // "anthropic" | "codex" | ...
-	InputTokens         int    `json:"input_tokens,omitempty"`
-	OutputTokens        int    `json:"output_tokens,omitempty"`
-	CacheReadTokens     int    `json:"cache_read_tokens,omitempty"`
-	CacheCreationTokens int    `json:"cache_creation_tokens,omitempty"`
+	Upstream     string `json:"upstream,omitempty"` // who served the model
+	Model        string `json:"model,omitempty"`    // the label the harness sent
+	Backing      string `json:"backing,omitempty"`  // backing model id, if rewritten
+	Provider     string `json:"provider,omitempty"` // "anthropic" | "codex" | ...
+	InputTokens  int    `json:"input_tokens,omitempty"`
+	OutputTokens int    `json:"output_tokens,omitempty"`
+	// ReasoningTokens is the provider-reported reasoning count when the
+	// transcript exposes one separately from output tokens. Zero means the
+	// transcript did not report the channel, not that the invocation did no
+	// reasoning. It is not folded into InputTokens or OutputTokens.
+	ReasoningTokens     int `json:"reasoning_tokens,omitempty"`
+	CacheReadTokens     int `json:"cache_read_tokens,omitempty"`
+	CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
+
+	// UsageStart and UsageEnd are the invocation span in unix milliseconds.
+	// Each is set only when the transcript proves that bound. Zero means
+	// unknown. Neither is filled from At or from the emitter clock. At stays
+	// the event time.
+	UsageStart int64 `json:"usage_start,omitempty"`
+	UsageEnd   int64 `json:"usage_end,omitempty"`
+
+	// RuntimeGeneration and RuntimeEpoch are the session incarnation the
+	// invocation was recorded under: the session row's generation and
+	// continuation_epoch. Both are set, or both stay zero. Zero means the
+	// row did not prove an incarnation. The instance token is never copied.
+	RuntimeGeneration int64 `json:"runtime_generation,omitempty"`
+	RuntimeEpoch      int64 `json:"runtime_epoch,omitempty"`
+
+	// AccountRef is an opaque reference copied verbatim from the session
+	// row's AccountRefMetadataKey at record time. Core attaches no meaning
+	// to it. Empty means the row did not carry one. A later rewrite of the
+	// session row does not change a fact already recorded.
+	AccountRef string `json:"account_ref,omitempty"`
 
 	// Compute facts (Kind == KindCompute).
 	Runtime     string  `json:"runtime,omitempty"`      // "local" | "daytona" | ...
@@ -68,12 +93,30 @@ type Fact struct {
 	CostUSDEstimate float64 `json:"cost_usd_estimate,omitempty"` // list-price estimate; decision-support only
 	Unpriced        bool    `json:"unpriced,omitempty"`          // pricing unknown: tokens kept, cost not measured
 
-	// UpstreamReqID is the provider response id (Anthropic message.id / OpenAI
-	// response.id) for model facts, or sessionID+awakeEpoch for compute facts.
+	// UpstreamReqID is the invocation's stable re-read identity for model
+	// facts, or sessionID+awakeEpoch for compute facts.
+	//
+	// Model facts copy the transcript collapse identity:
+	//   - claude: the assistant message id (msg_*), shared by every
+	//     content-block entry of one API response. Stable across re-reads
+	//     of that response.
+	//   - codex: "total:<total_tokens>", the cumulative-total identity
+	//     shared by duplicate token_count emissions of one snapshot. Stable
+	//     across re-reads of that snapshot. It is not an OpenAI response id.
+	//   - opencode: the export message id. Stable across re-reads.
+	//   - an entry with no message id uses the transcript entry uuid.
+	// Re-reading the same transcript yields the same id. A later invocation
+	// in the same session gets a different id.
 	UpstreamReqID  string `json:"upstream_req_id,omitempty"`
-	At             int64  `json:"at,omitempty"`              // unix millis, stamped by the emitter
+	At             int64  `json:"at,omitempty"`              // unix millis, event time; not a span bound
 	IdempotencyKey string `json:"idempotency_key,omitempty"` // see ModelIdempotencyKey / ComputeIdempotencyKey
 }
+
+// AccountRefMetadataKey is the session-row metadata key a deployment stamps
+// with an opaque account reference for the incarnation that is running.
+// Model facts copy that value onto [Fact.AccountRef] at record time. Core
+// never writes the key and never interprets the value.
+const AccountRefMetadataKey = "usage_account_ref"
 
 // Sink records usage facts. Implementations must be safe for concurrent use and
 // must not block the caller's hot path. Recording is best-effort, but a failed

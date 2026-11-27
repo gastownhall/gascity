@@ -27,6 +27,7 @@ type openCodeUsageMessage struct {
 			} `json:"cache"`
 		} `json:"tokens"`
 		Time struct {
+			Created   int64 `json:"created"`
 			Completed int64 `json:"completed"`
 		} `json:"time"`
 	} `json:"info"`
@@ -81,6 +82,12 @@ func ExtractOpenCodeTailUsage(path string) ([]TailUsage, error) {
 			CacheReadTokens:     tokens.Cache.Read,
 			CacheCreationTokens: tokens.Cache.Write,
 			Timestamp:           time.UnixMilli(info.Time.Completed),
+		}
+		if info.Time.Created > 0 {
+			started := time.UnixMilli(info.Time.Created)
+			if started.Before(usage.Timestamp) {
+				usage.StartedAt = started
+			}
 		}
 		if info.Cost != nil {
 			usage.ReportedCostUSD = *info.Cost
