@@ -1155,9 +1155,27 @@ func TestBuiltinProviders_OpenCodeHasModelOptions(t *testing.T) {
 		args  []string
 	}{
 		{name: "Default"},
-		{name: "DeepSeek V4 Flash Free", model: "opencode/deepseek-v4-flash-free", args: []string{"--model", "opencode/deepseek-v4-flash-free"}},
-		{name: "Nemotron 3 Super Free", model: "opencode/nemotron-3-super-free", args: []string{"--model", "opencode/nemotron-3-super-free"}},
+		{name: "DeepSeek V4.1 Flash Free", model: "opencode/deepseek-v4.1-flash-free", args: []string{"--model", "opencode/deepseek-v4.1-flash-free"}},
+		{name: "Nemotron 3.5 Super VL Free", model: "opencode/nemotron-3.5-super-vl-free", args: []string{"--model", "opencode/nemotron-3.5-super-vl-free"}},
 		{name: "Big Pickle", model: "opencode/big-pickle", args: []string{"--model", "opencode/big-pickle"}},
+	}
+
+	// The menu is exactly the table, in order: a retired id left in the
+	// preset must fail here even though every listed id is present.
+	var want, got []OptionChoice
+	for _, tt := range tests {
+		want = append(want, OptionChoice{Value: tt.model, Label: tt.name})
+	}
+	for _, opt := range opencode.OptionsSchema {
+		if opt.Key != "model" {
+			continue
+		}
+		for _, choice := range opt.Choices {
+			got = append(got, OptionChoice{Value: choice.Value, Label: choice.Label})
+		}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("opencode model choices (value, label) = %+v, want %+v", got, want)
 	}
 
 	for _, tt := range tests {
@@ -1189,6 +1207,37 @@ func TestBuiltinProviders_OpenCodeHasModelOptions(t *testing.T) {
 			}
 			if legacy.OptionDefaults["model"] != tt.model {
 				t.Fatalf("inferred model = %q, want %q", legacy.OptionDefaults["model"], tt.model)
+			}
+		})
+	}
+}
+
+// TestResolveProviderChain_OpenCodeLegacyModelArgFoldsCuratedChoice checks
+// that a provider layered on builtin:opencode with the legacy "-m <id>" arg
+// for a curated Zen model launches with "--model <id>" and no raw args.
+func TestResolveProviderChain_OpenCodeLegacyModelArgFoldsCuratedChoice(t *testing.T) {
+	for _, model := range []string{
+		"opencode/deepseek-v4.1-flash-free",
+		"opencode/nemotron-3.5-super-vl-free",
+	} {
+		t.Run(model, func(t *testing.T) {
+			leaf := ProviderSpec{Base: basePtr("builtin:opencode"), Args: []string{"-m", model}}
+			resolved, err := ResolveProviderChain("opencode-free", leaf, map[string]ProviderSpec{})
+			if err != nil {
+				t.Fatalf("ResolveProviderChain: %v", err)
+			}
+			if len(resolved.Args) != 0 {
+				t.Errorf("resolved Args = %v, want empty: the legacy -m flag must fold into option_defaults", resolved.Args)
+			}
+			if resolved.EffectiveDefaults["model"] != model {
+				t.Errorf("resolved EffectiveDefaults[model] = %q, want %q", resolved.EffectiveDefaults["model"], model)
+			}
+			args, _, err := ResolveOptions(resolved.OptionsSchema, nil, resolved.EffectiveDefaults)
+			if err != nil {
+				t.Fatalf("ResolveOptions: %v", err)
+			}
+			if want := []string{"--model", model}; !reflect.DeepEqual(args, want) {
+				t.Errorf("ResolveOptions args = %v, want %v", args, want)
 			}
 		})
 	}
