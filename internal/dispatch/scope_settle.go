@@ -90,20 +90,7 @@ func reconcileScopeForTerminalMember(store beads.GraphStore, bead beads.Bead, op
 		return snapshot, nil
 	}
 
-	failed := beadOutcomeFailed(bead)
-	if !failed && state == scopeMemberClosed && body.Status != "closed" {
-		// A member that closes pass after a sibling already failed must not
-		// settle the scope pass: the failed sibling's abort already decided the
-		// scope, and the body only needed this member to close (gastownhall/gascity#9507).
-		// Read from the invocation's view when it has one, so the check adds no
-		// store read to a pass close; a sibling that fails later aborts its own scope.
-		snapshot, err := loadSnapshot(true)
-		if err != nil {
-			return ControlResult{}, err
-		}
-		failed = scopeHasFailedMember(snapshot, bead.ID)
-	}
-	if failed {
+	if beadOutcomeFailed(bead) {
 		// The abort writes skip outcomes onto the members it finds open, so it
 		// reads them live rather than from the invocation's root view: a
 		// member a worker closed since the view must not be stamped skipped.
@@ -149,21 +136,6 @@ func reconcileScopeForTerminalMember(store beads.GraphStore, bead beads.Bead, op
 		return ControlResult{}, err
 	}
 	return ControlResult{Processed: true, Action: "scope-pass"}, nil
-}
-
-// scopeHasFailedMember reports whether a member other than excludeID (and the
-// scope body) closed with a failed outcome. Such a member has already aborted
-// the scope, so a later pass from a sibling must settle it as failed.
-func scopeHasFailedMember(snapshot scopeSnapshot, excludeID string) bool {
-	for _, member := range snapshot.members {
-		if member.ID == excludeID || member.ID == snapshot.body.ID {
-			continue
-		}
-		if member.Status == "closed" && beadOutcomeFailed(member) {
-			return true
-		}
-	}
-	return false
 }
 
 // substituteMember replaces the snapshot's copy of member (matched by ID) with

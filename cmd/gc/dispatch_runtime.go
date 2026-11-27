@@ -566,21 +566,15 @@ func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuer
 		return fmt.Errorf("watching city events: %w", err)
 	}
 	defer watcher.Close() //nolint:errcheck // best-effort cleanup
-	scopeWatcher := &scopeCloseWatcher{Watcher: watcher}
 	done := make(chan struct{})
 	defer close(done)
 
 	eventCh := make(chan workflowWatchResult, 1)
-	go pumpWorkflowEvents(done, scopeWatcher, eventCh)
+	go pumpWorkflowEvents(done, watcher, eventCh)
 
 	idleSweeps := 0
 	var pendingWakeErr error
 	for {
-		// A worker's close of a scope member does not reach the reconcile on its
-		// own, and the control paths do not run again for that scope. Settle the
-		// closed members' scopes from the close events before draining
-		// (gastownhall/gascity#9507).
-		reconcileClosedScopeMembers(cityPath, storePath, scopeWatcher.takeClosedScopeMembers(), stderr)
 		drainResult, err := drainWorkflowServeWork(agentCfg, cityPath, storePath, workQuery, workEnv, stderr)
 		if err != nil {
 			// A transient work-query/store failure — most commonly the
@@ -643,74 +637,6 @@ func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuer
 type workflowWatchResult struct {
 	evt events.Event
 	err error
-}
-
-// scopeCloseWatcher records the scope members named by bead.closed events as
-// the pump reads them, so the serve loop can reconcile their scopes. The
-// record is taken before the event is handed to the wake channel, so every
-// close the loop wakes for is in the record by the time the loop drains.
-type scopeCloseWatcher struct {
-	events.Watcher
-	mu  sync.Mutex
-	ids []string
-}
-
-func (w *scopeCloseWatcher) Next() (events.Event, error) {
-	evt, err := w.Watcher.Next()
-	if err != nil || evt.Type != events.BeadClosed {
-		return evt, err
-	}
-	bead, ok := beads.DecodeBeadEventPayload(evt.Payload)
-	if !ok || bead.ID == "" || bead.Metadata[beadmeta.ScopeRefMetadataKey] == "" {
-		return evt, nil
-	}
-	w.mu.Lock()
-	w.ids = append(w.ids, bead.ID)
-	w.mu.Unlock()
-	return evt, nil
-}
-
-// takeClosedScopeMembers returns the scope members recorded since the last
-// call and clears the record.
-func (w *scopeCloseWatcher) takeClosedScopeMembers() []string {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	ids := w.ids
-	w.ids = nil
-	return ids
-}
-
-// reconcileClosedScopeMembers runs the scope reconcile for each named closed
-// member against the serve loop's store. A member that is not in this store
-// (a foreign rig bead) or a reconcile error is traced and skipped: the close
-// stays recorded, and a later close or the existing control paths still settle
-// the scope.
-func reconcileClosedScopeMembers(cityPath, storePath string, ids []string, stderr io.Writer) {
-	if len(ids) == 0 {
-		return
-	}
-	cfg, err := loadCityConfig(cityPath, stderr)
-	if err != nil {
-		workflowTracef("serve scope-reconcile skipped load-config err=%v", err)
-		return
-	}
-	resolveRigPaths(cityPath, cfg.Rigs)
-	store, err := openControlStoreForDispatch(storePath, cityPath, cfg)
-	if err != nil {
-		workflowTracef("serve scope-reconcile skipped open-store store=%s err=%v", storePath, err)
-		return
-	}
-	defer func() {
-		if cerr := closeBeadStoreHandle(store); cerr != nil {
-			workflowTracef("serve scope-reconcile close-store err=%v", cerr)
-		}
-	}()
-	graph := cliGraphStore(store, cfg, cityPath)
-	for _, id := range ids {
-		if _, err := dispatch.ReconcileClosedScopeMember(graph, id); err != nil {
-			workflowTracef("serve scope-reconcile bead=%s err=%v", id, err)
-		}
-	}
 }
 
 func pumpWorkflowEvents(done <-chan struct{}, watcher events.Watcher, eventCh chan<- workflowWatchResult) {

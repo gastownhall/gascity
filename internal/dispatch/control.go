@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -298,10 +299,10 @@ func evaluateRetryAttempt(store beads.GraphStore, bead, attempt beads.Bead, _ in
 func evaluateRalphIteration(store beads.GraphStore, bead, iteration beads.Bead, iterationNum int, opts ProcessOptions) (attemptEvaluation, error) {
 	// The iteration boundary is a gate: no verdict — and no next iteration —
 	// until every member of this iteration has stopped. A closed body is not
-	// evidence the iteration finished: the abort path can close it while a
-	// claimed sibling is still running (the abort's skip set counts only
-	// unclaimed members), and a scope-check-exempt control settles it
-	// forcibly on every store. Block on each live member and defer the
+	// evidence the iteration finished: a scope-check-exempt control settles
+	// it forcibly on every store, and a ledger written before a scope abort
+	// deferred its body close over claimed work can hold a closed body with a
+	// sibling still running. Block on each live member and defer the
 	// verdict; the member's close re-runs the control (gastownhall/gascity#2519).
 	live, err := ralphIterationLiveMembers(store, bead, iteration, opts)
 	if err != nil {
@@ -410,16 +411,22 @@ func ralphIterationLiveMembers(store beads.GraphStore, control, iteration beads.
 	if err != nil {
 		return nil, fmt.Errorf("reading members of root %s: %w", rootID, err)
 	}
-	pending := scopeUnsettledMembers(iterationScopeMembers(all, rootID, iterationRef), all, "",
-		func(b beads.Bead) bool { return b.Status != "closed" })
-	live := make([]beads.Bead, 0, len(pending))
-	for _, member := range pending {
-		if !beadmeta.IsControlKind(member.Metadata[beadmeta.KindMetadataKey]) {
-			live = append(live, member)
-		}
-	}
-	slices.SortFunc(live, func(a, b beads.Bead) int { return strings.Compare(a.ID, b.ID) })
-	return live, nil
+	pending := scopeUnsettledMembers(iterationScopeMembers(all, rootID, iterationRef), all, "", isLiveScopeWork)
+	return slices.SortedFunc(maps.Values(pending), func(a, b beads.Bead) int { return strings.Compare(a.ID, b.ID) }), nil
+}
+
+// isLiveScopeWork reports whether a scope member is work still running or
+// waiting to run: not closed, and not controller machinery. The ralph
+// iteration drain gate waits on exactly this set.
+func isLiveScopeWork(b beads.Bead) bool {
+	return b.Status != "closed" && !beadmeta.IsControlKind(b.Metadata[beadmeta.KindMetadataKey])
+}
+
+// isClaimedScopeWork reports whether a scope member is live work a worker
+// holds (any status but open). A scope abort never skips it: only its worker
+// closes it, and the abort keeps its scope-check open to settle the scope then.
+func isClaimedScopeWork(b beads.Bead) bool {
+	return b.Status != "open" && isLiveScopeWork(b)
 }
 
 // ralphIterationHardFailure returns the bead whose hard failure ended a failed
