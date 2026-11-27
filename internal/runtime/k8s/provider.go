@@ -1139,11 +1139,34 @@ func verifyBeadsInPod(ctx context.Context, ops k8sOps, podName string, cfg runti
 	return nil
 }
 
+// Client-side rate limits for the provider's apiserver client. client-go's
+// defaults (5 QPS, burst 10) serialize the per-session pod reads that session
+// listing, the reconciler and health patrol issue from one controller
+// process; server-side API Priority and Fairness still protects the
+// apiserver.
+const (
+	k8sClientQPS   = 50
+	k8sClientBurst = 100
+)
+
+// withClientRateLimits sets the provider's client rate limits on cfg where it
+// leaves them unset (zero, client-go's "use the default"); explicitly
+// configured values are kept. It returns cfg.
+func withClientRateLimits(cfg *rest.Config) *rest.Config {
+	if cfg.QPS == 0 {
+		cfg.QPS = k8sClientQPS
+	}
+	if cfg.Burst == 0 {
+		cfg.Burst = k8sClientBurst
+	}
+	return cfg
+}
+
 func buildRESTConfig(k8sContext string) (*rest.Config, error) {
 	// Try in-cluster first.
 	cfg, err := rest.InClusterConfig()
 	if err == nil {
-		return cfg, nil
+		return withClientRateLimits(cfg), nil
 	}
 	// Fall back to kubeconfig.
 	rules := clientcmd.NewDefaultClientConfigLoadingRules()
@@ -1151,7 +1174,11 @@ func buildRESTConfig(k8sContext string) (*rest.Config, error) {
 	if k8sContext != "" {
 		overrides.CurrentContext = k8sContext
 	}
-	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, overrides).ClientConfig()
+	cfg, err = clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, overrides).ClientConfig()
+	if err != nil {
+		return nil, err
+	}
+	return withClientRateLimits(cfg), nil
 }
 
 func managedServiceAlias() (string, string, error) {
