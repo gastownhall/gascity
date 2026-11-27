@@ -126,3 +126,54 @@ func TestNativeInputAdmissionWithholdsEveryInputFact(t *testing.T) {
 		}
 	}
 }
+
+// TestNativeInputAdmissionPrerequisiteAddedAfterMaterialization is AC-3: a
+// ready-blocking prerequisite added to the input after the workflow was
+// materialized withholds the step until the prerequisite closes, whether the
+// prerequisite lives in the input's store or, named "external:<id>", in the
+// other store of a split city.
+func TestNativeInputAdmissionPrerequisiteAddedAfterMaterialization(t *testing.T) {
+	cases := map[string]struct {
+		split   bool
+		inGraph bool
+	}{
+		"unified/same store": {},
+		"split/same store":   {split: true},
+		"split/other store":  {split: true, inGraph: true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			work := beads.NewMemStore()
+			graph, legs := beads.Store(work), []Leg{testLeg("city", work)}
+			if tc.split {
+				graph = sqliteBinding(t)
+				legs = splitLegs(work, graph)
+			}
+			wf := newNativeWorkflow(t, work, graph, beads.Bead{})
+			if ids := readyIDs(t, legs, poolQuery); !slices.Contains(ids, wf.step.ID) {
+				t.Fatalf("Ready = %v lacks step %s before any prerequisite; want it admitted", ids, wf.step.ID)
+			}
+
+			home := beads.Store(work)
+			if tc.inGraph {
+				home = graph
+			}
+			blocker := mustCreate(t, home, beads.Bead{Title: "prerequisite", Type: "task"})
+			target := blocker.ID
+			if tc.inGraph {
+				target = "external:" + blocker.ID
+			}
+			if err := work.DepAdd(wf.input.ID, target, "blocks"); err != nil {
+				t.Fatalf("DepAdd blocks: %v", err)
+			}
+			if ids := readyIDs(t, legs, poolQuery); slices.Contains(ids, wf.step.ID) {
+				t.Fatalf("Ready = %v contains step %s whose input %s waits on open prerequisite %s; want it withheld", ids, wf.step.ID, wf.input.ID, blocker.ID)
+			}
+
+			closeBead(t, home, blocker.ID)
+			if ids := readyIDs(t, legs, poolQuery); !slices.Contains(ids, wf.step.ID) {
+				t.Fatalf("Ready = %v lacks step %s after prerequisite %s closed; want it readmitted", ids, wf.step.ID, blocker.ID)
+			}
+		})
+	}
+}

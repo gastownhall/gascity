@@ -15,6 +15,7 @@ package inputadmission
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -36,6 +37,9 @@ const (
 	ReasonBlocked Reason = "blocked"
 	// ReasonDeferred is an input that is deferred (beads.IsDeferred).
 	ReasonDeferred Reason = "deferred"
+	// ReasonPrerequisite is an input with a ready-blocking dependency
+	// (beads.IsReadyBlockingDependencyType) that no store holds satisfied.
+	ReasonPrerequisite Reason = "prerequisite"
 )
 
 // Withhold is the verdict that a step must not start: which input fact holds
@@ -261,16 +265,123 @@ func (j *Judge) convoyVerdict(ctx context.Context, convoyID string) (convoyFact,
 	if err != nil {
 		return convoyFact{}, fmt.Errorf("reading input convoy %s: %w", convoyID, err)
 	}
-	v := convoyFact{}
+	var live []convoy.HeldMember
 	for _, m := range members {
 		if convoy.IsUnresolvedTrackedItem(m.Bead) || convoy.IsTerminalStatus(m.Status) {
 			continue
 		}
 		if reason := memberReason(m.Bead, j.now); reason != "" {
-			v = convoyFact{withheld: true, withhold: Withhold{Reason: reason, ConvoyID: convoyID, InputID: m.ID}}
-			break
+			v := convoyFact{withheld: true, withhold: Withhold{Reason: reason, ConvoyID: convoyID, InputID: m.ID}}
+			j.convoys[convoyID] = v
+			return v, nil
 		}
+		live = append(live, m)
+	}
+	inputID, blockerID, err := j.unsatisfiedPrerequisite(ctx, live)
+	if err != nil {
+		return convoyFact{}, fmt.Errorf("reading prerequisites of input convoy %s: %w", convoyID, err)
+	}
+	v := convoyFact{}
+	if inputID != "" {
+		v = convoyFact{withheld: true, withhold: Withhold{Reason: ReasonPrerequisite, ConvoyID: convoyID, InputID: inputID, BlockerID: blockerID}}
 	}
 	j.convoys[convoyID] = v
 	return v, nil
+}
+
+// unsatisfiedPrerequisite returns the first of members, in their order, with a
+// ready-blocking dependency that is not satisfied, and that dependency's
+// target. Each member's edges are read from the store that holds it, live,
+// when the convoy is judged, so a prerequisite added after the workflow was
+// materialized counts. A target is judged from every copy the sources hold
+// (beads.DependencySatisfiedByCopies): "external:<id>" names the bead <id>, a
+// capability ref never withholds, and a target no source holds withholds.
+func (j *Judge) unsatisfiedPrerequisite(ctx context.Context, members []convoy.HeldMember) (inputID, blockerID string, err error) {
+	byReader := make(map[int][]string)
+	for _, m := range members {
+		byReader[m.Reader] = append(byReader[m.Reader], m.ID)
+	}
+	edges := make(map[string][]beads.Dep, len(members))
+	for i, ids := range byReader {
+		deps, err := j.depsFrom(ctx, i, ids)
+		if err != nil {
+			return "", "", err
+		}
+		for id, d := range deps {
+			edges[id] = d
+		}
+	}
+	targetsOf := make(map[string][]string, len(members))
+	var targets []string
+	for _, m := range members {
+		for _, dep := range edges[m.ID] {
+			if !beads.IsReadyBlockingDependencyType(dep.Type) {
+				continue
+			}
+			target, capability := beads.ExternalBlockerTarget(dep.DependsOnID)
+			if capability || target == "" {
+				continue
+			}
+			targetsOf[m.ID] = append(targetsOf[m.ID], target)
+			targets = append(targets, target)
+		}
+	}
+	if len(targets) == 0 {
+		return "", "", nil
+	}
+	copies := make(map[string][]beads.Bead, len(targets))
+	for _, src := range j.sources {
+		if src.Reader == nil {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return "", "", err
+		}
+		found, err := beads.GetMany(src.Reader, targets)
+		if err != nil {
+			return "", "", fmt.Errorf("%s store: reading prerequisites %s: %w", src.Label, strings.Join(targets, ", "), err)
+		}
+		for id, b := range found {
+			copies[id] = append(copies[id], b)
+		}
+	}
+	for _, m := range members {
+		for _, target := range targetsOf[m.ID] {
+			if !beads.DependencySatisfiedByCopies(copies[target]) {
+				return m.ID, target, nil
+			}
+		}
+	}
+	return "", "", nil
+}
+
+// depsFrom reads the down edges of ids from sources[i]: one batched read where
+// the store has one, otherwise one live DepList per id.
+func (j *Judge) depsFrom(ctx context.Context, i int, ids []string) (map[string][]beads.Dep, error) {
+	src := j.sources[i]
+	if src.Reader == nil {
+		return nil, nil
+	}
+	if batch, ok := beads.DepListBatchFor(src.Reader); ok {
+		deps, err := batch.DepListBatch(ids)
+		if err == nil {
+			return deps, nil
+		}
+		if !errors.Is(err, beads.ErrDepListBatchUnsupported) {
+			return nil, fmt.Errorf("%s store: listing dependencies of %s: %w", src.Label, strings.Join(ids, ", "), err)
+		}
+	}
+	live := beads.LiveFor(src.Reader)
+	out := make(map[string][]beads.Dep, len(ids))
+	for _, id := range ids {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		deps, err := live.DepList(id, "down")
+		if err != nil {
+			return nil, fmt.Errorf("%s store: listing dependencies of %s: %w", src.Label, id, err)
+		}
+		out[id] = deps
+	}
+	return out, nil
 }
