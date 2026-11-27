@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -254,5 +256,101 @@ func TestCanonicalSingletonOrphanCloseHonorsOperatorHold(t *testing.T) {
 	}
 	if got := e.get(t, e.claim.ID); got.Assignee != e.cfg.Agents[0].QualifiedName() || got.Status != "open" {
 		t.Fatalf("claim assignee=%q status=%q, want kept on the alias and open", got.Assignee, got.Status)
+	}
+}
+
+// cityTick runs one planner pass plus one reconcile pass, as the city loop
+// does, and returns the planner pass's pool trace records.
+func (e *singletonOrphanEnv) cityTick(t *testing.T, clk *clock.Fake) ([]SessionReconcilerTraceRecord, string) {
+	t.Helper()
+	var stderr bytes.Buffer
+	tick := buildDesiredState(singletonOrphanCity, e.cityDir, clk.Now().UTC(), e.cfg, e.sp, e.store, &stderr)
+	sessions, err := loadSessionBeads(e.store)
+	if err != nil {
+		t.Fatalf("loadSessionBeads: %v", err)
+	}
+	trace := newPoolDesiredStateTestTrace(e.cfg.Agents[0].QualifiedName())
+	states := computePoolDesiredStates(e.cfg, tick.AssignedWorkBeads, sessionInfosFromBeads(sessions), tick.ScaleCheckCounts, nil, trace)
+	poolDesired := PoolDesiredCounts(states)
+	if poolDesired == nil {
+		poolDesired = make(map[string]int)
+	}
+	mergeNamedSessionDemand(poolDesired, tick.NamedSessionDemand, e.cfg)
+	reconcileSessionBeadsAtPath(
+		context.Background(), e.cityDir, sessions, tick.State, configuredSessionNames(e.cfg, singletonOrphanCity, e.store),
+		e.cfg, e.sp, e.store, nil, tick.AssignedWorkBeads, nil, nil, newDrainTracker(), poolDesired,
+		tick.StoreQueryPartial, nil, singletonOrphanCity,
+		nil, clk, events.Discard, 0, 0, io.Discard, &stderr,
+	)
+	return trace.records, stderr.String()
+}
+
+// AC-2: with routed demand for the identity, the orphan pass that closes the
+// seat (the planner has already dropped it from the desired set, as in the
+// report) gives way to exactly one fresh seat under the alias within the
+// next city ticks, and no later pool cap counts the closed row.
+func TestCanonicalSingletonOrphanRecoversRoutedDemand(t *testing.T) {
+	agent := singletonOrphanAgent()
+	agent.ScaleCheck = printCountCommand(1)
+	e := newSingletonOrphanEnv(t, agent)
+	identity := e.cfg.Agents[0].QualifiedName()
+	if _, err := e.store.Create(beads.Bead{
+		Title:    "routed demand",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": identity},
+	}); err != nil {
+		t.Fatalf("create routed demand: %v", err)
+	}
+	clk := &clock.Fake{Time: e.now}
+
+	if records := e.tick(t); len(records) != 1 || records[0].OutcomeCode != TraceOutcomeClosed {
+		t.Fatalf("tick 1 close_orphan outcomes = %v, want [closed]", closeOrphanOutcomes(records))
+	}
+	var stderrs []string
+	for i := 2; i <= 3 && len(fakeStartNames(e.sp)) == 0; i++ {
+		clk.Advance(time.Minute)
+		records, stderr := e.cityTick(t, clk)
+		stderrs = append(stderrs, stderr)
+		for _, rec := range records {
+			if rec.SiteCode != TraceSitePoolNewDemandCap {
+				continue
+			}
+			for _, blocker := range poolTraceFieldStrings(t, rec.Fields, "blocking_sessions") {
+				if blocker == e.seat.ID || blocker == e.seat.Metadata["session_name"] {
+					t.Fatalf("tick %d: new_demand_cap lists the closed seat %q in blocking_sessions; stderr=%q", i, blocker, stderr)
+				}
+			}
+		}
+	}
+
+	starts := fakeStartNames(e.sp)
+	if len(starts) != 1 {
+		t.Fatalf("session starts = %v, want exactly one; seat status=%q stderr=%q", starts, e.get(t, e.seat.ID).Status, stderrs)
+	}
+	if got := e.get(t, e.seat.ID).Status; got != "closed" {
+		t.Fatalf("orphaned seat status = %q, want closed", got)
+	}
+	open, err := e.store.List(beads.ListQuery{Type: sessionBeadType})
+	if err != nil {
+		t.Fatalf("list sessions: %v", err)
+	}
+	var fresh []beads.Bead
+	for _, b := range open {
+		if b.Status != "closed" {
+			fresh = append(fresh, b)
+		}
+	}
+	if len(fresh) != 1 || fresh[0].ID == e.seat.ID {
+		t.Fatalf("open session rows = %v, want one fresh row", fresh)
+	}
+	if got := fresh[0].Metadata["alias"]; got != identity {
+		t.Fatalf("fresh seat alias = %q, want %q", got, identity)
+	}
+	if got := fresh[0].Metadata["session_name"]; got != starts[0] {
+		t.Fatalf("started runtime %q is not the fresh seat's session_name %q", starts[0], got)
+	}
+	if got := e.get(t, e.claim.ID); got.Assignee != identity {
+		t.Fatalf("alias claim assignee = %q, want kept on %q", got.Assignee, identity)
 	}
 }
