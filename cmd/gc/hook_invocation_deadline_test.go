@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 // TestHookDiscoveryAnswersBeforeDeadline pins #5533's deadline contract: a
@@ -125,8 +128,9 @@ func TestHookNegativeTimeoutIsRefused(t *testing.T) {
 // machinery must derive a 4s mutation reserve (min(10s, work/3)) and an 8s
 // claim fence (min(window, work − reserve)) from the Deadline alone. The
 // recorder's ops carry that clock; readAdvance is how far the fake work query
-// moves it before answering.
-func deadlineClaimFixture(t *testing.T, readAdvance time.Duration) (*turnBoundClaimRecorder, hookClaimOps) {
+// moves it before answering, and advance hands the same clock to a claim seam
+// that models a CAS taking time.
+func deadlineClaimFixture(t *testing.T, readAdvance time.Duration) (*turnBoundClaimRecorder, hookClaimOps, func(time.Duration)) {
 	t.Helper()
 	rec := &turnBoundClaimRecorder{}
 	ops := rec.ops(t, turnBoundRoutedWork)
@@ -137,7 +141,7 @@ func deadlineClaimFixture(t *testing.T, readAdvance time.Duration) (*turnBoundCl
 		clk = clk.Add(readAdvance)
 		return turnBoundRoutedWork, nil
 	}
-	return rec, ops
+	return rec, ops, func(d time.Duration) { clk = clk.Add(d) }
 }
 
 // TestHookClaimRefusesCandidatePastDeadlineFence pins AC-4: with a declared
@@ -148,7 +152,7 @@ func deadlineClaimFixture(t *testing.T, readAdvance time.Duration) (*turnBoundCl
 // binding: a claim whose read outlived the fence cannot be handed to the turn
 // that asked for it.
 func TestHookClaimRefusesCandidatePastDeadlineFence(t *testing.T) {
-	rec, ops := deadlineClaimFixture(t, 8*time.Second+500*time.Millisecond)
+	rec, ops, _ := deadlineClaimFixture(t, 8*time.Second+500*time.Millisecond)
 
 	var stdout, stderr bytes.Buffer
 	code := doHookClaim("query", "/rig", hookClaimOptions{
@@ -180,5 +184,73 @@ func TestHookClaimRefusesCandidatePastDeadlineFence(t *testing.T) {
 	// unbounded 160s default, or the 12s work time) cannot pass silently.
 	if !strings.Contains(stderr.String(), "8s claim window") {
 		t.Fatalf("stderr %q does not name the deadline-derived 8s claim window", stderr.String())
+	}
+}
+
+// TestHookClaimReleasesLandingPastDeadline pins AC-5: a claim mutation that
+// STARTS inside the deadline's claim fence but LANDS past the read end (W =
+// deadline minus the answer margin; 12s on the --timeout 15s shape) is a claim
+// the invoking turn can no longer receive. It must be released with reason
+// claim_window_straddled — released, never parked — and the hook exits
+// non-zero with nothing on stdout. The landing bound is the fence plus the
+// derived reserve (8s + 4s), so the control that lands at 11.5s, inside W,
+// stands.
+func TestHookClaimReleasesLandingPastDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		casDuration time.Duration
+		wantRelease bool
+		wantCode    int
+	}{
+		// 5s read + 7.5s CAS: the CAS lands at 12.5s, past W (12s) and past
+		// fence+reserve (8s+4s): the straddle.
+		{"lands past the read end", 7500 * time.Millisecond, true, 1},
+		// 5s read + 6.5s CAS: the CAS lands at 11.5s, inside W: a healthy claim.
+		{"lands inside the read end", 6500 * time.Millisecond, false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The read lands its candidate at 5s, inside the 8s fence, so the
+			// claim tier passes the start fence and runs the CAS.
+			rec, ops, advance := deadlineClaimFixture(t, 5*time.Second)
+			baseClaim := ops.Claim
+			ops.Claim = func(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
+				// The CAS starts inside the fence and takes casDuration.
+				advance(tc.casDuration)
+				return baseClaim(ctx, dir, env, beadID, assignee)
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := doHookClaim("query", "/rig", hookClaimOptions{
+				Assignee:     "worker-1",
+				RouteTargets: []string{"worker"},
+				JSON:         true,
+			}, ops, &stdout, &stderr)
+
+			if code != tc.wantCode {
+				t.Fatalf("code = %d, want %d; stderr=%s", code, tc.wantCode, stderr.String())
+			}
+			if len(rec.claims) != 1 {
+				t.Fatalf("claims = %d, want exactly one (the CAS ran inside the fence)", len(rec.claims))
+			}
+			if tc.wantRelease {
+				if len(rec.releases) != 1 || rec.releases[0] != "work-1" {
+					t.Fatalf("releases = %v, want [work-1]: a claim landing past the read end must be given back", rec.releases)
+				}
+				if len(rec.claimReleased) != 1 || rec.claimReleased[0].Reason != hookClaimReleaseReasonStraddled {
+					t.Fatalf("bead.claim_released records = %+v, want one with reason %s", rec.claimReleased, hookClaimReleaseReasonStraddled)
+				}
+				if stdout.Len() != 0 {
+					t.Fatalf("stdout = %q, want nothing: a straddled claim delivers no work result", stdout.String())
+				}
+				return
+			}
+			if len(rec.releases) != 0 {
+				t.Fatalf("releases = %v, want none: the claim landed inside the read end and must stand", rec.releases)
+			}
+			result := decodeTurnBoundResult(t, stdout.String())
+			if result.Action != "work" || result.BeadID != "work-1" {
+				t.Fatalf("result = %+v, want the standing claim delivered as work", result)
+			}
+		})
 	}
 }
