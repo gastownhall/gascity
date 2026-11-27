@@ -131,12 +131,106 @@ func TestNudgeStalledPoolClaims_UsesClaimFallbackWhenNudgeIsBlank(t *testing.T) 
 	}
 }
 
-func TestPoolClaimBackstopContent_PreservesExplicitNudge(t *testing.T) {
+// idleClaimProcedureNudge is a configured nudge that is a work procedure, not
+// a claim instruction: startup text the claim-recovery paths must never send
+// in place of their own claim line (issue #9196).
+const idleClaimProcedureNudge = "Check for uncommitted changes and commit them in logical groupings."
+
+func TestPoolClaimBackstopContent_IgnoresTheConfiguredNudge(t *testing.T) {
 	cfg := idleClaimTestCfg()
 	cfg.Agents[0].Nudge = "  Use the configured wake text exactly.  "
 
-	if got, want := (poolClaimBackstop{cfg: cfg}).content(idleClaimPoolSession()), "Use the configured wake text exactly."; got != want {
-		t.Fatalf("claim nudge = %q, want normalized configured value %q", got, want)
+	if got, want := (poolClaimBackstop{cfg: cfg}).content(idleClaimPoolSession()), defaultPoolClaimNudge; got != want {
+		t.Fatalf("claim nudge = %q, want the built-in claim line %q", got, want)
+	}
+}
+
+// A configured nudge that is a work procedure, not a claim instruction, must
+// not be sent verbatim as claim-backstop text: the backstop exists to make an
+// idle seat claim its routed trigger, so its text has to invoke the claim
+// protocol (issue #9196).
+func TestPoolClaimBackstopContent_ProcedureNudgeStillAsksToClaim(t *testing.T) {
+	cfg := idleClaimTestCfg()
+	cfg.Agents[0].Nudge = idleClaimProcedureNudge
+
+	got := (poolClaimBackstop{cfg: cfg}).content(idleClaimPoolSession())
+	if !strings.Contains(got, "gc hook --claim") {
+		t.Fatalf("claim backstop nudge = %q, want text that invokes gc hook --claim", got)
+	}
+}
+
+// TestClaimRecoveryTextIgnoresTheConfiguredNudge crosses the configured nudge
+// values a pack can ship with every claim-recovery site: each sends its own
+// built-in text (issue #9196). The configured nudge's presence still gates
+// the legacy continuation and unstarted-execution lanes, and a template not in
+// the config gets "" at every site.
+func TestClaimRecoveryTextIgnoresTheConfiguredNudge(t *testing.T) {
+	const bead = "work-b"
+	sites := []struct {
+		name string
+		// configuredOnly: "" for a blank nudge (the lane is gated on it).
+		configuredOnly bool
+		want           string
+		text           func(cfg *config.City, s beads.Bead) string
+	}{
+		{name: "trigger backstop", want: defaultPoolClaimNudge, text: func(cfg *config.City, s beads.Bead) string {
+			return (poolClaimBackstop{cfg: cfg}).content(s)
+		}},
+		{name: "warm-bind reminder", want: defaultPoolClaimNudge, text: warmBindClaimText},
+		{name: "execution backstop, started", want: fmt.Sprintf(defaultHeldClaimNudge, bead), text: func(cfg *config.City, s beads.Bead) string {
+			s.Metadata[executionClaimNudgeWorkKey] = bead
+			s.Metadata[executionClaimStartedKey] = startedValue(s, bead)
+			return (poolExecutionBackstop{cfg: cfg}).content(s)
+		}},
+		{name: "execution backstop, unstarted", configuredOnly: true, want: ladderClaimedNudge, text: func(cfg *config.City, s beads.Bead) string {
+			s.Metadata[executionClaimNudgeWorkKey] = bead
+			return (poolExecutionBackstop{cfg: cfg}).content(s)
+		}},
+		{name: "continuation backstop", configuredOnly: true, want: ladderClaimedNudge, text: func(cfg *config.City, s beads.Bead) string {
+			return (poolContinuationBackstop{cfg: cfg}).content(s)
+		}},
+	}
+	nudges := []struct {
+		name, nudge string
+		blank       bool
+	}{
+		{name: "empty", nudge: "", blank: true},
+		{name: "whitespace", nudge: " \t ", blank: true},
+		{name: "procedure", nudge: idleClaimProcedureNudge},
+		{name: "claim", nudge: "gc hook --claim --json"},
+		{name: "claim with drain-ack", nudge: "gc hook --claim --drain-ack --json"},
+		{name: "shipped polecat line", nudge: "Find work, create a branch, implement, push, hand off to refinery."},
+	}
+	for _, site := range sites {
+		for _, nc := range nudges {
+			t.Run(site.name+"/"+nc.name, func(t *testing.T) {
+				cfg := idleClaimTestCfg()
+				cfg.Agents[0].Nudge = nc.nudge
+				s := idleClaimPoolSession()
+				s.Metadata["instance_token"] = "tok-1"
+				want := site.want
+				if site.configuredOnly && nc.blank {
+					want = ""
+				}
+				got := site.text(cfg, s)
+				if got != want {
+					t.Fatalf("text = %q, want %q", got, want)
+				}
+				if strings.HasSuffix(site.name, ", started") && strings.Contains(got, "--drain-ack") {
+					t.Fatalf("started text %q carries --drain-ack", got)
+				}
+			})
+		}
+		t.Run(site.name+"/unknown template", func(t *testing.T) {
+			cfg := idleClaimTestCfg()
+			cfg.Agents[0].Nudge = idleClaimProcedureNudge
+			s := idleClaimPoolSession()
+			s.Metadata["instance_token"] = "tok-1"
+			s.Metadata["template"] = "unknown-agent"
+			if got := site.text(cfg, s); got != "" {
+				t.Fatalf("text for an unknown template = %q, want empty (fail closed)", got)
+			}
+		})
 	}
 }
 

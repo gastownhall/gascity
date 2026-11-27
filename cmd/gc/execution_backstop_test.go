@@ -246,6 +246,50 @@ func TestExecutionBackstopNudgesAnIdleClaimHolderExactlyOnce(t *testing.T) {
 	}
 }
 
+// An unstarted claim on a template that configures a nudge is reminded with
+// the built-in claim line, not the configured text: that is the agent's
+// startup text, which can be a work procedure that never tells the seat to
+// claim (issue #9196).
+func TestExecutionBackstopNudgesAnUnstartedClaimWithTheClaimLine(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.cfg.Agents[0].Nudge = idleClaimProcedureNudge
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t) // first sighting: start the grace clock
+
+	f.now = f.now.Add(idleClaimNudgeGrace + time.Second)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if got := f.nudgesDelivered(); len(got) != 1 || got[0] != ladderClaimedNudge {
+		t.Fatalf("nudges delivered = %q, want exactly [%q]; stdout=%s", got, ladderClaimedNudge, f.stdout.String())
+	}
+	if len(f.drained) != 0 {
+		t.Fatalf("drain requests = %v, want none while attempts remain", f.drained)
+	}
+}
+
+// A whitespace-only nudge is no nudge: the unstarted claim is drained just
+// after the grace with nothing sent, as for an empty one
+// (TestExecutionBackstopEscalatesWhenTheAgentHasNoNudgeConfigured).
+func TestExecutionBackstopTreatsAWhitespaceNudgeAsNone(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.cfg.Agents[0].Nudge = " \t "
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 0 {
+		t.Fatalf("drain requests inside the grace window = %v, want none", f.drained)
+	}
+
+	f.now = f.now.Add(idleClaimNudgeGrace + time.Second)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if got := f.nudgesDelivered(); len(got) != 0 {
+		t.Fatalf("nudges delivered with a whitespace nudge = %q, want none", got)
+	}
+	if len(f.drained) != 1 || f.drained[0] != f.sessName {
+		t.Fatalf("drain requests = %v, want exactly one for %s; stdout=%s", f.drained, f.sessName, f.stdout.String())
+	}
+}
+
 // Control A: a WORKING agent. The provider reports recent activity, so the
 // predicate holds — zero nudges and, just as importantly, zero writes, because a
 // backstop that marks a busy session is a backstop that will eventually nudge it
@@ -1331,12 +1375,13 @@ func (f *executionBackstopFixture) nudgesDelivered() []string {
 // stall). Kills execution evidence vetoing the nudge: the seat started its
 // step, its turn then died on an API error, and it sits at its prompt holding
 // the claim. Once the pane has read quiet past the window it gets one claim
-// nudge: the configured one, or the pool default when its template configures
-// none, as no maintainer-city pool template does (the stamp vetoes the drain,
-// so the nudge is the seat's only way back). The hook hands the seat its own
-// claim, so the nudge is idempotent; a seat that answers is left alone. The
-// default carries no --drain-ack (mc-ilr3b): a started seat must never ack a
-// drain on the nudge's no-work answer.
+// nudge, the built-in held-claim text naming the claim, whatever its template
+// configures as its nudge (a procedure, a claim line, or none, as no
+// maintainer-city pool template does): the stamp vetoes the drain, so the
+// nudge is the seat's only way back. The hook hands the seat its own claim, so
+// the nudge is idempotent; a seat that answers is left alone. The text carries
+// no --drain-ack (mc-ilr3b): a started seat must never ack a drain on the
+// nudge's no-work answer.
 func TestExecutionBackstopNudgesAStartedSeatWhoseTurnDied(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -1346,9 +1391,8 @@ func TestExecutionBackstopNudgesAStartedSeatWhoseTurnDied(t *testing.T) {
 		want  string
 	}{
 		{name: "no nudge configured", want: defaultHeldClaimNudge},
-		{name: "a configured nudge", nudge: "gc hook --claim --json", want: "gc hook --claim --json"},
-		// A configured nudge that would ack the drain is replaced by the
-		// default: the started rung never carries --drain-ack.
+		{name: "a configured claim nudge", nudge: "gc hook --claim --json", want: defaultHeldClaimNudge},
+		{name: "a configured procedure nudge", nudge: idleClaimProcedureNudge, want: defaultHeldClaimNudge},
 		{name: "a configured --drain-ack nudge", nudge: "gc hook --claim --drain-ack --json", want: defaultHeldClaimNudge},
 		// The production pane: broadcasts have scrolled the idle prompt
 		// away, so the snapshot can read neither a prompt nor a busy line.

@@ -922,6 +922,17 @@ func (s *ambiguousCreateStore) Get(id string) (beads.Bead, error) {
 	return s.laneTestStore.Get(id)
 }
 
+// refusingOpCreateStore refuses every op bead's create as an invalid request,
+// the op store's own refusal of a notice (plannerNoticeRefused).
+type refusingOpCreateStore struct{ laneTestStore }
+
+func (s refusingOpCreateStore) Create(b beads.Bead) (beads.Bead, error) {
+	if b.Type == opjournal.BeadType {
+		return beads.Bead{}, fmt.Errorf("%w: refused by the test store", opjournal.ErrInvalidRequest)
+	}
+	return s.laneTestStore.Create(b)
+}
+
 func TestWorkLadderNoticeProposalFailures(t *testing.T) {
 	t.Run("the journal cannot be listed", func(t *testing.T) {
 		var fs *failingOpListStore
@@ -998,9 +1009,10 @@ func TestWorkLadderNoticeProposalFailures(t *testing.T) {
 			t.Fatalf("%d failure tallies after an outage, want one for the seat", tallies)
 		}
 	})
-	t.Run("the configured nudge is too large", func(t *testing.T) {
-		lc := newLadderLaneCity(t, "message")
-		lc.env.Cfg.Agents[0].Nudge = strings.Repeat("x", opjournal.MaxInlinePayload+1)
+	t.Run("the op store refuses the notice", func(t *testing.T) {
+		lc := newLadderLaneCityOver(t, func(s laneTestStore) beads.Store {
+			return refusingOpCreateStore{laneTestStore: s}
+		}, "message")
 		id := lc.claim("unstarted")
 		lc.at(0)
 		lc.at(halfPast(1))
@@ -1365,6 +1377,7 @@ func TestWorkLadderNoticeDeliveredByTheLaneHost(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			lc := newLadderLaneCity(t, "message")
+			lc.env.Cfg.Agents[0].Nudge = idleClaimProcedureNudge
 			_, text := setup(lc)
 			lc.at(0)
 			lc.at(halfPast(1))
