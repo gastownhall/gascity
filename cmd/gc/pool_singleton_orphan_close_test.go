@@ -381,6 +381,48 @@ func TestCanonicalSingletonOrphanRecoversRoutedDemand(t *testing.T) {
 	}
 }
 
+// AC-2 without demand: the close is the orphan's own resolution, not a
+// reaction to demand. With the alias claim parked behind an open blocker and
+// nothing routed to the identity, the seat still closes and the following
+// city ticks open no fresh row and start no runtime.
+func TestCanonicalSingletonOrphanCloseWithoutDemandStartsNothing(t *testing.T) {
+	e := newSingletonOrphanEnv(t, singletonOrphanAgent())
+	blocker, err := e.store.Create(beads.Bead{Title: "review loop", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("create blocker: %v", err)
+	}
+	if err := e.store.DepAdd(e.claim.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("park alias claim: %v", err)
+	}
+	clk := &clock.Fake{Time: e.now}
+
+	if records := e.tick(t); len(records) != 1 || records[0].OutcomeCode != TraceOutcomeClosed {
+		t.Fatalf("close_orphan outcomes = %v, want [closed]", closeOrphanOutcomes(records))
+	}
+	var stderrs []string
+	for i := 2; i <= 3; i++ {
+		clk.Advance(time.Minute)
+		_, stderr := e.cityTick(t, clk)
+		stderrs = append(stderrs, stderr)
+	}
+
+	if starts := fakeStartNames(e.sp); len(starts) != 0 {
+		t.Fatalf("session starts = %v, want none without demand; stderr=%q", starts, stderrs)
+	}
+	rows, err := e.store.List(beads.ListQuery{Type: sessionBeadType})
+	if err != nil {
+		t.Fatalf("list sessions: %v", err)
+	}
+	for _, b := range rows {
+		if b.Status != "closed" {
+			t.Fatalf("open session row %s (alias %q) after the close, want none without demand", b.ID, b.Metadata["alias"])
+		}
+	}
+	if got := e.get(t, e.claim.ID); got.Assignee != e.cfg.Agents[0].QualifiedName() {
+		t.Fatalf("alias claim assignee = %q, want kept on the alias", got.Assignee)
+	}
+}
+
 // AC-5: a running canonical singleton seat working an in_progress claim under
 // its alias is left alone: no drain, no close, no release.
 func TestCanonicalSingletonRunningSeatKeepsItsInProgressClaim(t *testing.T) {
