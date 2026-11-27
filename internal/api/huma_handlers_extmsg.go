@@ -461,7 +461,12 @@ func (s *Server) humaHandleExtMsgTranscriptList(ctx context.Context, input *ExtM
 		Order:         extmsg.TranscriptOrder(input.Order),
 	})
 	if err != nil {
-		return nil, apierr.Internal.Msg(err.Error())
+		switch {
+		case errors.Is(err, extmsg.ErrInvalidInput) || errors.Is(err, extmsg.ErrInvalidConversation):
+			return nil, apierr.InvalidRequest.Msg(err.Error())
+		default:
+			return nil, apierr.Internal.Msg(err.Error())
+		}
 	}
 	if entries == nil {
 		entries = []extmsg.ConversationTranscriptRecord{}
