@@ -474,3 +474,121 @@ func TestCanonicalizeLegacyRoutedWorkRehomesOwnMintedBindingOnSharedRigLeg(t *te
 		})
 	}
 }
+
+// TestCanonicalizeLegacyRehomeOwnLegsKeepLegacyBehavior is AC-5: on the city's
+// own legs — the empty ref, a scoped city ref, and a relocated-class ref — both
+// arms keep every pre-guard behavior, in both directions: the #3378 strip of a
+// binding segment and the #5293 add of one, including the assigned arm's
+// two-fields-one-write shape and the live-legacy-owner skip.
+func TestCanonicalizeLegacyRehomeOwnLegsKeepLegacyBehavior(t *testing.T) {
+	stripCfg := &config.City{Agents: []config.Agent{poolAgent("planner", "rig-A", intPtr(5), 0)}}
+	addCfg := &config.City{Agents: []config.Agent{{
+		Name: "refinery", Dir: "gascity", BindingName: "gastown", MaxActiveSessions: intPtr(1),
+	}}}
+	legs := []string{"", "city:test-city", "class:ga-classes"}
+
+	for _, leg := range legs {
+		leg := leg
+
+		t.Run("routed strip on "+leg, func(t *testing.T) {
+			wb := workBead("wb-strip", "rig-A/gc.planner", "", "open", 5)
+			mem := beads.NewMemStoreFrom(0, []beads.Bead{wb}, nil)
+			store := &updateCountingStore{Store: mem}
+
+			report := canonicalizeLegacyBoundUnassignedRoutedWork(stripCfg, []beads.Bead{wb}, []beads.Store{store}, []string{leg}, io.Discard)
+
+			if store.updates != 1 {
+				t.Fatalf("wrote %d time(s), want the one canonicalizing write", store.updates)
+			}
+			if got, _ := mem.Get("wb-strip"); got.Metadata["gc.routed_to"] != "rig-A/planner" {
+				t.Errorf("gc.routed_to = %q, want rig-A/planner", got.Metadata["gc.routed_to"])
+			}
+			if len(report.Rehomed) != 1 || report.Rehomed[0].To != "rig-A/planner" || report.Rehomed[0].Leg != leg {
+				t.Errorf("rehomed %+v, want the strip on %q", report.Rehomed, leg)
+			}
+			if len(report.Refused) != 0 {
+				t.Errorf("refused %+v, want none on an own leg", report.Refused)
+			}
+		})
+
+		t.Run("routed add on "+leg, func(t *testing.T) {
+			wb := workBead("wb-add", "gascity/refinery", "", "open", 5)
+			mem := beads.NewMemStoreFrom(0, []beads.Bead{wb}, nil)
+			store := &updateCountingStore{Store: mem}
+
+			report := canonicalizeLegacyBoundUnassignedRoutedWork(addCfg, []beads.Bead{wb}, []beads.Store{store}, []string{leg}, io.Discard)
+
+			if store.updates != 1 {
+				t.Fatalf("wrote %d time(s), want the one canonicalizing write", store.updates)
+			}
+			if got, _ := mem.Get("wb-add"); got.Metadata["gc.routed_to"] != "gascity/gastown.refinery" {
+				t.Errorf("gc.routed_to = %q, want gascity/gastown.refinery", got.Metadata["gc.routed_to"])
+			}
+			if len(report.Rehomed) != 1 || report.Rehomed[0].To != "gascity/gastown.refinery" {
+				t.Errorf("rehomed %+v, want the add to gascity/gastown.refinery", report.Rehomed)
+			}
+			if len(report.Refused) != 0 {
+				t.Errorf("refused %+v, want none on an own leg", report.Refused)
+			}
+		})
+
+		t.Run("assigned strip on "+leg, func(t *testing.T) {
+			wb := workBead("wb-asg", "rig-A/gc.planner", "rig-A/gc.planner", "in_progress", 5)
+			mem := beads.NewMemStoreFrom(0, []beads.Bead{wb}, nil)
+			store := &updateCountingStore{Store: mem}
+
+			report := canonicalizeLegacyBoundAssignedWork(stripCfg, []beads.Bead{wb}, []beads.Store{store}, []string{leg}, newSessionBeadSnapshot(nil), io.Discard)
+
+			if store.updates != 1 {
+				t.Fatalf("wrote %d time(s), want one Update carrying both fields", store.updates)
+			}
+			if got, _ := mem.Get("wb-asg"); got.Assignee != "rig-A/planner" || got.Metadata["gc.routed_to"] != "rig-A/planner" {
+				t.Errorf("row = (assignee %q, route %q), want both rig-A/planner", got.Assignee, got.Metadata["gc.routed_to"])
+			}
+			if len(report.Rehomed) != 2 {
+				t.Errorf("rehomed %+v, want one entry per changed field", report.Rehomed)
+			}
+			if len(report.Refused) != 0 {
+				t.Errorf("refused %+v, want none on an own leg", report.Refused)
+			}
+		})
+
+		t.Run("assigned add on "+leg, func(t *testing.T) {
+			wb := workBead("wb-asg", "gascity/refinery", "gascity/refinery", "in_progress", 5)
+			mem := beads.NewMemStoreFrom(0, []beads.Bead{wb}, nil)
+			store := &updateCountingStore{Store: mem}
+
+			report := canonicalizeLegacyBoundAssignedWork(addCfg, []beads.Bead{wb}, []beads.Store{store}, []string{leg}, newSessionBeadSnapshot(nil), io.Discard)
+
+			if store.updates != 1 {
+				t.Fatalf("wrote %d time(s), want one Update carrying both fields", store.updates)
+			}
+			if got, _ := mem.Get("wb-asg"); got.Assignee != "gascity/gastown.refinery" || got.Metadata["gc.routed_to"] != "gascity/gastown.refinery" {
+				t.Errorf("row = (assignee %q, route %q), want both gascity/gastown.refinery", got.Assignee, got.Metadata["gc.routed_to"])
+			}
+			if len(report.Rehomed) != 2 || len(report.Refused) != 0 {
+				t.Errorf("report = (rehomed %+v, refused %+v), want two rehomes, no refusals", report.Rehomed, report.Refused)
+			}
+		})
+	}
+
+	t.Run("class leg live legacy owner is preserved", func(t *testing.T) {
+		const legacy = "gascity/refinery"
+		wb := workBead("wb-live", "gascity/gastown.refinery", legacy, "in_progress", 5)
+		mem := beads.NewMemStoreFrom(0, []beads.Bead{wb}, nil)
+		store := &updateCountingStore{Store: mem}
+		live := beads.Bead{
+			ID: "sess-legacy-live", Type: sessionBeadType, Status: "open",
+			Metadata: map[string]string{"session_name": legacy, "template": legacy, "state": "active"},
+		}
+
+		report := canonicalizeLegacyBoundAssignedWork(addCfg, []beads.Bead{wb}, []beads.Store{store}, []string{"class:ga-classes"}, newSessionBeadSnapshot([]beads.Bead{live}), io.Discard)
+
+		if store.updates != 0 {
+			t.Errorf("re-homed work owned by a live legacy session, got %d writes (want 0)", store.updates)
+		}
+		if len(report.Rehomed) != 0 || len(report.Refused) != 0 {
+			t.Errorf("report = %+v, want empty (the row is skipped, not refused)", report)
+		}
+	})
+}
