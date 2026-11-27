@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -85,6 +86,12 @@ type listShareFixture struct {
 	held  *heldActiveStore
 	// want is each row's active bead, by agent name or session id.
 	want map[string]string
+	// other is url with a query that keys a different list.
+	other string
+	// inline are urls that build their list inline, sharing no build.
+	inline []string
+	// malformed is url with a cursor the endpoint refuses, or "".
+	malformed string
 	// joined sets the endpoint's sharer hook.
 	joined func(func(key string, started bool))
 	// slots counts the endpoint's keys with a build running.
@@ -121,6 +128,8 @@ func newAgentListShareFixture(t *testing.T) *listShareFixture {
 		url:    cityURL(st, "/agents"),
 		held:   held,
 		want:   want,
+		other:  cityURL(st, "/agents?running=true"),
+		inline: []string{cityURL(st, "/agents?peek=true"), cityURL(st, "/agents?index=0&wait=10ms")},
 		joined: func(hook func(string, bool)) { srv.agentListBuilds.joined = hook },
 		slots:  srv.agentListBuilds.slotCount,
 		rows: func(t *testing.T, rec *httptest.ResponseRecorder) map[string]string {
@@ -153,14 +162,17 @@ func newSessionListShareFixture(t *testing.T) *listShareFixture {
 	}
 	srv := New(fs)
 	f := &listShareFixture{
-		state:  fs,
-		srv:    srv,
-		h:      newTestCityHandlerWith(t, fs, srv),
-		url:    cityURL(fs, "/sessions"),
-		held:   held,
-		want:   want,
-		joined: func(hook func(string, bool)) { srv.sessionListBuilds.joined = hook },
-		slots:  srv.sessionListBuilds.slotCount,
+		state:     fs,
+		srv:       srv,
+		h:         newTestCityHandlerWith(t, fs, srv),
+		url:       cityURL(fs, "/sessions"),
+		held:      held,
+		want:      want,
+		other:     cityURL(fs, "/sessions?limit=1"),
+		inline:    []string{cityURL(fs, "/sessions?peek=true")},
+		malformed: cityURL(fs, "/sessions?cursor=not-a-cursor"),
+		joined:    func(hook func(string, bool)) { srv.sessionListBuilds.joined = hook },
+		slots:     srv.sessionListBuilds.slotCount,
 		rows: func(t *testing.T, rec *httptest.ResponseRecorder) map[string]string {
 			t.Helper()
 			var resp struct {
@@ -341,4 +353,139 @@ func TestListBuildSharingPostMutation(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestListBuildSharingIsolation: sharing keeps each list's query, config and
+// freshness. While one build is held, a reader of another query or of a newer
+// config generation starts its own build, a peek or blocking reader builds
+// inline beside it, and a malformed cursor is refused at once; none joins the
+// held build. Readers of one build each get their own copy of its list.
+func TestListBuildSharingIsolation(t *testing.T) {
+	for _, fx := range listShareFixtures {
+		t.Run(fx.name, func(t *testing.T) {
+			f := fx.new(t)
+			joins := make(chan bool, 16)
+			f.joined(func(_ string, started bool) { joins <- started })
+			var mu sync.Mutex
+			recs := map[string]*httptest.ResponseRecorder{}
+			var wg sync.WaitGroup
+			read := func(name, url string) {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					rec := f.get(url)
+					mu.Lock()
+					recs[name] = rec
+					mu.Unlock()
+				}()
+			}
+			read("held", f.url)
+			if started := <-joins; !started {
+				t.Fatal("the first reader did not start a build")
+			}
+			<-f.held.entered
+
+			read("other query", f.other)
+			if started := <-joins; !started {
+				t.Error("a reader of another query joined the held build")
+			}
+			<-f.held.entered
+			// The server sees another config, so the list's config
+			// generation moves on.
+			f.srv.configGeneration(&config.City{})
+			read("new config", f.url)
+			if started := <-joins; !started {
+				t.Error("a reader of a newer config generation joined the held build")
+			}
+			<-f.held.entered
+			for _, url := range f.inline {
+				read(url, url)
+				<-f.held.entered
+			}
+			if f.malformed != "" {
+				rec := f.get(f.malformed)
+				if rec.Code != http.StatusBadRequest {
+					t.Errorf("GET malformed cursor while a build ran: status %d, want 400: %s", rec.Code, rec.Body.String())
+				}
+			}
+			if n := len(joins); n != 0 {
+				t.Errorf("%d inline or refused readers took a shared build", n)
+			}
+
+			f.held.open()
+			wg.Wait()
+			f.srv.waitForBackground()
+			f.checkRows(t, recs["held"], f.want)
+			for name, rec := range recs {
+				if rec.Code != http.StatusOK {
+					t.Errorf("GET %s: status %d: %s", name, rec.Code, rec.Body.String())
+				}
+			}
+			if _, maxRunning := f.held.stats(); maxRunning != 3+len(f.inline) {
+				t.Errorf("%d builds ran at once, want %d: one per key and one per inline reader", maxRunning, 3+len(f.inline))
+			}
+			if n := f.slots(); n != 0 {
+				t.Errorf("%d build slots left once the builds ended, want 0", n)
+			}
+		})
+	}
+
+	t.Run("waiters", func(t *testing.T) {
+		srv := New(newFakeState(t))
+		var sh listBuildSharer[agentResponse]
+		joins := make(chan bool, 4)
+		sh.joined = func(_ string, started bool) { joins <- started }
+		release := make(chan struct{})
+		held := func(ctx context.Context) (*ListOutput[agentResponse], error) {
+			<-release
+			return &ListOutput[agentResponse]{}, ctx.Err()
+		}
+		list := func() *ListOutput[agentResponse] {
+			return &ListOutput[agentResponse]{Index: 7, Body: ListBody[agentResponse]{
+				Items:         []agentResponse{{Name: "worker", ActiveBead: "gc-1"}},
+				Total:         1,
+				Partial:       true,
+				PartialErrors: []string{"rig alpha: looking up active work: down"},
+			}}
+		}
+		built := func(ctx context.Context) (*ListOutput[agentResponse], error) { return list(), ctx.Err() }
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := sh.share(context.Background(), srv, "k", held); err != nil {
+				t.Errorf("share: %v", err)
+			}
+		}()
+		<-joins
+		outs := make([]*ListOutput[agentResponse], 2)
+		for i := range outs {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				out, err := sh.share(context.Background(), srv, "k", built)
+				if err != nil {
+					t.Errorf("share: %v", err)
+				}
+				outs[i] = out
+			}()
+			if started := <-joins; started {
+				t.Fatal("a waiter started a build while one was running")
+			}
+		}
+		close(release)
+		wg.Wait()
+		srv.waitForBackground()
+		if outs[0] == nil || outs[1] == nil {
+			t.Fatal("a waiter got no list")
+		}
+
+		outs[0].Index = 99
+		outs[0].Body.Items[0].ActiveBead = "mutated"
+		outs[0].Body.PartialErrors[0] = "mutated"
+		want := list()
+		if outs[1].Index != want.Index || outs[1].Body.Items[0].ActiveBead != want.Body.Items[0].ActiveBead || !slices.Equal(outs[1].Body.PartialErrors, want.Body.PartialErrors) {
+			t.Errorf("one waiter's changes reached another's list: %+v", *outs[1])
+		}
+	})
 }

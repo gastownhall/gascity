@@ -2,7 +2,10 @@ package api
 
 import (
 	"context"
+	"log"
 	"sync"
+
+	"github.com/gastownhall/gascity/internal/api/apierr"
 )
 
 // listBuildSharer shares the fresh builds of one list endpoint among
@@ -39,10 +42,11 @@ type listBuild[T any] struct {
 }
 
 // share answers a reader of the list key names with a build that starts no
-// earlier than this call. build is this reader's build of the list; it runs
-// detached (runBackground) when this reader starts a build or creates the
-// queued one, so it must not use the request's context or input: the caller
-// passes copies.
+// earlier than this call, as a copy of that build's list that is this
+// reader's alone. build is this reader's build of the list; it runs detached
+// (runBackground) when this reader starts a build or creates the queued one,
+// so it must not use the request's context or input: the caller passes
+// copies.
 func (sh *listBuildSharer[T]) share(_ context.Context, s *Server, key string, build func(context.Context) (*ListOutput[T], error)) (*ListOutput[T], error) {
 	b, started := sh.take(key, build)
 	if started {
@@ -52,7 +56,17 @@ func (sh *listBuildSharer[T]) share(_ context.Context, s *Server, key string, bu
 		sh.joined(key, started)
 	}
 	<-b.done
-	return b.out, b.err
+	if b.err != nil {
+		return nil, b.err
+	}
+	out := *b.out
+	body, ok := cloneCachedValue[ListBody[T]](b.out.Body)
+	if !ok {
+		log.Printf("api: copying the shared list build %q failed", key)
+		return nil, apierr.Internal.Msg("copying the shared list build failed")
+	}
+	out.Body = body
+	return &out, nil
 }
 
 // take returns the build a reader of key arriving now waits on, and whether
