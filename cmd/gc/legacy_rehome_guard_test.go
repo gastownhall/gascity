@@ -144,3 +144,36 @@ func TestCanonicalizeLegacyRehomeSharedRigLegEdges(t *testing.T) {
 		}
 	})
 }
+
+// AC-2
+
+func sharedRigBoundOmpCity() *config.City {
+	agent := poolAgent("omp", "qcore", intPtr(3), 0)
+	agent.BindingName = "pool"
+	return &config.City{
+		Imports: map[string]config.Import{"pool": {Source: "./packs/pool"}},
+		Agents:  []config.Agent{agent},
+	}
+}
+
+// TestCanonicalizeLegacyRoutedWorkRefusesAddDirectionOnSharedRigLeg: city B
+// cannot prove a bare "qcore/omp" on a rig leg is its own legacy spelling; it
+// is city A's canonical route.
+func TestCanonicalizeLegacyRoutedWorkRefusesAddDirectionOnSharedRigLeg(t *testing.T) {
+	cfg := sharedRigBoundOmpCity()
+	wb := workBead("wb-1", sharedRigUnboundOmp, "", "open", 2)
+	mem := beads.NewMemStoreFrom(0, []beads.Bead{wb}, nil)
+	store := &updateCountingStore{Store: mem}
+
+	report := canonicalizeLegacyBoundUnassignedRoutedWork(cfg, []beads.Bead{wb}, []beads.Store{store}, []string{"rig:qcore"}, io.Discard)
+
+	if store.updates != 0 {
+		t.Errorf("Update calls = %d, want 0 (bare identity on a shared rig leg)", store.updates)
+	}
+	if got := mustGetBead(t, mem, "wb-1").Metadata[beadmeta.RoutedToMetadataKey]; got != sharedRigUnboundOmp {
+		t.Errorf("gc.routed_to = %q, want %q", got, sharedRigUnboundOmp)
+	}
+	if len(report.Rehomed) != 0 || len(report.Refused) != 1 {
+		t.Errorf("report = %+v, want one refused row and none rehomed", report)
+	}
+}
