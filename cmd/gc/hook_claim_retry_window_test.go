@@ -351,6 +351,44 @@ func TestFederatedClaimRunsNoReadBetweenSelectionAndCAS(t *testing.T) {
 	}
 }
 
+// TestFederatedClaimLostCASFallsThroughToLaterLeg pins the case the claim loop
+// itself must cover now that the claim acts on the discovery output directly
+// (#5693): the discovery-selected store's best row is lost to another claimant
+// at CAS time (ok=false, no error) and a later leg still holds routed work. A
+// lost CAS is non-terminal, the exhausted store is dropped, and reselection
+// claims the later leg's work — so this must end in a claim, never a no_work
+// drain that strands routed work behind a lost race.
+func TestFederatedClaimLostCASFallsThroughToLaterLeg(t *testing.T) {
+	h := newFailureHookHarness()
+	// Priority 1 outranks the default 2, so discovery deterministically selects
+	// the own store first.
+	h.script("/own", hookRunnerAnswer{out: routedRowJSONPriority("own-1", 1)})
+	h.script("/rig", hookRunnerAnswer{out: routedRowJSON("rig-1")})
+	stores := []hookStore{
+		{dir: "/own", env: []string{"BEADS_DIR=/own"}},
+		{dir: "/rig", env: []string{"BEADS_DIR=/rig"}, rig: "alpha"},
+	}
+	clock := newClaimFanoutClock(time.Second)
+	loseOwnRace := func(o *hookClaimOps) {
+		base := o.Claim
+		o.Claim = func(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
+			if beadID == "own-1" {
+				return beads.Bead{}, false, nil // lost the race: taken between discovery and the CAS
+			}
+			return base(ctx, dir, env, beadID, assignee)
+		}
+	}
+
+	code, result, stderr, rec := runClaimFanout(t, clock, h, stores, loseOwnRace)
+
+	if code != 0 || result.Action != "work" || result.BeadID != "rig-1" {
+		t.Fatalf("exit=%d result=%+v, want exit 0 claiming rig-1 after the lost race; stderr=%s", code, result, stderr)
+	}
+	if len(rec.claims) != 2 || rec.claims[0] != "own-1" || rec.claims[1] != "rig-1" {
+		t.Fatalf("claims = %v, want [own-1 rig-1]: the lost CAS first, then the later leg", rec.claims)
+	}
+}
+
 // End to end through the claim loop: a read that would recover on retry, but
 // only after the window closed, must not be retried into a claim. The
 // invocation keeps the failed-read contract: no drain result, no drain-ack, no

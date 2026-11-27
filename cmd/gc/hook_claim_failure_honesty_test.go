@@ -104,6 +104,21 @@ func routedRowJSON(id string) string {
 	return string(rows)
 }
 
+// routedRowJSONPriority is routedRowJSON with an explicit priority, so
+// cross-store ranking is deterministic in tests that need one leg's row to
+// rank strictly first (lower ranks better).
+func routedRowJSONPriority(id string, priority int) string {
+	p := priority
+	rows, _ := json.Marshal([]beads.Bead{{
+		ID:       id,
+		Status:   "open",
+		Type:     "task",
+		Priority: &p,
+		Metadata: map[string]string{"gc.routed_to": "rig/worker"},
+	}})
+	return string(rows)
+}
+
 // inProgressRowJSON is a crash-recovery resume row: this session's own claim,
 // already in progress. It is the row C7 says must survive a primary outage.
 func inProgressRowJSON(id string) string {
