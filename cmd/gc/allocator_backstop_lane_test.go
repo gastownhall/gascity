@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -1516,5 +1517,83 @@ func TestBackstopLaneRepairStopsBetweenHalvesOnShutdown(t *testing.T) {
 	}
 	if b, _ := mem.Get("ga-slot"); b.Metadata[beadmeta.RoutedToMetadataKey] != "rig-A/planner-2" {
 		t.Errorf("the routed half ran after shutdown: ga-slot route = %q", b.Metadata[beadmeta.RoutedToMetadataKey])
+	}
+}
+
+// TestBackstopDemandRepairsLeavesForeignRowsOnSharedRigLeg runs the whole
+// legacy demand-pass repair sequence over a city whose shared rig store holds
+// another city's canonical rows (AC-7 of #5846): two in_progress rows assigned
+// and routed to "fixture/pool.omp" and one open row routed there. The city
+// store's own legacy row (ga-rlegacy) is still re-homed — own legs keep
+// today's behavior — while the three foreign rows are refused, and the pass's
+// audit trail says exactly that: one refusal summary per arm plus the own-leg
+// rehomed line. A second pass over the emptied rig store is silent: the
+// re-home wrote once, the refusals never wrote at all, and steady state
+// converges to no output.
+func TestBackstopDemandRepairsLeavesForeignRowsOnSharedRigLeg(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			poolAgent("planner", "rig-A", intPtr(5), 0),
+			poolAgent("omp", "fixture", intPtr(3), 0),
+		},
+		Rigs: []config.Rig{{Name: "fixture", Path: t.TempDir()}},
+	}
+
+	cityMem := beads.NewMemStoreFrom(0, []beads.Bead{
+		workBead("ga-rlegacy", "rig-A/gc.planner", "", "open", 5),
+	}, nil)
+	fxMem := beads.NewMemStoreFrom(0, []beads.Bead{
+		workBead("fx-asg1", "fixture/pool.omp", "fixture/pool.omp", "in_progress", 5),
+		workBead("fx-asg2", "fixture/pool.omp", "fixture/pool.omp", "in_progress", 5),
+		workBead("fx-routed", "fixture/pool.omp", "", "open", 5),
+	}, nil)
+	env := externalReadsEnv{
+		CityPath:  t.TempDir(),
+		Cfg:       cfg,
+		CityStore: cityMem,
+		RigStores: map[string]beads.Store{"fixture": fxMem},
+		Sessions:  newSessionBeadSnapshot(nil),
+	}
+
+	var stderrBuf bytes.Buffer
+	runBackstopDemandRepairs(context.Background(), env, &stderrBuf)
+
+	var lines []string
+	for _, l := range strings.Split(stderrBuf.String(), "\n") {
+		if strings.TrimSpace(l) != "" {
+			lines = append(lines, l)
+		}
+	}
+	want := []string{
+		`canonicalizeLegacyBoundAssignedWork: refused 2 foreign legacy re-home(s) this pass: "fixture/pool.omp" -> "fixture/omp" (2: fx-asg1, fx-asg2)`,
+		`canonicalizeLegacyBoundUnassignedRoutedWork: rehomed ga-rlegacy on city:city: gc.routed_to "rig-A/gc.planner" -> "rig-A/planner"`,
+		`canonicalizeLegacyBoundUnassignedRoutedWork: refused 1 foreign legacy re-home(s) this pass: "fixture/pool.omp" -> "fixture/omp" (1: fx-routed)`,
+	}
+	if !slices.Equal(lines, want) {
+		t.Errorf("audit trail\n got  %q\n want %q", lines, want)
+	}
+	for _, id := range []string{"fx-asg1", "fx-asg2"} {
+		got, err := fxMem.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Assignee != "fixture/pool.omp" || got.Metadata["gc.routed_to"] != "fixture/pool.omp" {
+			t.Errorf("%s = (assignee %q, route %q), want the foreign canonical identity left alone", id, got.Assignee, got.Metadata["gc.routed_to"])
+		}
+	}
+	if got, err := fxMem.Get("fx-routed"); err != nil || got.Metadata["gc.routed_to"] != "fixture/pool.omp" {
+		t.Errorf("fx-routed = (err %v, route %q), want the foreign canonical route left alone", err, got.Metadata["gc.routed_to"])
+	}
+	if got, err := cityMem.Get("ga-rlegacy"); err != nil || got.Metadata["gc.routed_to"] != "rig-A/planner" {
+		t.Errorf("own-leg ga-rlegacy = (err %v, route %q), want it re-homed to rig-A/planner", err, got.Metadata["gc.routed_to"])
+	}
+
+	// Steady state: with the foreign rows gone and the own-leg row canonical,
+	// the next pass has nothing to say.
+	env.RigStores = map[string]beads.Store{"fixture": beads.NewMemStore()}
+	stderrBuf.Reset()
+	runBackstopDemandRepairs(context.Background(), env, &stderrBuf)
+	if stderrBuf.Len() != 0 {
+		t.Errorf("second pass logged %q, want a silent steady state", stderrBuf.String())
 	}
 }
