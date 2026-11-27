@@ -248,7 +248,7 @@ func preWakeUndoOf(v txView, patch session.MetadataPatch, staleKey bool) preWake
 	if len(v.It.Kept) > 0 {
 		row, meta = foldInfo(row, v.It.Kept), v.It.Kept.Apply(meta)
 	}
-	u := newPreWakeUndo(row, meta, patch)
+	u := newPreWakeUndo(row, meta, meta, patch)
 	if v, ok := u.written["continuation_reset_pending"]; ok && v == "" && staleKey {
 		u.restore["continuation_reset_pending"] = "true"
 	}

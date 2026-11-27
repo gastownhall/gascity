@@ -360,6 +360,18 @@ var wakeSources = []wakeSource{
 			w.Enqueue(wakeReasonProviderEvent, reconcilekey.SessionNamed("worker-1"))
 		},
 	},
+	{
+		// New with the session-sync barrier (ga-45119r, #5843): the verb's
+		// wake enqueues the session it refreshed; there was no pre-wake send,
+		// so the row's before is the equivalent legacy wake, not a replaced
+		// line.
+		site:   "controller_session_sync.go:handleSessionSyncSocketCmd",
+		call:   "Enqueue(wakeReasonSocket, reconcilekey.Session(sessionID))",
+		before: func(p, d chan<- struct{}, _ wakeInput) { legacyEnqueue(p, d, reconcilekey.SessionNamed("worker-1")) },
+		after: func(w *controllerWake, _ wakeInput) {
+			w.Enqueue(wakeReasonSocket, reconcilekey.SessionNamed("worker-1"))
+		},
+	},
 }
 
 // TestEveryEnqueueSourceKeepsItsLegacyWake is the equivalence proof: for

@@ -324,3 +324,43 @@ func TestCensusUnknownStateRows(t *testing.T) {
 		t.Fatalf("unknown-state rows = %v, want gc-1,gc-2", unknown)
 	}
 }
+
+// ga-45119r (#5843): `gc session reset` writes its markers through the CLI's
+// own store handle, straight to the shared backing, around the controller's
+// primed session cache. A keyed poke only enqueues a wake, so the pass it
+// wakes would decide on a stale cached row; the session-sync barrier installs
+// the row into that cache first, and the census over it reports the markers
+// without waiting for a periodic reconcile, an event relay or a ledger feed.
+func TestCensusSeesResetMarkersWrittenPastTheControllerCache(t *testing.T) {
+	backing := censusStore(censusSession("gc-1", map[string]string{"state": "active", "session_name": "s1", "generation": "1", "instance_token": "tok"}))
+	controllerCache := beads.NewCachingStoreForTest(backing, nil)
+	if err := controllerCache.Prime(context.Background()); err != nil {
+		t.Fatalf("prime: %v", err)
+	}
+	// The CLI's one-shot handle writes to the backing, around the cache.
+	cliHandle := beads.Store(backing)
+	if err := cliHandle.SetMetadataBatch("gc-1", map[string]string{"restart_requested": "true", "continuation_reset_pending": "true"}); err != nil {
+		t.Fatalf("cli reset write: %v", err)
+	}
+	// The barrier, as the controller socket serves it: session-sync installs
+	// the row the CLI wrote into the cache the census reads through, and
+	// enqueues the session's wake before replying.
+	cityPath := t.TempDir()
+	registerResidencyRoutes(cityPath, nil, func() beads.Store { return controllerCache })
+	defer unregisterResidencyRoutes(cityPath, nil)
+	pokeCh := make(chan struct{}, 1)
+	if reply := askSessionSync(t, cityPath, newLegacyWake(pokeCh, nil), "gc-1"); reply.Outcome != "ok" || reply.Generation != "1" {
+		t.Fatalf("session-sync reply = %+v, want ok at generation 1", reply)
+	}
+	select {
+	case <-pokeCh:
+	default:
+		t.Fatalf("session-sync enqueued no wake for gc-1")
+	}
+	// The keyed poke's pass reads the census through the controller cache.
+	c := readCensus(t, censusNow, censusLegs("class:sessions", controllerCache))
+	row := c.Rows[rowKey{"class:sessions", "gc-1"}]
+	if row.Info.RestartRequested != "true" || row.Info.ContinuationResetPending != "true" {
+		t.Fatalf("census row after CLI reset: restart_requested=%q continuation_reset_pending=%q, want both \"true\" (the controller pass decides on a stale cached row)", row.Info.RestartRequested, row.Info.ContinuationResetPending)
+	}
+}

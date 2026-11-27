@@ -1139,12 +1139,12 @@ func prepareStartCandidateForCity(
 			// byte-coherent with the persisted state without a second Get. It shares
 			// preWakeCommit's error contract: a failed re-read already returned above,
 			// so the twin is never folded from a stale/rejected bead.
-			inc, fold, err := preWakeCommitUnder(current, sessFront, clk, candidate.lease)
+			inc, fold, priors, err := preWakeCommitUnder(current, sessFront, clk, candidate.lease)
 			if err != nil {
 				return err
 			}
 			candidate.inc = inc
-			undo = newPreWakeUndo(current, persisted.Metadata, fold)
+			undo = newPreWakeUndo(current, persisted.Metadata, priors, fold)
 			candidate.info = current.ApplyPatch(fold)
 			return nil
 		}); err != nil {
@@ -3434,11 +3434,13 @@ func commitCapacityRefusal(result startResult, sessFront *sessionpkg.Store, wave
 
 // preWakeRestoredKeys are the lifecycle keys PreWake overwrites that a
 // capacity refusal restores. continuation_epoch is among them so a refused
-// attempt does not invalidate queued nudges. The incarnation identity
+// attempt does not invalidate queued nudges, and the restart request pair
+// (continuation_reset_pending, restart_requested) among them so a refused
+// attempt answers the request again. The incarnation identity
 // (instance_token, generation) stays bumped: the token fences the restore.
 var preWakeRestoredKeys = []string{
 	"state", "sleep_reason", "detached_at", "continuation_reset_pending",
-	"continuation_epoch", "wake_request", "wake_requested_at",
+	"continuation_epoch", "wake_request", "wake_requested_at", "restart_requested",
 }
 
 // preWakeRestoreAttempts bounds the restore's re-read when another writer
@@ -3460,10 +3462,15 @@ type preWakeUndo struct {
 }
 
 // newPreWakeUndo captures, from the row PreWake read and the batch it wrote,
-// how to undo it. The in-flight lease (last_woke_at) goes back to empty. A
-// claimless row's pending_create_started_at is restored too: PreWake stamps it
-// fresh, while a claimed row keeps its episode marker.
-func newPreWakeUndo(current sessionpkg.Info, persisted map[string]string, written sessionpkg.MetadataPatch) preWakeUndo {
+// how to undo it. before is the row's disposition priors (the cache the start
+// prepared from); priors are the restorable keys' values as the read the
+// PreWake patch itself decided on saw them — the mint's fresh read on the
+// legacy path, the tx row on v2 — so a request pair a writer outside the
+// controller's cache recorded between the two (#5843) is restored, not lost to
+// the stale prepare read. The in-flight lease (last_woke_at) goes back to
+// empty. A claimless row's pending_create_started_at is restored too: PreWake
+// stamps it fresh, while a claimed row keeps its episode marker.
+func newPreWakeUndo(current sessionpkg.Info, before, priors map[string]string, written sessionpkg.MetadataPatch) preWakeUndo {
 	keys := append([]string{"last_woke_at"}, preWakeRestoredKeys...)
 	if !current.PendingCreateClaim {
 		keys = append(keys, "pending_create_started_at")
@@ -3471,7 +3478,7 @@ func newPreWakeUndo(current sessionpkg.Info, persisted map[string]string, writte
 	undo := preWakeUndo{
 		written: make(sessionpkg.MetadataPatch, len(keys)),
 		restore: make(sessionpkg.MetadataPatch, len(keys)),
-		before:  persisted,
+		before:  before,
 		class:   written,
 	}
 	for _, key := range keys {
@@ -3480,7 +3487,7 @@ func newPreWakeUndo(current sessionpkg.Info, persisted map[string]string, writte
 			continue
 		}
 		undo.written[key] = value
-		undo.restore[key] = persisted[key]
+		undo.restore[key] = priors[key]
 	}
 	undo.restore["last_woke_at"] = ""
 	return undo

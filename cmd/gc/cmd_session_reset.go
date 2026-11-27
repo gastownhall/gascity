@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -142,7 +143,11 @@ func cmdSessionReset(args []string, key string, stdout, stderr io.Writer, asJSON
 	case cliOpRefused:
 		return 1
 	case cliOpReplayed:
-		return emitSessionResetResult(stdout, stderr, asJSON, sessionID, identity, op.outcome().Result.Via == legacyop.ViaLegacyRollback, op)
+		replayRolledBack := op.outcome().Result.Via == legacyop.ViaLegacyRollback
+		if !confirmSessionResetOnController(cityPath, sessionID, replayRolledBack, stderr) {
+			return 1
+		}
+		return emitSessionResetResult(stdout, stderr, asJSON, sessionID, identity, replayRolledBack, op)
 	}
 	defer op.end()
 
@@ -182,8 +187,26 @@ func cmdSessionReset(args []string, key string, stdout, stderr io.Writer, asJSON
 		op.noteReplayByID(args[0])
 	}
 
-	_ = enqueueController(cityPath, reconcilekey.Session(sessionID))
+	if !confirmSessionResetOnController(cityPath, sessionID, rolledBack, stderr) {
+		return 1
+	}
 	return emitSessionResetResult(stdout, stderr, asJSON, sessionID, identity, rolledBack, op)
+}
+
+// confirmSessionResetOnController is the reset's visibility barrier: the
+// controller installs the row the reset wrote into its own session cache
+// and wakes its reconcile (session-sync). It reports true when the
+// controller acknowledged, or, after a rollback, when the row is gone. On
+// any other answer it tells stderr that the reset is durably recorded but
+// unacknowledged, why, and how to force it now, and reports false.
+func confirmSessionResetOnController(cityPath, sessionID string, rolledBack bool, stderr io.Writer) bool {
+	err := syncSessionOnController(cityPath, sessionID)
+	if err == nil || (rolledBack && errors.Is(err, errSessionSyncMissing)) {
+		return true
+	}
+	fmt.Fprintf(stderr, "gc session reset: the reset is durably recorded on %s, but the controller did not confirm it sees the reset: %v\n", sessionID, err)         //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, "gc session reset: the reset applies when the controller next reads %s; run \"gc session kill %s\" to force it now\n", sessionID, sessionID) //nolint:errcheck // best-effort stderr
+	return false
 }
 
 // emitSessionResetResult prints a reset's success output, a replay's included.

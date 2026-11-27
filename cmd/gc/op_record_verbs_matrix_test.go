@@ -118,6 +118,8 @@ func startCLIOpController(t *testing.T, cityDir string) *cliOpController {
 						return
 					}
 					conn.Write([]byte(`{"outcome":"ok"}` + "\n")) //nolint:errcheck
+				case strings.HasPrefix(line, sessionSyncCommandPrefix):
+					conn.Write([]byte(`{"outcome":"ok"}` + "\n")) //nolint:errcheck
 				default:
 					conn.Write([]byte("ok\n")) //nolint:errcheck
 				}

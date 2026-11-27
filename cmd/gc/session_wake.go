@@ -77,16 +77,19 @@ var errPreWakeSuperseded = errors.New("pre-wake refused: the session row moved s
 // not at all. A moved or closed row writes nothing and returns
 // errPreWakeSuperseded. Without a conditional writer the check is the re-read
 // alone. It returns the minted incarnation, which the runtime-only start runs
-// under, and the batch it wrote.
+// under, the batch it wrote, and the priors of the restorable keys as that
+// same read saw them — the values a refused start's restore puts back, so
+// they must come from the mint's read, not the cache the start prepared from
+// (a request pair the CLI wrote past that cache is visible only here, #5843).
 func preWakeCommitUnder(
 	info sessions.Info,
 	sessFront *sessions.Store,
 	clk clock.Clock,
 	lease *sessions.RuntimeLease,
-) (inc sessions.Incarnation, fold sessions.MetadataPatch, err error) {
+) (inc sessions.Incarnation, fold sessions.MetadataPatch, priors map[string]string, err error) {
 	name := info.SessionNameMetadata
 	if !sessions.IsSessionNameSyntaxValid(name) {
-		return sessions.Incarnation{}, nil, fmt.Errorf("invalid session_name %q", name)
+		return sessions.Incarnation{}, nil, nil, fmt.Errorf("invalid session_name %q", name)
 	}
 	now := clk.Now()
 	var resetPrior map[string]string
@@ -100,6 +103,7 @@ func preWakeCommitUnder(
 		Patch: func(fresh sessions.Info, _ sessions.Incarnation) sessions.MetadataPatch {
 			_, _, batch, class := preWakePatch(fresh, now, "")
 			fold = class.Into(fresh.ID, batch)
+			priors = preWakeMintPriors(fresh)
 			resetPrior = freshWakeResetPriorValues(fresh)
 			freshWake = fresh.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(fresh)
 			return fold
@@ -108,13 +112,54 @@ func preWakeCommitUnder(
 	})
 	switch {
 	case errors.Is(err, sessions.ErrMintSuperseded) || errors.Is(err, sessions.ErrMintClosed):
-		return sessions.Incarnation{}, nil, fmt.Errorf("pre-wake metadata commit: %w: %w", errPreWakeSuperseded, err)
+		return sessions.Incarnation{}, nil, nil, fmt.Errorf("pre-wake metadata commit: %w: %w", errPreWakeSuperseded, err)
 	case err != nil:
-		return sessions.Incarnation{}, nil, fmt.Errorf("pre-wake metadata commit: %w", err)
+		return sessions.Incarnation{}, nil, nil, fmt.Errorf("pre-wake metadata commit: %w", err)
 	}
 	maps.Copy(fold, inc.IdentityPatch())
 	traceFreshWakeMetadataReset(name, resetPrior, fold, freshWake)
-	return inc, fold, nil
+	return inc, fold, priors, nil
+}
+
+// preWakeMintPriors is the mint's own read of the keys a refused start's
+// restore puts back (preWakeRestoredKeys and its two extras): the restore
+// rebuilds from these, so a request pair a writer outside the controller's
+// cache recorded between the prepare read and the mint (the #5843 window)
+// is restored, not lost to the stale prepare read.
+func preWakeMintPriors(fresh sessions.Info) map[string]string {
+	priors := make(map[string]string, len(preWakeRestoredKeys)+2)
+	for _, key := range append(append([]string(nil), preWakeRestoredKeys...), "last_woke_at", "pending_create_started_at") {
+		priors[key] = preWakeMintPrior(fresh, key)
+	}
+	return priors
+}
+
+// preWakeMintPrior is fresh's raw value of one restorable key, "" for a key
+// Info does not mirror.
+func preWakeMintPrior(fresh sessions.Info, key string) string {
+	switch key {
+	case "state":
+		return fresh.MetadataState
+	case "sleep_reason":
+		return fresh.SleepReason
+	case "detached_at":
+		return fresh.DetachedAt
+	case "continuation_reset_pending":
+		return fresh.ContinuationResetPending
+	case "continuation_epoch":
+		return fresh.ContinuationEpoch
+	case "wake_request":
+		return fresh.WakeRequest
+	case "wake_requested_at":
+		return fresh.WakeRequestedAt
+	case "restart_requested":
+		return fresh.RestartRequested
+	case "last_woke_at":
+		return fresh.LastWokeAt
+	case "pending_create_started_at":
+		return fresh.PendingCreateStartedAt
+	}
+	return ""
 }
 
 func preWakeCommitWith(
@@ -163,18 +208,34 @@ func preWakePatch(info sessions.Info, now time.Time, token string) (newGen int, 
 		sleepReason = string(sessions.SleepReasonIdleTimeout)
 	}
 
+	freshWake := info.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(info)
 	batch = sessions.PreWakePatch(sessions.PreWakePatchInput{
 		Generation:        newGen,
 		InstanceToken:     token,
 		ContinuationEpoch: continuationEpoch,
 		Now:               now,
 		SleepReason:       sleepReason,
-		FreshWake:         info.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(info),
+		FreshWake:         freshWake,
 		// A retry of a claimed pending create continues its episode, so the
 		// stale-create bound must keep measuring from the episode start.
 		EpisodePendingCreateStartedAt: pendingCreateEpisodeStartedAt(info),
+		ConsumeRestartRequest:         preWakeAnswersRestartRequest(info, freshWake),
 	})
 	return newGen, token, batch, sessions.CellInfo(info, sessions.ActorController, sessions.DispEvent{Kind: sessions.EvPreWake}, now)
+}
+
+// preWakeAnswersRestartRequest reports whether this wake answers the row's
+// recorded restart request (#5843): the request pair is present, and this
+// start is the fresh conversation it asks for — a fresh wake, or a resume
+// with no session key left to resume. The mint's caller decides it on its
+// own fresh read, so a request the CLI wrote past the controller's cache is
+// still answered; a lone request without its reset is the restart block's to
+// consume, not the wake's.
+func preWakeAnswersRestartRequest(info sessions.Info, freshWake bool) bool {
+	if strings.TrimSpace(info.RestartRequested) != "true" || strings.TrimSpace(info.ContinuationResetPending) == "" {
+		return false
+	}
+	return freshWake || strings.TrimSpace(info.SessionKey) == ""
 }
 
 // pendingCreateEpisodeStartedAt returns the pending_create_started_at a wake
