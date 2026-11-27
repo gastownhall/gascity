@@ -33,8 +33,8 @@ const infraScopeIntegrationSlice = "gascity-test.slice"
 // signaling it accepts that PID (and refuses a mismatched snapshot).
 //
 // It runs the production spawn path (startManagedDoltSQLServer through
-// infraCommand, with the production wrapper and probe) from a session-stamped
-// environment. The "dolt" it spawns is a stand-in on PATH that blocks while
+// infraCommand, with the production wrapper and probe). The "dolt" it
+// spawns is a stand-in on PATH that blocks while
 // keeping the spawned "sql-server --config <file>" argv, so gc's command-line
 // ownership check runs against it as well; no Dolt binary, city or store is
 // involved. It does not cover PID-namespace (bwrap --unshare-pid) seats or
@@ -54,7 +54,6 @@ func TestInfraScopedManagedDoltPIDIdentityUnderRealSystemd(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("systemd user scopes are Linux-only")
 	}
-	t.Setenv(infraSessionIdentityEnv, "gc-infra-scope-integration")
 	t.Setenv(infraSliceEnv, infraScopeIntegrationSlice)
 	if err := infraScopeSuitsCaller(); err != nil {
 		t.Skipf("infrastructure scoping does not apply to this caller: %v", err)

@@ -33,6 +33,12 @@ func disableInfraScopeForTests() {
 // into a new "scope" by overwriting it.
 const fakeCgroupEnv = "FAKE_CGROUP_SCOPE"
 
+// testSessionIdentityEnv is the session identity gc gives every agent
+// session, as a test-local name: production code no longer reads it to
+// decide infrastructure scoping, and the tests that still vary it do so to
+// prove it no longer matters.
+const testSessionIdentityEnv = "GC_SESSION_ID"
+
 // fakeInfraScopeName is the fake scope the fake systemd-run moves commands to.
 const fakeInfraScopeName = "fake-infra-scope"
 
@@ -53,6 +59,11 @@ const (
 	// userManagerCgroup is a scope under the user manager, such as a
 	// GC_AGENT_SLICE pane scope.
 	userManagerCgroup = "/user.slice/user-<uid>.slice/user@<uid>.service/app.slice/run-r1.scope"
+	// userServiceCgroup is a user service or timer unit under the user
+	// manager, such as nudge-drainer.service: the gc process carries no
+	// session identity, but a unit stop still tears the whole cgroup down
+	// (issue #5910's non-session cases).
+	userServiceCgroup = "/user.slice/user-<uid>.slice/user@<uid>.service/app.slice/nudge-drainer.service"
 	// supervisorSliceServiceCgroup is the supervisor run as a system
 	// service in a slice of its own; its agent panes share its cgroup.
 	supervisorSliceServiceCgroup = "/gascity.slice/gascity-prod.slice/gascity-supervisor.service"
@@ -91,9 +102,9 @@ func installInfraScopeHost(t *testing.T, h infraScopeHost) string {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv(infraSliceEnv, "")
 	if h.session {
-		t.Setenv(infraSessionIdentityEnv, "gc-test-session")
+		t.Setenv(testSessionIdentityEnv, "gc-test-session")
 	} else {
-		t.Setenv(infraSessionIdentityEnv, "")
+		t.Setenv(testSessionIdentityEnv, "")
 	}
 
 	lingerDir := filepath.Join(dir, "linger")
@@ -276,7 +287,6 @@ func TestManagedDoltSpawnWrappedInInfraScope(t *testing.T) {
 		host     infraScopeHost
 		sliceEnv string
 	}{
-		{name: "outside a session", host: infraScopeHost{linger: true, cgroup: userManagerCgroup}},
 		{name: "from a session with GC_INFRA_SLICE=off", host: wrappableFromSession, sliceEnv: "off"},
 		{name: "from a session in a system service", host: infraScopeHost{session: true, linger: true, cgroup: supervisorSliceServiceCgroup}},
 	} {
@@ -325,10 +335,21 @@ func TestManagedDoltStateRecordsInfraScope(t *testing.T) {
 
 // The bd provider script the supervisor launches runs `gc dolt-state
 // start-managed` with the supervisor's environment: BEADS_ACTOR (one of the
-// session-scoped keys) is set, GC_SESSION_ID is not. Its Dolt stays where
-// the supervisor's tree runs.
-func TestSupervisorLaunchedProviderSpawnStaysUnwrapped(t *testing.T) {
-	logPath := installInfraScopeHost(t, infraScopeHost{linger: true, cgroup: userManagerCgroup})
+// session-scoped keys) is set, GC_SESSION_ID is not. Where the server lands
+// follows the supervisor's own cgroup: under the user manager (a supervisor
+// user unit) the move suits the caller and the spawn is scoped — stopping
+// that unit must not take the store with it — while in a system service the
+// operator placed the tree deliberately and the spawn stays put.
+func TestSupervisorLaunchedProviderSpawnScopedUnderUserManager(t *testing.T) {
+	logPath := installInfraScopeHost(t, infraScopeHost{linger: true, cgroup: userServiceCgroup})
+	t.Setenv("BEADS_ACTOR", "gc-supervisor")
+	started, configPath := startDirectManagedDolt(t)
+	waitForSystemdRunInvocation(t, logPath, " -- dolt sql-server --config "+configPath)
+	assertScopedInvocation(t, logPath, started.InfraScope, "gascity infra: managed dolt")
+}
+
+func TestSupervisorLaunchedProviderSpawnStaysUnwrappedInSystemService(t *testing.T) {
+	logPath := installInfraScopeHost(t, infraScopeHost{linger: true, cgroup: supervisorSliceServiceCgroup})
 	t.Setenv("BEADS_ACTOR", "gc-supervisor")
 	startDirectManagedDolt(t)
 	assertNoSystemdRun(t, logPath)
@@ -363,31 +384,42 @@ func TestScopeWatchdogSpawnWrappedInInfraScope(t *testing.T) {
 		return configPath, started
 	}
 
-	t.Run("from a session", func(t *testing.T) {
-		logPath := installInfraScopeHost(t, wrappableFromSession)
-		configPath, started := start(t)
-		exe, err := managedDoltWatchdogExecutable()
-		if err != nil {
-			t.Fatalf("watchdog executable: %v", err)
-		}
-		waitForSystemdRunInvocation(t, logPath, " -- "+exe+" "+managedDoltScopeWatchdogArg+" "+configPath)
-		assertScopedInvocation(t, logPath, started.InfraScope, "gascity infra: managed dolt for city "+cityPath)
-		// The dolt server is the watchdog's child and inherits its scope;
-		// it is not wrapped a second time. (The other line is the probe.)
-		data, _ := os.ReadFile(logPath)
-		if n := strings.Count(string(data), " "+managedDoltScopeWatchdogArg+" "); n != 1 {
-			t.Fatalf("watchdog wrapped %d times, want 1; log:\n%s", n, data)
-		}
-		if strings.Contains(string(data), "-- dolt ") {
-			t.Fatalf("watchdog's dolt child was wrapped again; log:\n%s", data)
-		}
-	})
+	for _, tc := range []struct {
+		name string
+		host infraScopeHost
+	}{
+		{name: "from a session", host: wrappableFromSession},
+		// A gc process without a session identity under user@<uid>.service
+		// (a user or bot service, a timer unit) scopes the watchdog too: its
+		// unit stop would otherwise SIGTERM the store through the watchdog
+		// (issue #5910).
+		{name: "outside a session, from a user service", host: infraScopeHost{linger: true, cgroup: userServiceCgroup}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logPath := installInfraScopeHost(t, tc.host)
+			configPath, started := start(t)
+			exe, err := managedDoltWatchdogExecutable()
+			if err != nil {
+				t.Fatalf("watchdog executable: %v", err)
+			}
+			waitForSystemdRunInvocation(t, logPath, " -- "+exe+" "+managedDoltScopeWatchdogArg+" "+configPath)
+			assertScopedInvocation(t, logPath, started.InfraScope, "gascity infra: managed dolt for city "+cityPath)
+			// The dolt server is the watchdog's child and inherits its scope;
+			// it is not wrapped a second time. (The other line is the probe.)
+			data, _ := os.ReadFile(logPath)
+			if n := strings.Count(string(data), " "+managedDoltScopeWatchdogArg+" "); n != 1 {
+				t.Fatalf("watchdog wrapped %d times, want 1; log:\n%s", n, data)
+			}
+			if strings.Contains(string(data), "-- dolt ") {
+				t.Fatalf("watchdog's dolt child was wrapped again; log:\n%s", data)
+			}
+		})
+	}
 	for _, tc := range []struct {
 		name     string
 		host     infraScopeHost
 		sliceEnv string
 	}{
-		{name: "outside a session", host: infraScopeHost{linger: true, cgroup: userManagerCgroup}},
 		{name: "from a session with GC_INFRA_SLICE=off", host: wrappableFromSession, sliceEnv: "off"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -467,13 +499,12 @@ func TestDriftSupervisorRespawnNotWrappedInInfraScope(t *testing.T) {
 }
 
 // TestInfraArgvWrapsOnlyFromASessionWhenScopingKeepsLifetime is the rule's
-// truth table. A spawn is scoped only from inside an agent session, never
-// with GC_INFRA_SLICE=off, and only when a user-manager scope suits the
-// caller's cgroup: always under user@<uid>.service; from a login session's
-// scope when the user lingers; from anywhere else (a system service or
-// slice, a container's root) only when GC_INFRA_SLICE names a slice and the
-// user lingers. A spawn that stays unscoped never probes the host: the probe
-// itself creates a scope.
+// truth table. A spawn is scoped only when a user-manager scope suits the
+// caller's cgroup, and never with GC_INFRA_SLICE=off: always under
+// user@<uid>.service; from a login session's scope when the user lingers;
+// from anywhere else (a system service or slice, a container's root) only
+// when GC_INFRA_SLICE names a slice and the user lingers. A spawn that
+// stays unscoped never probes the host: the probe itself creates a scope.
 func TestInfraArgvWrapsOnlyFromASessionWhenScopingKeepsLifetime(t *testing.T) {
 	argv := []string{"dolt", "sql-server"}
 	cgroups := []struct {
@@ -499,7 +530,7 @@ func TestInfraArgvWrapsOnlyFromASessionWhenScopingKeepsLifetime(t *testing.T) {
 
 						var scoped bool
 						switch {
-						case !session || sliceEnv == "off":
+						case sliceEnv == "off":
 						case cg.cgroup == userManagerCgroup:
 							scoped = true
 						case cg.cgroup == loginSessionCgroup:
@@ -810,31 +841,6 @@ func TestInfraCommandWrapsResolvableExecutable(t *testing.T) {
 	cmd, unit := infraCommand(infraTestDescription, "sh", "-c", "true")
 	if want := infraTestScopeArgv(unit, []string{"sh", "-c", "true"}); !slices.Equal(cmd.Args, want) {
 		t.Fatalf("infraCommand args = %q, want %q", cmd.Args, want)
-	}
-}
-
-// TestProviderLifecycleEnvCarriesSessionIdentity: an agent's gc autostarts
-// the store through the provider script (gc-beads-bd.sh start → gc
-// dolt-state start-managed). That inner gc scopes the Dolt server only if
-// the provider env passes GC_SESSION_ID through, and must not invent one.
-func TestProviderLifecycleEnvCarriesSessionIdentity(t *testing.T) {
-	for _, session := range []bool{true, false} {
-		t.Run(fmt.Sprintf("session=%t", session), func(t *testing.T) {
-			cityPath := t.TempDir()
-			if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[beads]\nprovider = \"bd\"\n"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			want := ""
-			if session {
-				want = "gc-test-session"
-			}
-			// An empty value is no session identity to infraArgv.
-			t.Setenv(infraSessionIdentityEnv, want)
-			env := runtimeEnvEntriesToMap(mustProviderLifecycleProcessEnv(t, cityPath, "exec:"+gcBeadsBdScriptPath(cityPath)))
-			if got := env[infraSessionIdentityEnv]; got != want {
-				t.Fatalf("provider env %s = %q, want %q", infraSessionIdentityEnv, got, want)
-			}
-		})
 	}
 }
 

@@ -19,30 +19,28 @@ import (
 )
 
 // The managed Dolt server (directly or through its scope watchdog) that a gc
-// command run from inside an agent session spawns would otherwise inherit
-// that session's cgroup: a GC_AGENT_SLICE pane scope or a runtime launcher's
-// scope. A cgroup-wide kill of the agent then takes the city's store down
-// with it. Such spawns get a transient systemd user scope of their own
-// instead, when that scope suits the caller (infraScopeSuitsCaller). Every
-// other caller (the supervisor, a CLI run from a login shell, a provider
-// script the supervisor launched) spawns exactly as before. The supervisor
-// itself is never scoped: every session it starts would follow it into the
-// slice.
+// command spawns would otherwise inherit that gc process's cgroup: a
+// GC_AGENT_SLICE pane scope, a runtime launcher's scope, or the cgroup of
+// the user or system unit that started the gc command. A cgroup-wide stop
+// of whatever started it — an agent kill, a unit stop — then takes the
+// city's store down with it. Such spawns get a transient systemd user scope
+// of their own instead, when that scope suits the caller
+// (infraScopeSuitsCaller): where the gc process runs decides. Callers the
+// scope does not suit (a system service the operator placed deliberately, a
+// login session of a non-lingering user) spawn exactly as before. The
+// supervisor itself is never scoped: every session it starts would follow
+// it into the slice.
 const (
 	// infraSliceEnv names the systemd user slice infrastructure scopes are
 	// created under, or turns scoping off; see infraSlice.
 	infraSliceEnv = "GC_INFRA_SLICE"
 	// defaultInfraSlice is the slice used when infraSliceEnv is unset.
 	defaultInfraSlice = "gascity-infra.slice"
-	// infraSessionIdentityEnv is the session identity gc gives every agent
-	// session (one of execenv.SessionScopedEnvKeys); a gc process carrying
-	// it was started from inside that session.
-	infraSessionIdentityEnv = "GC_SESSION_ID"
 )
 
-// infraScope decides once per process whether infrastructure spawns from a
-// session can be scoped. The fallback is silent unless the operator named a
-// slice explicitly. Tests replace it.
+// infraScope decides once per process whether infrastructure spawns can be
+// scoped. The fallback is silent unless the operator named a slice
+// explicitly. Tests replace it.
 var infraScope = newInfraScope()
 
 // newInfraScope returns the production infrastructure scope wrapper.
@@ -217,13 +215,12 @@ func infraUnitName() string {
 }
 
 // infraArgv returns argv wrapped in a transient user scope under the infra
-// slice, described by description, when this gc process runs inside an
-// agent session, GC_INFRA_SLICE does not turn scoping off and the scope
-// suits the caller (infraScopeSuitsCaller), with the scope unit's name;
-// otherwise argv unchanged and "".
+// slice, described by description, when GC_INFRA_SLICE does not turn scoping
+// off and the scope suits the caller (infraScopeSuitsCaller), with the scope
+// unit's name; otherwise argv unchanged and "".
 func infraArgv(description string, argv []string) ([]string, string) {
 	slice, _ := infraSlice()
-	if slice == "" || strings.TrimSpace(os.Getenv(infraSessionIdentityEnv)) == "" {
+	if slice == "" {
 		return argv, ""
 	}
 	scope := userscope.Scope{Slice: slice, Unit: infraUnitName(), Description: description}
