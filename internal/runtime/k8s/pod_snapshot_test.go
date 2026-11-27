@@ -454,3 +454,40 @@ func TestPodSnapshotDoesNotServePreInvalidationListing(t *testing.T) {
 		t.Fatalf("LISTs after read C = %d, want 2 (served from LIST 2)", n)
 	}
 }
+
+// TestPodSnapshotDoesNotCacheListErrors: a failed snapshot LIST answers the
+// reads that waited on it as a failed per-session lookup does (not running,
+// not attached, no activity, no process) and is never cached: every later
+// read lists again, and the first successful LIST serves them.
+func TestPodSnapshotDoesNotCacheListErrors(t *testing.T) {
+	ops := newProbeOps([]probeSession{{name: "a", pod: true, tmux: true, attached: "1", activity: 1709300000}})
+	ops.inner.listErr = errors.New("apiserver unavailable")
+	p, _ := newSnapshotProvider(ops)
+
+	if p.IsRunning("a") {
+		t.Error("IsRunning on a failed LIST = true, want false")
+	}
+	if p.IsAttached("a") {
+		t.Error("IsAttached on a failed LIST = true, want false")
+	}
+	if activity, err := p.GetLastActivity("a"); err != nil || !activity.IsZero() {
+		t.Errorf("GetLastActivity on a failed LIST = (%v, %v), want (zero, nil)", activity, err)
+	}
+	if p.ProcessAlive("a", []string{"claude"}) {
+		t.Error("ProcessAlive on a failed LIST = true, want false")
+	}
+	if n := ops.listCount(); n != 4 {
+		t.Fatalf("LISTs after 4 failed reads = %d, want 4: a failed LIST must not be cached", n)
+	}
+	if n := ops.execCount(); n != 0 {
+		t.Fatalf("execs after failed LISTs = %d, want 0", n)
+	}
+
+	ops.withFake(func(f *fakeK8sOps) { f.listErr = nil })
+	if !p.IsRunning("a") || !p.IsAttached("a") {
+		t.Fatal("reads after the apiserver recovered do not see the running, attached session")
+	}
+	if n := ops.listCount(); n != 5 {
+		t.Fatalf("LISTs after recovery = %d, want 5 (one fresh listing serves both reads)", n)
+	}
+}
