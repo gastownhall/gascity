@@ -1046,6 +1046,7 @@ type bdIssue struct {
 	UpdatedAt    time.Time    `json:"updated_at"`
 	Assignee     string       `json:"assignee"`
 	From         string       `json:"from"`
+	Sender       string       `json:"sender"`
 	ParentID     string       `json:"parent"`
 	Ref          string       `json:"ref"`
 	Needs        []string     `json:"needs"`
@@ -1250,6 +1251,9 @@ func bdListIssueRows(data []byte) ([]json.RawMessage, error) {
 // bd create may return sub-second precision that bd show then truncates.
 func (b *bdIssue) toBead() Bead {
 	from := b.From
+	if from == "" {
+		from = b.Sender
+	}
 	if from == "" && b.Metadata != nil {
 		from = b.Metadata["from"]
 	}
