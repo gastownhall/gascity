@@ -7,12 +7,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -546,6 +548,246 @@ func TestSweepClosedOrderTrackingRetentionAcrossStoresBoundedStopsOnCancel(t *te
 		t.Fatalf("second store calls = %d, want 0 after the cancel", n)
 	}
 	assertBeadsKept(t, secondInner, seedIDs(secondSeed)...)
+}
+
+// retentionCancelStore cancels a sweep's context inside one store call, the
+// one cancelIn names, and logs every store call the sweep makes, so a test
+// reads what ran after the cancel. The cancel lands while that call is in
+// flight; the call itself completes. Embedding the beads.Store interface hides
+// DeleteBatch, so a sweep deletes bead by bead, as it does through the
+// watchdog's scoped stores.
+type retentionCancelStore struct {
+	beads.Store
+	cancel   context.CancelFunc
+	cancelIn string
+	calls    []string
+	// canceledAt indexes calls at the call the cancel landed in; -1 before.
+	canceledAt int
+}
+
+func newRetentionCancelStore(inner beads.Store, cancel context.CancelFunc, cancelIn string) *retentionCancelStore {
+	return &retentionCancelStore{Store: inner, cancel: cancel, cancelIn: cancelIn, canceledAt: -1}
+}
+
+func (s *retentionCancelStore) record(call string) {
+	s.calls = append(s.calls, call)
+	if s.canceledAt < 0 && call == s.cancelIn {
+		s.canceledAt = len(s.calls) - 1
+		s.cancel()
+	}
+}
+
+// afterCancel returns the store calls that started after the cancel, failing
+// the test when the sweep never made the call to cancel in.
+func (s *retentionCancelStore) afterCancel(t *testing.T) []string {
+	t.Helper()
+	if s.canceledAt < 0 {
+		t.Fatalf("the sweep never made the call %q to cancel in; it made %q", s.cancelIn, s.calls)
+	}
+	return s.calls[s.canceledAt+1:]
+}
+
+// describeRetentionList names a List call by the sweep step that makes it:
+// the retention listing, a candidate's strand guard (its membership read
+// includes closed members), a set-level strand guard read, or the candidate
+// guard walk's child read.
+func describeRetentionList(q beads.ListQuery) string {
+	root := q.Metadata[beadmeta.RootBeadIDMetadataKey]
+	switch {
+	case isRetentionListing(q):
+		return "listing"
+	case root != "" && q.IncludeClosed:
+		return "candidate guard " + root
+	case root != "":
+		return "set guard " + root
+	case q.ParentID != "":
+		return "children " + q.ParentID
+	default:
+		return fmt.Sprintf("List %+v", q)
+	}
+}
+
+func (s *retentionCancelStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.record(describeRetentionList(q))
+	return s.Store.List(q)
+}
+
+func (s *retentionCancelStore) Get(id string) (beads.Bead, error) {
+	s.record("Get " + id)
+	return s.Store.Get(id)
+}
+
+func (s *retentionCancelStore) DepList(id, direction string) ([]beads.Dep, error) {
+	s.record("DepList " + id + " " + direction)
+	return s.Store.DepList(id, direction)
+}
+
+func (s *retentionCancelStore) DepRemove(issueID, dependsOnID string) error {
+	s.record("DepRemove " + issueID + " " + dependsOnID)
+	return s.Store.DepRemove(issueID, dependsOnID)
+}
+
+func (s *retentionCancelStore) Delete(id string) error {
+	s.record("Delete " + id)
+	return s.Store.Delete(id)
+}
+
+// retentionCancelBatchStore is a retentionCancelStore whose deletes take the
+// batched path.
+type retentionCancelBatchStore struct {
+	*retentionCancelStore
+}
+
+var _ beads.BatchDeleter = retentionCancelBatchStore{}
+
+func (s retentionCancelBatchStore) DeleteBatch(ids []string) error {
+	s.record("DeleteBatch " + strings.Join(ids, ","))
+	for _, id := range ids {
+		if err := s.Store.Delete(id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// retentionThreeCandidateSeed is 13 closed runs of one order, all past the
+// TTL: the bounded sweep visits the three beyond the keep-10 floor in the
+// order run-02, run-01, run-00.
+func retentionThreeCandidateSeed(now time.Time) []beads.Bead {
+	return retentionEligibleSeed("run", minClosedOrderTrackingRetained+3, now)
+}
+
+// sweepRetentionBoundedWithDefaults runs the bounded per-store sweep with the
+// watchdog's default policy and delete budget.
+func sweepRetentionBoundedWithDefaults(ctx context.Context, store beads.Store, now time.Time) (int, error) {
+	return sweepClosedOrderTrackingRetentionBounded(ctx, store, now,
+		orderTrackingRetentionPolicyForConfig(&config.City{}), nil, orderTrackingRetentionWatchdogDeleteBudget)
+}
+
+// A cancel that lands inside a candidate's strand guard, one the candidate
+// passes, stops the sweep once that guard returns: no later candidate is
+// guarded, no set-level guard read or delete starts, and every run survives.
+func TestSweepClosedOrderTrackingRetentionBoundedCancelInCandidateGuard(t *testing.T) {
+	now := time.Now()
+	seed := retentionThreeCandidateSeed(now)
+	inner := beads.NewMemStoreFrom(100, seed, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store := newRetentionCancelStore(inner, cancel, "candidate guard run-02")
+
+	deleted, err := sweepRetentionBoundedWithDefaults(ctx, store, now)
+
+	if deleted != 0 || err != nil {
+		t.Fatalf("sweep = (%d, %v), want (0, nil)", deleted, err)
+	}
+	// The guard in flight finishes its own walk of run-02, and nothing else
+	// runs.
+	walk := map[string]bool{"children run-02": true, "Get run-02": true, "DepList run-02 up": true}
+	after := store.afterCancel(t)
+	for _, call := range after {
+		if !walk[call] {
+			t.Fatalf("store calls after the cancel = %q, want only the in-flight guard's walk of run-02", after)
+		}
+	}
+	assertBeadsKept(t, inner, seedIDs(seed)...)
+}
+
+// A cancel that lands inside a set-level strand guard read stops the sweep
+// before the next guard read and before any delete, batched or per bead: the
+// stop waits for that one read.
+func TestSweepClosedOrderTrackingRetentionBoundedCancelInSetGuard(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		name     string
+		cancelIn string
+		batched  bool
+	}{
+		{name: "first read, per bead", cancelIn: "set guard run-02"},
+		{name: "first read, batched", cancelIn: "set guard run-02", batched: true},
+		{name: "last read, per bead", cancelIn: "set guard run-00"},
+		{name: "last read, batched", cancelIn: "set guard run-00", batched: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			seed := retentionThreeCandidateSeed(now)
+			inner := beads.NewMemStoreFrom(100, seed, nil)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			store := newRetentionCancelStore(inner, cancel, tc.cancelIn)
+			var swept beads.Store = store
+			if tc.batched {
+				swept = retentionCancelBatchStore{store}
+			}
+
+			deleted, err := sweepRetentionBoundedWithDefaults(ctx, swept, now)
+
+			if deleted != 0 || err != nil {
+				t.Fatalf("sweep = (%d, %v), want (0, nil)", deleted, err)
+			}
+			if after := store.afterCancel(t); len(after) != 0 {
+				t.Fatalf("store calls after the cancel = %q, want none", after)
+			}
+			assertBeadsKept(t, inner, seedIDs(seed)...)
+		})
+	}
+}
+
+// A cancel that lands while a run's per-bead delete is in flight lets that
+// delete finish, dep unwind included, so the run is never left half deleted,
+// and stops before the next run's delete: the later runs survive and the
+// sweep counts the one delete.
+func TestSweepClosedOrderTrackingRetentionBoundedCancelInDeleteFinishesOnlyThatRun(t *testing.T) {
+	now := time.Now()
+	seed := append(retentionThreeCandidateSeed(now), beads.Bead{ID: "anchor", Title: "anchor", Status: "open", Type: "task"})
+	inner := beads.NewMemStoreFrom(100, seed, nil)
+	if err := inner.DepAdd("run-02", "anchor", "blocks"); err != nil {
+		t.Fatalf("DepAdd(run-02, anchor): %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store := newRetentionCancelStore(inner, cancel, "DepList run-02 down")
+
+	deleted, err := sweepRetentionBoundedWithDefaults(ctx, store, now)
+
+	if deleted != 1 || err != nil {
+		t.Fatalf("sweep = (%d, %v), want (1, nil)", deleted, err)
+	}
+	want := []string{"DepList run-02 up", "DepRemove run-02 anchor", "Delete run-02"}
+	if after := store.afterCancel(t); !slices.Equal(after, want) {
+		t.Fatalf("store calls after the cancel = %q, want only the in-flight delete of run-02, %q", after, want)
+	}
+	assertBeadsGone(t, inner, "run-02")
+	assertBeadsKept(t, inner, "run-01", "run-00", "anchor")
+}
+
+// secondDeleteFailingStore fails the second bead Delete it serves.
+type secondDeleteFailingStore struct {
+	beads.Store
+	deletes int
+}
+
+func (s *secondDeleteFailingStore) Delete(id string) error {
+	s.deletes++
+	if s.deletes == 2 {
+		return errors.New("second delete failed")
+	}
+	return s.Store.Delete(id)
+}
+
+// A per-bead delete that fails part-way stops the sweep, and the sweep counts
+// the run it deleted before the failure, so the watchdog's delete budget and
+// its pruned line see that delete.
+func TestSweepClosedOrderTrackingRetentionBoundedCountsDeletesBeforeAFailure(t *testing.T) {
+	now := time.Now()
+	inner := beads.NewMemStoreFrom(100, retentionThreeCandidateSeed(now), nil)
+	store := &secondDeleteFailingStore{Store: inner}
+
+	deleted, err := sweepRetentionBoundedWithDefaults(context.Background(), store, now)
+
+	if deleted != 1 || err == nil || !strings.Contains(err.Error(), "second delete failed") {
+		t.Fatalf("sweep = (%d, %v), want (1, the second delete's error)", deleted, err)
+	}
+	assertBeadsGone(t, inner, "run-02")
+	assertBeadsKept(t, inner, "run-01", "run-00")
 }
 
 // run() starts the retention lane once the city is ready and joins it on the

@@ -2363,8 +2363,9 @@ func bulkDeleteMaxAge(_ *config.City) time.Duration {
 // most once every orderTrackingRetentionWatchdogInterval. It deletes at most
 // orderTrackingRetentionWatchdogDeleteBudget beads per invocation. The
 // retention lane (order_tracking_retention_lane.go) runs it with its pass's
-// config snapshot. Canceling ctx stops the sweep at its next store-call
-// boundary; the watchdog then logs how many beads it deleted before the cancel.
+// config snapshot. Canceling ctx stops the sweep at its next step
+// (sweepClosedOrderTrackingRetentionBounded); the watchdog then logs how many
+// beads it deleted before the cancel.
 func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(ctx context.Context, cfg *config.City, now time.Time) {
 	if !cr.orderTrackingRetentionWatchdogLast.IsZero() &&
 		now.Sub(cr.orderTrackingRetentionWatchdogLast) < orderTrackingRetentionWatchdogInterval {

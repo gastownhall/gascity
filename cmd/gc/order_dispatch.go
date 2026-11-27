@@ -3760,9 +3760,10 @@ func sweepClosedOrderTrackingRetentionAcrossStores(stores []beads.Store, now tim
 // count with a nil error on budget exhaustion. Store errors are returned as
 // normal; deletion errors within budget are propagated.
 //
-// Canceling ctx stops the sweep at its next store-call boundary: no store is
-// listed after the cancel, and the deletes and store errors so far are
-// returned. The cancel itself is not an error; callers read ctx.Err().
+// Canceling ctx stops the sweep at its next step, as
+// sweepClosedOrderTrackingRetentionBounded describes: no store is listed after
+// the cancel, and the deletes and store errors so far are returned. The cancel
+// itself is not an error; callers read ctx.Err().
 func sweepClosedOrderTrackingRetentionAcrossStoresBounded(ctx context.Context, stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}, limit int) (int, error) { //nolint:unparam // onlyOrders is nil at all current call sites; preserved for API parity with the unbounded variant
 	if limit <= 0 {
 		return 0, nil
@@ -3870,12 +3871,15 @@ func logRetainedForLiveDescendants(ids []string) {
 // sweepClosedOrderTrackingRetentionBounded is the per-store bounded variant of
 // sweepClosedOrderTrackingRetention. It stops deleting once limit deletions have
 // occurred within this store call. On budget exhaustion it returns the partial
-// count with a nil error; delete errors are still propagated.
+// count with a nil error; delete errors are still propagated, with the runs
+// deleted before the error counted (none for a failed batched delete).
 //
-// Canceling ctx stops the sweep before its next store call: after the
-// listing, before each candidate's strand guard, and before the delete. A
-// canceled sweep deletes nothing and returns the guard errors so far, without
-// reporting the cancel itself.
+// Canceling ctx stops the sweep at its next step, and the step in flight
+// finishes: the listing, one candidate's strand guard (its membership read and
+// any tree walk), one set-level guard read, the batched delete, or one run's
+// per-bead delete (deleteWorkflowBeadsBatchGuarded). A canceled sweep returns
+// the runs it deleted and the guard errors so far, without reporting the
+// cancel itself.
 func sweepClosedOrderTrackingRetentionBounded(ctx context.Context, store beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}, limit int) (int, error) {
 	if store == nil {
 		return 0, fmt.Errorf("bead store unavailable")
@@ -3945,13 +3949,23 @@ candidates:
 		}
 	}
 	logRetainedForLiveDescendants(retained)
-	if ctx.Err() != nil {
-		return 0, deleteErr
+	// What deleteWorkflowBeadsBatch does, but cancelable: the set-level strand
+	// guard runs one read at a time, so a cancel lands before the next read,
+	// and nothing is deleted unless every run passes. Each read names every
+	// cleared run as part of the delete, as the one set-level call would.
+	for _, id := range cleared {
+		if ctx.Err() != nil {
+			return 0, deleteErr
+		}
+		if err := assertWorkflowDeleteSetLeavesNothingStrandedFor(store, cleared, []string{id}); err != nil {
+			return 0, errors.Join(deleteErr, fmt.Errorf("deleting %d closed order-tracking beads: %w", len(cleared), err))
+		}
 	}
-	if err := deleteWorkflowBeadsBatch(store, cleared); err != nil {
-		return 0, errors.Join(deleteErr, fmt.Errorf("deleting %d closed order-tracking beads: %w", len(cleared), err))
+	deleted, err := deleteWorkflowBeadsBatchGuarded(ctx, store, cleared)
+	if err != nil {
+		return deleted, errors.Join(deleteErr, fmt.Errorf("deleting %d closed order-tracking beads: %w", len(cleared), err))
 	}
-	return len(cleared), deleteErr
+	return deleted, deleteErr
 }
 
 // countClosedOrderTrackingRetentionEligible returns the number of closed
