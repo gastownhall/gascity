@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -177,6 +179,189 @@ func TestSessionListReadsEachStoreOnce(t *testing.T) {
 			for name, store := range map[string]*activeReadCountingStore{"alpha": alpha, "beta": beta} {
 				if n := store.count(); n != 1 {
 					t.Errorf("rig %s: %d in_progress reads for a page of %d sessions, want 1", name, n, len(want))
+				}
+			}
+		})
+	}
+}
+
+// fixedOrderStore answers in_progress List calls with its rows in the order
+// given, filtered by the query's assignees, as a backend that orders rows of
+// equal creation time its own way would.
+type fixedOrderStore struct {
+	beads.Store
+	rows []beads.Bead
+}
+
+func (s *fixedOrderStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Status != "in_progress" {
+		return s.Store.List(query)
+	}
+	var out []beads.Bead
+	for _, b := range s.rows {
+		if len(query.Assignees) == 0 || slices.Contains(query.Assignees, b.Assignee) {
+			out = append(out, b)
+		}
+	}
+	return out, nil
+}
+
+// TestActiveBeadIndexPrecedenceAndScope: one index answers every row of a
+// list build exactly as the live lookup answers that row alone: identity order
+// first, then store order, then newest first within a store (backend order
+// for equal creation times), exact trimmed assignee matches, blank and
+// repeated identities dropped, and each row's effective scope (a suspended
+// rig's own store never read, a store it shares with an active rig read
+// through that rig, an unknown rig searching every store). Rows sharing a
+// store read it once, and a store no row reaches is not read at all.
+func TestActiveBeadIndexPrecedenceAndScope(t *testing.T) {
+	type row struct {
+		rig        string
+		identities []string
+		want       string // fixture key of the expected bead, "" for none
+	}
+	tieTime := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	for _, tc := range []struct {
+		name      string
+		rows      []row
+		wantReads map[string]int // per counted store; absent means 0
+	}{
+		{
+			name:      "identity order beats store order",
+			rows:      []row{{"", []string{"alias-2", "sess-1"}, "beta alias-2"}},
+			wantReads: map[string]int{"alpha": 1, "beta": 1},
+		},
+		{
+			name:      "first store wins for one identity, newest within it",
+			rows:      []row{{"", []string{"sess-1", "tmpl"}, "alpha sess-1 newer"}},
+			wantReads: map[string]int{"alpha": 1},
+		},
+		{
+			name: "backend order decides equal creation times",
+			rows: []row{{"ties", []string{"tie"}, "ties first"}},
+			// fixedOrderStore is not counted: it is the only store read.
+		},
+		{
+			name: "assignees match exactly after trimming",
+			rows: []row{
+				{"", []string{"work"}, ""},
+				{"", []string{"WORKER"}, ""},
+				{"", []string{" worker "}, "alpha worker"},
+			},
+			wantReads: map[string]int{"alpha": 1, "beta": 1, "zeta": 1},
+		},
+		{
+			name: "blank and repeated identities are dropped",
+			rows: []row{
+				{"", []string{"", "  ", "alias-2", "alias-2", "sess-1"}, "beta alias-2"},
+				{"", []string{"", "  "}, ""},
+			},
+			wantReads: map[string]int{"alpha": 1, "beta": 1},
+		},
+		{
+			name: "rows share one read per store",
+			rows: []row{
+				{"", []string{"sess-1"}, "alpha sess-1 newer"},
+				{"", []string{"tmpl"}, "alpha tmpl"},
+				{"", []string{"alias-2"}, "beta alias-2"},
+				{"beta", []string{"sess-1"}, "beta sess-1"},
+				{"gamma", []string{"alias-2"}, "beta alias-2"},
+				{"zeta", []string{"tmpl"}, "zeta tmpl"},
+			},
+			wantReads: map[string]int{"alpha": 1, "beta": 1, "zeta": 1},
+		},
+		{
+			name:      "rig scope reads only that rig's store",
+			rows:      []row{{"zeta", []string{"sess-1", "tmpl"}, "zeta tmpl"}},
+			wantReads: map[string]int{"zeta": 1},
+		},
+		{
+			name: "suspended rig's own store is never read",
+			rows: []row{
+				{"cold", []string{"sess-4"}, ""},
+				{"", []string{"sess-4"}, ""},
+			},
+			wantReads: map[string]int{"alpha": 1, "beta": 1, "zeta": 1},
+		},
+		{
+			name:      "suspended rig reads the store it shares with an active rig",
+			rows:      []row{{"chill", []string{"alias-2", "sess-1"}, "beta alias-2"}},
+			wantReads: map[string]int{"beta": 1},
+		},
+		{
+			name:      "unknown rig searches every store",
+			rows:      []row{{"nosuch", []string{"sess-5"}, "zeta sess-5"}},
+			wantReads: map[string]int{"alpha": 1, "beta": 1, "zeta": 1},
+		},
+		{
+			name: "empty page reads nothing",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newFakeState(t)
+			st.cfg.Rigs = []config.Rig{
+				{Name: "alpha", Path: "/tmp/alpha"},
+				{Name: "beta", Path: "/tmp/beta"},
+				{Name: "chill", Path: "/tmp/chill", SuspendedOnStart: true},
+				{Name: "cold", Path: "/tmp/cold", SuspendedOnStart: true},
+				{Name: "gamma", Path: "/tmp/gamma"},
+				{Name: "ties", Path: "/tmp/ties"},
+				{Name: "zeta", Path: "/tmp/zeta"},
+			}
+			counted := map[string]*listCountingStore{
+				"alpha": {Store: &beads.MemStore{IDPrefix: "alpha"}},
+				"beta":  {Store: &beads.MemStore{IDPrefix: "beta"}},
+				"cold":  {Store: &beads.MemStore{IDPrefix: "cold"}},
+				"zeta":  {Store: &beads.MemStore{IDPrefix: "zeta"}},
+			}
+			ids := map[string]string{
+				"alpha sess-1 older": addActiveWork(t, counted["alpha"].Store, "sess-1"),
+				"alpha sess-1 newer": addActiveWork(t, counted["alpha"].Store, "sess-1"),
+				"alpha tmpl":         addActiveWork(t, counted["alpha"].Store, "tmpl"),
+				"alpha worker":       addActiveWork(t, counted["alpha"].Store, "worker"),
+				"beta sess-1":        addActiveWork(t, counted["beta"].Store, "sess-1"),
+				"beta alias-2":       addActiveWork(t, counted["beta"].Store, "alias-2"),
+				"cold sess-4":        addActiveWork(t, counted["cold"].Store, "sess-4"),
+				"zeta sess-5":        addActiveWork(t, counted["zeta"].Store, "sess-5"),
+				"zeta tmpl":          addActiveWork(t, counted["zeta"].Store, "tmpl"),
+				"ties first":         "ties-2",
+			}
+			ties := &fixedOrderStore{Store: beads.NewMemStore(), rows: []beads.Bead{
+				{ID: "ties-2", Assignee: "tie", Status: "in_progress", CreatedAt: tieTime},
+				{ID: "ties-1", Assignee: "tie", Status: "in_progress", CreatedAt: tieTime},
+			}}
+			st.stores = map[string]beads.Store{
+				"alpha": counted["alpha"],
+				"beta":  counted["beta"],
+				"chill": counted["beta"],
+				"cold":  counted["cold"],
+				"gamma": counted["beta"],
+				"ties":  ties,
+				"zeta":  counted["zeta"],
+			}
+			srv := New(st)
+
+			index := srv.newActiveBeadIndex()
+			got := make([]string, len(tc.rows))
+			for i, r := range tc.rows {
+				got[i] = index.lookup(r.rig, r.identities...)
+			}
+			reads := make(map[string]int, len(counted))
+			for name, store := range counted {
+				reads[name] = store.listCalls
+			}
+
+			for i, r := range tc.rows {
+				if want := ids[r.want]; got[i] != want {
+					t.Errorf("row %d lookup(%q, %q) = %q, want %q (%s)", i, r.rig, r.identities, got[i], want, r.want)
+				}
+				if live := srv.findLiveActiveBeadForAssignees(r.rig, r.identities...); got[i] != live {
+					t.Errorf("row %d lookup(%q, %q) = %q, live lookup = %q", i, r.rig, r.identities, got[i], live)
+				}
+			}
+			for name, n := range reads {
+				if n != tc.wantReads[name] {
+					t.Errorf("store %s: %d reads for the build, want %d", name, n, tc.wantReads[name])
 				}
 			}
 		})
