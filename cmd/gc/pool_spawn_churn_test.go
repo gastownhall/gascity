@@ -276,3 +276,119 @@ func TestPoolSpawnChurnHoldWithholdsBlindSpawnsInBothDemandPasses(t *testing.T) 
 		t.Fatalf("v2 steady new requests: blind=%d bound=%d, want blind=2 bound=1", blind, bound)
 	}
 }
+
+// claimFailed feeds the hook's bead.claim_failed report for seat id of
+// template: its claim write failed, and, if nothing else claims, it drains
+// claims_errored.
+func (h *spawnChurnHarness) claimFailed(id, template string) {
+	h.t.Helper()
+	payload, err := json.Marshal(events.BeadClaimFailedPayload{Template: template, SessionID: id, Error: "503 busy"})
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	h.guard.observe(events.Event{Type: events.BeadClaimFailed, Ts: h.now, Subject: "gc-work", SessionID: id, Payload: payload})
+}
+
+// claimedCell is a work_started cell naming one claim at at.
+func claimedCell(at time.Time) string {
+	return session.EncodeWorkStarted(session.WorkStarted{Claims: []session.WorkStartedEntry{{Store: "city", Bead: "gc-work", Gen: 1, At: at, Via: "claim"}}})
+}
+
+// with is md plus kv.
+func with(md map[string]string, kv ...string) map[string]string {
+	out := map[string]string{}
+	for k, v := range md {
+		out[k] = v
+	}
+	for i := 0; i+1 < len(kv); i += 2 {
+		out[kv[i]] = kv[i+1]
+	}
+	return out
+}
+
+// Closes that are not blind churn never add to a template's streak: three of
+// a kind, 2 min apart, trip nothing.
+func TestPoolSpawnChurnIgnoresClosesThatAreNotBlindChurn(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// close plays one seat's life, from its creation to its close.
+		close func(h *spawnChurnHarness, template string)
+	}{
+		{"bound seat", func(h *spawnChurnHarness, template string) {
+			md := with(blindSeat(), "gc.trigger_bead_id", "gc-work")
+			id, created := h.spawn(template, md)
+			h.seatEvent(events.BeadClosed, id, template, created, awake(md, h.now))
+		}},
+		{"stamp cleared mid-life", func(h *spawnChurnHarness, template string) {
+			id, created := h.spawn(template, with(blindSeat(), "gc.trigger_bead_id", "gc-work"))
+			h.seatEvent(events.BeadUpdated, id, template, created, awake(blindSeat(), h.now))
+			h.seatEvent(events.BeadClosed, id, template, created, awake(blindSeat(), h.now))
+		}},
+		{"claim in work_started", func(h *spawnChurnHarness, template string) {
+			id, created := h.spawn(template, blindSeat())
+			md := with(awake(blindSeat(), h.now), session.WorkStartedKey, claimedCell(h.now))
+			h.seatEvent(events.BeadUpdated, id, template, created, md)
+			h.seatEvent(events.BeadClosed, id, template, created, md)
+		}},
+		{"claims_errored", func(h *spawnChurnHarness, template string) {
+			id, created := h.spawn(template, blindSeat())
+			h.seatEvent(events.BeadUpdated, id, template, created, awake(blindSeat(), h.now))
+			h.claimFailed(id, template)
+			h.seatEvent(events.BeadClosed, id, template, created, awake(blindSeat(), h.now))
+		}},
+		{"failed-create", func(h *spawnChurnHarness, template string) {
+			id, created := h.spawn(template, blindSeat())
+			h.seatEvent(events.BeadClosed, id, template, created, with(awake(blindSeat(), h.now), "state", "failed-create"))
+		}},
+		{"named session", func(h *spawnChurnHarness, template string) {
+			md := with(blindSeat(), session.NamedSessionMetadataKey, "true")
+			id, created := h.spawn(template, md)
+			h.seatEvent(events.BeadClosed, id, template, created, awake(md, h.now))
+		}},
+		{"manual session", func(h *spawnChurnHarness, template string) {
+			md := with(blindSeat(), "session_origin", "manual")
+			id, created := h.spawn(template, md)
+			h.seatEvent(events.BeadClosed, id, template, created, awake(md, h.now))
+		}},
+		{"legacy manual session", func(h *spawnChurnHarness, template string) {
+			md := with(blindSeat(), "manual_session", "true")
+			id, created := h.spawn(template, md)
+			h.seatEvent(events.BeadClosed, id, template, created, awake(md, h.now))
+		}},
+		{"never woke", func(h *spawnChurnHarness, template string) {
+			id, created := h.spawn(template, blindSeat())
+			h.seatEvent(events.BeadClosed, id, template, created, blindSeat())
+		}},
+		{"not pool managed", func(h *spawnChurnHarness, template string) {
+			id, created := h.spawn(template, nil)
+			h.seatEvent(events.BeadClosed, id, template, created, awake(nil, h.now))
+		}},
+		{"creation not observed", func(h *spawnChurnHarness, template string) {
+			h.next++
+			id, created := fmt.Sprintf("%s-unseen-%d", template, h.next), h.now.Add(-time.Hour)
+			h.seatEvent(events.BeadUpdated, id, template, created, awake(blindSeat(), h.now))
+			h.seatEvent(events.BeadClosed, id, template, created, awake(blindSeat(), h.now))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newSpawnChurnHarness(t)
+			for i := 0; i < 3; i++ {
+				tc.close(h, "churny")
+				h.advance(time.Minute)
+			}
+			if got := h.guard.allowance(); got != nil {
+				t.Fatalf("allowance = %v, want none", got)
+			}
+			if len(h.recorded) != 0 {
+				t.Fatalf("recorded %d events, want none", len(h.recorded))
+			}
+			// Nor do they pad a streak of real churn.
+			h.churn("churny")
+			h.advance(time.Minute)
+			h.churn("churny")
+			if h.held("churny") {
+				t.Fatal("held after two churned closes and three excluded ones")
+			}
+		})
+	}
+}
