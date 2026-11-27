@@ -362,3 +362,124 @@ func TestDivergenceTreatsWithheldInputAsBenign(t *testing.T) {
 		})
 	}
 }
+
+// TestDoHookClaimServesUnsubjectRowsThroughRealJudge pins the hook's
+// non-subject arms through the real judge over the fixture's own store: a
+// control-kind row of the held workflow is claimed and an in_progress row owned
+// by this identity is adopted exactly as before the gate — control kinds are
+// dispatcher bookkeeping and in_progress is existing ownership, neither is
+// judged — while the same workflow's open step stays withheld.
+func TestDoHookClaimServesUnsubjectRowsThroughRealJudge(t *testing.T) {
+	opts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	}
+	t.Run("control-kind row claimed", func(t *testing.T) {
+		f := newAdmissionFixture(t, 1, "")
+		control, err := f.store.Create(beads.Bead{Title: "control row", Type: "task", Metadata: map[string]string{
+			beadmeta.KindMetadataKey:       beadmeta.KindDrain,
+			beadmeta.RootBeadIDMetadataKey: f.root.ID,
+			beadmeta.RoutedToMetadataKey:   "worker",
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var claimed []string
+		ops := f.ops(t, &claimed)
+		ops.Runner = func(string, string) (string, error) { return f.output(t, f.steps[0], control), nil }
+		var stdout, stderr bytes.Buffer
+		if code := doHookClaim("query", "/rig", opts, ops, &stdout, &stderr); code != 0 {
+			t.Fatalf("doHookClaim = %d, want 0; stderr=%s", code, stderr.String())
+		}
+		if len(claimed) != 1 || claimed[0] != control.ID {
+			t.Fatalf("claimed %v, want only the control row %s", claimed, control.ID)
+		}
+		if !strings.Contains(stderr.String(), "withheld "+f.steps[0].ID) {
+			t.Fatalf("stderr = %q, want the withheld open step named", stderr.String())
+		}
+		f.requireUntouched(t)
+	})
+	t.Run("owned in_progress row adopted", func(t *testing.T) {
+		f := newAdmissionFixture(t, 1, "")
+		inProgress, assignee := "in_progress", "worker-1"
+		if err := f.store.Update(f.steps[0].ID, beads.UpdateOpts{Status: &inProgress, Assignee: &assignee}); err != nil {
+			t.Fatal(err)
+		}
+		owned, err := f.store.Get(f.steps[0].ID) // the live row a work query would serve
+		if err != nil {
+			t.Fatal(err)
+		}
+		var claimed []string
+		ops := f.ops(t, &claimed)
+		ops.Runner = func(string, string) (string, error) { return f.output(t, owned), nil }
+		var stdout, stderr bytes.Buffer
+		if code := doHookClaim("query", "/rig", opts, ops, &stdout, &stderr); code != 0 {
+			t.Fatalf("doHookClaim = %d, want 0; stderr=%s", code, stderr.String())
+		}
+		if len(claimed) != 0 {
+			t.Fatalf("claimed %v, want the owned in_progress row adopted without a claim", claimed)
+		}
+		if !strings.Contains(stdout.String(), "existing_assignment") || !strings.Contains(stdout.String(), owned.ID) {
+			t.Fatalf("stdout = %q, want the owned row adopted as existing_assignment", stdout.String())
+		}
+		if strings.Contains(stderr.String(), "withheld "+owned.ID) {
+			t.Fatalf("stderr = %q, want the owned row never withheld", stderr.String())
+		}
+	})
+}
+
+// TestDoHookClaimRetiresTerminalInputBeforeAdmissionGate pins the retirement
+// arm's order: an all-terminal input retires the workflow — root and open step
+// closed as skipped — before the admission gate runs, exactly the pre-gate
+// behavior, so the gate sees no candidate and no claim is attempted.
+func TestDoHookClaimRetiresTerminalInputBeforeAdmissionGate(t *testing.T) {
+	f := newAdmissionFixture(t, 1, "")
+	if err := f.store.Close(f.input.ID); err != nil {
+		t.Fatalf("closing the input: %v", err)
+	}
+	var claimed []string
+	ops := f.ops(t, &claimed)
+	ops.RetireWorkflow = func(ctx context.Context, _ string, _ []string, verdict workflowInputVerdict) error {
+		if verdict.State == workflowInputPurged {
+			return failPurgedWorkflow(ctx, f.store, verdict.RootID)
+		}
+		return skipDoneWorkflow(f.store, verdict.RootID)
+	}
+	judged := false
+	judge := ops.InputAdmission
+	ops.InputAdmission = func(ctx context.Context, dir string, env []string, candidates []beads.Bead) (map[string]inputadmission.Withhold, error) {
+		judged = true
+		return judge(ctx, dir, env, candidates)
+	}
+	ops.Runner = func(string, string) (string, error) { return f.output(t, f.steps[0]), nil }
+	var stdout, stderr bytes.Buffer
+	if code := doHookClaim("query", "/rig", hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		DrainAck:           true,
+		JSON:               true,
+	}, ops, &stdout, &stderr); code != 0 {
+		t.Fatalf("doHookClaim = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if len(claimed) != 0 {
+		t.Fatalf("claimed %v, want retirement to close the workflow before any claim", claimed)
+	}
+	if judged {
+		t.Fatal("the admission gate judged a candidate of a retired workflow")
+	}
+	if !strings.Contains(stderr.String(), "input convoy work is already terminal") {
+		t.Fatalf("stderr = %q, want the retirement line", stderr.String())
+	}
+	for _, id := range []string{f.root.ID, f.steps[0].ID} {
+		got, err := f.store.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != "closed" || got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeSkipped {
+			t.Fatalf("%s: status=%q outcome=%q, want closed/%s", id, got.Status, got.Metadata[beadmeta.OutcomeMetadataKey], beadmeta.OutcomeSkipped)
+		}
+	}
+}
