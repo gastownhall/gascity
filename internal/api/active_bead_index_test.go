@@ -1,12 +1,15 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -363,6 +366,191 @@ func TestActiveBeadIndexPrecedenceAndScope(t *testing.T) {
 				if n != tc.wantReads[name] {
 					t.Errorf("store %s: %d reads for the build, want %d", name, n, tc.wantReads[name])
 				}
+			}
+		})
+	}
+}
+
+// activeReadFailingStore fails its in_progress List calls with err, keeping
+// the rows that decoded when err is a partial result, and counts them.
+type activeReadFailingStore struct {
+	beads.Store
+	mu    sync.Mutex
+	err   error
+	reads int
+}
+
+func (s *activeReadFailingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Status != "in_progress" {
+		return s.Store.List(query)
+	}
+	s.mu.Lock()
+	s.reads++
+	err := s.err
+	s.mu.Unlock()
+	rows, listErr := s.Store.List(query)
+	switch {
+	case listErr != nil:
+		return nil, listErr
+	case err == nil:
+		return rows, nil
+	case beads.IsPartialResult(err):
+		return rows, err
+	default:
+		return nil, err
+	}
+}
+
+func (s *activeReadFailingStore) setErr(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.err = err
+}
+
+func (s *activeReadFailingStore) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reads
+}
+
+// TestActiveBeadIndexPartialErrors: an active-work read that fails is logged
+// once and reported once in the list's partial_errors, whatever the number of
+// rows reaching the store, and the store is not read again within the build.
+// A failed read answers no row, so a row falls through to the next store in
+// scope; a partial result still answers from the rows that decoded. A partial
+// agent list is not cached: the next request, once the store reads again,
+// rebuilds and answers in full.
+func TestActiveBeadIndexPartialErrors(t *testing.T) {
+	failed := errors.New("bd list: exit status 1")
+	partial := &beads.PartialResultError{Op: "bd list", Err: errors.New("decoding an unrelated bead")}
+
+	for _, tc := range []struct {
+		name      string
+		err       error
+		keepsRows bool
+	}{
+		{name: "failed read", err: failed},
+		{name: "partial read", err: partial, keepsRows: true},
+	} {
+		t.Run("agent list/"+tc.name, func(t *testing.T) {
+			st := newFakeState(t)
+			names, _ := runningWorkers(t, st, 4)
+			store := &activeReadFailingStore{Store: beads.NewMemStore(), err: tc.err}
+			want := make(map[string]string, len(names))
+			for _, name := range names {
+				want[name] = addActiveWork(t, store.Store, name)
+			}
+			st.stores["myrig"] = store
+			var logs bytes.Buffer
+			t.Cleanup(captureLog(t, &logs))
+			h := newTestCityHandlerWith(t, st, New(st))
+			list := func() agentListWire {
+				t.Helper()
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(st, "/agents"), nil))
+				if rec.Code != http.StatusOK {
+					t.Fatalf("GET /agents status = %d: %s", rec.Code, rec.Body.String())
+				}
+				var resp agentListWire
+				if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+					t.Fatalf("decode: %v", err)
+				}
+				return resp
+			}
+
+			first := list()
+
+			for _, item := range first.Items {
+				wantBead := ""
+				if tc.keepsRows {
+					wantBead = want[item.Name]
+				}
+				if item.ActiveBead != wantBead {
+					t.Errorf("%s active_bead = %q, want %q", item.Name, item.ActiveBead, wantBead)
+				}
+			}
+			wantErrs := []string{fmt.Sprintf("rig myrig: looking up active work: %v", tc.err)}
+			if !first.Partial || !slices.Equal(first.PartialErrors, wantErrs) {
+				t.Errorf("partial = %v, partial_errors = %q, want true and %q", first.Partial, first.PartialErrors, wantErrs)
+			}
+			if n := store.count(); n != 1 {
+				t.Errorf("failing store read %d times for %d rows, want 1", n, len(names))
+			}
+			if n := strings.Count(logs.String(), `looking up active work in rig "myrig"`); n != 1 {
+				t.Errorf("failed read logged %d times, want 1; log:\n%s", n, logs.String())
+			}
+
+			store.setErr(nil)
+			second := list()
+
+			if second.Partial || store.count() != 2 {
+				t.Errorf("after the store recovered: partial = %v (%q), store reads = %d; want a full rebuild, not the cached partial list", second.Partial, second.PartialErrors, store.count())
+			}
+			for _, item := range second.Items {
+				if item.ActiveBead != want[item.Name] {
+					t.Errorf("after recovery %s active_bead = %q, want %q", item.Name, item.ActiveBead, want[item.Name])
+				}
+			}
+		})
+	}
+
+	for _, handler := range []string{"huma", "legacy"} {
+		t.Run("session list/"+handler, func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			fs.cfg.Rigs = append(fs.cfg.Rigs,
+				config.Rig{Name: "alpha", Path: "/tmp/alpha"},
+				config.Rig{Name: "beta", Path: "/tmp/beta"},
+			)
+			alpha := &activeReadFailingStore{Store: &beads.MemStore{IDPrefix: "alpha"}, err: failed}
+			beta := &beads.MemStore{IDPrefix: "beta"}
+			fs.stores["alpha"] = alpha
+			fs.stores["beta"] = beta
+			want := map[string]string{}
+			for i := range 4 {
+				info := createTestSession(t, fs.cityBeadStore, fs.sp, fmt.Sprintf("session %d", i))
+				// alpha sorts first, so its bead would win had it read.
+				addActiveWork(t, alpha.Store, info.ID)
+				want[info.ID] = addActiveWork(t, beta, info.ID)
+			}
+			srv := New(fs)
+			var logs bytes.Buffer
+			t.Cleanup(captureLog(t, &logs))
+
+			rec := httptest.NewRecorder()
+			if handler == "legacy" {
+				srv.handleSessionList(rec, httptest.NewRequest("GET", "/v0/sessions", nil))
+			} else {
+				newTestCityHandlerWith(t, fs, srv).ServeHTTP(rec, httptest.NewRequest("GET", cityURL(fs, "/sessions"), nil))
+			}
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET /sessions status = %d: %s", rec.Code, rec.Body.String())
+			}
+			var resp struct {
+				Items         []sessionResponse `json:"items"`
+				Partial       bool              `json:"partial"`
+				PartialErrors []string          `json:"partial_errors"`
+			}
+			if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if len(resp.Items) != len(want) {
+				t.Fatalf("GET /sessions listed %d sessions, want %d", len(resp.Items), len(want))
+			}
+			for _, item := range resp.Items {
+				if item.ActiveBead != want[item.ID] {
+					t.Errorf("session %s active_bead = %q, want beta's %q", item.ID, item.ActiveBead, want[item.ID])
+				}
+			}
+			wantErrs := []string{fmt.Sprintf("rig alpha: looking up active work: %v", failed)}
+			if !resp.Partial || !slices.Equal(resp.PartialErrors, wantErrs) {
+				t.Errorf("partial = %v, partial_errors = %q, want true and %q", resp.Partial, resp.PartialErrors, wantErrs)
+			}
+			if n := alpha.count(); n != 1 {
+				t.Errorf("failing store read %d times for %d sessions, want 1", n, len(want))
+			}
+			if n := strings.Count(logs.String(), `looking up active work in rig "alpha"`); n != 1 {
+				t.Errorf("failed read logged %d times, want 1; log:\n%s", n, logs.String())
 			}
 		})
 	}

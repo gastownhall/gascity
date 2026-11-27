@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"log"
 	"strings"
 
@@ -26,6 +27,8 @@ type activeBeadIndex struct {
 	// keyed by beads.PhysicalStoreKey so rigs sharing a store read it once.
 	// A store whose read failed is here too, with the rows that decoded.
 	loaded map[string]map[string]string
+	// errs holds one partial-list message per store whose read failed.
+	errs []string
 }
 
 // activeBeadScope is one rig's search scope: the stores a lookup may read and
@@ -67,11 +70,17 @@ func (x *activeBeadIndex) lookup(rig string, assignees ...string) string {
 	return ""
 }
 
+// partialErrors returns one message per store whose read failed, in the
+// order the reads ran, for the list's partial_errors.
+func (x *activeBeadIndex) partialErrors() []string {
+	return x.errs
+}
+
 // storeWork returns store's newest in_progress bead per assignee, reading the
 // store on its first use. The read takes the store's cached answer when its
 // cache serves one and lists the store only when the cache declines. A failed
-// read is logged once and never retried within the build; a partial result
-// keeps the rows that decoded.
+// read is logged and reported once and never retried within the build; a
+// partial result keeps the rows that decoded.
 func (x *activeBeadIndex) storeWork(name string, store beads.WorkStore) map[string]string {
 	key := beads.PhysicalStoreKey(store)
 	if work, ok := x.loaded[key]; ok {
@@ -88,6 +97,7 @@ func (x *activeBeadIndex) storeWork(name string, store beads.WorkStore) map[stri
 		rows, err = store.List(query)
 		if err != nil {
 			log.Printf("api: looking up active work in rig %q: %v", name, err)
+			x.errs = append(x.errs, fmt.Sprintf("rig %s: looking up active work: %v", name, err))
 			if !beads.IsPartialResult(err) {
 				rows = nil
 			}

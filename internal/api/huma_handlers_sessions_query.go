@@ -87,6 +87,7 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 		page[j] = sessionResponseWithReason(sess, responseByID[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
 		s.enrichSessionResponseWithKeyedPaths(&page[j], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, activeBeads.lookup, false, 0, keyedTranscriptPaths)
 	}
+	partialErrors = append(partialErrors, activeBeads.partialErrors()...)
 	if input.WakeReasons {
 		s.setSessionListWakeReasons(page, pageSessions, listings)
 	}
