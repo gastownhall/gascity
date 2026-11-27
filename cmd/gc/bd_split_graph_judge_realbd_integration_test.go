@@ -34,7 +34,8 @@ func TestGcBdCreateGraphJudgeFactsRealBd(t *testing.T) {
 				})
 			}
 			// Beads that exist before the plan: outside is a parent_id beside a
-			// parent key, and tt-twin1 is also the key of a plan node.
+			// parent key or its parent alias, and tt-twin1 is also the key of a
+			// plan node.
 			outside := realBdCreate(t, must, "--title", "outside the plan")
 			must("create", "--id", "tt-twin1", "--title", "a bead whose id is a plan key", "--json")
 			plan := `{"nodes":[
@@ -44,6 +45,8 @@ func TestGcBdCreateGraphJudgeFactsRealBd(t *testing.T) {
  {"key":"pinned","title":"pinned","id":"tt-pinned1"},
  {"key":"refs","title":"refs","metadata":{"root":"direct"},"metadata_refs":{"root":"pinned","minted":"parent"},"deps":[{"target":"tt-pinned1"}]},
  {"key":"adopted","title":"adopted","parent_key":"parent","parent_id":"` + outside + `"},
+ {"key":"keyed","title":"keyed","parent_key":"parent","parent_id":"tt-pinned1"},
+ {"key":"aliased","title":"aliased","parent":"parent","parent_id":"` + outside + `"},
  {"key":"tt-twin1","title":"twin"},
  {"key":"waiter","title":"waiter","deps":[{"target":"tt-twin1"}]}],
  "edges":[{"from_id":"tt-pinned1","to_key":"parent","type":"blocks"}]}`
@@ -55,7 +58,7 @@ func TestGcBdCreateGraphJudgeFactsRealBd(t *testing.T) {
 				IDs map[string]string `json:"ids"`
 			}
 			out := must("create", "--graph", path, "--json")
-			if err := json.Unmarshal(out, &created); err != nil || len(created.IDs) != 8 {
+			if err := json.Unmarshal(out, &created); err != nil || len(created.IDs) != 10 {
 				t.Fatalf("decoding the graph result: %v\n%s", err, out)
 			}
 
@@ -87,10 +90,14 @@ func TestGcBdCreateGraphJudgeFactsRealBd(t *testing.T) {
 			if !realBdDependsOn(t, must, "tt-pinned1", created.IDs["parent"], "blocks") {
 				t.Errorf("tt-pinned1 does not block on %s through the edge's from_id", created.IDs["parent"])
 			}
-			// bd links a node to its parent key and ignores a parent_id beside
-			// it, so the judge never holds that id to the edge rule.
-			if got := realBdDepTargets(t, must, created.IDs["adopted"], "parent-child"); !slices.Equal(got, []string{created.IDs["parent"]}) {
-				t.Errorf("adopted's parent-child edges go to %q, want exactly one, to the parent key's node %s and not to %s", got, created.IDs["parent"], outside)
+			// bd links a node to its parent key, or to its parent alias, and
+			// ignores a parent_id beside either, whether it names a bead outside
+			// the plan or another node of it, so the judge never holds that id
+			// to the edge rule.
+			for _, k := range []string{"adopted", "keyed", "aliased"} {
+				if got := realBdDepTargets(t, must, created.IDs[k], "parent-child"); !slices.Equal(got, []string{created.IDs["parent"]}) {
+					t.Errorf("%s's parent-child edges go to %q, want exactly one, to the parent key's node %s and not to %s or tt-pinned1", k, got, created.IDs["parent"], outside)
+				}
 			}
 			// bd resolves a deps target as a plan key before an id, so a target
 			// that is both binds the plan's node, never the existing bead.

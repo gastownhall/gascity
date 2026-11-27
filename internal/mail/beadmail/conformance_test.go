@@ -10,6 +10,12 @@ import (
 
 func TestBeadmailConformance(t *testing.T) {
 	mailtest.RunProviderTests(t, func(_ *testing.T) mail.Provider {
-		return New(beads.NewMemStore())
+		return newTestProvider(beads.NewMemStore())
+	})
+}
+
+func TestBeadmailReplyToOwnMessage(t *testing.T) {
+	mailtest.RunReplyToOwnMessageTests(t, func(_ *testing.T) mail.Provider {
+		return newTestProvider(beads.NewMemStore())
 	})
 }

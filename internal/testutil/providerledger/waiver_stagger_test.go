@@ -35,10 +35,10 @@ func runtimeWaiverExpiries(t *testing.T) map[string][]time.Time {
 // queue, so the owner gets one failure to answer at a time and everyone else
 // keeps working.
 //
-// The unit is the gap, not the row. Two waivers cover
-// internal/runtime/t3bridge.NewSeamBacked — the exact: and legacy prefix: routes
-// both select it — and one contract closes both, so they deliberately share a
-// date. Splitting them would claim two pieces of work where there is one.
+// The unit is the gap, not the row. When two waivers cover the same
+// constructor because one contract closes both routes that select it, they
+// deliberately share a date. Splitting them would claim two pieces of work
+// where there is one.
 func TestRuntimeWaiverExpiriesDivergeByGap(t *testing.T) {
 	byConstructor := runtimeWaiverExpiries(t)
 

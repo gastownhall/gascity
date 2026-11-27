@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/auto"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -413,5 +414,5 @@ func (unreachableTurnStore) Get(string) (beads.Bead, error) {
 // fail.
 func sessionManagerOnFailingStore(t *testing.T, s turnSession) *sessionpkg.Manager {
 	t.Helper()
-	return sessionpkg.NewManagerWithOptions(unreachableTurnStore{s.store}, s.sp, sessionpkg.WithCityPath(t.TempDir()))
+	return sessionpkg.NewManagerWithOptions(beadstest.Sessions(unreachableTurnStore{s.store}), s.sp, sessionpkg.WithCityPath(t.TempDir()))
 }

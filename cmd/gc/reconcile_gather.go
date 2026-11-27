@@ -634,7 +634,7 @@ func (m *gatherMemo) refresh(e gatherEnv, env *reconcileEnv, now time.Time, rows
 		// template: requalification leaves the template in the identity's
 		// prior form, matching no agent, and skipping the row would leave
 		// A7 without a resolution to rename it under (gastownhall/gascity#5957).
-		if mislabelled[row.Key] || (findAgentByTemplate(env.Cfg, resolvedSessionTemplateInfo(row.Info, env.Cfg)) == nil && !row.Info.ConfiguredNamedSession) {
+		if mislabelled[row.Key] || (findSessionAgentByTemplate(env.Cfg, resolvedSessionTemplateInfo(row.Info, env.Cfg)) == nil && !row.Info.ConfiguredNamedSession) {
 			continue
 		}
 		k := templateMemoKeyOf(row.Info)

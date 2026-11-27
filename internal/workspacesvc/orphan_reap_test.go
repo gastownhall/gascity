@@ -1,3 +1,10 @@
+//go:build unix
+
+// The orphan the production filter looks for is defined by re-parenting to
+// pid 1 and is identified by reading /proc. Windows has neither: there is no
+// init to inherit an orphan, and /proc is deliberately never consulted there
+// because C:\proc is writable by any local user (see pidutil/procfs_windows.go).
+
 package workspacesvc
 
 import (
@@ -227,8 +234,12 @@ func TestFindOrphanedServiceProcessesSkipsWhenSweeperIsInit(t *testing.T) {
 	})
 
 	// Sanity: a normal (non-init) sweeper sees the seeded orphan.
+	normalFound, err := findOrphanedServiceProcessesFrom(os.Getpid(), id)
+	if err != nil {
+		t.Fatalf("normal sweep: %v", err)
+	}
 	found := false
-	for _, got := range findOrphanedServiceProcessesFrom(os.Getpid(), id) {
+	for _, got := range normalFound {
 		if got == pid {
 			found = true
 			break
@@ -238,8 +249,12 @@ func TestFindOrphanedServiceProcessesSkipsWhenSweeperIsInit(t *testing.T) {
 		t.Fatalf("normal sweep did not find seeded orphan %d", pid)
 	}
 
-	if got := findOrphanedServiceProcessesFrom(1, id); len(got) != 0 {
-		t.Fatalf("pid-1 sweep returned %v, want none", got)
+	initFound, err := findOrphanedServiceProcessesFrom(1, id)
+	if err != nil {
+		t.Fatalf("pid-1 sweep: %v", err)
+	}
+	if len(initFound) != 0 {
+		t.Fatalf("pid-1 sweep returned %v, want none", initFound)
 	}
 	if !processAliveForTest(pid) {
 		t.Fatalf("orphan %d died during find-only sweeps", pid)

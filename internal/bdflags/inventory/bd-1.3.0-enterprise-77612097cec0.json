@@ -9,6 +9,66 @@
   "pflag_version": "v1.0.10",
   "cgo_enabled": "1"
  },
+ "graph_plan": {
+  "plan": [
+   "commit_message",
+   "edges",
+   "nodes"
+  ],
+  "node": [
+   "acceptance_criteria",
+   "actor",
+   "assign_after_create",
+   "assignee",
+   "defer_until",
+   "deps",
+   "description",
+   "design",
+   "due_at",
+   "ephemeral",
+   "estimate",
+   "estimated_minutes",
+   "event_kind",
+   "external_ref",
+   "id",
+   "key",
+   "labels",
+   "metadata",
+   "metadata_refs",
+   "mol_type",
+   "no_history",
+   "notes",
+   "owner",
+   "parent",
+   "parent_id",
+   "parent_key",
+   "payload",
+   "pinned",
+   "priority",
+   "spec_id",
+   "status",
+   "storage_class",
+   "target",
+   "title",
+   "type",
+   "wisp_type"
+  ],
+  "edge": [
+   "from_id",
+   "from_key",
+   "gate",
+   "spawner_id",
+   "spawner_key",
+   "thread_id",
+   "to_id",
+   "to_key",
+   "type"
+  ],
+  "dep": [
+   "target",
+   "type"
+  ]
+ },
  "commands": [
   {
    "path": "",

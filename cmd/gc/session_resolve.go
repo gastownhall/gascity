@@ -17,11 +17,7 @@ import (
 
 // resolveSessionID delegates to session.ResolveSessionID.
 func resolveSessionID(store beads.Store, identifier string) (string, error) {
-	return session.ResolveSessionID(store, identifier)
-}
-
-func resolveSessionIDAllowClosed(store beads.Store, identifier string) (string, error) {
-	return session.ResolveSessionIDAllowClosed(store, identifier)
+	return session.ResolveSessionID(beads.SessionStore{Store: store}, identifier)
 }
 
 type namedSessionResolveOptions struct {
@@ -35,6 +31,13 @@ type namedSessionResolveOptions struct {
 	// configured named row before it is reopened; an error leaves the row
 	// closed and is the resolution's.
 	beforeReopen func(id string) error
+	// stderr, when materializing, receives the materializer's report of a
+	// session start it left to the reconciler (noteDeferredSessionStart); nil
+	// discards it, for a caller that reports the start itself.
+	stderr io.Writer
+	// observeOnly: the resolution writes nothing, not even the empty-type
+	// heal of scanned rows (resolveOpenQualifiedAliasBasename).
+	observeOnly bool
 }
 
 const templateTargetPrefix = "template:"
@@ -59,7 +62,7 @@ func resolveConfiguredNamedSessionID(
 	if !ok {
 		return "", false, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
-	lookup, err := session.LookupConfiguredNamedSession(store, spec)
+	lookup, err := session.LookupConfiguredNamedSession(beads.SessionStore{Store: store}, spec)
 	if err != nil {
 		return "", true, fmt.Errorf("looking up configured named session: %w", err)
 	}
@@ -84,7 +87,7 @@ func resolveConfiguredNamedSessionID(
 	if !opts.materialize {
 		return "", false, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
-	id, err := ensureSessionIDForTemplateWithOptions(cityPath, cfg, store, spec.Identity, io.Discard, ensureSessionForTemplateOptions{
+	id, err := ensureSessionIDForTemplateWithOptions(cityPath, cfg, store, spec.Identity, opts.stderr, ensureSessionForTemplateOptions{
 		materializeMetadata: opts.materializeMetadata,
 	})
 	return id, true, err
@@ -98,8 +101,11 @@ func resolveSessionIDAllowClosedWithConfig(cityPath string, cfg *config.City, st
 	return resolveSessionIDWithOptions(cityPath, cfg, store, identifier, namedSessionResolveOptions{allowClosed: true})
 }
 
-func resolveSessionIDMaterializingNamed(cityPath string, cfg *config.City, store beads.Store, identifier string) (string, error) {
-	return resolveSessionIDWithOptions(cityPath, cfg, store, identifier, namedSessionResolveOptions{materialize: true})
+// resolveSessionIDMaterializingNamed resolves identifier, materializing a
+// configured named session that has no row yet. stderr receives the
+// materializer's report of a start it left to the reconciler; nil discards it.
+func resolveSessionIDMaterializingNamed(cityPath string, cfg *config.City, store beads.Store, identifier string, stderr io.Writer) (string, error) {
+	return resolveSessionIDWithOptions(cityPath, cfg, store, identifier, namedSessionResolveOptions{materialize: true, stderr: stderr})
 }
 
 // resolveSessionIDMaterializingNamedBeforeReopen is
@@ -137,11 +143,12 @@ func resolveSessionIDWithOptions(
 	if store == nil {
 		return "", fmt.Errorf("session store unavailable")
 	}
+	sessions := beads.SessionStore{Store: store}
 	if isTemplateTarget(identifier) {
 		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
 	if !opts.skipExactID {
-		if id, err := session.ResolveSessionIDByExactID(store, identifier); err == nil {
+		if id, err := session.ResolveSessionIDByExactID(sessions, identifier); err == nil {
 			return id, nil
 		} else if !errors.Is(err, session.ErrSessionNotFound) {
 			return "", err
@@ -152,7 +159,7 @@ func resolveSessionIDWithOptions(
 	} else if matched || !errors.Is(err, session.ErrSessionNotFound) {
 		return "", fmt.Errorf("resolving configured named session %q: %w", identifier, err)
 	}
-	if id, err := session.ResolveSessionID(store, identifier); err == nil {
+	if id, err := session.ResolveSessionID(sessions, identifier); err == nil {
 		if cfg != nil {
 			if info, getErr := sessionFrontDoor(store).Get(id); getErr == nil {
 				if isNamedSessionInfo(info) {
@@ -167,7 +174,7 @@ func resolveSessionIDWithOptions(
 	} else if !errors.Is(err, session.ErrSessionNotFound) {
 		return "", err
 	}
-	if id, err := resolveOpenQualifiedAliasBasename(store, identifier); err == nil {
+	if id, err := resolveOpenQualifiedAliasBasename(store, identifier, !opts.observeOnly); err == nil {
 		return id, nil
 	} else if !errors.Is(err, session.ErrSessionNotFound) {
 		return "", err
@@ -181,7 +188,7 @@ func resolveSessionIDWithOptions(
 				return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 			}
 		}
-		if id, err := session.ResolveSessionIDAllowClosed(store, identifier); err == nil {
+		if id, err := session.ResolveSessionIDAllowClosed(sessions, identifier); err == nil {
 			return id, nil
 		} else if !errors.Is(err, session.ErrSessionNotFound) {
 			return "", err
@@ -190,7 +197,10 @@ func resolveSessionIDWithOptions(
 	return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 }
 
-func resolveOpenQualifiedAliasBasename(store beads.Store, identifier string) (string, error) {
+// resolveOpenQualifiedAliasBasename resolves identifier as the basename of an
+// open session's qualified alias. With heal, a scanned row with an empty type
+// has its type repaired; an observe-only caller passes false.
+func resolveOpenQualifiedAliasBasename(store beads.Store, identifier string, heal bool) (string, error) {
 	identifier = strings.TrimSpace(identifier)
 	if store == nil || identifier == "" || strings.Contains(identifier, "/") {
 		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
@@ -207,7 +217,7 @@ func resolveOpenQualifiedAliasBasename(store beads.Store, identifier string) (st
 		if info.Closed {
 			continue
 		}
-		if info.Type == "" {
+		if heal && info.Type == "" {
 			sessFront.RepairTypeBestEffort(info.ID)
 		}
 		alias := strings.TrimSpace(info.Alias)

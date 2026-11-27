@@ -313,6 +313,32 @@ func TestFindKimiSessionFileFollowsSymlinkedRoots(t *testing.T) {
 	}
 }
 
+// Companion to TestFindKimiSessionFileFollowsSymlinkedRoots: a dangling
+// symlinked account root is a deliberate existence check (bare EvalSymlinks
+// site), not comparison prep, so it must be skipped without error and must
+// not block discovery through a later, valid sibling root.
+func TestFindKimiSessionFileSkipsBrokenSymlinkedRoot(t *testing.T) {
+	isolateKimiSearchRoots(t)
+	base := t.TempDir()
+	accountRoot := t.TempDir()
+	workDir := "/tmp/gascity/phase1/kimi-broken"
+	workHash := kimiWorkDirHash(workDir)
+	want := writeKimiContext(t, filepath.Join(accountRoot, workHash, "session-key", "context.jsonl"), []string{
+		`{"role":"user","content":"via valid root"}`,
+	})
+
+	if err := os.Symlink(filepath.Join(base, "does-not-exist"), filepath.Join(base, "account-a-broken")); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+	if err := os.Symlink(accountRoot, filepath.Join(base, "account-b-valid")); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := FindKimiSessionFile([]string{base}, workDir); !samePath(got, want) {
+		t.Fatalf("FindKimiSessionFile() = %q, want %q (broken sibling root must be skipped, not fatal)", got, want)
+	}
+}
+
 // isolateKimiSearchRoots pins every ambient variable DefaultKimiSearchPaths
 // reads, so a discovery test sees only the roots it creates. Pinning HOME alone
 // is insufficient: KIMI_CODE_HOME contributes a root independently of HOME, and
@@ -542,4 +568,101 @@ func kimiEntryIDs(entries []*Entry) []string {
 		ids = append(ids, entry.UUID)
 	}
 	return ids
+}
+
+// Discovery must hand back paths spelled under the caller's own search root:
+// ExtractKimiTailMetaFromSearchPaths checks containment lexically, so a
+// symlink-resolved path is rejected as outside the configured roots. samePath
+// cannot pin this because it resolves both sides, so these assertions compare
+// the exact lexical spelling.
+func TestKimiDiscoveredPathsStayUnderLexicalSearchRoot(t *testing.T) {
+	workDir := "/tmp/gascity/phase1/kimi-lexical"
+	workHash := kimiWorkDirHash(workDir)
+	const sessionID = "session-key"
+	transcript := []string{`{"role":"user","content":"lexical"}`}
+
+	cases := []struct {
+		name string
+		// setup returns the search root and the exact path discovery must return.
+		setup func(t *testing.T) (searchRoot, want string)
+	}{
+		{
+			name: "symlinked search root",
+			setup: func(t *testing.T) (string, string) {
+				realRoot := t.TempDir()
+				writeKimiContext(t, filepath.Join(realRoot, workHash, sessionID, "context.jsonl"), transcript)
+				link := filepath.Join(t.TempDir(), "sessions-link")
+				if err := os.Symlink(realRoot, link); err != nil {
+					t.Skipf("symlink unsupported on this platform: %v", err)
+				}
+				return link, filepath.Join(link, workHash, sessionID, "context.jsonl")
+			},
+		},
+		{
+			name: "nested symlinked account root",
+			setup: func(t *testing.T) (string, string) {
+				base := t.TempDir()
+				accountRoot := t.TempDir()
+				writeKimiContext(t, filepath.Join(accountRoot, workHash, sessionID, "context.jsonl"), transcript)
+				if err := os.Symlink(accountRoot, filepath.Join(base, "account-a")); err != nil {
+					t.Skipf("symlink unsupported on this platform: %v", err)
+				}
+				return base, filepath.Join(base, "account-a", workHash, sessionID, "context.jsonl")
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateKimiSearchRoots(t)
+			searchRoot, want := tc.setup(t)
+			searchPaths := []string{searchRoot}
+
+			lookups := map[string]string{
+				"FindKimiSessionFile":              FindKimiSessionFile(searchPaths, workDir),
+				"FindKimiSessionFileIfUnambiguous": FindKimiSessionFileIfUnambiguous(searchPaths, workDir),
+				"FindKimiSessionFileByID":          FindKimiSessionFileByID(searchPaths, workDir, sessionID),
+			}
+			for name, got := range lookups {
+				if got != want {
+					t.Errorf("%s() = %q, want exact lexical path %q", name, got, want)
+					continue
+				}
+				if _, err := ExtractKimiTailMetaFromSearchPaths(searchPaths, got); err != nil {
+					t.Errorf("ExtractKimiTailMetaFromSearchPaths(%s result %q) = %v, want accepted", name, got, err)
+				}
+			}
+		})
+	}
+}
+
+// Lexical recursion must keep the canonical-keyed cycle protection: a link
+// from the search root to itself and a link from an account root back to the
+// search root both resolve to an already-visited directory.
+func TestFindKimiSessionFileTerminatesOnSymlinkCycles(t *testing.T) {
+	isolateKimiSearchRoots(t)
+	base := t.TempDir()
+	acct := t.TempDir()
+	workDir := "/tmp/gascity/phase1/kimi-cycles"
+	workHash := kimiWorkDirHash(workDir)
+	const sessionID = "session-key"
+	writeKimiContext(t, filepath.Join(acct, workHash, sessionID, "context.jsonl"), []string{
+		`{"role":"user","content":"cycle"}`,
+	})
+	for link, target := range map[string]string{
+		filepath.Join(base, "account-a"):    acct,
+		filepath.Join(base, "loop-to-self"): base,
+		filepath.Join(acct, "back-to-base"): base,
+	} {
+		if err := os.Symlink(target, link); err != nil {
+			t.Skipf("symlink unsupported on this platform: %v", err)
+		}
+	}
+	want := filepath.Join(base, "account-a", workHash, sessionID, "context.jsonl")
+
+	if got := FindKimiSessionFile([]string{base}, workDir); got != want {
+		t.Errorf("FindKimiSessionFile() = %q, want %q", got, want)
+	}
+	if got := FindKimiSessionFileByID([]string{base}, workDir, sessionID); got != want {
+		t.Errorf("FindKimiSessionFileByID() = %q, want %q", got, want)
+	}
 }

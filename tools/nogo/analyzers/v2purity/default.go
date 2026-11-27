@@ -30,6 +30,7 @@ var Default = Config{
 		"github.com/gastownhall/gascity/internal/beads.MailStore",
 		"github.com/gastownhall/gascity/internal/beads.OrdersStore",
 		"github.com/gastownhall/gascity/internal/beads.NudgesStore",
+		"github.com/gastownhall/gascity/internal/beads.MoleculeTarget",
 	},
 	// Roots pins the //gc:pure roots: the decide, admission, the dirty
 	// filters, the work ladder's decision, every section's Decide, and every

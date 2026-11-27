@@ -75,7 +75,7 @@ func TestMailSenderResolvesSessionIdentities(t *testing.T) {
 			state := newFakeState(t)
 			state.cfg.NamedSessions = append(state.cfg.NamedSessions, config.NamedSession{Name: "reviewer", Template: "worker", Dir: "myrig"})
 			state.cityBeadStore = beads.NewMemStore()
-			store := state.SessionsBeadStore().Store
+			store := state.Stores().Sessions().Store
 			createTestSessionBead(t, store, map[string]string{"template": "myrig/worker", "alias": "myrig/worker-3", "session_name": "worker-3", "state": "active"}, "worker-3")
 			createTestSessionBead(t, store, map[string]string{"template": "gone", "alias": "ghost-1", "session_name": "ghost-1", "state": "active"}, "ghost-1")
 			h := newTestCityHandler(t, state)

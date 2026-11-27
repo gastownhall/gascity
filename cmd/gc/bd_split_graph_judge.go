@@ -16,7 +16,9 @@ import (
 // labels and metadata, plus the parent links and edges the plan names. The
 // judge reads the plan the way bd decodes it (the same Go types, so the same
 // case-insensitive field match, duplicate-key and merge behavior), classifies
-// every node, and holds every id-named endpoint to the cross-store edge rule.
+// every node and vets every explicit node id. An id-named endpoint that names
+// a node's own explicit id is that node; every other is held to the
+// cross-store edge rule.
 
 // bdGraphPlan is the subset of bd's graph-apply plan the judge needs, decoded
 // with bd's own field types.

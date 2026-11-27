@@ -9,7 +9,7 @@ const (
 	// PublicGastownPackVersion pins fresh init output to the registry release
 	// content commit from gastownhall/gascity-packs (main, or a gastown
 	// release branch such as release/gastown-0.1.11).
-	PublicGastownPackVersion = "sha:cb6a612882b8402569c495c90ab75bb257a51bdc"
+	PublicGastownPackVersion = "sha:66897e7132c9d1160509ee47dd1b935bbd3b9664"
 
 	// PublicGascityPackSource is the concrete durable source for the
 	// gascity planning/implementation skills pack.
@@ -70,6 +70,13 @@ var SupersededBundledPackImportVersions = []string{
 	// predates the content those binaries embedded, so it is served from
 	// embedded content and never fetched (isSupersededEmbeddedOnlyPin).
 	"sha:f895c0ff47d6ee9334ed282a416387eb5b084d24",
+	// The pins v1.5.1 shipped from hotfix/1.5.1, whose [release-only]
+	// re-pins never reached main: its first pin (274c1cfb70), its pin
+	// after #7498 (40404c6cfd), and v1.5.1's own (bae3ebb2b4). Without them
+	// a main build reads a city v1.5.1 created as deliberately pinned.
+	"sha:3dcfe0969e26aac651c5c65c0a5d73f2d8cc16c5",
+	"sha:505dcdcbce087c7b29c6a6eeb4ca37fe646b5e42",
+	"sha:2e643dc2eb5ff84d9853ecaa6961a87a8e4043ae",
 }
 
 // SupersededPublicGastownPackVersions lists previous canonical pins for the
@@ -81,6 +88,7 @@ var SupersededBundledPackImportVersions = []string{
 // When bumping PublicGastownPackVersion, append the old value here
 // (scripts/update-bundled-gastown-pack does this).
 var SupersededPublicGastownPackVersions = []string{
+	"sha:cb6a612882b8402569c495c90ab75bb257a51bdc",
 	"sha:66c672b5ed00af143158b4eac960523c56b977ee",
 	"sha:33d3a430a67d1782ad364556cb566bdb01d0afe3",
 	"sha:4212acb7046c11f6f633df73307006493185233a",

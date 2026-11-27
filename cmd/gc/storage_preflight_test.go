@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -454,6 +455,25 @@ func TestStoragePreflightIsReachableFromTheCommandTree(t *testing.T) {
 	}
 }
 
+// refuseRealStoreOpens fails the test if a store is opened through the real
+// openers: a scope (rig) store or the work store. A fixture city's provider is
+// not running, so a real open starts it, and on a host with dolt installed the
+// managed server outlives the test (ga-683m7f). A fixture that needs a store
+// stubs its opener after this runs.
+func refuseRealStoreOpens(t *testing.T) {
+	t.Helper()
+	prevScope, prevSource := openStorageScopeStore, openInfraMigrationSource
+	openStorageScopeStore = func(storePath, _ string) (beads.Store, error) {
+		t.Errorf("opened the real store at %s, which starts the fixture city's provider; stub it in the fixture", storePath)
+		return nil, fmt.Errorf("a real store open at %s in a test that runs no provider", storePath)
+	}
+	openInfraMigrationSource = func(string) (beads.Store, error) {
+		t.Error("opened the real work store, which starts the fixture city's provider; stub it in the fixture")
+		return nil, errors.New("a real work-store open in a test that runs no provider")
+	}
+	t.Cleanup(func() { openStorageScopeStore, openInfraMigrationSource = prevScope, prevSource })
+}
+
 // TestPreflightRefusesEveryCityTheMigrationRefuses is the drift guard for this
 // verb's whole reason to exist.
 //
@@ -491,6 +511,9 @@ func TestStoragePreflightIsReachableFromTheCommandTree(t *testing.T) {
 // compile-time beads.DepMetadataWriter assertion in sqlite_store_graph_apply.go.
 // A destination that could reach an operator without one does not exist, so
 // there is no window this omission could cost.
+//
+// No leg runs against a live city, so no leg may open a real store
+// (refuseRealStoreOpens): a fixture that needs one stubs it.
 func TestPreflightRefusesEveryCityTheMigrationRefuses(t *testing.T) {
 	cases := []struct {
 		name string
@@ -528,6 +551,19 @@ func TestPreflightRefusesEveryCityTheMigrationRefuses(t *testing.T) {
 			openInfraMigrationSource = func(string) (beads.Store, error) { return source, nil }
 			return request
 		}},
+		{"an open work bead is blocked by an open infrastructure bead (D9)", "a work store cannot hold a cross-store gate", func(t *testing.T) storageOperatorRequest {
+			request, _, _ := preflightReadyCity(t, 0)
+			source, err := openInfraMigrationSource(request.CityPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			running := mustCreateInfraBead(t, source, beads.Bead{Title: "graft running", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}})
+			waiting := mustCreateInfraBead(t, source, beads.Bead{Title: "work waiting on it", Type: "task"})
+			if err := source.DepAdd(waiting.ID, running.ID, "blocks"); err != nil {
+				t.Fatal(err)
+			}
+			return request
+		}},
 		{"the destination already holds beads this migration did not write", "did not write", func(t *testing.T) storageOperatorRequest {
 			request, cfg, _ := preflightReadyCity(t, 1)
 			target := mustResolveInfraTarget(t, request.CityPath, cfg)
@@ -541,9 +577,27 @@ func TestPreflightRefusesEveryCityTheMigrationRefuses(t *testing.T) {
 			}
 			return request
 		}},
+		// A stale binding re-copies, except under a restore's record: the
+		// restore owns it, and the migration names the restore instead.
+		{"a binding a restore holds stale", snapshotRestoreInstruction("20261106T000000Z", "/archive"), func(t *testing.T) storageOperatorRequest {
+			request, cfg, _ := preflightReadyCity(t, 1)
+			var log bytes.Buffer
+			if got := migrateInfraClasses(t, request.CityPath, cfg, &log); got.Outcome != infraMigrationConverged {
+				t.Fatalf("the fixture migration reported %s: %s", got.Outcome, log.String())
+			}
+			target := mustResolveInfraTarget(t, request.CityPath, cfg)
+			if err := writeInfraRestoreRecord(target, infraRestoreRecord{Snapshot: "20261106T000000Z", Database: target.Database, StartedAt: time.Now().UTC(), Command: snapshotRestoreInstruction("20261106T000000Z", "/archive")}); err != nil {
+				t.Fatal(err)
+			}
+			return request
+		}},
 		{"a rig prefix in a reserved class namespace", `"gcg"`, func(t *testing.T) storageOperatorRequest {
 			request, cfg, _ := preflightReadyCity(t, 1)
-			cfg.Rigs = []config.Rig{{Name: "reserved", Prefix: "gcg", Path: t.TempDir()}}
+			rigPath := t.TempDir()
+			cfg.Rigs = []config.Rig{{Name: "reserved", Prefix: "gcg", Path: rigPath}}
+			// The plan block does not end the report, so the preflight leg
+			// censuses this rig.
+			stubStorageScopeStore(t, rigPath, func() beads.Store { return beads.NewMemStore() })
 			return request
 		}},
 		{"a remote stage", "remote stage of city controller-city", func(t *testing.T) storageOperatorRequest {
@@ -622,6 +676,9 @@ func TestPreflightRefusesEveryCityTheMigrationRefuses(t *testing.T) {
 			other := newOtherCity(t)
 			writeManagedDoltCity(t, request.CityPath)
 			stopManagedDolt(t, request.CityPath, 3417)
+			// The window starts the stopped managed Dolt before the
+			// shared-store check; this fixture has no provider script.
+			stubMigrationWindowStartStop(t, &migrationWindowProvider{})
 			writeExplicitDoltCity(t, other, 3417)
 			stubOtherCities(t, other)
 			return request
@@ -630,6 +687,7 @@ func TestPreflightRefusesEveryCityTheMigrationRefuses(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			refuseRealStoreOpens(t)
 			var migrateStdout, migrateStderr bytes.Buffer
 			if code := doStorageMigrate(context.Background(), tc.build(t), &migrateStdout, &migrateStderr); code == 0 {
 				t.Fatalf("this fixture does not make the migration refuse, so it proves nothing about preflight: %s", migrateStdout.String())
@@ -685,6 +743,7 @@ func TestPreflightRefusesEveryCityTheMigrationRefuses(t *testing.T) {
 	}
 	for _, tc := range controls {
 		t.Run("control: "+tc.name, func(t *testing.T) {
+			refuseRealStoreOpens(t)
 			var migrateStdout, migrateStderr bytes.Buffer
 			if code := doStorageMigrate(context.Background(), tc.build(t), &migrateStdout, &migrateStderr); code != 0 {
 				t.Fatalf("the control city does not migrate, so the refusal cases above prove nothing: %s", migrateStderr.String())
@@ -788,8 +847,16 @@ func TestPreflightAndMigrateAgreeOnAManagedStoreAcrossTheStop(t *testing.T) {
 	}
 
 	stopManagedDolt(t, request.CityPath, port)
+	// The maintenance window sees the stopped managed Dolt and starts it for
+	// the run; this fixture has no provider script, so only the start and the
+	// stop are stubbed.
+	provider := &migrationWindowProvider{}
+	stubMigrationWindowStartStop(t, provider)
 	if code, stderr := migrateFor(t, request); code != 0 {
 		t.Fatalf("preflight cleared the live city, and the migration refused it once its managed Dolt was stopped: exit %d: %s", code, stderr)
+	}
+	if provider.starts != 1 || provider.stops != 1 {
+		t.Fatalf("starts = %d, stops = %d: the window did not see the stopped managed Dolt it must start", provider.starts, provider.stops)
 	}
 }
 
@@ -849,12 +916,14 @@ func TestPreflightNamesRigResidueOnAConvergedCityWithoutBlocking(t *testing.T) {
 // these would stop me" would appear to list checks that do not exist.
 func TestPreflightBlockIndentsAWrappedRefusalUnderTheDetailColumn(t *testing.T) {
 	var stdout bytes.Buffer
-	if code := preflightBlock(&stdout, "destination", errors.New("first line\nsecond line")); code == 0 {
-		t.Fatal("preflightBlock returned a clearing exit code")
+	var found preflightFindings
+	found.block(&stdout, "destination", errors.New("first line\nsecond line"))
+	if code := found.finish(&stdout); code == 0 {
+		t.Fatal("a report with a blocked check returned a clearing exit code")
 	}
 	lines := strings.Split(stdout.String(), "\n")
 	if len(lines) < 2 {
-		t.Fatalf("preflightBlock printed no continuation: %q", stdout.String())
+		t.Fatalf("the block printed no continuation: %q", stdout.String())
 	}
 	if !strings.HasPrefix(lines[0], "  "+preflightBlockTag) {
 		t.Fatalf("first line is not a check row: %q", lines[0])

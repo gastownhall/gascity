@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
+
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -48,7 +50,7 @@ func TestExtmsgNotifyQueuesBehindPending(t *testing.T) {
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Blocked")
 	fs.sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{RequestID: "req-1", Kind: "approval", Prompt: "Allow Bash?"})
 
-	if err := srv.sendBackgroundMessageToSession(context.Background(), fs.cityBeadStore, info.ID, "new message in #ops"); err != nil {
+	if err := srv.sendBackgroundMessageToSession(context.Background(), beadstest.Sessions(fs.cityBeadStore), info.ID, "new message in #ops"); err != nil {
 		t.Fatalf("sendBackgroundMessageToSession = %v, want the notice queued", err)
 	}
 	if got := fs.sp.CountCalls("Nudge", info.SessionName) + fs.sp.CountCalls("NudgeNow", info.SessionName); got != 0 {
@@ -87,7 +89,7 @@ func TestCreateWithInitialMessageQueuesBehindPending(t *testing.T) {
 	if success == nil {
 		t.Fatal("expected a session create success event")
 	}
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, provider, session.WithCityPath(fs.cityPath))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), provider, session.WithCityPath(fs.cityPath))
 	sessions, err := mgr.List("", "")
 	if err != nil {
 		t.Fatalf("list sessions: %v", err)

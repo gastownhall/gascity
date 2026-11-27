@@ -190,7 +190,7 @@ func (s *NativeDoltStore) closeAllAsBatch(ids []string, metadata map[string]stri
 // asymmetry is what the per-bead route this replaced had to guard against.
 func (s *NativeDoltStore) applyCloseChunk(applier issueops.BatchApplier, items []issueops.ApplyItem) (issueops.ApplyBatchResult, error) {
 	var result issueops.ApplyBatchResult
-	err := retryOnNativeDoltSerializationConflict(func() error {
+	err := retryOnNativeDoltSerializationConflict("close_chunk", "", func() error {
 		ctx, cancel := nativeDoltOperationContext(context.TODO())
 		defer cancel()
 		var attemptErr error

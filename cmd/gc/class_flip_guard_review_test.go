@@ -49,6 +49,9 @@ func runGuardCases(t *testing.T, cases []guardCase) {
 			if c.refuse && !strings.Contains(g.refusal, "Nothing was written") {
 				t.Errorf("refusal does not say nothing was written: %q", g.refusal)
 			}
+			if n := strings.Count(g.refusal, "Nothing was written."); n > 1 || strings.Contains(g.refusal, "written..") {
+				t.Errorf("refusal closes %d times: %q", n, g.refusal)
+			}
 			// The same argv on a single-store city is never refused.
 			if single := bdClassFlipGuard(&config.City{}, t.TempDir(), c.argv, deps); single.refusal != "" {
 				t.Errorf("single-store city refused: %q", single.refusal)
@@ -276,27 +279,78 @@ func TestGcBdClassGuardJudgesMetadataAsEveryStoreReadsIt(t *testing.T) {
 	}
 }
 
-// TestGcBdImportJudgesMetadataAsEveryStoreReadsIt: an import row whose
-// metadata the bd CLI and a native Dolt store classify differently is refused,
-// with or without --skip-infra: kept, it is stranded wherever a native store
-// reads the work store; left out, a work row the bd CLI reads is dropped. A
-// null that no reading turns into a class marker imports as before.
+// TestGcBdImportJudgesMetadataAsEveryStoreReadsIt: an import row is judged
+// under both readings of its metadata, the bd CLI's and a native Dolt
+// store's. A row its store holds under both is kept, and one it holds under
+// neither is handled like any row of a class the store does not hold:
+// refused, or left out with --skip-infra. A row its store holds under one
+// reading only is refused even with --skip-infra: kept, it is stranded
+// wherever a store reads it the other way; left out, a row this store holds
+// is dropped. A null that no reading turns into a class marker imports as
+// before.
 func TestGcBdImportJudgesMetadataAsEveryStoreReadsIt(t *testing.T) {
+	notFound := func(string) (beads.Bead, bdReadResult) { return beads.Bead{}, bdReadNotFound }
+	// The bd CLI reads work, a native store graph (a null gc.root_bead_id).
 	ambiguous := `{"id":"demo-7","title":"x","issue_type":"task","metadata":{"gc.root_bead_id":null}}` + "\n"
-	for _, argv := range [][]string{{"import", "-"}, {"import", "-", "--skip-infra"}} {
-		deps := splitTestDeps(strings.NewReader(ambiguous), func(string) (beads.Bead, bdReadResult) { return beads.Bead{}, bdReadNotFound })
-		g := bdClassFlipGuard(splitGuardTestCity(), t.TempDir(), argv, deps)
-		for _, want := range []string{"demo-7", "work class as the bd CLI", "graph class as a native Dolt store", "Nothing was written"} {
-			if !strings.Contains(g.refusal, want) {
-				t.Errorf("gc bd %s: refusal %q does not carry %q", strings.Join(argv, " "), g.refusal, want)
+	// The bd CLI reads graph, a native store work (gc.synthetic "null" marks a
+	// synthetic convoy).
+	reversed := `{"id":"demo-6","title":"c","issue_type":"convoy","metadata":{"gc.root_bead_id":"gcg-1","gc.synthetic":null}}` + "\n"
+	for _, c := range []struct {
+		row  string
+		want []string
+	}{
+		{ambiguous, []string{"line 1 (demo-7)", "work class as the bd CLI", "graph class as a native Dolt store", "holds the work class but not the graph class", "gc.root_bead_id differently", "Nothing was written."}},
+		{reversed, []string{"line 1 (demo-6)", "graph class as the bd CLI", "work class as a native Dolt store", "holds the work class but not the graph class", "gc.synthetic differently", "Nothing was written."}},
+	} {
+		for _, argv := range [][]string{{"import", "-"}, {"import", "-", "--skip-infra"}} {
+			g := bdClassFlipGuard(splitGuardTestCity(), t.TempDir(), argv, splitTestDeps(strings.NewReader(c.row), notFound))
+			for _, want := range c.want {
+				if !strings.Contains(g.refusal, want) {
+					t.Errorf("gc bd %s: refusal %q does not carry %q", strings.Join(argv, " "), g.refusal, want)
+				}
+			}
+			if strings.Contains(g.refusal, "no store of this city") {
+				t.Errorf("gc bd %s: refusal %q claims no store holds both readings", strings.Join(argv, " "), g.refusal)
 			}
 		}
 	}
+
+	// The bd CLI reads sessions (an own-session wait), a native store graph:
+	// a whole split's work store holds neither.
+	neither := `{"id":"demo-5","title":"g","issue_type":"gate","labels":["session:5"],"metadata":{"session_id":"5","gc.root_bead_id":null}}` + "\n"
 	holds := workStoreClassHolds(splitGuardTestCity())
+	split, problem := splitBdImportRows([]byte(neither), holds)
+	if problem != "" || split.skipped != 1 || formatClassCounts(split.byClass) != "1 sessions" || len(split.keptIDs) != 0 {
+		t.Errorf("a row held under neither reading: skipped %d (%s), kept %v, problem %q; want it left out and counted under the bd CLI's reading", split.skipped, formatClassCounts(split.byClass), split.keptIDs, problem)
+	}
+	g := bdClassFlipGuard(splitGuardTestCity(), t.TempDir(), []string{"import", "-", "--skip-infra"}, splitTestDeps(strings.NewReader(neither), notFound))
+	if g.cleanup != nil {
+		defer g.cleanup()
+	}
+	if g.refusal != "" || !strings.Contains(g.notice, "left out 1 row(s)") || !strings.Contains(g.notice, "(1 sessions)") {
+		t.Errorf("import --skip-infra of a row held under neither reading: refusal %q, notice %q; want it left out", g.refusal, g.notice)
+	}
+	g = bdClassFlipGuard(splitGuardTestCity(), t.TempDir(), []string{"import", "-"}, splitTestDeps(strings.NewReader(neither), notFound))
+	if !strings.Contains(g.refusal, "holds 1 row(s) of a class this store does not hold (1 sessions)") || strings.Contains(g.refusal, "native Dolt store") {
+		t.Errorf("import of a row held under neither reading: refusal %q, want the ordinary unheld-class refusal", g.refusal)
+	}
+	g = bdClassFlipGuard(splitGuardTestCity(), t.TempDir(), []string{"import", "-", "--dry-run"}, splitTestDeps(strings.NewReader(neither), notFound))
+	if g.cleanup != nil {
+		defer g.cleanup()
+	}
+	if g.refusal != "" || g.notice == "" {
+		t.Errorf("import --dry-run of a row held under neither reading: refusal %q, notice %q; want it reported", g.refusal, g.notice)
+	}
+	sessionsOnWork := splitGuardTestCity()
+	sessionsOnWork.Storage.Classes.Sessions = config.StorageWorkBinding
+	if _, problem := splitBdImportRows([]byte(neither), workStoreClassHolds(sessionsOnWork)); !strings.Contains(problem, "holds the sessions class but not the graph class") {
+		t.Errorf("on a sessions-on-work split: problem %q, want the row refused as held under the bd CLI's reading only", problem)
+	}
+
 	if _, problem := splitBdImportRows([]byte(`{"id":"demo-6","title":"x","issue_type":"task","metadata":{"gc.kind":null,"gc.root_bead_id":null}}`+"\n"), holds); !strings.Contains(problem, "gc.root_bead_id differently") {
 		t.Errorf("a row with nulls on two class keys: problem %q does not name gc.root_bead_id, the key that decides its class", problem)
 	}
-	split, problem := splitBdImportRows([]byte(`{"id":"demo-8","title":"x","issue_type":"task","metadata":{"gc.kind":null}}`+"\n"), holds)
+	split, problem = splitBdImportRows([]byte(`{"id":"demo-8","title":"x","issue_type":"task","metadata":{"gc.kind":null}}`+"\n"), holds)
 	if problem != "" || !slices.Equal(split.keptIDs, []string{"demo-8"}) {
 		t.Errorf("a null on a key no reading sets: kept %v, problem %q; want demo-8 kept", split.keptIDs, problem)
 	}
@@ -304,11 +358,68 @@ func TestGcBdImportJudgesMetadataAsEveryStoreReadsIt(t *testing.T) {
 	if problem != "" || split.skipped != 1 || formatClassCounts(split.byClass) != "1 sessions" {
 		t.Errorf("a session row both readings place in the binding: skipped %d (%s), problem %q; want it left out and counted", split.skipped, formatClassCounts(split.byClass), problem)
 	}
-	city := splitGuardTestCity()
-	city.Storage.Classes.Graph = config.StorageWorkBinding
-	split, problem = splitBdImportRows([]byte(ambiguous), workStoreClassHolds(city))
+	graphOnWork := splitGuardTestCity()
+	graphOnWork.Storage.Classes.Graph = config.StorageWorkBinding
+	split, problem = splitBdImportRows([]byte(ambiguous), workStoreClassHolds(graphOnWork))
 	if problem != "" || !slices.Equal(split.keptIDs, []string{"demo-7"}) {
 		t.Errorf("on a graph-on-work split: kept %v, problem %q; want demo-7 kept", split.keptIDs, problem)
+	}
+}
+
+// TestGcBdEdgeEndpointRefusalStatesItsCauseOnce: every door that judges an
+// edge endpoint refuses an endpoint gc did not find exactly, stating the cause
+// once and closing with one "Nothing was written.". A refusal of a write that
+// names the unresolved bead itself keeps its own text.
+func TestGcBdEdgeEndpointRefusalStatesItsCauseOnce(t *testing.T) {
+	const prefix = `gc bd dep add: refused on this split city: an edge endpoint must be a bead of this city's work stores: `
+	const suffix = `. A dependency edge across stores is never written. Nothing was written.`
+	want := map[bdReadResult]string{
+		bdReadNotFound:  prefix + `no bead "demo-404" in this store, so gc cannot judge what the write would do` + suffix,
+		bdReadCollision: prefix + `bd resolves "demo-404" to a different bead (a short or partial id), so the write would land on a bead gc did not judge. Name the bead by its full id` + suffix,
+		bdReadFailed:    prefix + `gc could not read the bead to check the write. Retry once the store answers` + suffix,
+	}
+	for _, bad := range []bdReadResult{bdReadNotFound, bdReadCollision, bdReadFailed} {
+		read := func(id string) (beads.Bead, bdReadResult) {
+			if id == "demo-404" {
+				return beads.Bead{}, bad
+			}
+			return beads.Bead{ID: id, Type: "task"}, bdReadFound
+		}
+		for _, door := range []struct {
+			argv  []string
+			stdin string
+		}{
+			{[]string{"dep", "add", "demo-1", "demo-404"}, ""},
+			{[]string{"create", "--title", "x", "--deps", "demo-404"}, ""},
+			{[]string{"create", "--title", "x", "--parent", "demo-404", "--no-inherit-labels"}, ""},
+			{[]string{"update", "demo-1", "--parent", "demo-404"}, ""},
+			{[]string{"batch"}, "dep add demo-1 demo-404\n"},
+			{[]string{"import", "-"}, `{"id":"demo-2","title":"x","issue_type":"task","dependencies":[{"depends_on_id":"demo-404"}]}` + "\n"},
+		} {
+			deps := splitTestDeps(strings.NewReader(door.stdin), read)
+			deps.endpoints = func(ids []string) map[string]bdReadResult {
+				out := map[string]bdReadResult{}
+				for _, id := range ids {
+					_, out[id] = read(id)
+				}
+				return out
+			}
+			g := bdClassFlipGuard(splitGuardTestCity(), t.TempDir(), door.argv, deps)
+			if g.cleanup != nil {
+				g.cleanup()
+			}
+			if g.refusal == "" || strings.Count(g.refusal, "Nothing was written.") != 1 || strings.Contains(g.refusal, "written..") {
+				t.Errorf("gc bd %s (read %v): refusal %q, want the cause stated once and one closing sentence", strings.Join(door.argv, " "), bad, g.refusal)
+			}
+			if door.argv[0] == "dep" && g.refusal != want[bad] {
+				t.Errorf("gc bd dep add (read %v):\n got %q\nwant %q", bad, g.refusal, want[bad])
+			}
+		}
+	}
+	deps := splitTestDeps(nil, func(string) (beads.Bead, bdReadResult) { return beads.Bead{}, bdReadNotFound })
+	g := bdClassFlipGuard(splitGuardTestCity(), t.TempDir(), []string{"update", "demo-404", "--add-label", "wisp"}, deps)
+	if w := `gc bd update demo-404: refused on this split city: no bead "demo-404" in this store, so gc cannot judge what the write would do. Nothing was written.`; g.refusal != w {
+		t.Errorf("gc bd update of an absent bead:\n got %q\nwant %q", g.refusal, w)
 	}
 }
 

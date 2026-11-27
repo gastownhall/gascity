@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -77,7 +78,7 @@ func TestSessionGetEnrichedWireByteIdentical(t *testing.T) {
 		b := b
 		t.Run(b.ID, func(t *testing.T) {
 			store := beads.NewMemStoreFrom(1, []beads.Bead{b}, nil)
-			mgr := session.NewManagerWithOptions(store, runtime.NewFake(), session.WithCityPath(t.TempDir()))
+			mgr := session.NewManagerWithOptions(beadstest.Sessions(store), runtime.NewFake(), session.WithCityPath(t.TempDir()))
 
 			// Golden: the pre-cutover double-read. mgr.Get for the runtime-enriched
 			// Info, then a separate store.Get projected to PersistedResponse.

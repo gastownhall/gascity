@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -225,10 +226,20 @@ func startLeaseName(c startCandidate) string {
 // sleep->re-wake fairness (a SleepPatch clears last_woke_at before the append,
 // so the fallback kicks in) is pinned by TestWakeFairnessInfoTwinCharacterization
 // — the slept_at middle tier keeps a session that slept recently from jumping
-// the queue ahead of one that has been waiting since creation.
+// the queue ahead of one that has been waiting since creation. A reset-pending
+// session (a fresh cycle or restart handoff: RestartRequestPatch clears
+// last_woke_at) ranks by reset_committed_at, when its last incarnation stopped,
+// ahead of the slept_at and creation fallbacks. A long-lived named session that
+// cycles on every patrol then cannot outrank pool sessions created since that
+// reset by a stale slept_at or its CreatedAt.
 func wakeFairnessTime(c startCandidate) time.Time {
 	if t, err := time.Parse(time.RFC3339, c.info.LastWokeAt); err == nil {
 		return t
+	}
+	if strings.TrimSpace(c.info.ContinuationResetPending) == "true" {
+		if t, err := time.Parse(time.RFC3339, strings.TrimSpace(c.info.ResetCommittedAt)); err == nil {
+			return t
+		}
 	}
 	if t, err := time.Parse(time.RFC3339, c.info.SleptAt); err == nil {
 		return t
@@ -658,6 +669,9 @@ type asyncStartTracker struct {
 	// a provider swap's wait (waitLaunchedStarts).
 	launched         int
 	drainAckStopKeys sync.Map
+	// admitted counts the starts handed out by start and not yet finished, for
+	// busy. It is read without mu, from the controller's tick.
+	admitted atomic.Int64
 }
 
 func (t *asyncStartTracker) start() (func(), bool) {
@@ -670,7 +684,20 @@ func (t *asyncStartTracker) start() (func(), bool) {
 		return nil, false
 	}
 	t.wg.Add(1)
-	return t.wg.Done, true
+	t.admitted.Add(1)
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			t.admitted.Add(-1)
+			t.wg.Done()
+		})
+	}, true
+}
+
+// busy reports whether any start handed out by start (an async session start
+// or drain-ack stop) has not finished. It is a non-blocking read, unlike wait.
+func (t *asyncStartTracker) busy() bool {
+	return t != nil && t.admitted.Load() > 0
 }
 
 func (t *asyncStartTracker) startDrainAckStop(key string) (func(), bool) {
@@ -765,7 +792,9 @@ func (t *asyncStartTracker) waitUntil(timeout time.Duration, shouldStop func() b
 }
 
 type asyncPreparedStart struct {
-	item    preparedStart
+	item preparedStart
+	// release gives back the start's async slot. It does no store I/O, so the
+	// start goroutine can run it whatever state the store is in.
 	release func()
 	done    func()
 	tracker *asyncStartTracker // counts the start's goroutine; nil counts nothing
@@ -1177,9 +1206,9 @@ func refreshConfiguredNamedStartCandidate(
 	// Fold the resolver's Info too, not just the params: the resolve may have
 	// durably cleared a stale trigger stamp (bindNamedSessionTriggerBead,
 	// gascity#4373), and buildPreparedStartWithWorkDirResolver re-derives the
-	// launch env from candidate.info via sessionTriggerBeadEnv. Keeping the
-	// pre-call Info here would hand the seat starting on the clearing tick the
-	// stale GC_TRIGGER_BEAD_ID the clear just removed.
+	// launch env from candidate.info via sessionDemandSpawnEnv. Keeping the
+	// pre-call Info here would mark the seat starting on the clearing tick
+	// demand-spawned for the stamp the clear just removed.
 	candidate.info = refreshedInfo
 	return candidate
 }
@@ -1438,7 +1467,7 @@ func buildPreparedStartWithTranscript(
 	// resolveSessionCommand only adds --resume/--session-id which are not schema
 	// flags, so the overrides don't need to be re-applied.
 	if msg, ok := sessionOverrides["initial_message"]; ok && msg != "" && (firstStart || forceFresh) {
-		if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none" {
+		if (tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none") || initialMessageRidesStartupPrompt(tp.IsACP) {
 			agentCfg.Nudge = appendInitialMessageToStartupNudge(agentCfg.Nudge, msg)
 		} else {
 			existing := ""
@@ -1487,8 +1516,8 @@ func buildPreparedStartWithTranscript(
 	if gcProvider := sessionpkg.ProviderFamilyFromInfo(candidate.info, ""); gcProvider != "" {
 		agentCfg.Env = mergeEnv(agentCfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
 	}
-	if triggerEnv := sessionTriggerBeadEnv(candidate.info); len(triggerEnv) > 0 {
-		agentCfg.Env = mergeEnv(agentCfg.Env, triggerEnv)
+	if demandEnv := sessionDemandSpawnEnv(candidate.info); len(demandEnv) > 0 {
+		agentCfg.Env = mergeEnv(agentCfg.Env, demandEnv)
 	}
 	agentCfg.Env = git.ApplySSHKeepaliveEnv(agentCfg.Env)
 	agentCfg = runtime.SyncWorkDirEnv(agentCfg)
@@ -1648,27 +1677,19 @@ func samePreparedWorkDirPath(a, b string) bool {
 	return samePath(a, b)
 }
 
-// sessionTriggerBeadEnv reads the trigger-bead identity off the typed twin
-// (Info.TriggerBeadID / Info.TriggerBeadStoreRef, verbatim raw mirrors) instead of
-// the raw bead metadata. The trigger key IS mutated on the start-prep path —
-// refreshConfiguredNamedStartCandidate runs bindNamedSessionTriggerBead, which
-// clears a stamp whose target is no longer workable (gascity#4373) — so
-// coherence here depends on that refresh folding its returned Info onto
-// candidate.info, not on the key being immutable.
-func sessionTriggerBeadEnv(info sessionpkg.Info) map[string]string {
-	triggerBeadID := strings.TrimSpace(info.TriggerBeadID)
-	if triggerBeadID == "" {
+// sessionDemandSpawnEnv is the launch env a row's trigger stamp contributes:
+// the presence-only marker GC_SPAWN_ORIGIN=demand when info carries a stamp,
+// otherwise nil. It never exports the trigger id or its store ref. The stamp
+// names the row the controller counted, not the bead the seat claims (the pool
+// is pull), and a shell's copy is frozen at exec while the stamp keeps moving,
+// so an id-shaped variable would be one ${…:-} away from closing a foreign
+// bead (gastownhall/gascity#5738). A seat names its own bead through
+// `gc hook current --id-only`.
+func sessionDemandSpawnEnv(info sessionpkg.Info) map[string]string {
+	if strings.TrimSpace(info.TriggerBeadID) == "" {
 		return nil
 	}
-	env := map[string]string{
-		"GC_TRIGGER_BEAD_ID":      triggerBeadID,
-		"GC_TRIGGER_WORK_BEAD_ID": triggerBeadID,
-	}
-	if storeRef := strings.TrimSpace(info.TriggerBeadStoreRef); storeRef != "" {
-		env["GC_TRIGGER_BEAD_STORE_REF"] = storeRef
-		env["GC_TRIGGER_WORK_STORE_REF"] = storeRef
-	}
-	return env
+	return map[string]string{"GC_SPAWN_ORIGIN": demandSpawnOriginValue}
 }
 
 // parseSessionTemplateOverridesForLaunch decodes the per-session template_overrides
@@ -2027,6 +2048,12 @@ func runPreparedStartCandidate(
 	startCallBegin := time.Now()
 	startedFresh, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter, warmClaim)
 	startCtxErr := startCtx.Err()
+	// A startup nudge the runtime handed back (one held behind a dialog
+	// under program_status = "on", row A20, or an un-welded exec launch's
+	// first turn) is queued, never typed or failed.
+	if qerr := queueStartupNudgeHandback(cityPath, cfg, sp, item.candidate.info, item.candidate.name(), item.cfg.Env[runtime.InstanceTokenEnv], err == nil, time.Now()); qerr != nil {
+		log.Printf("gc start: %v", qerr)
+	}
 	// diedDuringStartup starts true when the provider/resume layer already
 	// reported the death directly (runtime.ErrSessionDiedDuringStartup,
 	// e.g. from the tmux adapter or from retryFreshStartAfterStaleKey's
@@ -2075,10 +2102,21 @@ func runPreparedStartCandidate(
 	// the dead resume's pane for the resume backstop to read that
 	// refusal from, so recordWakeFailure clears the key for the
 	// next attempt.
+	//
+	// A start whose startup prompt rides the agent's first ACP
+	// session/prompt (an ACP session on Windows; see
+	// initialMessageRidesStartupPrompt) is gated the same way: an agent that
+	// exits after session/new leaves the command wrapper that launched it
+	// alive past Start, so the prompt write succeeds into the pipe and the
+	// prompt would be lost behind a successful start. A Start that overran
+	// startupTimeout skips that check: it is a startup timeout whether or not
+	// the session lived.
 	var diedPane string
-	if startedFresh && err == nil && strings.TrimSpace(item.candidate.info.ID) != "" && item.candidate.info.SessionKey != "" {
+	if startedFresh && err == nil && strings.TrimSpace(item.candidate.info.ID) != "" &&
+		(item.candidate.info.SessionKey != "" ||
+			(startCtxErr == nil && item.cfg.Nudge != "" && initialMessageRidesStartupPrompt(item.candidate.tp.IsACP))) {
 		postStartBegin := time.Now()
-		if stabilityWaiter(startCtx, item.candidate.name()) {
+		if stabilityWaiter(ctx, item.candidate.name()) {
 			running := false
 			alive := false
 			if store == nil || strings.TrimSpace(item.candidate.info.ID) == "" {
@@ -2218,12 +2256,11 @@ func startOutcomeDefersCommit(outcome TraceOutcomeCode) bool {
 	return outcome == TraceOutcomeSessionInitializing || outcome == TraceOutcomeDeferred
 }
 
+// appendInitialMessageToStartupNudge composes the startup nudge that carries
+// msg (session.AppendInitialMessage): the session layer owns the composition,
+// so a handed-back nudge is split by the same rule (session.SplitInitialMessage).
 func appendInitialMessageToStartupNudge(nudge, msg string) string {
-	userMessage := "User message:\n" + msg
-	if nudge != "" {
-		return nudge + startupPromptNudgeSeparator + userMessage
-	}
-	return userMessage
+	return sessionpkg.AppendInitialMessage(nudge, msg)
 }
 
 func restartPromptNudge(prompt, nudge string) string {
@@ -2343,15 +2380,34 @@ func enqueuePreparedStartWaveForCity(
 				}
 			}
 			defer releaseStart()
+			// The start holds the item's runtime lease (nil when it holds none)
+			// until the commit phase takes it over; a panic before then
+			// abandons it, a flock-only drop that makes no store call.
+			lease := item.candidate.lease
+			leaseHandedOff := false
+			defer func() {
+				if !leaseHandedOff {
+					lease.Abandon()
+				}
+			}()
 			watched, unwatch := watchStartLease(ctx, item)
 			result := runPreparedStartCandidate(watched, item, cityPath, sp, store, cfg, startupTimeout, stabilityWaiter, sessionStaleKeyDetectionWaiter, warmClaim)
-			unwatch()
 			// Resolve before the commit so a stale, refused, or panicking
 			// commit cannot lose the endpoint verdict.
 			result = resolveStartCapacity(result, rec, stderr)
-			commitAsyncStartResultWithContext(ctx, result, sp, store, clk, rec, wave, stdout, stderr, trace)
-			// The commit is done: release the lease and the slot before the
-			// follow-up, so the pass it wakes finds the name free.
+			// Bounded: a commit that wedges on the store or the runtime must not
+			// hold the slot (SESSION-RUNTIME-035). Resolving the endpoint
+			// verdict above stays outside the bound. The lease and the watch
+			// move to the commit: it releases the lease when it returns, and
+			// the wait abandons it only if the commit never claimed it.
+			leaseHandedOff = true
+			commitAsyncStartBounded(ctx, cityPath, result, wave, stderr, lease, unwatch,
+				func() bool {
+					return commitAsyncStartResultWithContext(ctx, result, sp, store, clk, rec, wave, stdout, stderr, trace)
+				})
+			// The commit is done or abandoned: the lease is released, or its
+			// flock abandoned, or held by the commit that is still running, so
+			// give the slot back before the follow-up.
 			releaseStart()
 			if asyncFollowUp != nil {
 				asyncFollowUp()
@@ -2745,7 +2801,7 @@ func startPreparedStartCandidate(
 				// already has.
 				if store != nil {
 					if raw, err := store.Get(item.candidate.info.ID); err == nil {
-						deliverWarmBindClaimNudge(ctx, sp, store, &raw, warmBindClaimText(cfg, raw), warmClaim)
+						deliverWarmBindClaimNudge(ctx, sp, store, cfg, &raw, warmBindClaimText(cfg, raw), warmClaim)
 					}
 				}
 				return false, nil
@@ -2865,17 +2921,11 @@ var staleResumeKeyProbe = func(searchPaths []string, provider, workDir, sessionK
 	return workertranscript.HasKeyedTranscript(keyedProbeRoots(searchPaths, provider), provider, workDir, sessionKey)
 }
 
-// keyedProbeRoots is the roots a keyed probe of provider searches. A
-// claude-family probe searches the roots exactly as given, adding no default
-// of its own, so an empty list means the defaults rather than nothing. Every
-// other family probes the defaults alone, on top of which its reader adds
-// its own default roots: [daemon] observe_paths are Claude roots, and pi
-// walks every root it is given recursively.
+// keyedProbeRoots is the roots a keyed probe of provider searches
+// (workertranscript.KeyedProbeRoots): searchPaths for a claude-family probe,
+// the defaults otherwise.
 func keyedProbeRoots(searchPaths []string, provider string) []string {
-	if len(searchPaths) == 0 || !strings.Contains(strings.ToLower(strings.TrimSpace(provider)), "claude") {
-		return worker.DefaultSearchPaths()
-	}
-	return searchPaths
+	return workertranscript.KeyedProbeRoots(searchPaths, provider)
 }
 
 // launchTranscriptRoots is the roots a keyed probe searches for a launch of
@@ -2896,12 +2946,12 @@ func keyedProbeRoots(searchPaths []string, provider string) []string {
 // operator value beside such a wrapper pins the probe to a root the launch
 // does not read, and every start reads its conversation gone.
 func launchTranscriptRoots(cfg *config.City, tp TemplateParams) []string {
-	if dir := strings.TrimSpace(tp.OperatorEnv["CLAUDE_CONFIG_DIR"]); filepath.IsAbs(dir) {
-		return []string{filepath.Join(dir, "projects")}
+	if root, ok := workertranscript.ClaudeConfigProjectsRoot(tp.OperatorEnv); ok {
+		return []string{root}
 	}
 	roots := sessionTranscriptSearchPaths(cfg)
-	if dir := strings.TrimSpace(tp.Env["CLAUDE_CONFIG_DIR"]); filepath.IsAbs(dir) {
-		roots = worker.MergeSearchPaths(append(roots, filepath.Join(dir, "projects")))
+	if root, ok := workertranscript.ClaudeConfigProjectsRoot(tp.Env); ok {
+		roots = worker.MergeSearchPaths(append(roots, root))
 	}
 	return roots
 }
@@ -3175,7 +3225,7 @@ func commitStartResultTraced(
 		// crash-loop accounting: a provider Start that failed still delays the
 		// next one. A collision with an existing session is not a start failure.
 		if result.unattributedErr != nil && result.providerStartCalled && !errors.Is(result.unattributedErr, runtime.ErrSessionExists) {
-			recordStartupHealthFailure(info, name, result.unattributedErr, sessFront, clk, stderr)
+			recordStartupHealthFailure(info, name, tp.TemplateName, result.unattributedErr, sessFront, clk, rec, stderr)
 		}
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.unattributedErr, result.phases)
 		return startCommitFailed
@@ -3592,7 +3642,7 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 				"error": formatLifecycleError(result.err),
 			})
 		}
-		recordStartupHealthFailure(info, name, result.err, sessFront, clk, stderr)
+		recordStartupHealthFailure(info, name, tp.TemplateName, result.err, sessFront, clk, rec, stderr)
 		if !result.prepared.candidate.configured || result.diedDuringStartup {
 			// A configured named session (declared via [[named_session]]) must
 			// survive a single transient start failure mid pending-create (e.g.
@@ -3664,8 +3714,9 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 
 // recordStartupHealthFailure accrues one failed start on the session's
 // startup-health episode, which quarantines the name once it reaches
-// defaultMaxWakeAttempts.
-func recordStartupHealthFailure(info sessionpkg.Info, name string, err error, sessFront *sessionpkg.Store, clk clock.Clock, stderr io.Writer) {
+// defaultMaxWakeAttempts, stamps the per-failure retry backoff, and emits the
+// once-per-episode startup-health alert on crossing the threshold.
+func recordStartupHealthFailure(info sessionpkg.Info, name, template string, err error, sessFront *sessionpkg.Store, clk clock.Clock, rec events.Recorder, stderr io.Writer) {
 	episodeKey := startupHealthEpisodeKey(info, name)
 	prior, loadErr := sessFront.LoadStartupHealthEpisode(episodeKey)
 	if loadErr != nil {
@@ -3678,6 +3729,20 @@ func recordStartupHealthFailure(info sessionpkg.Info, name string, err error, se
 		kind = sessionpkg.FailureKindTimeout
 	}
 	episode := sessionpkg.RecordStartupFailure(prior, kind, err.Error(), clk.Now(), defaultMaxWakeAttempts, defaultQuarantineDuration)
+	// Stamp the retry backoff (caller-owned policy, see
+	// RecordStartupFailure's contract). Below the quarantine threshold
+	// this is the ONLY thing bounding the retry cadence, and it is
+	// what turns an indefinite ~65s respawn loop into a capped one.
+	episode.BackoffUntil = startupBackoffUntil(episode.ConsecutiveCount, clk.Now())
+	// Escalate exactly once per episode. RecordStartupFailure raises
+	// the disposition to pending on crossing the threshold and never
+	// regresses it from sent, so this fires on the threshold failure
+	// only. The event is recorded BEFORE the disposition is persisted:
+	// if the save below fails, the next failure re-alerts rather than
+	// losing the escalation entirely. At-least-once is the right
+	// failure mode for an alert whose whole purpose is that 42 silent
+	// hours never happen again.
+	episode = emitStartupHealthAlert(rec, stderr, episode, template)
 	if saveErr := sessFront.SaveStartupHealthEpisode(episode); saveErr != nil {
 		fmt.Fprintf(stderr, "session reconciler: saving startup-health episode for %s: %v\n", name, saveErr) //nolint:errcheck
 	}
@@ -3905,10 +3970,10 @@ const (
 	// pendingCreateRuntimeForeign: the runtime is not this create's. It
 	// positively carries another session's ID or another incarnation's token,
 	// carries no attribution at all, or is gone (runtime.ErrSessionNotFound).
-	// No attribution is evidence of another owner only on a runtime that
-	// stamps identity before the name is visible (identityReadable); a close
-	// that frees the name of a row owning it tears such a runtime down first
-	// (releaseRowOwnedRuntime).
+	// No attribution is evidence of another owner only on a runtime whose
+	// GetMeta reads identity stamped before the name is visible
+	// (metaIdentityReadable); a close that frees the name of a row owning it
+	// tears such a runtime down first (releaseRowOwnedRuntime).
 	pendingCreateRuntimeForeign
 	// pendingCreateRuntimeUnknown: an identity read failed, and the keys that
 	// could be read do not decide the answer without it.
@@ -4257,7 +4322,7 @@ func clearLegacyPoolStartupHealthEpisode(info sessionpkg.Info, name string, sess
 	if err != nil || (prior.ConsecutiveCount == 0 && prior.QuarantinedUntil.IsZero()) {
 		return
 	}
-	holders, err := sessionpkg.ExactMetadataSessionCandidatesInfo(sessFront.Store().Store, true,
+	holders, err := sessionpkg.ExactMetadataSessionCandidatesInfo(sessFront.Store(), true,
 		map[string]string{"session_name": legacy})
 	if err != nil {
 		return
@@ -4493,12 +4558,16 @@ func (p *rowRuntimeProbes) confirmStopped(name string, sp runtime.Provider) erro
 //
 // It applies to a manual session (session_origin=manual or the legacy manual
 // marker) that is not a configured named session and has a session name,
-// served by a runtime that cannot vouch for identity (identityReadable). Only
-// tmux, acp and subprocess stamp GC_SESSION_ID and GC_INSTANCE_TOKEN before
-// the name is visible, so there a runtime carrying neither is another owner's.
-// Elsewhere (an exec pack, k8s, t3bridge, ssh, herdr) the row's own start can
-// list a box before its identity reads, or never stamp one, so a box with no
-// identity under a name reserved to this row is most likely the row's own.
+// served by a runtime that cannot vouch for identity through GetMeta, which
+// is how the rollback reads it (metaIdentityReadable). Only tmux, acp and
+// subprocess stamp GC_SESSION_ID and GC_INSTANCE_TOKEN where GetMeta reads
+// them before the name is visible, so there a runtime carrying neither is
+// another owner's. Elsewhere (an exec pack, k8s, t3bridge, ssh, herdr) the
+// row's own start can list a box before its identity reads, or never stamp
+// one, so a box with no identity under a name reserved to this row is most
+// likely the row's own. That holds for a v2-ready exec pack too: its
+// `observe` reports the identity its box was started with, but its
+// `get-meta` need not.
 // The pending-create rollback reads such a box as foreign
 // (pendingCreateIdentity.attribution) and frees the name without a stop; a
 // configured or pool row re-targets the same name and finds the box again,
@@ -4517,12 +4586,12 @@ func manualRowTearsDownUnattributedRuntime(info sessionpkg.Info, sp runtime.Prov
 	}
 	leaf, _, known := runtime.ResolveBackend(sp, name)
 	if known {
-		return leaf != nil && !identityReadable(leaf), true
+		return leaf != nil && !metaIdentityReadable(leaf), true
 	}
 	// A composite that cannot route the name yet may serve it from any of
 	// its leaves; only a leaf that cannot vouch for identity needs the route.
 	for _, l := range inventoryLeaves(sp, "") {
-		if !identityReadable(l.provider) {
+		if !metaIdentityReadable(l.provider) {
 			return true, false
 		}
 	}
@@ -4949,6 +5018,7 @@ func executePlannedStartsTraced(
 					continue
 				}
 				var release func()
+				var slotRelease func()
 				var done func()
 				if startOpts.async {
 					var tracking bool
@@ -4960,6 +5030,7 @@ func executePlannedStartsTraced(
 					var reserved bool
 					var outcome string
 					release, reserved, outcome = reserveAsyncStartSlot(ctx, asyncLimiter)
+					slotRelease = release
 					if !reserved {
 						done()
 						logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), outcome, time.Time{}, time.Time{}, nil)
@@ -5110,7 +5181,7 @@ func executePlannedStartsTraced(
 					probed[endpoint] = true
 				}
 				if startOpts.async {
-					asyncPrepared = append(asyncPrepared, asyncPreparedStart{item: *item, release: release, done: done, tracker: startOpts.asyncTracker})
+					asyncPrepared = append(asyncPrepared, asyncPreparedStart{item: *item, release: slotRelease, done: done, tracker: startOpts.asyncTracker})
 				} else {
 					prepared = append(prepared, *item)
 				}

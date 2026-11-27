@@ -14,6 +14,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -751,7 +752,7 @@ func TestLaneRespondRefusalOffersAResendOnlyWhenNothingWasSent(t *testing.T) {
 func rollBackRespond(t *testing.T, e *opsEnv, st *lanePokeState, control string) {
 	t.Helper()
 	st.kinds = []string{"message"}
-	e.fs.cfg.Ops.Authoritative = st.kinds
+	e.fs.cfg.Ops.Authoritative = config.OpsKinds(st.kinds...)
 	e.fs.cfg.Ops.ControlMode = control
 	e.restart(t)
 	e.resolver.state = st
@@ -763,7 +764,7 @@ func rollBackRespond(t *testing.T, e *opsEnv, st *lanePokeState, control string)
 func listRespond(t *testing.T, e *opsEnv, st *lanePokeState, control string) {
 	t.Helper()
 	st.kinds = []string{"message", "respond"}
-	e.fs.cfg.Ops.Authoritative = st.kinds
+	e.fs.cfg.Ops.Authoritative = config.OpsKinds(st.kinds...)
 	e.fs.cfg.Ops.ControlMode = control
 	e.restart(t)
 	e.resolver.state = st

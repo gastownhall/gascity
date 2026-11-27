@@ -12,29 +12,29 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
-// These tests pin the `gc session list --json` contract: two renderings (the
-// API envelope and the local result) share one schema
-// (schemas/session/list/result.schema.json), and the route a caller takes
-// decides which one it gets.
+// These tests pin the `gc session list --json` contract: every route prints
+// one shape (schemas/session/list/result.schema.json). A read the API served
+// adds the optional _cache_age_s and the per-row running, reason, last_output
+// and program_status fields; a local read omits them.
 
 // sessionListRendering classifies a decoded `gc session list --json` payload.
-// The API rendering is identified by _cache_age_s, the local one by filters and
-// summary; a payload carrying both, or neither, is a contract violation.
+// Both renderings carry filters and summary; the API one is identified by
+// _cache_age_s. A payload missing filters or summary is a contract violation.
 func sessionListRendering(t *testing.T, payload map[string]any) string {
 	t.Helper()
 	_, hasAge := payload["_cache_age_s"]
 	_, hasFilters := payload["filters"]
 	_, hasSummary := payload["summary"]
-	switch {
-	case hasAge && !hasFilters && !hasSummary:
-		return "api"
-	case !hasAge && hasFilters && hasSummary:
-		return "local"
+	if !hasFilters || !hasSummary {
+		t.Fatalf("payload lacks filters or summary (filters=%v summary=%v): %v", hasFilters, hasSummary, payload)
 	}
-	t.Fatalf("payload is not exactly one rendering (_cache_age_s=%v filters=%v summary=%v): %v", hasAge, hasFilters, hasSummary, payload)
-	return ""
+	if hasAge {
+		return "api"
+	}
+	return "local"
 }
 
 // sessionListRows returns the decoded rows of payload, failing when sessions is
@@ -76,6 +76,18 @@ func assertSessionListRendering(t *testing.T, payload map[string]any, want strin
 	if payload["ok"] != true {
 		t.Fatalf("ok = %#v, want true", payload["ok"])
 	}
+	summary, _ := payload["summary"].(map[string]any)
+	if total, _ := summary["total"].(float64); int(total) != len(rows) {
+		t.Fatalf("summary.total = %v, want len(sessions) = %d", summary["total"], len(rows))
+	}
+	for i, row := range rows {
+		if _, ok := row["closed"].(bool); !ok {
+			t.Fatalf("sessions[%d].closed = %#v, want a boolean", i, row["closed"])
+		}
+		if _, ok := row["last_active"].(string); !ok {
+			t.Fatalf("sessions[%d].last_active = %#v, want a string", i, row["last_active"])
+		}
+	}
 	switch want {
 	case "api":
 		if _, ok := payload["_cache_age_s"].(float64); !ok {
@@ -87,17 +99,21 @@ func assertSessionListRendering(t *testing.T, payload map[string]any, want strin
 			}
 		}
 	case "local":
-		summary, _ := payload["summary"].(map[string]any)
-		if total, _ := summary["total"].(float64); int(total) != len(rows) {
-			t.Fatalf("summary.total = %v, want len(sessions) = %d", summary["total"], len(rows))
+		for i, row := range rows {
+			for _, key := range []string{"running", "reason", "program_status"} {
+				if _, ok := row[key]; ok {
+					t.Fatalf("sessions[%d] carries API-only %s on a local read: %v", i, key, row)
+				}
+			}
 		}
 	}
 }
 
 // TestSessionListJSONRouteConformance runs the real `gc session list --json`
-// command through each route the ladder can take and checks that the route
-// decides the rendering, that each rendering validates against the shared
-// schema, and that the route audit line names the route taken. The decision
+// command through each route the ladder can take and checks that every route
+// prints the one shape, plus the API-only fields exactly when the API served
+// the read, that each payload validates against the schema, and that the
+// route audit line names the route taken. The decision
 // table itself is TestSessionListAPIClientRouting's; this test pins what each
 // decision prints.
 func TestSessionListJSONRouteConformance(t *testing.T) {
@@ -139,23 +155,26 @@ func TestSessionListJSONRouteConformance(t *testing.T) {
 		escapeHatch bool
 		pid         int
 		mode        controllerHostingMode
-		supervisor  bool // the supervisor client resolves to supervisorClient; on a row that must stay local it proves the route, not a nil client, kept it off the API
+		supervisor  bool // the supervisor client resolves to supervisorClient; on the escape-hatch rows it proves the route, not a nil client, kept the read off the API
 		grants      bool
 		args        []string
 		rendering   string
 		empty       bool
 		route       string
 	}{
-		{name: "supervisor-hosted", city: h.cityPath, supervisor: true, pid: 4242, mode: controllerHostingSupervisor, rendering: "local", route: "route=fallback reason=supervisor-hosted"},
-		{name: "supervisor-hosted-requiring-grants", city: h.cityPath, supervisor: true, pid: 4242, mode: controllerHostingSupervisor, grants: true, rendering: "local", route: "route=fallback reason=supervisor-hosted"},
-		{name: "supervisor-hosted-with-api-port", city: apiCity, supervisor: true, pid: 4242, mode: controllerHostingSupervisor, rendering: "local", empty: true, route: "route=fallback reason=supervisor-hosted"},
+		{name: "supervisor-hosted", city: h.cityPath, supervisor: true, pid: 4242, mode: controllerHostingSupervisor, rendering: "api", route: toAPI},
+		{name: "supervisor-hosted-requiring-grants", city: h.cityPath, pid: 4242, mode: controllerHostingSupervisor, grants: true, rendering: "local", route: "route=fallback reason=grant-required"},
+		{name: "supervisor-hosted-with-api-port", city: apiCity, supervisor: true, pid: 4242, mode: controllerHostingSupervisor, rendering: "api", route: toAPI},
+		{name: "supervisor-hosted-supervisor-unavailable", city: h.cityPath, pid: 4242, mode: controllerHostingSupervisor, rendering: "local", route: "route=fallback reason=controller-down"},
 		{name: "standalone-with-api-port", city: apiCity, pid: 4242, mode: controllerHostingStandalone, rendering: "api", route: toAPI},
 		{name: "unknown-hosting-with-api-port", city: apiCity, pid: 4242, mode: controllerHostingUnknown, rendering: "api", route: toAPI},
 		{name: "no-controller-supervisor-reachable", city: h.cityPath, supervisor: true, rendering: "api", route: toAPI},
 		{name: "no-controller-supervisor-unreachable", city: h.cityPath, rendering: "local", route: "route=fallback reason=controller-down"},
 		{name: "escape-hatch", city: h.cityPath, escapeHatch: true, supervisor: true, pid: 4242, mode: controllerHostingSupervisor, rendering: "local", route: "route=fallback reason=escape-hatch"},
 		{name: "api-empty-list", city: h.cityPath, supervisor: true, args: []string{noMatch}, rendering: "api", empty: true, route: toAPI},
-		{name: "local-empty-list", city: h.cityPath, supervisor: true, pid: 4242, mode: controllerHostingSupervisor, args: []string{noMatch}, rendering: "local", empty: true, route: "route=fallback reason=supervisor-hosted"},
+		{name: "local-empty-list", city: h.cityPath, escapeHatch: true, supervisor: true, pid: 4242, mode: controllerHostingSupervisor, args: []string{noMatch}, rendering: "local", empty: true, route: "route=fallback reason=escape-hatch"},
+		{name: "supervisor-hosted-closed-history", city: h.cityPath, supervisor: true, pid: 4242, mode: controllerHostingSupervisor, args: []string{"--state=all"}, rendering: "local", route: "route=fallback reason=" + sessionListClosedHistoryReason},
+		{name: "standalone-with-api-port-closed-history", city: apiCity, pid: 4242, mode: controllerHostingStandalone, args: []string{"--state=closed"}, rendering: "local", empty: true, route: "route=fallback reason=" + sessionListClosedHistoryReason},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -186,9 +205,8 @@ func TestSessionListJSONRouteConformance(t *testing.T) {
 			if !strings.Contains(stderr.String(), tc.route) {
 				t.Fatalf("stderr = %q, want the route audit line to contain %q", stderr.String(), tc.route)
 			}
-			// The API rendering is indented over several lines, the local one is a
-			// single line; both are one JSON document validated against the one
-			// schema.
+			// Every route prints one single-line JSON document validated against
+			// the one schema.
 			validateJSONAgainstBuiltinSchema(t, []string{"session", "list"}, stdout.Bytes())
 			var payload map[string]any
 			if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
@@ -215,8 +233,13 @@ func fillAllFields(t *testing.T, v any) {
 			f.SetString("x-" + tag)
 		case f.Kind() == reflect.Bool:
 			f.SetBool(true)
+		case f.Type() == reflect.TypeOf((*bool)(nil)):
+			yes := true
+			f.Set(reflect.ValueOf(&yes))
 		case f.Type() == reflect.TypeOf(time.Time{}):
 			f.Set(reflect.ValueOf(stamp))
+		case f.Type() == reflect.TypeOf([]string(nil)):
+			f.Set(reflect.ValueOf([]string{"x-" + tag}))
 		case f.Type() == reflect.TypeOf((*time.Time)(nil)):
 			f.Set(reflect.ValueOf(&stamp))
 		case f.Type() == reflect.TypeOf((*api.SessionProgramStatus)(nil)):
@@ -266,10 +289,9 @@ func structJSONNames(v any) []string {
 	return names
 }
 
-// sessionListSchemaRowVariants loads the built-in result schema and returns,
-// for each oneOf variant, the row item schema keyed by rendering ("api" when
-// the variant requires _cache_age_s, "local" otherwise).
-func sessionListSchemaRowVariants(t *testing.T) map[string]map[string]any {
+// sessionListSchema loads the built-in result schema, fails when it is not
+// one closed shape, and returns the row item schema and the envelope schema.
+func sessionListSchema(t *testing.T) (items, envelope map[string]any) {
 	t.Helper()
 	raw, err := readBuiltinSchema([]string{"session", "list"}, jsonSchemaResultRole)
 	if err != nil {
@@ -279,35 +301,19 @@ func sessionListSchemaRowVariants(t *testing.T) map[string]map[string]any {
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		t.Fatal(err)
 	}
-	defs, _ := doc["$defs"].(map[string]any)
-	branches, _ := doc["oneOf"].([]any)
-	if len(branches) != 2 {
-		t.Fatalf("schema oneOf has %d branches, want 2 (api and local renderings)", len(branches))
+	if _, ok := doc["oneOf"]; ok {
+		t.Fatalf("schema has a oneOf; every route must print one shape")
 	}
-	out := map[string]map[string]any{}
-	for _, b := range branches {
-		branch, _ := b.(map[string]any)
-		if ref, ok := branch["$ref"].(string); ok {
-			branch, _ = defs[strings.TrimPrefix(ref, "#/$defs/")].(map[string]any)
-		}
-		kind := "local"
-		for _, r := range branch["required"].([]any) {
-			if r == "_cache_age_s" {
-				kind = "api"
-			}
-		}
-		props, _ := branch["properties"].(map[string]any)
-		sessions, _ := props["sessions"].(map[string]any)
-		items, _ := sessions["items"].(map[string]any)
-		if items == nil {
-			t.Fatalf("variant %s has no sessions.items schema", kind)
-		}
-		out[kind] = items
+	if doc["additionalProperties"] != false {
+		t.Fatalf("schema envelope must be closed (additionalProperties false)")
 	}
-	if out["api"] == nil || out["local"] == nil {
-		t.Fatalf("schema variants = %v, want one api and one local", out)
+	props, _ := doc["properties"].(map[string]any)
+	sessions, _ := props["sessions"].(map[string]any)
+	items, _ = sessions["items"].(map[string]any)
+	if items == nil {
+		t.Fatalf("schema has no sessions.items")
 	}
-	return out
+	return items, doc
 }
 
 func schemaRowProperties(row map[string]any) []string {
@@ -320,34 +326,81 @@ func schemaRowProperties(row map[string]any) []string {
 	return names
 }
 
-// TestSessionListRowStructsMatchSchema keeps the two row structs and their
-// schema variants in step: a row with every field populated validates, the
-// schema declares exactly the fields the struct can emit, and a minimal row
-// carries every property the schema requires.
+// TestSessionListRowStructsMatchSchema keeps the one envelope and row struct
+// in step with the one schema shape: a document with every field populated
+// validates, the schema declares exactly the fields the structs can emit, a
+// minimal row carries every required property, and each route's row builder
+// fills only its own fields.
 func TestSessionListRowStructsMatchSchema(t *testing.T) {
-	variants := sessionListSchemaRowVariants(t)
+	items, envelope := sessionListSchema(t)
 
-	t.Run("local", func(t *testing.T) {
-		var row sessionListJSONRow
-		fillAllFields(t, &row)
-		var out bytes.Buffer
-		result := sessionListJSON{SchemaVersion: "1", Sessions: []sessionListJSONRow{row}, Summary: sessionListSummary{Total: 1}}
-		if err := writeCLIJSONLine(&out, result); err != nil {
-			t.Fatal(err)
+	t.Run("envelope", func(t *testing.T) {
+		want := append(structJSONNames(sessionListJSON{}), "ok")
+		sort.Strings(want)
+		if got := schemaRowProperties(envelope); !reflect.DeepEqual(got, want) {
+			t.Fatalf("schema envelope properties = %v, want %v", got, want)
 		}
-		validateJSONAgainstBuiltinSchema(t, []string{"session", "list"}, out.Bytes())
-		assertRowSchemaSync(t, variants["local"], row, sessionListJSONRow{})
+		var required []string
+		for _, r := range envelope["required"].([]any) {
+			required = append(required, r.(string))
+		}
+		sort.Strings(required)
+		if want := []string{"filters", "ok", "schema_version", "sessions", "summary"}; !reflect.DeepEqual(required, want) {
+			t.Fatalf("schema envelope required = %v, want %v", required, want)
+		}
 	})
 
-	t.Run("api", func(t *testing.T) {
-		var row api.SessionView
+	t.Run("row", func(t *testing.T) {
+		var row sessionListJSONRow
 		fillAllFields(t, &row)
-		var out bytes.Buffer
-		if code := renderSessionListFromAPI(api.CachedRead[[]api.SessionView]{Body: []api.SessionView{row}, AgeSeconds: 1.5}, true, &out); code != 0 {
-			t.Fatalf("renderSessionListFromAPI = %d", code)
+		row.LastActive = "2026-10-28T12:00:00Z"
+		var out, errOut bytes.Buffer
+		age := 1.5
+		if code := writeSessionListJSON([]sessionListJSONRow{row}, "all", "x", &age, &out, &errOut); code != 0 {
+			t.Fatalf("writeSessionListJSON = %d: %s", code, errOut.String())
 		}
 		validateJSONAgainstBuiltinSchema(t, []string{"session", "list"}, out.Bytes())
-		assertRowSchemaSync(t, variants["api"], row, api.SessionView{})
+		assertRowSchemaSync(t, items, row, sessionListJSONRow{})
+		var minimal bytes.Buffer
+		if code := writeSessionListJSON([]sessionListJSONRow{{}}, "", "", nil, &minimal, &errOut); code != 0 {
+			t.Fatalf("writeSessionListJSON(minimal) = %d", code)
+		}
+		if !strings.Contains(minimal.String(), `"last_active":""`) {
+			t.Fatalf("a zero row must print last_active \"\": %s", minimal.String())
+		}
+	})
+
+	t.Run("api-row", func(t *testing.T) {
+		var view api.SessionListView
+		fillAllFields(t, &view)
+		rows := sessionListJSONRowsFromAPI([]api.SessionListView{view})
+		if len(rows) != 1 {
+			t.Fatalf("rows = %v", rows)
+		}
+		r := rows[0]
+		if r.Command != "" || r.SessionKey != "" || r.ResumeFlag != "" || r.ResumeStyle != "" || r.ResumeCommand != "" {
+			t.Fatalf("an API row carries a redacted field: %+v", r)
+		}
+		if r.Running == nil || !*r.Running || r.Reason == "" || r.LastOutput == "" || r.ProgramStatus == nil {
+			t.Fatalf("an API row must carry the server's running, reason, last_output and program_status: %+v", r)
+		}
+		if empty := sessionListJSONRowsFromAPI(nil); empty == nil {
+			t.Fatalf("sessionListJSONRowsFromAPI(nil) must be non-nil")
+		}
+	})
+
+	t.Run("local-row", func(t *testing.T) {
+		info := session.Info{
+			ID: "gc-1", Template: "worker", State: session.StateActive, Command: "x", SessionKey: "k",
+			CreatedAt: time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC),
+		}
+		r := sessionListJSONRows([]session.Info{info})[0]
+		if r.Running != nil || r.Reason != "" || r.LastOutput != "" || r.ProgramStatus != nil {
+			t.Fatalf("a local row carries an API-only field: %+v", r)
+		}
+		if r.Command != "x" || r.SessionKey != "k" {
+			t.Fatalf("a local row must carry command and session_key: %+v", r)
+		}
 	})
 }
 

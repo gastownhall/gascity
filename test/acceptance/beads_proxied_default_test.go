@@ -26,7 +26,9 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
+	"github.com/gastownhall/gascity/test/processfloor"
 )
 
 const proxiedTimingReportPath = "/data/tmp/gc-dolt-takeover/10-timing.md"
@@ -613,7 +615,9 @@ func makeCityLookLegacyManaged(t *testing.T, env *helpers.Env, bdPath, cityRoot 
 	var metadata proxiedBeadsMetadata
 	readJSONFile(t, filepath.Join(beadsDir, "metadata.json"), &metadata)
 
-	for _, name := range []string{"dolt", "proxied_server_client_info.json"} {
+	// Pre-provider-owned legacy cities did not have the identity file that
+	// fresh provider-owned init now creates before the fixture is rewritten.
+	for _, name := range []string{"dolt", "proxied_server_client_info.json", "identity.toml"} {
 		if err := os.RemoveAll(filepath.Join(beadsDir, name)); err != nil {
 			t.Fatal(err)
 		}
@@ -627,11 +631,10 @@ func makeCityLookLegacyManaged(t *testing.T, env *helpers.Env, bdPath, cityRoot 
 		t.Fatal(err)
 	}
 	// No issue_prefix: `bd init` leaves it commented out in its template (the
-	// same fact TestBeadsProxiedDefaultRig/adopt-un-journaled hand-writes
-	// around), and gc's own canonicalisation supplies it on the next lifecycle
-	// command. What the fixture has to state is the part gc reads as "this
-	// city's Dolt is mine": the managed-city endpoint origin and direct server
-	// mode.
+	// fact TestBeadsProxiedDefaultRig's adopt subtests rely on), and gc's own
+	// canonicalisation supplies it on the next lifecycle command. What the
+	// fixture has to state is the part gc reads as "this city's Dolt is mine":
+	// the managed-city endpoint origin and direct server mode.
 	legacyConfig := "gc.endpoint_origin: managed_city\n" +
 		"gc.endpoint_status: verified\n" +
 		"dolt.mode: server\n" +
@@ -955,9 +958,10 @@ func TestBeadsProxiedDefaultNativeLane(t *testing.T) {
 
 // TestBeadsProxiedDefaultRig proves the bd front door and a rig on a proxied
 // city: the rig inherits the proxied default, doctor stays green with it, and
-// an un-journaled bd workspace is adopted while a store-less clone is refused.
+// un-journaled bd workspaces (proxied and embedded) are adopted under their
+// stores' own prefixes while a store-less clone is refused.
 func TestBeadsProxiedDefaultRig(t *testing.T) {
-	p := newProxiedDefaultCity(t, "testrig", "adopted-rig")
+	p := newProxiedDefaultCity(t, "testrig", "adopted-rig", "embedded-rig")
 	rigDir := p.rigs["testrig"]
 	p.initDefault(t)
 
@@ -1006,12 +1010,15 @@ func TestBeadsProxiedDefaultRig(t *testing.T) {
 		})
 
 		// A workspace that already holds a beads store is an adoption, which gc
-		// makes explicit rather than inferring.
-		owned, addErr := helpers.RunGC(env, cityRoot, "rig", "add", "--adopt", "--prefix", "adopt", adopted)
+		// makes explicit rather than inferring. No --prefix: bd keeps the
+		// prefix only in the store, and the adopted rig takes it from there.
+		assertConfigYAMLRecordsNoPrefix(t, adopted)
+		owned, addErr := helpers.RunGC(env, cityRoot, "rig", "add", "--adopt", adopted)
 		if addErr != nil {
 			t.Fatalf("gc rig add --adopt on a bd-initialised proxied workspace: %v\n%s", addErr, owned)
 		}
 		assertProxiedScope(t, proxiedNeverIdleEnv(env.Clone()), adopted, "adopted rig")
+		p.assertAdoptedUnderStorePrefix(t, "adopted-rig", "adopt")
 
 		// The clone shape: metadata says proxied-server, but bd's store is
 		// gitignored and never came along. gc must refuse rather than let bd
@@ -1043,6 +1050,77 @@ func TestBeadsProxiedDefaultRig(t *testing.T) {
 			t.Error("the refused clone had a store created under it anyway")
 		}
 	})
+
+	t.Run("adopt-embedded-without-prefix", func(t *testing.T) {
+		// bd's default store is embedded Dolt, and like the proxied one it
+		// records its prefix only in the database. gc reads it with a
+		// read-only bd command against the store itself.
+		dir := p.rigs["embedded-rig"]
+		initCmd := exec.Command(p.bdPath, "init", "-p", "emb", "--quiet", "--skip-hooks", "--skip-agents", "--non-interactive", dir) //nolint:gosec // resolved test binary
+		initCmd.Dir = dir
+		initCmd.Env = p.env.ToolList()
+		if out, err := initCmd.CombinedOutput(); err != nil {
+			t.Fatalf("bd init: %v\n%s", err, out)
+		}
+		var metadata proxiedBeadsMetadata
+		readJSONFile(t, filepath.Join(dir, ".beads", "metadata.json"), &metadata)
+		if !strings.EqualFold(metadata.DoltMode, "embedded") {
+			t.Fatalf("bd init made a %q store, want bd's embedded default", metadata.DoltMode)
+		}
+		assertConfigYAMLRecordsNoPrefix(t, dir)
+		if out, err := helpers.RunGC(p.env, p.cityRoot, "rig", "add", "--adopt", dir); err != nil {
+			t.Fatalf("gc rig add --adopt on a bd-initialised embedded workspace: %v\n%s", err, out)
+		}
+		p.assertAdoptedUnderStorePrefix(t, "embedded-rig", "emb")
+	})
+}
+
+// assertConfigYAMLRecordsNoPrefix fails unless the scope's .beads/config.yaml
+// leaves issue_prefix unset, as bd init does: the adopt below must then learn
+// the prefix from the store.
+func assertConfigYAMLRecordsNoPrefix(t *testing.T, scopeRoot string) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(scopeRoot, ".beads", "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		key := strings.TrimSpace(line)
+		if strings.HasPrefix(key, "issue_prefix:") || strings.HasPrefix(key, "issue-prefix:") {
+			t.Fatalf("%s/.beads/config.yaml records the prefix (%q); the adopt would not read the store", scopeRoot, key)
+		}
+	}
+}
+
+// assertAdoptedUnderStorePrefix asserts an adopt that named no --prefix
+// pinned the store's own prefix on the rig's city.toml entry, and that gc
+// mints the rig's beads under it.
+func (p *proxiedDefaultCity) assertAdoptedUnderStorePrefix(t *testing.T, rigName, prefix string) {
+	t.Helper()
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(p.cityRoot, "city.toml"))
+	if err != nil {
+		t.Fatalf("loading city.toml: %v", err)
+	}
+	pinned := ""
+	for _, r := range cfg.Rigs {
+		if r.Name == rigName {
+			pinned = r.Prefix
+		}
+	}
+	if pinned != prefix {
+		t.Fatalf("city.toml pins rig %s prefix %q, want the store's %q", rigName, pinned, prefix)
+	}
+	out, err := p.city.GCStdout("bd", "--rig", rigName, "create", "adopted rig bead", "--json")
+	if err != nil {
+		t.Fatalf("gc bd --rig %s create: %v\n%s", rigName, err, out)
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	lastJSONLine(t, out, &created)
+	if !strings.HasPrefix(created.ID, prefix+"-") {
+		t.Errorf("gc minted %q in rig %s, want an id under the store's prefix %q", created.ID, rigName, prefix)
+	}
 }
 
 // TestBeadsProxiedDefaultStart proves a supervisor start of a proxied city
@@ -1400,31 +1478,6 @@ func assertProxiedNativePerfHeadroom(t *testing.T, label string, wall, target ti
 	}
 }
 
-// bestOfGCSide returns the smallest gc-side time over n samples of one
-// measurement.
-//
-// The minimum, not the mean: what is being measured is a fixed cost, and every
-// sample is that cost plus whatever else this shared box was doing during it.
-// The mean of a fixed cost plus one-sided noise is a measure of the noise. The
-// minimum is the closest any sample got to the quantity, and a regression that
-// really did add work to gc's side raises every sample, including the best one.
-//
-// Each sample returns its gc-side time already attributed. It used to return
-// (wall, child) and clamp a negative difference to zero here, and under an
-// upper bound zero passes: over-reported child time made the gate pass
-// whatever gc did (round3 review, completeness). A sample that cannot be
-// attributed now fails the row where it is measured (helpers.PassthroughGCSide).
-func bestOfGCSide(t *testing.T, n int, sample func() time.Duration) time.Duration {
-	t.Helper()
-	best := time.Duration(-1)
-	for i := 0; i < n; i++ {
-		if gcSide := sample(); best < 0 || gcSide < best {
-			best = gcSide
-		}
-	}
-	return best
-}
-
 // describeProxiedAccount renders the store open's own account of the proxied
 // lane for a failure message.
 func describeProxiedAccount(payload beadsStorePayloadDoc) string {
@@ -1575,18 +1628,19 @@ func runProxiedNativeLaneGates(t *testing.T, bdPath, doltPath string) {
 	})
 
 	t.Run("bd-list-gc-side-budget", func(t *testing.T) {
-		// The floor first: what one gc process costs on THIS box before it has
-		// done anything at all.
+		// The floor beside the command: what one gc process costs on THIS box
+		// before it has done anything at all.
 		//
-		// Without it this row is not a gate, it is a thermometer. `gc --help`
-		// loads no city, opens no store and forks no bd; on the machine this was
-		// written on it takes 80-120ms of wall clock, which is already the whole
-		// budget. A raw "wall minus child <= 0.1s" assertion would therefore fail
-		// for a gc that did literally nothing, and pass on a faster box for a gc
-		// that had bolted a store open onto the passthrough. What PR2 owes is the
-		// MARGINAL cost: the config load, the scope resolution and the
-		// environment build gc performs for this command, over and above starting
-		// at all.
+		// Without it this row is not a gate, it is a thermometer. The floor
+		// (test/processfloor.Args, `gc ready --help`) starts gc exactly as
+		// `gc bd` starts it, loads no city, opens no store and forks no bd, and
+		// starting a gc process can already take the whole budget of wall clock
+		// on a loaded box. A raw "wall minus child <= 0.1s" assertion would
+		// therefore fail for a gc that did literally nothing, and pass on a
+		// faster box for a gc that had bolted a store open onto the passthrough.
+		// What PR2 owes is the MARGINAL cost: the config load, the scope
+		// resolution and the environment build gc performs for this command,
+		// over and above starting at all.
 		//
 		// Both numbers are reported. The raw one is the artifact the plan asks
 		// for; the marginal one is the gate. That is a deliberate departure from
@@ -1594,14 +1648,18 @@ func runProxiedNativeLaneGates(t *testing.T, bdPath, doltPath string) {
 		// 0.1s`, for the reason above, and it has a cost the raw line does not:
 		// two subtractions, each of which can go vacuous. Neither is allowed to
 		// (round3 review, completeness): a sample whose children cannot be
-		// attributed fails, and so does a floor that stopped being one — see
-		// helpers.PassthroughGCSide and helpers.MarginalOverFloor.
-		floor := bestOfGCSide(t, 5, func() time.Duration {
-			start := time.Now()
-			helpers.RunGC(lane, cityRoot, "--help") //nolint:errcheck // the exit status of --help is not the measurement
-			return time.Since(start)
-		})
-
+		// attributed fails, and a floor that stopped being one never passes —
+		// see helpers.PassthroughGCSide and helpers.MarginalOverFloor.
+		//
+		// The two are sampled in interleaved pairs, by a floor that starts like
+		// `gc bd`. A floor that runs the eager pack-command discovery `gc bd`
+		// skips (`gc --help` does), or that is sampled in a block of its own,
+		// reads above the gc side on a loaded box (gate tracker ga-97b2v9wd). A
+		// reading still inverted after helpers.FloorMeasurementMaxPairs pairs is
+		// reported inconclusive: helpers.MissingPrecondition skips it locally and
+		// fails it under GC_REQUIRE_ACCEPTANCE_TOOLING, so this host's failure to
+		// produce a floor is never counted as a pass, nor as a verdict on gc's
+		// side.
 		trace := helpers.NewBDTrace(t)
 		traced := lane.Clone().With(helpers.BDTraceEnv, trace.Path)
 		var (
@@ -1609,7 +1667,22 @@ func runProxiedNativeLaneGates(t *testing.T, bdPath, doltPath string) {
 			lastRecords int
 			describe    string
 		)
-		gcSide := bestOfGCSide(t, 5, func() time.Duration {
+		floorSample := func() time.Duration {
+			start := time.Now()
+			out, err := helpers.RunGC(lane, cityRoot, processfloor.Args()...)
+			elapsed := time.Since(start)
+			if err != nil {
+				t.Fatalf("process floor gc %q failed, so its time is not a bare gc start: %v\n%s", processfloor.Args(), err, out)
+			}
+			return elapsed
+		}
+		// Each gc-side sample returns its time already attributed. It used to
+		// return (wall, child) and clamp a negative difference to zero, and
+		// under an upper bound zero passes: over-reported child time made the
+		// gate pass whatever gc did (round3 review, completeness). A sample that
+		// cannot be attributed fails the row where it is measured
+		// (helpers.PassthroughGCSide).
+		gcSideSample := func() time.Duration {
 			trace.Reset()
 			bdCalls.Reset()
 			start := time.Now()
@@ -1631,22 +1704,24 @@ func runProxiedNativeLaneGates(t *testing.T, bdPath, doltPath string) {
 				t.Fatalf("gc bd list --json: %v\n%s", err, describe)
 			}
 			return sampleGCSide
-		})
+		}
 
-		marginal, err := helpers.MarginalOverFloor(gcSide, floor, proxiedNativeGCSideBudget)
-		if err != nil {
-			t.Fatalf("gc bd list --json, best of 5: %v", err)
+		m := helpers.MeasureMarginalOverFloor(proxiedNativeGCSideBudget, floorSample, gcSideSample)
+		if m.Inverted {
+			_, err := helpers.MarginalOverFloor(m.GCSide, m.Floor, proxiedNativeGCSideBudget)
+			helpers.MissingPrecondition(t, "INCONCLUSIVE, no verdict on gc's side of `gc bd list --json`: after %d interleaved pairs of gc %q and the traced command, %v",
+				m.Pairs, processfloor.Args(), err)
 		}
 		// The artifact: bd-bound and machine-bound, recorded so the delta is
 		// reproducible, never asserted. The 0.4s figure in the bead is a
 		// stretch target for a future in-process arm and is NOT a PR2 gate.
-		t.Logf("gc bd list --json, flag ON (best of 5): gc-side %s = process floor %s + marginal %s; last sample had %d traced call(s) totalling %s\n%s",
-			gcSide.Round(time.Millisecond), floor.Round(time.Millisecond), marginal.Round(time.Millisecond),
+		t.Logf("gc bd list --json, flag ON (best of %d): gc-side %s = process floor %s + marginal %s; last sample had %d traced call(s) totalling %s\n%s",
+			m.Pairs, m.GCSide.Round(time.Millisecond), m.Floor.Round(time.Millisecond), m.Marginal.Round(time.Millisecond),
 			lastRecords, lastChild.Round(time.Millisecond), describe)
-		if marginal > proxiedNativeGCSideBudget {
-			t.Errorf("marginal gc-side time for `gc bd list --json` = %s, want <= %s (best-of-5 gc-side %s minus this box's %s process floor)",
-				marginal.Round(time.Millisecond), proxiedNativeGCSideBudget,
-				gcSide.Round(time.Millisecond), floor.Round(time.Millisecond))
+		if m.Marginal > proxiedNativeGCSideBudget {
+			t.Errorf("marginal gc-side time for `gc bd list --json` = %s, want <= %s (best-of-%d gc-side %s minus this box's %s process floor)",
+				m.Marginal.Round(time.Millisecond), proxiedNativeGCSideBudget, m.Pairs,
+				m.GCSide.Round(time.Millisecond), m.Floor.Round(time.Millisecond))
 		}
 	})
 

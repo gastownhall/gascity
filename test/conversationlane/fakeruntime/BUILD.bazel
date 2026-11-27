@@ -1,8 +1,11 @@
-load("@rules_go//go:def.bzl", "go_binary", "go_library")
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 
 go_library(
     name = "fakeruntime_lib",
-    srcs = ["main.go"],
+    srcs = [
+        "main.go",
+        "observe.go",
+    ],
     importpath = "github.com/gastownhall/gascity/test/conversationlane/fakeruntime",
     visibility = ["//visibility:private"],
 )
@@ -42,4 +45,17 @@ filegroup(
         allow_empty = True,
     ),
     visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "fakeruntime_test",
+    srcs = [
+        "observe_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":fakeruntime_lib"],
+    deps = [
+        "//internal/runtime/runtimecontract",
+        "//internal/testenv",
+    ],
 )

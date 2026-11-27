@@ -442,12 +442,7 @@ func TestControlReadyFallbackReadyLogsWhenResultHitsLimit(t *testing.T) {
 	if err := os.WriteFile(payloadPath, payload, 0o644); err != nil {
 		t.Fatalf("write payload: %v", err)
 	}
-	bdPath := filepath.Join(tmp, "bd")
-	script := fmt.Sprintf("#!/bin/sh\ncat %q\n", payloadPath)
-	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	installFakeBdOnPath(t, fmt.Sprintf("#!/bin/sh\ncat %q\n", payloadPath), map[string]nativeFakeBdReply{"": {StdoutFile: payloadPath}})
 	t.Setenv("GC_BEADS", "bd")
 
 	var logBuf bytes.Buffer
@@ -475,12 +470,7 @@ func TestControlReadyFallbackReadyLogsWhenResultHitsLimit(t *testing.T) {
 // must not log anything.
 func TestControlReadyFallbackReadyNoWarningBelowLimit(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
-	tmp := t.TempDir()
-	bdPath := filepath.Join(tmp, "bd")
-	if err := os.WriteFile(bdPath, []byte("#!/bin/sh\nprintf '[{\"id\":\"ga-fallback-only\"}]'\n"), 0o755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	installFakeBdOnPath(t, "#!/bin/sh\nprintf '[{\"id\":\"ga-fallback-only\"}]'\n", map[string]nativeFakeBdReply{"": {Stdout: `[{"id":"ga-fallback-only"}]`}})
 	t.Setenv("GC_BEADS", "bd")
 
 	var logBuf bytes.Buffer
@@ -501,14 +491,9 @@ func TestControlReadyFallbackReadyNoWarningBelowLimit(t *testing.T) {
 }
 
 func TestNextWorkflowServeBeadsNonControlQueryUsesOriginalShellPath(t *testing.T) {
-	tmp := t.TempDir()
-	bdPath := filepath.Join(tmp, "bd")
-	if err := os.WriteFile(bdPath, []byte(`#!/bin/sh
+	installFakeBdOnPath(t, `#!/bin/sh
 printf '[{"id":"ga-plain"}]'
-`), 0o755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+`, map[string]nativeFakeBdReply{"": {Stdout: `[{"id":"ga-plain"}]`}})
 
 	got, err := nextWorkflowServeBeads("bd ready --json --limit=20", t.TempDir(), nil)
 	if err != nil {
@@ -516,5 +501,287 @@ printf '[{"id":"ga-plain"}]'
 	}
 	if len(got) != 1 || got[0].ID != "ga-plain" {
 		t.Fatalf("nextWorkflowServeBeads = %#v, want [{ga-plain}]", got)
+	}
+}
+
+// installArgvLoggingFakeBd puts a fake `bd` on PATH that appends each
+// invocation's argv to a log, one invocation per line, and returns the log's
+// path. With refuseReadonly it refuses --readonly the way bd does on a Dolt
+// proxied-server scope (proxy.readonly.unsupported); every invocation that gets
+// past that check runs answer, a shell snippet that writes the reply.
+func installArgvLoggingFakeBd(t *testing.T, refuseReadonly bool, answer string) string {
+	t.Helper()
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "bd.log")
+	refusal := ""
+	if refuseReadonly {
+		refusal = `for arg in "$@"; do
+  if [ "$arg" = "--readonly" ]; then
+    echo 'Error: proxy.readonly.unsupported: --readonly is not supported on a proxied-server store' >&2
+    exit 1
+  fi
+done
+`
+	}
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %q\n%s%s\n", logPath, refusal, answer)
+	if err := os.WriteFile(filepath.Join(tmp, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_BEADS", "bd")
+	return logPath
+}
+
+// fakeBdReplyJSON is an answer snippet for installArgvLoggingFakeBd that
+// prints payload verbatim.
+func fakeBdReplyJSON(payload string) string {
+	return "printf '%s' '" + payload + "'"
+}
+
+// readFakeBdCalls returns the logged argv of every fake bd invocation, split
+// into tokens so assertions compare whole flags rather than substrings.
+func readFakeBdCalls(t *testing.T, logPath string) [][]string {
+	t.Helper()
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read bd log: %v", err)
+	}
+	var calls [][]string
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		calls = append(calls, strings.Fields(line))
+	}
+	return calls
+}
+
+// controlReadyFallbackArgv is the full bd argv the control-ready shell
+// fallback is expected to run: the global flags, then the unchanged ready
+// query.
+func controlReadyFallbackArgv(readonly, includeEphemeral bool) []string {
+	var argv []string
+	if readonly {
+		argv = append(argv, "--readonly")
+	}
+	argv = append(argv, "--sandbox", "ready", "--json",
+		"--exclude-type="+controlReadyExcludeType,
+		fmt.Sprintf("--limit=%d", controlReadyFallbackLimit))
+	if includeEphemeral {
+		argv = append(argv, "--include-ephemeral")
+	}
+	return argv
+}
+
+// writeScopeMetadataForTest writes scopeRoot's .beads/metadata.json.
+func writeScopeMetadataForTest(t *testing.T, scopeRoot, metadata string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(scopeRoot, ".beads"), 0o755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	if err := os.WriteFile(scopeMetadataJSONPath(scopeRoot), []byte(metadata), 0o644); err != nil {
+		t.Fatalf("write metadata.json: %v", err)
+	}
+}
+
+const proxiedDoltScopeMetadata = `{"backend":"dolt","dolt_mode":"proxied-server"}`
+
+// TestControlReadyFallbackReadyOmitsReadonlyOnProxiedScope is ga-p25uw4
+// (#7358): bd refuses strict --readonly on a proxied-server Dolt scope with
+// proxy.readonly.unsupported, so the fallback read there must drop --readonly
+// (keeping --sandbox) or the control-dispatcher is never fed work.
+func TestControlReadyFallbackReadyOmitsReadonlyOnProxiedScope(t *testing.T) {
+	type scope struct {
+		cityPath, dir, scopeRoot string
+	}
+	cases := []struct {
+		name  string
+		setup func(t *testing.T) scope
+	}{
+		{
+			name: "city scope",
+			setup: func(t *testing.T) scope {
+				dir := t.TempDir()
+				return scope{cityPath: dir, dir: dir, scopeRoot: dir}
+			},
+		},
+		{
+			name: "rig scope",
+			setup: func(t *testing.T) scope {
+				cityPath := t.TempDir()
+				if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+					t.Fatalf("write city.toml: %v", err)
+				}
+				rig := filepath.Join(cityPath, "rigs", "fixture")
+				return scope{cityPath: cityPath, dir: rig, scopeRoot: rig}
+			},
+		},
+		{
+			name: "scope reached through a symlinked path",
+			setup: func(t *testing.T) scope {
+				realDir := t.TempDir()
+				alias := filepath.Join(t.TempDir(), "alias")
+				if err := os.Symlink(realDir, alias); err != nil {
+					t.Fatalf("symlink scope alias: %v", err)
+				}
+				return scope{cityPath: alias, dir: alias, scopeRoot: realDir}
+			},
+		},
+	}
+	for _, tc := range cases {
+		for _, includeEphemeral := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/includeEphemeral=%t", tc.name, includeEphemeral), func(t *testing.T) {
+				configureIsolatedRuntimeEnv(t)
+				logPath := installArgvLoggingFakeBd(t, true, fakeBdReplyJSON(`[{"id":"ga-proxied-ready"}]`))
+				s := tc.setup(t)
+				writeScopeMetadataForTest(t, s.scopeRoot, proxiedDoltScopeMetadata)
+				if !scopeUsesProxiedDoltMode(s.cityPath, s.scopeRoot) {
+					t.Fatalf("fixture scope %s is not classified proxied-server", s.scopeRoot)
+				}
+
+				result, err := controlReadyFallbackReady(s.dir, s.cityPath, nil, includeEphemeral)
+				if err != nil {
+					t.Fatalf("controlReadyFallbackReady on a proxied scope: %v", err)
+				}
+				if len(result) != 1 || result[0].ID != "ga-proxied-ready" {
+					t.Fatalf("result = %#v, want single ga-proxied-ready bead", result)
+				}
+				calls := readFakeBdCalls(t, logPath)
+				want := controlReadyFallbackArgv(false, includeEphemeral)
+				if len(calls) != 1 || !stringSlicesEqual(calls[0], want) {
+					t.Fatalf("bd calls = %q, want exactly one call with argv %q", calls, want)
+				}
+			})
+		}
+	}
+}
+
+// TestTryControlReadyScanFallsBackOnProxiedScopeWithoutReadonly drives the
+// whole readiness scan for the generated control-ready query on a proxied
+// city whose ready sources cannot be opened: the shell fallback it takes must
+// feed the dispatcher its work instead of failing the scan.
+func TestTryControlReadyScanFallsBackOnProxiedScopeWithoutReadonly(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	writeScopeMetadataForTest(t, cityDir, proxiedDoltScopeMetadata)
+
+	target := "gascity/control-dispatcher"
+	logPath := installArgvLoggingFakeBd(t, true, fakeBdReplyJSON(
+		`[{"id":"ga-proxied-control","status":"open","issue_type":"task","assignee":"`+target+`"}]`))
+	installControlReadyLegSourcesFn(t, func(string, string, *config.City) ([]beads.Store, []beads.Store, error) {
+		return nil, nil, fmt.Errorf("opening control store: injected failure")
+	})
+
+	agentCfg := config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"}
+	query := workflowServeControlReadyQuery(agentCfg)
+	parsed, ok := parseControlReadyQuery(query)
+	if !ok {
+		t.Fatalf("parseControlReadyQuery did not recognize the generated query %q", query)
+	}
+
+	queue, handled, err := tryControlReadyScan(query, cityDir, nil)
+	if err != nil {
+		t.Fatalf("tryControlReadyScan: %v", err)
+	}
+	if !handled {
+		t.Fatalf("handled = false, want true for the generated control-ready query")
+	}
+	if len(queue) != 1 || queue[0].ID != "ga-proxied-control" {
+		t.Fatalf("queue = %#v, want single ga-proxied-control bead", queue)
+	}
+	calls := readFakeBdCalls(t, logPath)
+	want := controlReadyFallbackArgv(false, parsed.includeEphemeral)
+	if len(calls) != 1 || !stringSlicesEqual(calls[0], want) {
+		t.Fatalf("bd calls = %q, want exactly one fallback call with argv %q", calls, want)
+	}
+}
+
+// TestControlReadyFallbackReadyProxiedFailureStaysLoud pins that dropping
+// --readonly on a proxied scope changes only the flags: an unrelated bd failure
+// or unreadable output there is still an error, never an empty queue.
+func TestControlReadyFallbackReadyProxiedFailureStaysLoud(t *testing.T) {
+	cases := []struct {
+		name   string
+		answer string
+	}{
+		{name: "bd exits nonzero", answer: "echo 'Error: dolt sql-server unreachable' >&2\nexit 2"},
+		{name: "bd prints malformed JSON", answer: fakeBdReplyJSON(`[{"id":"ga-truncated"`)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			configureIsolatedRuntimeEnv(t)
+			logPath := installArgvLoggingFakeBd(t, true, tc.answer)
+			dir := t.TempDir()
+			writeScopeMetadataForTest(t, dir, proxiedDoltScopeMetadata)
+
+			result, err := controlReadyFallbackReady(dir, dir, nil, false)
+			if err == nil {
+				t.Fatalf("controlReadyFallbackReady = %#v, nil error; want the bd failure surfaced", result)
+			}
+			if result != nil {
+				t.Fatalf("result = %#v alongside error %v, want no partial result", result, err)
+			}
+			calls := readFakeBdCalls(t, logPath)
+			want := controlReadyFallbackArgv(false, false)
+			if len(calls) != 1 || !stringSlicesEqual(calls[0], want) {
+				t.Fatalf("bd calls = %q, want exactly one call with argv %q and no retry", calls, want)
+			}
+		})
+	}
+}
+
+// TestControlReadyFallbackReadyKeepsReadonlyOnDirectScope is the control for
+// the proxied exception: every scope the classifier does not put on a Dolt
+// proxied-server keeps the strict `bd --readonly --sandbox` fallback read.
+func TestControlReadyFallbackReadyKeepsReadonlyOnDirectScope(t *testing.T) {
+	cases := []struct {
+		name string
+		// cityTOML, when set, is written as the scope's city.toml; metadata,
+		// when set, as its .beads/metadata.json.
+		cityTOML string
+		metadata string
+	}{
+		{name: "dolt server", metadata: `{"backend":"dolt","dolt_mode":"server"}`},
+		{name: "dolt embedded", metadata: `{"backend":"dolt","dolt_mode":"embedded"}`},
+		{name: "legacy city without metadata or init intent", cityTOML: "[workspace]\nname = \"test-city\"\n"},
+		{
+			name:     "doltlite with a stale proxied marker",
+			cityTOML: "[workspace]\nname = \"test-city\"\n[beads]\nprovider = \"bd\"\nbackend = \"doltlite\"\n",
+			metadata: `{"backend":"doltlite","dolt_mode":"proxied-server"}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			configureIsolatedRuntimeEnv(t)
+			logPath := installArgvLoggingFakeBd(t, false, fakeBdReplyJSON(`[{"id":"ga-direct-ready"}]`))
+			dir := t.TempDir()
+			if tc.cityTOML != "" {
+				if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(tc.cityTOML), 0o644); err != nil {
+					t.Fatalf("write city.toml: %v", err)
+				}
+			}
+			if tc.metadata != "" {
+				writeScopeMetadataForTest(t, dir, tc.metadata)
+			}
+			if scopeUsesProxiedDoltMode(dir, dir) {
+				t.Fatalf("fixture scope is classified proxied-server; it cannot control the direct path")
+			}
+
+			result, err := controlReadyFallbackReady(dir, dir, nil, false)
+			if err != nil {
+				t.Fatalf("controlReadyFallbackReady: %v", err)
+			}
+			if len(result) != 1 || result[0].ID != "ga-direct-ready" {
+				t.Fatalf("result = %#v, want single ga-direct-ready bead", result)
+			}
+			calls := readFakeBdCalls(t, logPath)
+			want := controlReadyFallbackArgv(true, false)
+			if len(calls) != 1 || !stringSlicesEqual(calls[0], want) {
+				t.Fatalf("bd calls = %q, want exactly one call with argv %q", calls, want)
+			}
+		})
 	}
 }

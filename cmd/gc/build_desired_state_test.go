@@ -2896,7 +2896,7 @@ func TestBuildDesiredState_UsesAgentHookOverride(t *testing.T) {
 			Name:              "hookoverride",
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(1),
-			ScaleCheck:        "printf 1",
+			ScaleCheck:        printCountCommand(1),
 			InstallAgentHooks: []string{"claude"},
 		}},
 	}
@@ -3345,7 +3345,7 @@ func TestBuildDesiredState_RoutedQueueDoesNotCreateOneSessionPerBead(t *testing.
 			Name:              "claude",
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(20),
-			ScaleCheck:        "printf 1",
+			ScaleCheck:        printCountCommand(1),
 		}},
 	}
 
@@ -3377,7 +3377,7 @@ func TestBuildDesiredState_NewPoolSessionBeadCreatedWithConcreteIdentity(t *test
 			Dir:               "rig",
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(3),
-			ScaleCheck:        "printf 1",
+			ScaleCheck:        printCountCommand(1),
 		}},
 	}
 
@@ -3433,7 +3433,7 @@ func TestBuildDesiredState_MaxOneAgentDemandUsesCanonicalIdentity(t *testing.T) 
 			Dir:               "cashmaster",
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(1),
-			ScaleCheck:        "printf 1",
+			ScaleCheck:        printCountCommand(1),
 		}},
 	}
 
@@ -3492,7 +3492,7 @@ func TestBuildDesiredState_NoStoreMaxOneAgentDemandUsesCanonicalSlotZero(t *test
 			Dir:               "cashmaster",
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(1),
-			ScaleCheck:        "printf 1",
+			ScaleCheck:        printCountCommand(1),
 		}},
 	}
 
@@ -3525,7 +3525,7 @@ func TestSyncSessionBeads_DoesNotBackfillPoolSlotForCanonicalMaxOneDemand(t *tes
 			Dir:               "cashmaster",
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(1),
-			ScaleCheck:        "printf 1",
+			ScaleCheck:        printCountCommand(1),
 		}},
 	}
 
@@ -3590,7 +3590,7 @@ func TestBuildDesiredState_MaxOneAgentNormalizesStalePoolIdentityBead(t *testing
 			Dir:               "cashmaster",
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(1),
-			ScaleCheck:        "printf 1",
+			ScaleCheck:        printCountCommand(1),
 		}},
 	}
 
@@ -3683,7 +3683,7 @@ func TestBuildDesiredState_MaxOneAgentPrefersCanonicalWhenStaleDuplicateExists(t
 			Dir:               "cashmaster",
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(1),
-			ScaleCheck:        "printf 1",
+			ScaleCheck:        printCountCommand(1),
 		}},
 	}
 
@@ -3737,7 +3737,7 @@ func TestBuildDesiredState_MaxOneAgentPreservesManualStaleIdentityBesideCanonica
 			Dir:               "cashmaster",
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(1),
-			ScaleCheck:        "printf 1",
+			ScaleCheck:        printCountCommand(1),
 		}},
 	}
 
@@ -4230,18 +4230,13 @@ func TestRealizePoolDesiredSessionsBindsTriggerBeadToFreshSession(t *testing.T) 
 		t.Fatalf("desired sessions = %d, want 1", len(desired))
 	}
 	for _, tp := range desired {
-		if got := tp.Env["GC_TRIGGER_BEAD_ID"]; got != "gp-59q" {
-			t.Fatalf("GC_TRIGGER_BEAD_ID = %q, want gp-59q", got)
+		// The stamp stays controller-side demand bookkeeping: the seat's shell
+		// carries only the presence marker, never the id or its store ref
+		// (gastownhall/gascity#5738).
+		if got := tp.Env["GC_SPAWN_ORIGIN"]; got != "demand" {
+			t.Fatalf("GC_SPAWN_ORIGIN = %q, want demand", got)
 		}
-		if got := tp.Env["GC_TRIGGER_WORK_BEAD_ID"]; got != "gp-59q" {
-			t.Fatalf("GC_TRIGGER_WORK_BEAD_ID = %q, want gp-59q", got)
-		}
-		if got := tp.Env["GC_TRIGGER_BEAD_STORE_REF"]; got != "rig:gascity-packs" {
-			t.Fatalf("GC_TRIGGER_BEAD_STORE_REF = %q, want rig:gascity-packs", got)
-		}
-		if got := tp.Env["GC_TRIGGER_WORK_STORE_REF"]; got != "rig:gascity-packs" {
-			t.Fatalf("GC_TRIGGER_WORK_STORE_REF = %q, want rig:gascity-packs", got)
-		}
+		assertEnvWithholdsTriggerIDs(t, "seat env", tp.Env)
 		if got := tp.Env["GC_PACKER_PACK"]; got != "packer" {
 			t.Fatalf("GC_PACKER_PACK = %q, want packer", got)
 		}
@@ -4689,14 +4684,14 @@ func TestBuildDesiredStateTranslatesFloorDemandIntoCreateBudget(t *testing.T) {
 			{
 				Name:              "alpha",
 				StartCommand:      "true",
-				ScaleCheck:        "printf 5",
+				ScaleCheck:        printCountCommand(5),
 				MinActiveSessions: intPtr(0),
 				MaxActiveSessions: intPtr(5),
 			},
 			{
 				Name:              "zulu",
 				StartCommand:      "true",
-				ScaleCheck:        "printf 0",
+				ScaleCheck:        printCountCommand(0),
 				MinActiveSessions: intPtr(1),
 				MaxActiveSessions: intPtr(5),
 			},
@@ -4745,14 +4740,14 @@ func TestBuildDesiredStateFairShareIgnoresInFlightPoolCreates(t *testing.T) {
 			{
 				Name:              "alpha",
 				StartCommand:      "true",
-				ScaleCheck:        "printf 1",
+				ScaleCheck:        printCountCommand(1),
 				MinActiveSessions: intPtr(0),
 				MaxActiveSessions: intPtr(5),
 			},
 			{
 				Name:              "zulu",
 				StartCommand:      "true",
-				ScaleCheck:        "printf 2",
+				ScaleCheck:        printCountCommand(2),
 				MinActiveSessions: intPtr(0),
 				MaxActiveSessions: intPtr(5),
 			},
@@ -4785,7 +4780,7 @@ func TestBuildDesiredStateDependencyFloorExemptFromFreshCreateBudget(t *testing.
 				Name:              "db",
 				Dir:               "svc",
 				StartCommand:      "true",
-				ScaleCheck:        "printf 0",
+				ScaleCheck:        printCountCommand(0),
 				MinActiveSessions: intPtr(0),
 				MaxActiveSessions: intPtr(3),
 			},
@@ -4793,7 +4788,7 @@ func TestBuildDesiredStateDependencyFloorExemptFromFreshCreateBudget(t *testing.
 				Name:              "api",
 				Dir:               "svc",
 				StartCommand:      "true",
-				ScaleCheck:        "printf 2",
+				ScaleCheck:        printCountCommand(2),
 				DependsOn:         []string{"svc/db"},
 				MinActiveSessions: intPtr(0),
 				MaxActiveSessions: intPtr(3),
@@ -5522,6 +5517,78 @@ func TestBuildDesiredState_MaxOneCanonicalBeadIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestBuildDesiredState_MinFloorCanonicalPoolRowAfterRestartHandoffIsReused
+// covers the restart outage end to end: a min=1, max=1 pool whose only row was
+// stopped by a restart request (asleep, reset committed, no sleep reason)
+// keeps that row desired under the same session id on every tick, so its
+// reset-pending wake can start it, instead of stalling the floor's fresh
+// create on the row's own name until the session sweep closes it.
+func TestBuildDesiredState_MinFloorCanonicalPoolRowAfterRestartHandoffIsReused(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	now := time.Date(2026, 10, 30, 5, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "rig",
+			StartCommand:      "true",
+			ScaleCheck:        "printf 0",
+			MinActiveSessions: intPtr(1),
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+	sp := runtime.NewFake()
+
+	var warmup bytes.Buffer
+	first := buildDesiredState("test-city", cityPath, now, cfg, sp, store, &warmup)
+	if len(first.State) != 1 {
+		t.Fatalf("warm-up tick: desired = %d, want 1; stderr=%q", len(first.State), warmup.String())
+	}
+	rows, err := store.List(beads.ListQuery{Label: sessionBeadLabel})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("warm-up tick: session beads = %d, want 1", len(rows))
+	}
+	row := rows[0]
+	if err := store.SetMetadataBatch(row.ID, restartHandoff("", true, finalizeFacts{Now: now.Add(time.Minute)})); err != nil {
+		t.Fatal(err)
+	}
+
+	for tick := 1; tick <= 2; tick++ {
+		var stderr bytes.Buffer
+		result := buildDesiredState("test-city", cityPath, now.Add(time.Duration(tick+1)*time.Minute), cfg, sp, store, &stderr)
+		tp, ok := result.State[row.Metadata["session_name"]]
+		if !ok {
+			t.Fatalf("tick %d: desired state missing handed-off row %s (%q); keys=%v stderr=%q",
+				tick, row.ID, row.Metadata["session_name"], mapKeys(result.State), stderr.String())
+		}
+		if got := tp.Env["GC_SESSION_ID"]; got != row.ID {
+			t.Fatalf("tick %d: desired GC_SESSION_ID = %q, want handed-off row %s", tick, got, row.ID)
+		}
+		for _, stall := range []string{"slot stalled on its own runtime name", "is held by session"} {
+			if strings.Contains(stderr.String(), stall) {
+				t.Fatalf("tick %d: stderr contains %q: %s", tick, stall, stderr.String())
+			}
+		}
+		after, err := store.List(beads.ListQuery{Label: sessionBeadLabel})
+		if err != nil {
+			t.Fatalf("tick %d: List: %v", tick, err)
+		}
+		open := 0
+		for _, b := range after {
+			if b.Status != "closed" {
+				open++
+			}
+		}
+		if open != 1 {
+			t.Fatalf("tick %d: open session beads = %d, want 1 (the handed-off row reused)", tick, open)
+		}
+	}
+}
+
 func TestBuildDesiredState_NamepoolMaxOneUsesNamepoolIdentity(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
@@ -5533,7 +5600,7 @@ func TestBuildDesiredState_NamepoolMaxOneUsesNamepoolIdentity(t *testing.T) {
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(1),
 			NamepoolNames:     []string{"furiosa"},
-			ScaleCheck:        "printf 1",
+			ScaleCheck:        printCountCommand(1),
 		}},
 	}
 
@@ -5598,7 +5665,7 @@ func TestBuildDesiredState_DoesNotCreateWhenConcreteNamepoolIdentityHeld(t *test
 			Dir:               "rig",
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(3),
-			ScaleCheck:        "printf 1",
+			ScaleCheck:        printCountCommand(1),
 			// A one-member namepool: the foreign manual row above holds its only
 			// concrete identity, so fresh allocation must fail at capacity rather
 			// than creating another occupant with the alias merely deferred.
@@ -7384,7 +7451,7 @@ func TestBuildDesiredState_RigPoolIgnoresAssignedWorkInUnreachableStore(t *testi
 			Dir:               "riga",
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(5),
-			ScaleCheck:        "printf 0",
+			ScaleCheck:        printCountCommand(0),
 		}},
 	}
 
@@ -7562,7 +7629,9 @@ func TestBuildDesiredState_ProductionDemandSkipsAllScaleChecksWhenCitySuspended(
 }
 
 func scaleCheckMarkerCommand(marker string, count int) string {
-	return fmt.Sprintf("printf probed > %s; printf %d", strconv.Quote(marker), count)
+	return platformCommand(
+		fmt.Sprintf("printf probed > %s; printf %d", strconv.Quote(marker), count),
+		fmt.Sprintf("Set-Content -LiteralPath %s -Value probed; Write-Output %d", psLiteral(marker), count))
 }
 
 func assertMarkerExists(t *testing.T, marker string) {
@@ -8620,7 +8689,7 @@ func TestBuildDesiredState_ScaleCheckErrorRetainsOnlyAffectedPoolSessions(t *tes
 			{
 				Name:              "helper",
 				StartCommand:      "echo",
-				ScaleCheck:        "printf 0",
+				ScaleCheck:        printCountCommand(0),
 				MinActiveSessions: intPtr(0),
 				MaxActiveSessions: intPtr(3),
 			},
@@ -8709,7 +8778,7 @@ func TestBuildDesiredState_ScaleCheckErrorPreservesDormantAffectedPoolSessionWit
 			{
 				Name:              "helper",
 				StartCommand:      "echo",
-				ScaleCheck:        "printf 0",
+				ScaleCheck:        printCountCommand(0),
 				MinActiveSessions: intPtr(0),
 				MaxActiveSessions: intPtr(3),
 			},
@@ -8973,7 +9042,7 @@ func TestBuildDesiredState_PoolSessionCoreFingerprintStableAcrossTicks(t *testin
 			StartCommand:      "true",
 			MinActiveSessions: intPtr(0),
 			MaxActiveSessions: intPtr(3),
-			ScaleCheck:        "printf 1",
+			ScaleCheck:        printCountCommand(1),
 		}},
 	}
 
@@ -9112,7 +9181,7 @@ func TestBuildDesiredState_StoreBackedPoolUsesLogicalInstanceIdentity(t *testing
 				StartCommand:      "true",
 				MinActiveSessions: intPtr(0),
 				MaxActiveSessions: intPtr(2),
-				ScaleCheck:        "printf 2",
+				ScaleCheck:        printCountCommand(2),
 			},
 		},
 	}
@@ -9178,7 +9247,7 @@ func TestBuildDesiredState_StoreBackedPoolUsesQualifiedInstanceNameForBindings(t
 			WorkDir:           ".gc/worktrees/{{.AgentBase}}",
 			MinActiveSessions: intPtr(0),
 			MaxActiveSessions: intPtr(2),
-			ScaleCheck:        "printf 1",
+			ScaleCheck:        printCountCommand(1),
 		}},
 	}
 
@@ -9242,7 +9311,7 @@ func TestBuildDesiredState_RecoversPoolTemplateFromAliasOnlyBindingIdentity(t *t
 			StartCommand:  "true",
 			NamepoolNames: []string{"furiosa", "nux"},
 			WorkDir:       ".gc/worktrees/{{.AgentBase}}",
-			ScaleCheck:    "printf 1",
+			ScaleCheck:    printCountCommand(1),
 		}},
 	}
 
@@ -9358,7 +9427,7 @@ func TestBuildDesiredState_PendingCreatePoolSessionDropsWithoutScaleDemand(t *te
 			WorkDir:           ".",
 			MinActiveSessions: intPtr(0),
 			MaxActiveSessions: intPtr(5),
-			ScaleCheck:        "printf 0",
+			ScaleCheck:        printCountCommand(0),
 		}},
 	}
 
@@ -9931,13 +10000,13 @@ func TestBuildDesiredState_ZeroScaledPoolSessionKeepsDependencyFloorWhileDrainin
 			{
 				Name:              "db",
 				StartCommand:      "true",
-				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
+				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: printCountCommand(0),
 			},
 			{
 				Name:              "api",
 				StartCommand:      "true",
 				DependsOn:         []string{"db"},
-				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
+				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: printCountCommand(0),
 			},
 		},
 	}
@@ -9968,7 +10037,8 @@ func TestBuildDesiredState_PoolCheckInjectsDoltPortForRigScopedAgent(t *testing.
 	// The check command outputs "2" only when BEADS_DOLT_SERVER_PORT is set.
 	// If the fix works, buildDesiredState prefixes the command with
 	// BEADS_DOLT_SERVER_PORT=9876, so the inner shell sees the variable.
-	checkCmd := `sh -c 'test -n "$BEADS_DOLT_SERVER_PORT" && printf 2 || printf 0'`
+	checkCmd := platformCommand(`sh -c 'test -n "$BEADS_DOLT_SERVER_PORT" && printf 2 || printf 0'`,
+		`if ($env:BEADS_DOLT_SERVER_PORT) { 2 } else { 0 }`)
 	cfg := &config.City{
 		Rigs: []config.Rig{{
 			Name:     "myrig",
@@ -10020,7 +10090,8 @@ func TestBuildDesiredState_PoolCheckUsesCityDoltPortForCityScopedAgent(t *testin
 	}
 	// Same check command but for a city-scoped agent (no rig). The canonical
 	// projected Dolt port should still be present, so the check outputs 2.
-	checkCmd := `sh -c 'test -n "$BEADS_DOLT_SERVER_PORT" && printf 2 || printf 0'`
+	checkCmd := platformCommand(`sh -c 'test -n "$BEADS_DOLT_SERVER_PORT" && printf 2 || printf 0'`,
+		`if ($env:BEADS_DOLT_SERVER_PORT) { 2 } else { 0 }`)
 	cfg := &config.City{
 		Agents: []config.Agent{
 			{
@@ -10072,7 +10143,8 @@ func TestBuildDesiredState_PoolCheckUsesExplicitRigPassword(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	checkCmd := `sh -c 'test "$BEADS_DOLT_PASSWORD" = "rig-secret" && printf 2 || printf 0'`
+	checkCmd := platformCommand(`sh -c 'test "$BEADS_DOLT_PASSWORD" = "rig-secret" && printf 2 || printf 0'`,
+		`if ($env:BEADS_DOLT_PASSWORD -ceq 'rig-secret') { 2 } else { 0 }`)
 	cfg := &config.City{
 		Rigs: []config.Rig{{
 			Name: "demo",
@@ -12047,7 +12119,7 @@ func TestBuildDesiredState_DependencyFloorIgnoresConfigBlindLegacySlotRecovery(t
 				StartCommand:      "true",
 				MinActiveSessions: intPtr(0),
 				MaxActiveSessions: intPtr(3),
-				ScaleCheck:        "printf 0",
+				ScaleCheck:        printCountCommand(0),
 			},
 			{
 				Name:              "api",
@@ -12055,7 +12127,7 @@ func TestBuildDesiredState_DependencyFloorIgnoresConfigBlindLegacySlotRecovery(t
 				StartCommand:      "true",
 				MinActiveSessions: intPtr(0),
 				MaxActiveSessions: intPtr(3),
-				ScaleCheck:        "printf 0",
+				ScaleCheck:        printCountCommand(0),
 				DependsOn:         []string{"gascity/db"},
 			},
 		},
@@ -12136,7 +12208,7 @@ func TestBuildDesiredState_PoolBeadIdentityAgreesAcrossRealizeAndCanonicalHelper
 				StartCommand:      "true",
 				MinActiveSessions: intPtr(0),
 				MaxActiveSessions: intPtr(3),
-				ScaleCheck:        "printf 1",
+				ScaleCheck:        printCountCommand(1),
 			},
 		},
 	}
@@ -12257,7 +12329,7 @@ func TestBuildDesiredState_RigScopedScaleCheckExpandsRigTemplate(t *testing.T) {
 				StartCommand:      "true",
 				MinActiveSessions: intPtr(0),
 				MaxActiveSessions: intPtr(5),
-				ScaleCheck:        "echo {{.Rig}} | grep -c alpha",
+				ScaleCheck:        platformCommand("echo {{.Rig}} | grep -c alpha", "if ('{{.Rig}}' -like '*alpha*') { 1 } else { 0 }"),
 			},
 			{
 				Name:              "ant",
@@ -12265,7 +12337,7 @@ func TestBuildDesiredState_RigScopedScaleCheckExpandsRigTemplate(t *testing.T) {
 				StartCommand:      "true",
 				MinActiveSessions: intPtr(0),
 				MaxActiveSessions: intPtr(5),
-				ScaleCheck:        "echo {{.Rig}} | grep -c beta",
+				ScaleCheck:        platformCommand("echo {{.Rig}} | grep -c beta", "if ('{{.Rig}}' -like '*beta*') { 1 } else { 0 }"),
 			},
 		},
 	}
@@ -13241,7 +13313,7 @@ func TestControlDispatcherRouteRepairAgreesWithTheMinter(t *testing.T) {
 		if !scoped {
 			t.Fatalf("ScopeRigContext(%q) not scoped", tc.root)
 		}
-		minted, err := graphroute.ControlDispatcherBinding(nil, "test-city", cfg, rigContext, deps)
+		minted, err := graphroute.ControlDispatcherBinding(beads.SessionStore{}, "test-city", cfg, rigContext, deps)
 		if err != nil {
 			t.Fatalf("ControlDispatcherBinding(%q): %v", tc.root, err)
 		}
@@ -14066,7 +14138,7 @@ func TestBuildDesiredState_ProviderRedBlocksNewPoolSessionCreate(t *testing.T) {
 				Name:              "worker",
 				Provider:          "claude",
 				StartCommand:      "echo",
-				ScaleCheck:        "printf 3",
+				ScaleCheck:        printCountCommand(3),
 				MinActiveSessions: intPtr(0),
 				MaxActiveSessions: intPtr(5),
 			}},
@@ -14670,6 +14742,61 @@ func TestBuildDesiredState_APICreatedAgentSessionBeadStaysDesired(t *testing.T) 
 			if tp.ConfiguredNamedIdentity != "" {
 				t.Fatalf("desired[%q].ConfiguredNamedIdentity = %q, want empty — the ad-hoc bead must not adopt the named session identity",
 					sessionName, tp.ConfiguredNamedIdentity)
+			}
+		})
+	}
+}
+
+// TestRealizePoolDesiredSessionsSeatShellCarriesNoTriggerBeadID reproduces
+// gastownhall/gascity#5738: a demand-spawned pool seat's shell must carry only
+// the presence-only GC_SPAWN_ORIGIN marker, never an id-shaped trigger hint a
+// ${GC_BEAD_ID:-${GC_TRIGGER_BEAD_ID:-…}} close chain could mistake for the
+// bead the seat actually claimed (the pool is pull). That holds when the
+// controller's own environment carries a launching pane's GC_TRIGGER_* keys
+// too: the seat withholds them rather than inheriting a foreign id, and an
+// unstamped seat withholds the marker as well.
+func TestRealizePoolDesiredSessionsSeatShellCarriesNoTriggerBeadID(t *testing.T) {
+	for _, c := range []struct {
+		name, workBeadID, wantOrigin string
+	}{
+		{"stamped", "gp-a", demandSpawnOriginValue},
+		{"unstamped", "", ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			setControllerDemandSpawnEnv(t)
+			store := beads.NewMemStore()
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents: []config.Agent{{
+					Name:              "worker",
+					StartCommand:      "true",
+					MinActiveSessions: intPtr(0),
+					MaxActiveSessions: intPtr(1),
+				}},
+			}
+			var stderr bytes.Buffer
+			bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+			bp.sessionBeads = &sessionBeadSnapshot{}
+			desired := map[string]TemplateParams{}
+
+			realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{
+				Template: "worker",
+				Requests: []SessionRequest{{
+					Template:     "worker",
+					Tier:         "new",
+					WorkBeadID:   c.workBeadID,
+					WorkStoreRef: "rig:gascity",
+				}},
+			}, desired, &stderr)
+
+			if len(desired) != 1 {
+				t.Fatalf("desired sessions = %d, want 1; stderr=%q", len(desired), stderr.String())
+			}
+			for _, tp := range desired {
+				assertEnvWithholdsTriggerIDs(t, "pool seat shell env", tp.Env)
+				if got, ok := tp.Env["GC_SPAWN_ORIGIN"]; !ok || got != c.wantOrigin {
+					t.Errorf("GC_SPAWN_ORIGIN = (%q, present=%v), want %q", got, ok, c.wantOrigin)
+				}
 			}
 		})
 	}

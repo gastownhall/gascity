@@ -179,8 +179,7 @@ func TestAPIClientRouting(t *testing.T) {
 		// A supervisor that requires a signed grant on city routes refuses this
 		// client's gated calls with a 401 no caller falls back from, so general
 		// commands keep their local fallback without resolving the supervisor
-		// client — among them the per-turn gc mail check --inject hook, which
-		// would otherwise stop injecting mail.
+		// client — among them gc mail check, which would otherwise fail.
 		t.Setenv("GC_NO_API", "")
 		restore(supervisorHosted, func(string) *api.Client {
 			t.Errorf("supervisor client resolved for a supervisor that requires city grants")
@@ -192,7 +191,7 @@ func TestAPIClientRouting(t *testing.T) {
 			t.Fatalf("apiClient = %p, want nil (the supervisor requires grants this client never mints)", got)
 		}
 		if c, reason := mailCheckAPIClient(dir); c != nil || reason != "grant-required" {
-			t.Fatalf("mailCheckAPIClient = (%p, %q), want (nil, \"grant-required\") so gc mail check --inject injects locally", c, reason)
+			t.Fatalf("mailCheckAPIClient = (%p, %q), want (nil, \"grant-required\") so gc mail check reads locally", c, reason)
 		}
 	})
 
@@ -468,14 +467,15 @@ func TestCityStatusAPIClientRoutesToSupervisor(t *testing.T) {
 	})
 }
 
-// TestSessionListAPIClientRouting covers the client gc session list resolves.
-// A supervisor-hosted city lists its sessions locally, with or without an
-// [api] port and whatever the supervisor's grant requirement, and the
-// supervisor client is never resolved for it: the local rows carry the
-// session list contract (agent_name, closed, the summary) that the API's rows
-// do not, and the API fills each active session's active bead by reading every
-// rig store, a suspended rig's included. Every other shape routes as apiClient
-// does. (#5262)
+// TestSessionListAPIClientRouting covers the client gc session list resolves:
+// it routes as apiClient does (#8453). A supervisor-hosted city lists through
+// the supervisor API, with or without an [api] port; a supervisor that
+// requires grants, or a supervisor client that cannot be resolved, sends the
+// listing local. A state filter that can keep a closed session lists locally
+// wherever the API would have served it, since the API reads the whole
+// session history again for every page; where no API serves it, the reason a
+// nil client gives stands. The supervisor client is never resolved under a
+// grant requirement or the GC_NO_API escape hatch.
 func TestSessionListAPIClientRouting(t *testing.T) {
 	sentinel := api.NewClient("http://supervisor.sentinel:1")
 	origIdentity, origSup, origGrants := apiRouteControllerIdentityHook, apiRouteSupervisorClientHook, apiRouteSupervisorGrantsHook
@@ -490,6 +490,8 @@ func TestSessionListAPIClientRouting(t *testing.T) {
 	)
 	cases := []struct {
 		name string
+		// state is the --state filter.
+		state string
 		// escapeHatch sets GC_NO_API=1, under which nothing may be probed.
 		escapeHatch bool
 		pid         int
@@ -497,19 +499,31 @@ func TestSessionListAPIClientRouting(t *testing.T) {
 		// supervisor is whether the supervisor client may be resolved; it is
 		// the sentinel when it may.
 		supervisor bool
-		grants     bool
-		toml       string
-		want       string // "supervisor", "standalone" or "" (nil)
-		wantReason string
+		// supervisorNil makes the supervisor client hook return nil: no
+		// supervisor-managed client is available.
+		supervisorNil bool
+		grants        bool
+		toml          string
+		want          string // "supervisor", "standalone" or "" (nil)
+		wantReason    string
 	}{
-		{name: "supervisor-hosted-lists-locally", pid: 4242, mode: controllerHostingSupervisor, toml: noAPIPort, wantReason: "supervisor-hosted"},
-		{name: "supervisor-hosted-with-api-port-lists-locally", pid: 4242, mode: controllerHostingSupervisor, toml: apiPort, wantReason: "supervisor-hosted"},
-		{name: "supervisor-hosted-requiring-grants-lists-locally", pid: 4242, mode: controllerHostingSupervisor, grants: true, toml: noAPIPort, wantReason: "supervisor-hosted"},
+		{name: "supervisor-hosted-uses-supervisor", pid: 4242, mode: controllerHostingSupervisor, supervisor: true, toml: noAPIPort, want: "supervisor"},
+		{name: "supervisor-hosted-with-api-port-uses-supervisor", pid: 4242, mode: controllerHostingSupervisor, supervisor: true, toml: apiPort, want: "supervisor"},
+		{name: "supervisor-hosted-requiring-grants-lists-locally", pid: 4242, mode: controllerHostingSupervisor, grants: true, toml: noAPIPort, wantReason: "grant-required"},
+		{name: "supervisor-hosted-supervisor-unavailable-lists-locally", pid: 4242, mode: controllerHostingSupervisor, supervisor: true, supervisorNil: true, toml: noAPIPort, wantReason: "controller-down"},
 		{name: "standalone-with-api-port-uses-standalone", pid: 4242, mode: controllerHostingStandalone, toml: apiPort, want: "standalone"},
 		{name: "unknown-with-api-port-uses-standalone", pid: 4242, mode: controllerHostingUnknown, toml: apiPort, want: "standalone"},
 		{name: "standalone-no-api-port-lists-locally", pid: 4242, mode: controllerHostingStandalone, toml: noAPIPort, wantReason: "controller-down"},
 		{name: "controller-down-uses-supervisor", supervisor: true, toml: apiPort, want: "supervisor"},
 		{name: "escape-hatch-lists-locally", escapeHatch: true, pid: 4242, mode: controllerHostingSupervisor, toml: noAPIPort, wantReason: "escape-hatch"},
+		{name: "supervisor-hosted-all-lists-locally", state: "all", pid: 4242, mode: controllerHostingSupervisor, supervisor: true, toml: noAPIPort, wantReason: sessionListClosedHistoryReason},
+		{name: "supervisor-hosted-closed-lists-locally", state: "closed", pid: 4242, mode: controllerHostingSupervisor, supervisor: true, toml: noAPIPort, wantReason: sessionListClosedHistoryReason},
+		{name: "supervisor-hosted-active-or-closed-lists-locally", state: "active,closed", pid: 4242, mode: controllerHostingSupervisor, supervisor: true, toml: noAPIPort, wantReason: sessionListClosedHistoryReason},
+		{name: "supervisor-hosted-active-uses-supervisor", state: "active", pid: 4242, mode: controllerHostingSupervisor, supervisor: true, toml: noAPIPort, want: "supervisor"},
+		{name: "standalone-with-api-port-all-lists-locally", state: "all", pid: 4242, mode: controllerHostingStandalone, toml: apiPort, wantReason: sessionListClosedHistoryReason},
+		{name: "controller-down-closed-lists-locally", state: "closed", supervisor: true, toml: apiPort, wantReason: sessionListClosedHistoryReason},
+		{name: "supervisor-hosted-requiring-grants-all-keeps-grant-required", state: "all", pid: 4242, mode: controllerHostingSupervisor, grants: true, toml: noAPIPort, wantReason: "grant-required"},
+		{name: "escape-hatch-all-keeps-escape-hatch", state: "all", escapeHatch: true, pid: 4242, mode: controllerHostingSupervisor, toml: noAPIPort, wantReason: "escape-hatch"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -527,11 +541,14 @@ func TestSessionListAPIClientRouting(t *testing.T) {
 				if !tc.supervisor {
 					t.Errorf("supervisor client resolved for gc session list")
 				}
+				if tc.supervisorNil {
+					return nil
+				}
 				return sentinel
 			}
 			apiRouteSupervisorGrantsHook = func() bool { return tc.grants }
 			dir := writeCityTOMLForRoute(t, t.TempDir(), tc.toml)
-			c, reason := sessionListAPIClient(dir)
+			c, reason := sessionListAPIClient(dir, tc.state)
 			switch tc.want {
 			case "supervisor":
 				if c != sentinel {
@@ -550,5 +567,75 @@ func TestSessionListAPIClientRouting(t *testing.T) {
 				t.Fatalf("sessionListAPIClient reason = %q, want %q", reason, tc.wantReason)
 			}
 		})
+	}
+}
+
+// TestStandaloneAPIClientNeverResolvesTheSupervisor pins standaloneAPIClient:
+// a standalone controller's [api] endpoint, and nil wherever apiClient would
+// hand back the supervisor-managed client, without resolving it.
+func TestStandaloneAPIClientNeverResolvesTheSupervisor(t *testing.T) {
+	origIdentity, origSup := apiRouteControllerIdentityHook, apiRouteSupervisorClientHook
+	t.Cleanup(func() { apiRouteControllerIdentityHook, apiRouteSupervisorClientHook = origIdentity, origSup })
+	sentinel := api.NewClient("http://supervisor.sentinel:1")
+	for _, tc := range []struct {
+		name     string
+		identity controllerIdentityReply
+		cityTOML string
+		want     string // "nil" or "standalone"
+	}{
+		{"supervisor-hosted", controllerIdentityReply{PID: 4242, HostingMode: controllerHostingSupervisor}, "name = \"t\"\n", "nil"},
+		{"supervisor-hosted with a stale api port", controllerIdentityReply{PID: 4242, HostingMode: controllerHostingSupervisor}, "name = \"t\"\n[api]\nport = 8080\n", "nil"},
+		{"no live controller", controllerIdentityReply{}, "name = \"t\"\n[api]\nport = 8080\n", "nil"},
+		{"controller predating identify, no api port", controllerIdentityReply{PID: 4242}, "name = \"t\"\n", "nil"},
+		{"standalone with an api port", controllerIdentityReply{PID: 4242, HostingMode: controllerHostingStandalone}, "name = \"t\"\n[api]\nport = 8080\n", "standalone"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_NO_API", "")
+			identity := tc.identity
+			apiRouteControllerIdentityHook = func(string) controllerIdentityReply { return identity }
+			apiRouteSupervisorClientHook = func(string) *api.Client {
+				t.Errorf("standaloneAPIClient resolved the supervisor-managed client")
+				return sentinel
+			}
+			got := standaloneAPIClient(writeCityTOMLForRoute(t, t.TempDir(), tc.cityTOML))
+			switch {
+			case tc.want == "nil" && got != nil:
+				t.Fatalf("standaloneAPIClient = %p, want nil", got)
+			case tc.want == "standalone" && (got == nil || got == sentinel):
+				t.Fatalf("standaloneAPIClient = %p, want the standalone controller's client", got)
+			}
+		})
+	}
+}
+
+// TestMailCheckInjectProbesOnlyAStandaloneController pins the client each
+// form of `gc mail check` routes through in a supervisor-hosted city. The
+// per-turn --inject hook reads the mailbox in process either way, so it does
+// not probe the supervisor first: that probe is a full inbox listing on every
+// agent prompt. A plain check still asks the supervisor.
+func TestMailCheckInjectProbesOnlyAStandaloneController(t *testing.T) {
+	origIdentity, origSup, origGrants := apiRouteControllerIdentityHook, apiRouteSupervisorClientHook, apiRouteSupervisorGrantsHook
+	t.Cleanup(func() {
+		apiRouteControllerIdentityHook, apiRouteSupervisorClientHook, apiRouteSupervisorGrantsHook = origIdentity, origSup, origGrants
+	})
+	t.Setenv("GC_NO_API", "")
+	sentinel := api.NewClient("http://supervisor.sentinel:1")
+	apiRouteControllerIdentityHook = func(string) controllerIdentityReply {
+		return controllerIdentityReply{PID: 4242, HostingMode: controllerHostingSupervisor}
+	}
+	apiRouteSupervisorGrantsHook = func() bool { return false }
+	dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
+
+	apiRouteSupervisorClientHook = func(string) *api.Client {
+		t.Errorf("gc mail check --inject resolved the supervisor-managed client")
+		return sentinel
+	}
+	if c, _ := mailCheckClient(dir, true); c != nil {
+		t.Fatalf("mailCheckClient(inject) = %p, want nil: the hook reads the mailbox in process", c)
+	}
+
+	apiRouteSupervisorClientHook = func(string) *api.Client { return sentinel }
+	if c, reason := mailCheckClient(dir, false); c != sentinel {
+		t.Fatalf("mailCheckClient(plain) = (%p, %q), want the supervisor-managed client", c, reason)
 	}
 }

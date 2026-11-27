@@ -22,6 +22,10 @@ type FileSnapshot struct {
 	// mode back rather than widen the file to the 0644 default. Zero means the
 	// default.
 	Mode os.FileMode
+	// Dir marks the snapshot of a directory's mode (dirModeSnapshot): Data is
+	// unused, and a restore only puts Mode back on the directory, never
+	// creating, emptying or removing it.
+	Dir bool
 }
 
 // SnapshotResolvedFile snapshots path for rollback through any symlink chain:
@@ -53,12 +57,25 @@ func SnapshotOptionalFile(fs fsys.FS, path string) (FileSnapshot, error) {
 		}
 		return FileSnapshot{}, err
 	}
+	// The mode comes from a second call. Its failure is returned rather than
+	// read as the 0644 default, which would widen a 0600 file on restore.
+	info, err := fs.Stat(path)
+	if err != nil {
+		return FileSnapshot{}, err
+	}
 	cp := append([]byte(nil), data...)
 	snap := FileSnapshot{Path: path, Data: cp, Exists: true}
-	if info, err := fs.Stat(path); err == nil && info.Mode().IsRegular() {
+	if info.Mode().IsRegular() {
 		snap.Mode = info.Mode().Perm()
 	}
 	return snap, nil
+}
+
+// dirModeSnapshot records the mode of the directory at path, as info reports
+// it (permission bits plus setuid, setgid and sticky), so a rollback can undo
+// a chmod a failed step made to it.
+func dirModeSnapshot(path string, info os.FileInfo) FileSnapshot {
+	return FileSnapshot{Path: path, Exists: true, Mode: fsys.ComparableMode(info.Mode()), Dir: true}
 }
 
 // RestoreSnapshots restores every snapshot, best-effort: it attempts all of them
@@ -78,6 +95,9 @@ func RestoreSnapshots(fs fsys.FS, snapshots []FileSnapshot) error {
 }
 
 func restoreSnapshot(fs fsys.FS, snap FileSnapshot) error {
+	if snap.Dir {
+		return restoreDirMode(fs, snap)
+	}
 	if !snap.Exists {
 		if err := fs.Remove(snap.Path); err != nil && !os.IsNotExist(err) {
 			return err
@@ -88,5 +108,23 @@ func restoreSnapshot(fs fsys.FS, snap FileSnapshot) error {
 	if perm == 0 {
 		perm = 0o644
 	}
-	return fsys.WriteFileAtomic(fs, snap.Path, snap.Data, perm)
+	// A file whose bytes and mode already match is left alone: rewriting it
+	// would replace its inode (detaching a hard link) and bump its mtime.
+	return fsys.WriteFileIfContentOrModeChangedAtomic(fs, snap.Path, snap.Data, perm)
+}
+
+// restoreDirMode puts a directory's snapshotted mode back. A directory that is
+// gone has nothing to restore.
+func restoreDirMode(fs fsys.FS, snap FileSnapshot) error {
+	info, err := fs.Stat(snap.Path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if fsys.ComparableMode(info.Mode()) == snap.Mode {
+		return nil
+	}
+	return fs.Chmod(snap.Path, snap.Mode)
 }

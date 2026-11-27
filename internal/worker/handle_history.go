@@ -24,6 +24,49 @@ func (h *SessionHandle) TranscriptPath(_ context.Context) (string, error) {
 	return path, nil
 }
 
+// claudeLayoutTranscript is the kill guard's view of a session's transcript.
+// The guard parses Claude-format records only, so it resolves the transcript by
+// the Claude layout (session key, then work-directory slug) and never walks the
+// Codex or Pi trees the way the generic lookup does for an unpinned provider.
+type claudeLayoutTranscript struct{ h *SessionHandle }
+
+// claudeLayoutTranscript returns the Claude-layout-only view of this session's
+// transcript for [InFlightBackgroundSubagents].
+func (h *SessionHandle) claudeLayoutTranscript() subagentGuardTranscript {
+	return claudeLayoutTranscript{h: h}
+}
+
+func (t claudeLayoutTranscript) path() (string, error) {
+	id := t.h.currentSessionID()
+	if id == "" {
+		return "", ErrHistoryUnavailable
+	}
+	path, _, err := t.h.manager.TranscriptPathClaudeLayout(id, t.h.adapter.SearchPaths)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(path) == "" {
+		return "", ErrHistoryUnavailable
+	}
+	return path, nil
+}
+
+func (t claudeLayoutTranscript) TranscriptRecords(context.Context) ([]json.RawMessage, error) {
+	path, err := t.path()
+	if err != nil {
+		return nil, err
+	}
+	return t.h.adapter.TranscriptRecords(path)
+}
+
+func (t claudeLayoutTranscript) AgentMappings(context.Context) ([]AgentMapping, error) {
+	path, err := t.path()
+	if err != nil {
+		return nil, err
+	}
+	return t.h.adapter.AgentMappings(path)
+}
+
 // Transcript loads the provider-native transcript through the worker boundary.
 func (h *SessionHandle) Transcript(ctx context.Context, req TranscriptRequest) (*TranscriptResult, error) {
 	id := h.currentSessionID()

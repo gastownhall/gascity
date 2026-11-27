@@ -19,6 +19,7 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/molecule"
@@ -1199,7 +1200,7 @@ func TestRunsReportFormulaV1Steps(t *testing.T) {
 	}
 	eventLog := &runEventLog{}
 	store := beads.NewCachingStoreForTest(beads.NewMemStore(), eventLog.onChange)
-	result, err := molecule.Instantiate(ctx, store, recipe, molecule.Options{})
+	result, err := molecule.Instantiate(ctx, beadstest.GraphMolecule(store), recipe, molecule.Options{})
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
