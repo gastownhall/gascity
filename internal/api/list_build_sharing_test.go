@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -347,4 +348,220 @@ func TestListBuildSharingPostMutation(t *testing.T) {
 	if gated.reads != 2 {
 		t.Errorf("GET /agents served 2 cache-miss readers with %d builds, want 2: one running build and the one queued behind it", gated.reads)
 	}
+}
+
+// TestListBuildSharingIsolation pins what the shared list build does not
+// couple: a reader on another cache key — and an inline read (?peek=true),
+// which takes no cache key at all — builds on its own and completes while a
+// shared build for the plain list is still held, leaving that build's slot
+// untouched; and at the helper level, two waiters joined onto one build each
+// receive their own deep copy, so what one waiter does with its response
+// cannot reach the other.
+func TestListBuildSharingIsolation(t *testing.T) {
+	st := newFakeState(t)
+	st.cfg.NamedSessions = nil
+	st.cfg.Agents = []config.Agent{
+		{Name: "worker1", Dir: "myrig", Provider: "test-agent", MaxActiveSessions: intPtr(1)},
+	}
+	gates := []chan struct{}{make(chan struct{}), make(chan struct{}), make(chan struct{})}
+	arrived := []chan struct{}{make(chan struct{}), make(chan struct{}), make(chan struct{})}
+	gated := &gatedActiveWorkStore{Store: st.stores["myrig"], gates: gates, arrived: arrived}
+	st.stores["myrig"] = gated
+	srv := New(st)
+	h := newTestCityHandlerWith(t, st, srv)
+
+	// The response cache is off: every shared-key reader here is a cache
+	// miss, which is the sharing path's precondition.
+	oldTTL, oldFloor := responseCacheTTL, agentListResponseTTLFloor
+	responseCacheTTL, agentListResponseTTLFloor = 0, 0
+	t.Cleanup(func() {
+		responseCacheTTL, agentListResponseTTLFloor = oldTTL, oldFloor
+	})
+
+	releases := make([]func(), len(gates))
+	for i := range gates {
+		g := gates[i]
+		releases[i] = sync.OnceFunc(func() { close(g) })
+	}
+	t.Cleanup(func() {
+		for _, r := range releases {
+			r()
+		}
+	})
+
+	type agentCall struct {
+		id   int
+		code int
+		body agentListWire
+	}
+	calls := make(chan agentCall, 3)
+	fetch := func(query string, id int) {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(st, "/agents"+query), nil))
+		var body agentListWire
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Errorf("decode GET /agents%s: %v", query, err)
+			calls <- agentCall{id: id, code: rec.Code}
+			return
+		}
+		calls <- agentCall{id: id, code: rec.Code, body: body}
+	}
+	activeBeadOf := func(call agentCall, name string) string {
+		for _, item := range call.body.Items {
+			if item.Name == name {
+				return item.ActiveBead
+			}
+		}
+		return "<not listed>"
+	}
+	anyBuildRunning := func() bool {
+		for _, slot := range srv.listBuilds {
+			if slot.running != nil {
+				return true
+			}
+		}
+		return false
+	}
+	// oneSlotHoldsBuild holds while exactly one slot remains — the held
+	// build's own — with nothing queued behind it: the inline and
+	// other-key builds left no slot of theirs behind.
+	oneSlotHoldsBuild := func() bool {
+		n := 0
+		queued := false
+		for _, slot := range srv.listBuilds {
+			n++
+			if slot.running == nil || slot.queued != nil {
+				queued = true
+			}
+		}
+		return n == 1 && !queued
+	}
+
+	// The plain list's shared build reads the store and holds its rows.
+	go fetch("", 1)
+	awaitSlotState(t, srv, "the first build to start", anyBuildRunning)
+	awaitSignal(t, arrived[0], "the first build's in_progress read")
+
+	// A ?peek=true reader builds inline — no cache key, no shared build —
+	// so it completes while the shared build is still held and leaves no
+	// slot behind.
+	go fetch("?peek=true", 2)
+	awaitSignal(t, arrived[1], "the peek read's in_progress read")
+	releases[1]()
+	r2 := <-calls
+	if r2.id != 2 {
+		t.Fatalf("the peek response is reader %d's, want 2: responses are paired by id, not arrival order", r2.id)
+	}
+	if r2.code != http.StatusOK {
+		t.Errorf("the peek reader status = %d, want 200", r2.code)
+	}
+	if got := activeBeadOf(r2, "myrig/worker1"); got != "" {
+		t.Errorf("the peek reader saw active_bead %q, want none: no work was created", got)
+	}
+	awaitSlotState(t, srv, "only the held build's slot to remain after the peek build", oneSlotHoldsBuild)
+
+	// A reader on a different key (?running=false changes the input, hence
+	// the cache key) builds on its own the same way.
+	go fetch("?running=false", 3)
+	awaitSignal(t, arrived[2], "the other-key read's in_progress read")
+	releases[2]()
+	r3 := <-calls
+	if r3.id != 3 {
+		t.Fatalf("the other-key response is reader %d's, want 3: responses are paired by id, not arrival order", r3.id)
+	}
+	if r3.code != http.StatusOK {
+		t.Errorf("the other-key reader status = %d, want 200", r3.code)
+	}
+	if got := activeBeadOf(r3, "myrig/worker1"); got != "" {
+		t.Errorf("the other-key reader saw active_bead %q, want none: no work was created", got)
+	}
+	awaitSlotState(t, srv, "only the held build's slot to remain after the other-key build", oneSlotHoldsBuild)
+
+	// Release the held build: it serves its own reader, and the slot drains.
+	releases[0]()
+	r1 := <-calls
+	if r1.id != 1 {
+		t.Fatalf("the held build's response is reader %d's, want 1: responses are paired by id, not arrival order", r1.id)
+	}
+	if r1.code != http.StatusOK {
+		t.Errorf("the held build's reader status = %d, want 200", r1.code)
+	}
+	if got := activeBeadOf(r1, "myrig/worker1"); got != "" {
+		t.Errorf("the held build's reader saw active_bead %q, want none: no work was created", got)
+	}
+	if gated.reads != 3 {
+		t.Errorf("GET /agents ran %d builds for the three readers, want 3: the shared key stacked one build, the peek and other-key readers built their own", gated.reads)
+	}
+	awaitSlotState(t, srv, "the slot map to drain once the held build ends", func() bool {
+		return len(srv.listBuilds) == 0
+	})
+
+	// Helper level: two waiters joined onto one build each receive their own
+	// deep copy. The first caller starts the build; the second queues the
+	// build behind it; the third joins that queued build — two waiters, one
+	// outcome.
+	type probeList struct {
+		IDs []string
+	}
+	probeKey := "isolation-probe"
+	probeGate := make(chan struct{})
+	probeBuild := func(ctx context.Context) (probeList, error) {
+		select {
+		case <-probeGate:
+			return probeList{IDs: []string{"a", "b"}}, nil
+		case <-ctx.Done():
+			return probeList{}, ctx.Err()
+		}
+	}
+	type probeResult struct {
+		who string
+		v   probeList
+		err error
+	}
+	probeResults := make(chan probeResult, 3)
+	probe := func(who string) {
+		v, err := shareListBuild(context.Background(), srv, probeKey, probeBuild)
+		probeResults <- probeResult{who: who, v: v, err: err}
+	}
+	go probe("starter")
+	awaitSlotState(t, srv, "the probe build to start", func() bool {
+		slot := srv.listBuilds[probeKey]
+		return slot != nil && slot.running != nil
+	})
+	go probe("queued")
+	awaitSlotState(t, srv, "the probe build to queue behind the running one", func() bool {
+		slot := srv.listBuilds[probeKey]
+		return slot != nil && slot.running != nil && slot.queued != nil
+	})
+	go probe("joiner")
+	close(probeGate)
+	byWho := make(map[string]probeResult, 3)
+	for range []string{"starter", "queued", "joiner"} {
+		r := <-probeResults
+		if r.err != nil {
+			t.Errorf("the %s waiter errored: %v", r.who, r.err)
+			continue
+		}
+		byWho[r.who] = r
+	}
+	for _, who := range []string{"starter", "queued", "joiner"} {
+		r, ok := byWho[who]
+		if !ok {
+			t.Fatalf("the %s waiter's result is missing", who)
+		}
+		if len(r.v.IDs) != 2 || r.v.IDs[0] != "a" || r.v.IDs[1] != "b" {
+			t.Errorf("the %s waiter's copy is %v, want [a b]", who, r.v.IDs)
+		}
+	}
+	// The queued waiter and the joiner wait on the same build's outcome, so
+	// the joiner's copy must be its own: appending to it cannot reach the
+	// queued waiter's.
+	joiner := byWho["joiner"]
+	joiner.v.IDs = append(joiner.v.IDs, "mutated")
+	if got := byWho["queued"].v.IDs; len(got) != 2 {
+		t.Errorf("the queued waiter's copy is %v after the joiner appended to its own, want [a b]: every waiter gets a deep copy of the build's outcome", got)
+	}
+	awaitSlotState(t, srv, "the probe key's slot to drain", func() bool {
+		return srv.listBuilds[probeKey] == nil
+	})
 }
