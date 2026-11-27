@@ -220,6 +220,31 @@ func writeMarkingFakeDolt(t *testing.T) (string, string) {
 	return dir, marker
 }
 
+// writeMarkingFakeDoltDyingOnSecondTERM writes a fake dolt that records it
+// is running and then stays up, exiting only on its second SIGTERM: the
+// first (a unit stop's cgroup-wide signal) alone does not finish it, the
+// second (the watchdog forwarding that stop) does. That makes the
+// watchdog's forwarding observable and deterministic — the server cannot
+// die before the watchdog has logged and forwarded — without depending on
+// the SIGKILL escalation's grace period. The shell stays the process image,
+// and the marker appears only after the kernel finished exec'ing it, so no
+// waitForFinalImage dance is needed.
+func writeMarkingFakeDoltDyingOnSecondTERM(t *testing.T) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "dolt.started")
+	script := "#!/bin/sh\n" +
+		"[ \"$1\" = sql-server ] || { echo \"unexpected dolt args: $*\" >&2; exit 2; }\n" +
+		": > '" + marker + "'\n" +
+		"terms=0\n" +
+		"trap 'terms=$((terms+1)); [ \"$terms\" -ge 2 ] && exit 0' TERM\n" +
+		"while :; do sleep 5; done\n"
+	if err := os.WriteFile(filepath.Join(dir, "dolt"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake dolt: %v", err)
+	}
+	return dir, marker
+}
+
 const infraScopePrefix = "--user --scope --slice=gascity-infra.slice --collect --quiet "
 
 // infraUnitPattern is the transient scope unit name gc gives a scoped spawn.
@@ -700,11 +725,12 @@ func waitForFinalImage(t *testing.T, pid int, name string) {
 	}
 }
 
-// killFakeCgroup kills every process in the fake cgroup scope, the way a
-// runtime's cgroup-wide stop of an agent session does. It reads each
+// signalFakeCgroup signals every process in the fake cgroup scope, the way a
+// cgroup-wide stop does: a runtime killing an agent's scope whole (SIGKILL),
+// or a unit stop under KillMode=control-group (SIGTERM). It reads each
 // process's environment once: a process still exec'ing is passed over, so
 // wait for the target's final image first (waitForFinalImage).
-func killFakeCgroup(t *testing.T, scope string) {
+func signalFakeCgroup(t *testing.T, scope string, sig syscall.Signal) {
 	t.Helper()
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
@@ -720,8 +746,15 @@ func killFakeCgroup(t *testing.T, scope string) {
 		if err != nil || !bytes.Contains(environ, want) {
 			continue
 		}
-		_ = syscall.Kill(pid, syscall.SIGKILL)
+		_ = syscall.Kill(pid, sig)
 	}
+}
+
+// killFakeCgroup kills every process in the fake cgroup scope, the way a
+// runtime's cgroup-wide stop of an agent session does.
+func killFakeCgroup(t *testing.T, scope string) {
+	t.Helper()
+	signalFakeCgroup(t, scope, syscall.SIGKILL)
 }
 
 func processAlive(pid int) bool {
@@ -777,6 +810,138 @@ func TestAgentScopeKillSparesAgentStartedManagedDolt(t *testing.T) {
 			alive := !died
 			if alive != tc.wantAlive {
 				t.Fatalf("managed Dolt alive after the agent's cgroup kill = %t, want %t", alive, tc.wantAlive)
+			}
+		})
+	}
+}
+
+// startCallerUnitDirectManagedDolt starts the managed Dolt server directly
+// (no scope watchdog) from the caller unit's environment, as a gc call from
+// a non-session user unit that autostarts it. It returns the started
+// process, the fake dolt's running marker and the dolt log path.
+func startCallerUnitDirectManagedDolt(t *testing.T) (managedDoltStartedProcess, string, string) {
+	t.Helper()
+	withManagedDoltTestMode(t, false)
+	t.Setenv(managedDoltTestModeEnv, "")
+	t.Setenv(managedDoltScopeWatchdogEnv, "0")
+	binDir, marker := writeMarkingFakeDolt(t)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "dolt-config.yaml")
+	if err := os.WriteFile(configPath, []byte("log_level: debug\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	logFile, err := os.Create(filepath.Join(dir, "dolt.log"))
+	if err != nil {
+		t.Fatalf("create log: %v", err)
+	}
+	t.Cleanup(func() { _ = logFile.Close() })
+	started, err := startManagedDoltSQLServer("", configPath, logFile.Name(), logFile)
+	if err != nil {
+		t.Fatalf("startManagedDoltSQLServer: %v", err)
+	}
+	killInfraScopeTestPID(t, started.PID)
+	return started, marker, logFile.Name()
+}
+
+// startCallerUnitWatchdogManagedDolt starts the managed Dolt server under
+// the scope watchdog from the caller unit's environment. The fake dolt dies
+// only on its second SIGTERM (writeMarkingFakeDoltDyingOnSecondTERM), so a
+// death proves the watchdog forwarded the stop. It returns the started
+// process, the fake dolt's running marker and the dolt log path.
+func startCallerUnitWatchdogManagedDolt(t *testing.T) (managedDoltStartedProcess, string, string) {
+	t.Helper()
+	cityPath := t.TempDir()
+	binDir, marker := writeMarkingFakeDoltDyingOnSecondTERM(t)
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "dolt-config.yaml")
+	if err := os.WriteFile(configPath, []byte("log_level: debug\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	logFilePath := filepath.Join(dir, "dolt.log")
+	logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatalf("open log file: %v", err)
+	}
+	t.Cleanup(func() { _ = logFile.Close() })
+	parentEnv := removeEnvKey(os.Environ(), "PATH")
+	parentEnv = append(parentEnv, "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	started, err := startManagedDoltSQLServerWithScopeWatchdogEnv(cityPath, configPath, logFilePath, logFile, parentEnv)
+	if err != nil {
+		t.Fatalf("start managed dolt with scope watchdog: %v", err)
+	}
+	killInfraScopeTestPID(t, started.PID)
+	killInfraScopeTestPID(t, started.WatchdogPID)
+	return started, marker, logFilePath
+}
+
+// TestCallerUnitStopSparesManagedDoltStartedOutsideASession reproduces
+// issue #5910's non-session cases: a gc command run from a transient user
+// unit that is not an agent session (a one-shot service such as
+// nudge-drainer.service, a bot service) autostarts the managed Dolt server.
+// Stopping that unit SIGTERMs every process in its cgroup
+// (KillMode=control-group). Scoped into a scope of its own, the server (and
+// its watchdog) survive the stop; without infrastructure scoping the same
+// sequence kills the store, and the watchdog logs the report's signature —
+// "received terminated" — as it forwards the unit stop into the server.
+func TestCallerUnitStopSparesManagedDoltStartedOutsideASession(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("fake cgroup signal reads /proc")
+	}
+	for _, tc := range []struct {
+		name      string
+		watchdog  bool
+		unscoped  bool
+		wantAlive bool
+	}{
+		{name: "direct without infrastructure scoping the store dies with the unit", unscoped: true, wantAlive: false},
+		{name: "direct scoped the store survives the unit stop", unscoped: false, wantAlive: true},
+		{name: "scope watchdog without infrastructure scoping the store dies with the unit", watchdog: true, unscoped: true, wantAlive: false},
+		{name: "scope watchdog scoped the store survives the unit stop", watchdog: true, unscoped: false, wantAlive: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			installInfraScopeHost(t, infraScopeHost{linger: false, cgroup: userServiceCgroup})
+			if tc.unscoped {
+				disableInfraScopeForTests()
+			}
+			callerUnit := fmt.Sprintf("caller-unit-%d-%d", os.Getpid(), time.Now().UnixNano())
+			t.Setenv(fakeCgroupEnv, callerUnit)
+
+			var started managedDoltStartedProcess
+			var marker, logFilePath string
+			if tc.watchdog {
+				started, marker, logFilePath = startCallerUnitWatchdogManagedDolt(t)
+			} else {
+				started, marker, logFilePath = startCallerUnitDirectManagedDolt(t)
+			}
+			waitForFile(t, marker)
+			if !tc.watchdog {
+				// The direct fake marks itself running before it execs its
+				// final image; a signal scan over it mid-exec misses it.
+				waitForFinalImage(t, started.PID, fakeDoltFinalImage)
+			}
+			signalFakeCgroup(t, callerUnit, syscall.SIGTERM)
+
+			// A process the unit stop reached is gone within moments; one it
+			// spared is still running after the window.
+			window := 10 * time.Second
+			if tc.wantAlive {
+				window = 500 * time.Millisecond
+			}
+			died := infraPollUntil(window, func() bool { return !processAlive(started.PID) })
+			if alive := !died; alive != tc.wantAlive {
+				data, _ := os.ReadFile(logFilePath)
+				t.Fatalf("managed Dolt alive after the caller unit's SIGTERM = %t, want %t; log:\n%s", alive, tc.wantAlive, data)
+			}
+			if tc.watchdog && tc.wantAlive && !processAlive(started.WatchdogPID) {
+				data, _ := os.ReadFile(logFilePath)
+				t.Fatalf("watchdog pid %d died with the caller unit while the store was scoped; log:\n%s", started.WatchdogPID, data)
+			}
+			if tc.watchdog && !tc.wantAlive {
+				data, _ := os.ReadFile(logFilePath)
+				if !strings.Contains(string(data), "gc scope watchdog: received terminated") {
+					t.Fatalf("watchdog log missing the forwarded unit stop; log:\n%s", data)
+				}
 			}
 		})
 	}
