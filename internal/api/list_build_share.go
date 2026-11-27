@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"log"
+	"runtime/debug"
 	"sync"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
@@ -46,8 +47,9 @@ type listBuild[T any] struct {
 // reader's alone. build is this reader's build of the list; it runs detached
 // (runBackground) when this reader starts a build or creates the queued one,
 // so it must not use the request's context or input: the caller passes
-// copies.
-func (sh *listBuildSharer[T]) share(_ context.Context, s *Server, key string, build func(context.Context) (*ListOutput[T], error)) (*ListOutput[T], error) {
+// copies. A reader whose ctx ends first stops waiting with a 503; the build
+// runs on for its other readers.
+func (sh *listBuildSharer[T]) share(ctx context.Context, s *Server, key string, build func(context.Context) (*ListOutput[T], error)) (*ListOutput[T], error) {
 	b, started := sh.take(key, build)
 	if started {
 		sh.start(s, key, b)
@@ -55,7 +57,11 @@ func (sh *listBuildSharer[T]) share(_ context.Context, s *Server, key string, bu
 	if sh.joined != nil {
 		sh.joined(key, started)
 	}
-	<-b.done
+	select {
+	case <-b.done:
+	case <-ctx.Done():
+		return nil, apierr.ServiceUnavailable.Msgf("waiting for the list to build: %v", ctx.Err())
+	}
 	if b.err != nil {
 		return nil, b.err
 	}
@@ -91,10 +97,18 @@ func (sh *listBuildSharer[T]) take(key string, build func(context.Context) (*Lis
 }
 
 // start runs b, the build running in key's slot, detached, and ends it on
-// every exit path.
+// every exit path. A build that panics is logged and fails its readers with a
+// 500: the request path's recover (withRecovery) does not cover a detached
+// goroutine, and a panic there would take the process down.
 func (sh *listBuildSharer[T]) start(s *Server, key string, b *listBuild[T]) {
 	s.runBackground(func(ctx context.Context) {
 		defer sh.end(s, key, b)
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("api: panic in shared list build %q: %v\n%s", key, r, debug.Stack())
+				b.out, b.err = nil, apierr.Internal.Msg("building the list failed")
+			}
+		}()
 		b.out, b.err = b.run(ctx)
 	})
 }
