@@ -881,16 +881,16 @@ func (l *externalReadsLane) demandRepairs(ctx context.Context, env externalReads
 // returns the control dispatcher scope gaps it found.
 func runBackstopDemandRepairs(ctx context.Context, env externalReadsEnv, stderr io.Writer) []ControlDispatcherScopeGap {
 	cfg := env.Cfg
-	assigned, assignedStores, _, _, _ := collectAssignedWorkBeadsWithStores(env.CityPath, cfg, env.CityStore, env.RigStores, env.SuspendedRigPaths, env.Sessions, newReadyDemandCache())
+	assigned, assignedStores, assignedRefs, _, _ := collectAssignedWorkBeadsWithStores(env.CityPath, cfg, env.CityStore, env.RigStores, env.SuspendedRigPaths, env.Sessions, newReadyDemandCache())
 	repairPoolSlotWorkDirClobber(cfg, assigned, assignedStores, stderr)
 	stampRunSessionIdentity(cfg, assigned, assignedStores, env.Sessions, stderr)
-	canonicalizeLegacyBoundAssignedWork(cfg, assigned, assignedStores, env.Sessions, stderr)
+	canonicalizeLegacyBoundAssignedWork(cfg, assigned, assignedStores, assignedRefs, env.Sessions, stderr)
 	if ctx.Err() != nil {
 		return nil
 	}
 	routed, routedStores, routedRefs, _ := collectOpenUnassignedRoutedWork(env.CityPath, cfg, env.CityStore, env.RigStores, env.SuspendedRigPaths, stderr, nil, nil)
 	repairPoolSlotWorkDirClobber(cfg, routed, routedStores, stderr)
-	canonicalizeLegacyBoundUnassignedRoutedWork(cfg, routed, routedStores, stderr)
+	canonicalizeLegacyBoundUnassignedRoutedWork(cfg, routed, routedStores, routedRefs, stderr)
 	collapseSlotSuffixedRoutedWork(cfg, routed, routedStores, stderr)
 	return repairControlDispatcherRoutesForStoreScope(env.CityPath, cfg, routed, routedStores, routedRefs, stderr)
 }
