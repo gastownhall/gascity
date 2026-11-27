@@ -1343,6 +1343,13 @@ func managedCityStopTimeout(mc *managedCity) time.Duration {
 	return mc.cr.cfg.Daemon.ShutdownTimeoutDuration()
 }
 
+// forcedShutdownMessage is the line the supervisor prints when a city did
+// not exit within its shutdown timeout. It names gc suspend, which holds a
+// city's sessions without a stop the city has to answer.
+func forcedShutdownMessage(cityName string, timeout time.Duration) string {
+	return fmt.Sprintf("gc supervisor: city '%s' did not exit within %s after cancel; forcing shutdown (to keep its sessions from starting again, run `gc suspend %s`)", cityName, timeout, cityName)
+}
+
 func managedCityForcedStopTimeout(mc *managedCity) time.Duration {
 	timeout := managedCityStopTimeout(mc)
 	if timeout <= 0 {
@@ -1407,7 +1414,7 @@ func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) error {
 			}
 			return nil
 		case <-time.After(timeout):
-			fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after cancel; forcing shutdown\n", mc.name, timeout) //nolint:errcheck
+			fmt.Fprintln(stderr, forcedShutdownMessage(mc.name, timeout)) //nolint:errcheck
 			stopErr = fmt.Errorf("city %q did not exit within %s after cancel", mc.name, timeout)
 		}
 	}

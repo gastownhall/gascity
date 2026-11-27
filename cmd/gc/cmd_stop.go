@@ -62,7 +62,16 @@ registered city that no controller served, the city is left unregistered
 rather than restored, so the supervisor does not relaunch it under that
 stop, and gc stop prints the command that finishes the stop: it names
 the city by its path, since its name no longer resolves. Use --force to
-skip the interrupt grace period and go straight to kill.`,
+skip the interrupt grace period and go straight to kill.
+
+To keep a city from starting sessions without stopping or unregistering
+it, use "gc suspend <city>" instead; "gc resume <city>" lifts it. When no
+gc command can run, suspend the city by hand by writing
+
+    {"city":{"suspended":true}}
+
+to <city>/.gc/runtime/suspension-state.json; the controller reads it on
+its next pass and starts no session while it is there.`,
 		Args:              cobra.MaximumNArgs(1),
 		ValidArgsFunction: completeCityNames,
 		RunE: func(_ *cobra.Command, args []string) error {

@@ -1973,6 +1973,7 @@ go_test(
         "op_record_verbs_test.go",
         "op_sweep_events_test.go",
         "op_sweep_test.go",
+        "operator_brake_text_test.go",
         "ops_failpoint_test.go",
         "order_args_channel_test.go",
         "order_backend_followup_test.go",

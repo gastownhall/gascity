@@ -5407,6 +5407,15 @@ stop, and gc stop prints the command that finishes the stop: it names
 the city by its path, since its name no longer resolves. Use --force to
 skip the interrupt grace period and go straight to kill.
 
+To keep a city from starting sessions without stopping or unregistering
+it, use "gc suspend &lt;city&gt;" instead; "gc resume &lt;city&gt;" lifts it. When no
+gc command can run, suspend the city by hand by writing
+
+    &#123;"city":&#123;"suspended":true&#125;&#125;
+
+to &lt;city&gt;/.gc/runtime/suspension-state.json; the controller reads it on
+its next pass and starts no session while it is there.
+
 ```
 gc stop [path|name] [flags]
 ```
