@@ -142,7 +142,7 @@ func classifyDemandTrigger(triggerID, dir string, opts hookClaimOptions, ops hoo
 	if status != "open" || !demandRowServable(bead) || !hookClaimMatchesRoute(bead, opts.RouteTargets) {
 		return status, events.DemandClaimBenign
 	}
-	switch classifyDemandRowClaimability(bead, ops.nowOrWallClock()) {
+	switch classifyDemandRowClaimability(bead, ops.nowOrWallClock(), false) {
 	case demandRowClaimable:
 		// Open, servable, route-matching, and claimable right now — the agreement
 		// invariant breaking.

@@ -47,6 +47,38 @@ func newAdmission(legs []Leg) *inputadmission.Judge {
 	return inputadmission.New(sources, time.Now())
 }
 
+// InputWithheld judges rows — one leg's assigned rows, read live by a
+// controller probe — for input admission over that leg's store alone, and
+// returns the withheld row ids (#8832). The hook's claim path refuses a
+// withheld row, so a wake, keep-awake, park or ladder probe that counts it as
+// work holds a session for work it cannot claim — the loop a dispatch hold
+// caused (ga-5736js). The verdict is the same rule the ready reader applies,
+// read live; a probe that runs between a hold and its release simply reads
+// the newer facts next tick.
+//
+// A leg with a nil store, no rows, or a judgment that fails withholds
+// nothing: the probe keeps its ungated answer rather than failing a seat
+// decision from a read hiccup, the same never-under-count rule the demand
+// pass's gate applies (PartialResultError there, a conservative answer here).
+func InputWithheld(leg Leg, rows []beads.Bead) map[string]bool {
+	if leg.Store == nil || len(rows) == 0 {
+		return nil
+	}
+	adm := newAdmission([]Leg{{Label: "assigned", Store: leg.Store}})
+	if adm == nil {
+		return nil
+	}
+	verdicts, err := adm.Judge(context.Background(), 0, rows)
+	if err != nil || len(verdicts) == 0 {
+		return nil
+	}
+	withheld := make(map[string]bool, len(verdicts))
+	for id := range verdicts {
+		withheld[id] = true
+	}
+	return withheld
+}
+
 // legIndexFor returns the index of the leg whose store has key — the leg the
 // bounded read is serving — or -1.
 func legIndexFor(legs []Leg, key string) int {

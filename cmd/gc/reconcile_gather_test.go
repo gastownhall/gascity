@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"io"
 	"reflect"
@@ -32,6 +33,19 @@ func (p *sleepCountingProvider) SleepCapability(string) runtime.SessionSleepCapa
 	return runtime.SessionSleepCapabilityFull
 }
 
+// recordGatedDemandReads runs the external-reads lane's demand read once,
+// synchronously, at now, and returns the recording it publishes — what the
+// lane does off the pass in production. Every city's demand legs are gate
+// legs (#8832) and the v2 pass serves a gate leg's Ready only from a gated
+// recording, so a fixture that runs real passes records one per pass. The
+// lane's repair steps do not run: the fixture's own writes are its state.
+func recordGatedDemandReads(now time.Time, cityPath string, cfg *config.City, cityStore beads.Store, rigStores map[string]beads.Store) *externalReadsRecording {
+	env := externalReadsEnv{CityPath: cityPath, Cfg: cfg, CityStore: cityStore, RigStores: rigStores}
+	l := newExternalReadsLane(time.Minute, func() (externalReadsEnv, error) { return env, nil }, nil, nil, nil, io.Discard)
+	l.now = func() time.Time { return now }
+	return l.publish(l.read(context.Background(), l.sources(env)))
+}
+
 // gatherFixture is a primed, exact sessions cache (the controller's SQLite
 // binding) holding rows, a city on the worker pool, an observation cache with
 // one complete inventory pass, and a planner.
@@ -60,10 +74,15 @@ func newGatherFixture(t *testing.T, rows ...beads.Bead) *gatherFixture {
 	f.p = newPlanner(realPlannerClock{}, func() time.Duration { return time.Minute }, nil, f.inflight, nil, io.Discard)
 	f.env = gatherEnv{
 		CityPath: t.TempDir(), CityName: "test-city",
-		Env:          f.cur.Load,
-		Sessions:     func() beads.Store { return f.cache },
-		RigStores:    func() map[string]beads.Store { return nil },
-		Recording:    f.rec.Load,
+		Env:       f.cur.Load,
+		Sessions:  func() beads.Store { return f.cache },
+		RigStores: func() map[string]beads.Store { return nil },
+		Recording: func() *externalReadsRecording {
+			if r := f.rec.Load(); r != nil {
+				return r // a test pinned the lane's recording
+			}
+			return recordGatedDemandReads(gatherNow, f.env.CityPath, f.cur.Load().Cfg, f.cache, nil)
+		},
 		Observations: func() *ObservationCache { return obs },
 		Episodes:     func() (map[string]session.StartupHealthEpisode, error) { return readStartupHealthEpisodes(f.cache) },
 		Templates: func(*reconcileEnv, time.Time) templateResolver {
@@ -99,7 +118,10 @@ func TestGatherReadsNoBackingStore(t *testing.T) {
 		t.Fatalf("census rows = %d, want 2", len(w.Census.Rows))
 	}
 	for _, op := range f.backing.readLog() {
-		if !strings.HasPrefix(op, "Ready ") {
+		// The fixture's Recording closure runs the lane's read inline, so the
+		// backing also sees its two reads: the gated Ready and the live claims
+		// List (#8832). In production both run off the pass.
+		if !strings.HasPrefix(op, "Ready ") && op != "List status=in_progress live=true" {
 			t.Errorf("gather read the backing store: %s", op)
 		}
 	}
@@ -211,13 +233,17 @@ func TestGatherBootStateComputed(t *testing.T) {
 		{name: "no inventory pass", want: bootState{CachePrimed: true, RecordingSeen: true}, arrange: func(_ *testing.T, f *gatherFixture) {
 			f.env.Observations = nil
 		}},
-		{name: "lane-fed leg, no recording", want: bootState{CachePrimed: true, InventoryComplete: true}, arrange: laneFedRig},
+		{name: "lane-fed leg, no recording", want: bootState{CachePrimed: true, InventoryComplete: true}, arrange: func(t *testing.T, f *gatherFixture) {
+			laneFedRig(t, f)
+			f.env.Recording = func() *externalReadsRecording { return nil } // the lane has not published yet
+		}},
 		{name: "lane-fed leg, recording", want: bootState{CachePrimed: true, InventoryComplete: true, RecordingSeen: true}, arrange: func(t *testing.T, f *gatherFixture) {
 			laneFedRig(t, f)
 			f.rec.Store(&externalReadsRecording{Seq: 1})
 		}},
 		{name: "suspended city, lane-fed leg, no recording", want: bootState{CachePrimed: true, InventoryComplete: true}, arrange: func(t *testing.T, f *gatherFixture) {
 			laneFedRig(t, f)
+			f.env.Recording = func() *externalReadsRecording { return nil } // the lane has not published yet
 			f.env.Suspension = suspended
 		}},
 	} {

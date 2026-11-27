@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/inputadmission"
 	"github.com/gastownhall/gascity/internal/readywork"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -60,6 +61,13 @@ type demandReads interface {
 	// ClosedNamedIndex is the city store's closed named-session index
 	// (readyAssignedWorkAssignees). It reads closed history.
 	ClosedNamedIndex(store beads.Store) (session.ClosedNamedSessionBeadIndex, error)
+	// InputWithheldFor returns the rows input admission withheld in the
+	// pass's own gated read of leg, keyed by row id with the
+	// verdict (#8832): the recording's verdicts for a v2 pass, judged over
+	// every leg at once by the lane's one gate, and none for legacy, whose
+	// arms judge live. A leg with no gated recording withholds nothing —
+	// its reads are partial anyway.
+	InputWithheldFor(leg readywork.Leg) map[string]inputadmission.Withhold
 }
 
 // demandReadsOrLegacy treats a nil reads as legacy.
@@ -113,6 +121,12 @@ func (legacyDemandReads) ClosedNamedIndex(store beads.Store) (session.ClosedName
 	return session.BuildClosedNamedSessionBeadIndex(beads.SessionStore{Store: store})
 }
 
+// InputWithheldFor is none for legacy: its pass judges its arms' rows live
+// (readywork.InputWithheld), inside its gate deadline.
+func (legacyDemandReads) InputWithheldFor(readywork.Leg) map[string]inputadmission.Withhold {
+	return nil
+}
+
 // demandLegCache classifies a demand leg: its CachingStore, behind the
 // bead-policy front door, and whether the leg is exact (the cache's backing
 // declares beads.CachedReadExact). A leg with no CachingStore is not exact.
@@ -146,7 +160,9 @@ func demandLegCache(store beads.Store) (cache *beads.CachingStore, exact bool) {
 //     exact gate leg, the rows the cross-store rule settles by the leg's own
 //     verdict are judged from its cache instead (ReadyAll).
 //   - Cached: the cache's List on an exact leg; the strict cached List on
-//     any other, with no live fallback.
+//     any other, with no live fallback. On an exact gate leg the in_progress
+//     view is the cache's rows widened with the claims the lane's source
+//     read live (legRecording.Claimed, #8832).
 //   - CachedReady: unavailable, so ReadyAll is the whole Ready answer.
 //   - ReadyLimit: none. The assigned Ready set is not truncated by
 //     max_wakes_per_tick (BEHAVIORS #31 F).
@@ -228,13 +244,50 @@ func (r *v2DemandReads) Cached(store beads.Store, query beads.ListQuery) ([]bead
 	}
 	return r.once(demandLegRead{leg: cache, shape: shape}, func() ([]beads.Bead, error) {
 		if exact {
-			return cache.List(query)
+			rows, err := cache.List(query)
+			// #8832: the pass serves an exact gate leg's Ready from the lane's
+			// fresh gated recording, so its claimed view must see what the lane
+			// read live too — a claim written straight to the backing between
+			// the cache's convergence points would otherwise drop the row from
+			// assigned work and read its seat as idle.
+			if query.Status == "in_progress" && crossStoreGateLeg(r.gateLegs, store) >= 0 {
+				if s, lerr := r.rec.lookup(sourceDemand, store, r.now); lerr == nil {
+					rows = unionClaimedRows(s.Leg, rows)
+				}
+			}
+			return rows, err
 		}
 		if rows, ok := cache.CachedList(query); ok {
 			return rows, nil
 		}
 		return nil, &beads.PartialResultError{Op: "v2 demand " + shape, Err: beads.ErrCacheUnavailable}
 	})
+}
+
+// unionClaimedRows widens an exact gate leg's cached in_progress rows with the
+// claims its lane source read live (legRecording.Claimed). The union only adds
+// rows — the cache keeps its copy of a row both hold, so an in-process claim
+// the cache already absorbed still counts and the claimed-demand cut keeps its
+// read. A failed recorded half leaves the cache's rows as they are.
+func unionClaimedRows(rec legRecording, rows []beads.Bead) []beads.Bead {
+	if rec.ClaimedErr != nil || len(rec.Claimed) == 0 {
+		return rows
+	}
+	held := make(map[string]bool, len(rows))
+	for _, b := range rows {
+		held[b.ID] = true
+	}
+	extra := make([]beads.Bead, 0, len(rec.Claimed))
+	for _, b := range rec.Claimed {
+		if !held[b.ID] {
+			extra = append(extra, b)
+		}
+	}
+	if len(extra) == 0 {
+		return rows
+	}
+	// rows may alias the cache's slice, so the widened set is a new one.
+	return append(slices.Clone(rows), extra...)
 }
 
 // ReadyAll on a split city's gate leg is the external-reads lane's gated
@@ -319,6 +372,22 @@ func (r *v2DemandReads) ClosedNamedIndex(store beads.Store) (session.ClosedNamed
 		return session.ClosedNamedSessionBeadIndex{}, &beads.PartialResultError{Op: "v2 demand " + shape, Err: err}
 	}
 	return s.ClosedNamed, s.Err
+}
+
+// InputWithheldFor is the recording's own verdicts for the leg: what the
+// lane's one gate withheld from this leg's gated snapshot, judged over every
+// leg at once (#8832). A missing, stale or failed recording withholds
+// nothing — its reads are partial, and the pass retains instead of counting
+// a half it cannot see.
+func (r *v2DemandReads) InputWithheldFor(leg readywork.Leg) map[string]inputadmission.Withhold {
+	if leg.Store == nil {
+		return nil
+	}
+	s, err := r.rec.lookup(sourceDemand, leg.Store, r.now)
+	if err != nil || s.Err != nil {
+		return nil
+	}
+	return s.Leg.InputWithheld
 }
 
 // recorded serves a lane-fed leg's live read from the external-reads

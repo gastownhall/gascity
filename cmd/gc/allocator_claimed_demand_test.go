@@ -40,11 +40,13 @@ func claimedGather(t *testing.T, reads func(*beads.CachingStore) demandReads, no
 	return v
 }
 
-// recordedOpen is a v2 reads whose recording of cache's leg lists open.
+// recordedOpen is a v2 reads whose recording of cache's leg lists open, as
+// the lane gated it (#8832: the pass serves a gate leg's Ready only from a
+// gated recording).
 func recordedOpen(open ...beads.Bead) func(*beads.CachingStore) demandReads {
 	return func(cache *beads.CachingStore) demandReads {
 		rec := &externalReadsRecording{Seq: 1, FreshFor: time.Minute, Sources: map[sourceKey]sourceResult{
-			keyOf(sourceDemand, cache): {EndedAt: allocNow.Add(-5 * time.Second), sourcePayload: sourcePayload{Leg: legRecording{RawOpen: open, ReadyAll: open}}},
+			keyOf(sourceDemand, cache): {EndedAt: allocNow.Add(-5 * time.Second), sourcePayload: sourcePayload{Leg: legRecording{RawOpen: open, ReadyAll: open, ReadyGated: true}}},
 		}}
 		return newV2DemandReads(allocNow, rec)
 	}
@@ -317,7 +319,10 @@ func TestPassRecordCountsALaggingClaimOnce(t *testing.T) {
 	rig, _ := newDemandCache(t, false, claimed)
 	f.env.RigStores = func() map[string]beads.Store { return map[string]beads.Store{"alpha": rig} }
 	f.rec.Store(&externalReadsRecording{Seq: 1, FreshFor: time.Hour, Sources: map[sourceKey]sourceResult{
-		keyOf(sourceDemand, rig): {EndedAt: gatherNow, sourcePayload: sourcePayload{Leg: legRecording{RawOpen: []beads.Bead{routed("w-1")}, ReadyAll: []beads.Bead{routed("w-1")}}}},
+		keyOf(sourceDemand, rig): {EndedAt: gatherNow, sourcePayload: sourcePayload{Leg: legRecording{RawOpen: []beads.Bead{routed("w-1")}, ReadyAll: []beads.Bead{routed("w-1")}, ReadyGated: true}}},
+		// The city leg is exact and empty; its gated Ready is recorded too
+		// (#8832), so the pin covers every gate leg the pass reads.
+		keyOf(sourceDemand, f.cache): {EndedAt: gatherNow, sourcePayload: sourcePayload{Leg: legRecording{ReadyGated: true}}},
 	}})
 
 	f.runPass(0)

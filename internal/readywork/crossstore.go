@@ -743,6 +743,17 @@ func (g *LegGate) Gate(ctx context.Context, own int, rows []beads.Bead) ([]beads
 	return gateItems(ctx, g.cs, g.adm, owners, items, 0)
 }
 
+// Withheld returns the rows input admission has withheld in this gate's
+// judgments so far, keyed by row id: the recording a demand pass keeps beside
+// its gated reads, so its wake and keep-awake counting refuse the same rows
+// the reader did.
+func (g *LegGate) Withheld() map[string]inputadmission.Withhold {
+	if g == nil || g.adm == nil {
+		return nil
+	}
+	return g.adm.WithheldRows()
+}
+
 // listing reads legs[own]'s absent-blocker listing, once for the gate's life.
 func (g *LegGate) listing(ctx context.Context, own int) legResult {
 	g.mu.Lock()

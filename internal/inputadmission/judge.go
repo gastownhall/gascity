@@ -157,6 +157,9 @@ type Judge struct {
 	// convoy with no withholding verdict is not re-read.
 	verdicts map[string]Withhold
 	judged   map[string]bool
+	// withheldRows records every row a Judge call withheld, keyed by row id,
+	// for the caller that must report them (the demand pass's InputWithheld).
+	withheldRows map[string]Withhold
 	// satisfied memoizes each prerequisite target's copy-rule verdict.
 	satisfied map[string]bool
 }
@@ -171,15 +174,30 @@ type rootRead struct {
 // against now.
 func New(sources []Source, now time.Time) *Judge {
 	return &Judge{
-		sources:   sources,
-		now:       now,
-		roots:     make(map[string]rootRead),
-		stops:     make(map[string]workflowstop.WorkflowStop),
-		stopDone:  make(map[string]bool),
-		verdicts:  make(map[string]Withhold),
-		judged:    make(map[string]bool),
-		satisfied: make(map[string]bool),
+		sources:      sources,
+		now:          now,
+		roots:        make(map[string]rootRead),
+		stops:        make(map[string]workflowstop.WorkflowStop),
+		stopDone:     make(map[string]bool),
+		verdicts:     make(map[string]Withhold),
+		judged:       make(map[string]bool),
+		withheldRows: make(map[string]Withhold),
+		satisfied:    make(map[string]bool),
 	}
+}
+
+// WithheldRows returns every row the Judge's calls have withheld so far,
+// keyed by row id, with its verdict. The demand pass records it beside the
+// gated reads so wake and keep-awake counting see the same rows the reader
+// refused.
+func (j *Judge) WithheldRows() map[string]Withhold {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	out := make(map[string]Withhold, len(j.withheldRows))
+	for id, w := range j.withheldRows {
+		out[id] = w
+	}
+	return out
 }
 
 // Judge returns which of rows — every one served by sources[own], whose store
@@ -202,6 +220,9 @@ func (j *Judge) Judge(ctx context.Context, own int, rows []beads.Bead) (map[stri
 		}
 		if w.Reason != "" {
 			out[row.ID] = w
+			j.mu.Lock()
+			j.withheldRows[row.ID] = w
+			j.mu.Unlock()
 		}
 	}
 	return out, nil
