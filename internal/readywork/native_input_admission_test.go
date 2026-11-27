@@ -423,3 +423,35 @@ func TestNativeInputAdmissionReadyAndDemand(t *testing.T) {
 		})
 	}
 }
+
+// TestNativeInputAdmissionBeforeReadyLimit is the #8832 report's limit
+// reproduction: more held-input steps than a bounded read's limit plus its
+// slack, all ordered ahead of one ready step, must not starve that step —
+// admission runs before the limit, so Read(limit=1) returns it.
+func TestNativeInputAdmissionBeforeReadyLimit(t *testing.T) {
+	const limit = 1
+	for city, open := range openCities {
+		t.Run(city, func(t *testing.T) {
+			work, graph, legs := open(t)
+			held := newNativeWorkflow(t, work, graph, beads.Bead{Labels: []string{"hold:external"}})
+			first, later := 0, 3
+			if err := graph.Update(held.step.ID, beads.UpdateOpts{Priority: &first}); err != nil {
+				t.Fatalf("raising held step priority: %v", err)
+			}
+			for i := 0; i < limit+boundedSlack; i++ {
+				mustCreate(t, graph, beads.Bead{Title: "held step", Type: "task", Priority: &first, Metadata: map[string]string{
+					"gc.root_bead_id": held.root.ID, "gc.routed_to": "gascity/pool",
+				}})
+			}
+			free := newNativeWorkflow(t, work, graph, beads.Bead{})
+			if err := graph.Update(free.step.ID, beads.UpdateOpts{Priority: &later}); err != nil {
+				t.Fatalf("lowering ready step priority: %v", err)
+			}
+			q := poolQuery
+			q.Limit = limit
+			if got := readyIDs(t, legs, q); !slices.Equal(got, []string{free.step.ID}) {
+				t.Fatalf("Ready(limit=%d) = %v, want [%s]: the %d steps ahead of it are withheld by held input %s", limit, got, free.step.ID, limit+boundedSlack+1, held.input.ID)
+			}
+		})
+	}
+}
