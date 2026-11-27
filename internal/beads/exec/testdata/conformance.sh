@@ -44,6 +44,34 @@ JQ_NORMALIZE_BEAD='
   | .labels = [.labels // [] | .[] | select(startswith("meta:") | not)]
 '
 
+# jq function mirroring beads.ReadinessWorkOutcome over a normalized bead: the
+# gc.work_outcome readiness judges a closed dependency by. A formula step
+# (gc.step_ref) whose close dispatch reads as a verdict reports none: one with
+# a terminal gc.outcome, an attempt root (beadmeta.IsAttemptRoot:
+# gc.logical_bead_id plus a retry-run/retry-eval kind, gc.attempt or
+# gc.retry_attempt, or a gc.control_for on a bead whose gc.kind is not a
+# control kind), or a gc.on_fail=abort_scope member. gc.outcome,
+# gc.control_for and gc.on_fail are trimmed as strings.TrimSpace trims them.
+# shellcheck disable=SC2016  # $m, $key and $kind are jq variables, not bash
+JQ_READINESS_WORK_OUTCOME_DEF='
+  def readiness_work_outcome:
+    (.metadata // {}) as $m
+    | def present($key): ($m[$key] // "") != "";
+      def trimmed($key): ($m[$key] // "") | tostring | sub("^\\s+"; "") | sub("\\s+$"; "");
+      def kind_in(kinds): ($m["gc.kind"] // "") as $kind | any(kinds; . == $kind);
+      if present("gc.step_ref")
+         and (any("pass", "fail", "skipped", "canceled"; . == trimmed("gc.outcome"))
+              or (present("gc.logical_bead_id")
+                  and (kind_in("retry-run", "retry-eval")
+                       or present("gc.attempt") or present("gc.retry_attempt")))
+              or (trimmed("gc.control_for") != ""
+                  and (kind_in("retry", "ralph", "check", "retry-eval", "fanout", "drain", "scope-check", "workflow-finalize") | not))
+              or trimmed("gc.on_fail") == "abort_scope")
+      then ""
+      else ($m["gc.work_outcome"] // "")
+      end;
+'
+
 # next_id atomically increments the counter and prints the new ID.
 next_id() {
 	local counter_file="$STATE_ROOT/.counter"
@@ -243,9 +271,9 @@ ready)
 	deps="[]"
 	[ -f "$DEPS_FILE" ] && deps=$(cat "$DEPS_FILE")
 	# shellcheck disable=SC2086
-	jq -s --argjson deps "$deps" "
+	jq -s --argjson deps "$deps" "$JQ_READINESS_WORK_OUTCOME_DEF
 	  [.[] | $JQ_NORMALIZE_BEAD] as \$beads
-	  | (\$beads | map({key: .id, value: {status: .status, work_outcome: (if .metadata[\"gc.outcome\"] == \"pass\" and (.metadata[\"gc.step_ref\"] // \"\") != \"\" then \"\" else (.metadata[\"gc.work_outcome\"] // \"\") end)}}) | from_entries) as \$byid
+	  | (\$beads | map({key: .id, value: {status: .status, work_outcome: readiness_work_outcome}}) | from_entries) as \$byid
 	  | [\$beads[] | select(.status == \"open\") | . as \$b | select(
 	      [\$deps[] | select(.issue_id == \$b.id and (.type == \"blocks\" or .type == \"waits-for\" or .type == \"conditional-blocks\"))]
 	      | all(\$byid[.depends_on_id].status == \"closed\" and \$byid[.depends_on_id].work_outcome != \"blocked\")

@@ -2,9 +2,11 @@ package beads
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -647,6 +649,38 @@ func TestSQLiteEnrichReadyProjectionLeavesVanishedRowsAlone(t *testing.T) {
 			if b.IsBlocked == nil || !*b.IsBlocked {
 				t.Fatalf("vanished row lost its verdict: IsBlocked = %v, want true", b.IsBlocked)
 			}
+		}
+	}
+}
+
+// TestSQLiteTrimSpaceCharsTrimsLikeStringsTrimSpace pins that the SQLite ready
+// statement trims gc.outcome and gc.on_fail exactly as ReadinessWorkOutcome
+// and dispatch do: TRIM(x, sqliteTrimSpaceChars) equals strings.TrimSpace(x)
+// for every rune through U+3100, which spans the whole Unicode White_Space
+// set, and for format characters Go does not count as space.
+func TestSQLiteTrimSpaceCharsTrimsLikeStringsTrimSpace(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	stmt, err := db.Prepare("SELECT TRIM(?, " + sqliteTrimSpaceChars + ")")
+	if err != nil {
+		t.Fatalf("preparing TRIM over sqliteTrimSpaceChars: %v", err)
+	}
+	t.Cleanup(func() { _ = stmt.Close() })
+	runes := []rune{0x180e, 0x200b, 0x2060, 0xfeff, 0x1f600}
+	for r := rune(1); r <= 0x3100; r++ {
+		runes = append(runes, r)
+	}
+	for _, r := range runes {
+		value := string(r) + "fail" + string(r)
+		var got string
+		if err := stmt.QueryRow(value).Scan(&got); err != nil {
+			t.Fatalf("TRIM(%q): %v", value, err)
+		}
+		if want := strings.TrimSpace(value); got != want {
+			t.Errorf("TRIM(%q, sqliteTrimSpaceChars) = %q, want %q: SQLite and strings.TrimSpace disagree on %U", value, got, want, r)
 		}
 	}
 }
