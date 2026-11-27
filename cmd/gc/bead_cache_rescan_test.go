@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -271,5 +273,30 @@ func TestSupervisorReloadDoesNotWaitForAScan(t *testing.T) {
 	cache.ReconcileIfDueForTest()
 	if got := backing.lists.Load() - lists; got != 1 {
 		t.Fatalf("after the blocked scan: backing listed %d times over two loop steps, want 1 for the reload's request", got)
+	}
+}
+
+// TestSupervisorReloadHelpMentionsBeadCacheRescan: the reload help says it
+// also re-scans the bead caches GET /beads serves, and that the re-scan
+// finishes after the reply.
+func TestSupervisorReloadHelpMentionsBeadCacheRescan(t *testing.T) {
+	var out bytes.Buffer
+	cmd := newSupervisorReloadCmd(io.Discard, io.Discard)
+	cmd.SetOut(&out)
+	if err := cmd.Help(); err != nil {
+		t.Fatalf("Help: %v", err)
+	}
+	help := strings.Join(strings.Fields(out.String()), " ")
+	for _, want := range []string{
+		"requests an immediate re-scan of every running city's bead caches",
+		"GET /beads",
+		"after the reload replies",
+	} {
+		if !strings.Contains(help, want) {
+			t.Errorf("gc supervisor reload --help does not say %q:\n%s", want, out.String())
+		}
+	}
+	if !strings.Contains(cmd.Short, "bead caches") {
+		t.Errorf("Short = %q; want it to name the bead caches", cmd.Short)
 	}
 }

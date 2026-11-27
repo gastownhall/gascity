@@ -1274,11 +1274,18 @@ func newSupervisorReloadCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "reload",
-		Short: "Trigger immediate reconciliation of all cities",
+		Short: "Trigger immediate reconciliation of all cities and their bead caches",
 		Long: `Send a reload signal to the running supervisor, causing it to
 immediately re-read the registry and reconcile all cities. Use this
 after killing a child process to force the supervisor to detect the
 change and restart it without waiting for the next patrol tick.
+
+The reload also requests an immediate re-scan of every running city's
+bead caches, which GET /beads and the dashboard serve, so a bead
+written outside gc (for example closed with bd close) shows without
+waiting for the cache's next periodic re-scan. The re-scan runs in the
+background and finishes after the reload replies; a suspended city or
+rig is not re-scanned until it resumes.
 
 The reload also re-reads write_auth_verify_key from supervisor.toml and
 swaps the write-auth verifying keys in place, so a key can be enrolled,
