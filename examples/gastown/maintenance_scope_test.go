@@ -1005,7 +1005,7 @@ func TestJsonlExportMovesLegacySnapshotToLegacyDirWithoutDeletingIt(t *testing.T
 		t.Fatalf("seed history lost: %v\n%s", err, out)
 	}
 	// Spike detection read the old {"rows"} baseline (2) and matched it.
-	if strings.Contains(f.read(t, f.gcLog), "JSONL spike") {
+	if strings.Contains(f.read(t, f.gcLog), "ESCALATION: JSONL row-count") {
 		t.Fatalf("switching formats must not trip the spike check:\n%s", f.read(t, f.gcLog))
 	}
 }
