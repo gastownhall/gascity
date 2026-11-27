@@ -354,12 +354,13 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	keyedTranscriptPaths := session.ResolveKeyedTranscriptPaths(sessionTranscriptLookupCandidates(pageSessions), s.sessionLogPaths(), sessionTranscriptProviderFallback(cfg))
 	items := make([]sessionResponse, len(pageSessions))
 	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
+	// A failed active-work read leaves only active_bead empty, so it is not
+	// a partial roster (activeBeadIndex.partialErrors).
 	activeBeads := s.newActiveBeadIndex()
 	for i, sess := range pageSessions {
 		items[i] = sessionResponseWithReason(sess, responseByID[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
 		s.enrichSessionResponseWithKeyedPaths(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, activeBeads.lookup, false, 0, keyedTranscriptPaths)
 	}
-	partialErrors = append(partialErrors, activeBeads.partialErrors()...)
 
 	if !pp.IsPaging {
 		writeJSON(w, http.StatusOK, listResponse{

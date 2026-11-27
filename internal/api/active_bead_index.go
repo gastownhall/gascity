@@ -71,7 +71,11 @@ func (x *activeBeadIndex) lookup(rig string, assignees ...string) string {
 }
 
 // partialErrors returns one message per store whose read failed, in the
-// order the reads ran, for the list's partial_errors.
+// order the reads ran, for the agent list's partial_errors. The session lists
+// do not report them: their partial flag says the session roster itself is
+// incomplete, which fails gc session list and the core pack's orders that
+// read it, while a failed read here leaves every row in place with only its
+// active_bead empty.
 func (x *activeBeadIndex) partialErrors() []string {
 	return x.errs
 }
@@ -79,8 +83,8 @@ func (x *activeBeadIndex) partialErrors() []string {
 // storeWork returns store's newest in_progress bead per assignee, reading the
 // store on its first use. The read takes the store's cached answer when its
 // cache serves one and lists the store only when the cache declines. A failed
-// read is logged and reported once and never retried within the build; a
-// partial result keeps the rows that decoded.
+// read is logged and recorded for partialErrors once and never retried within
+// the build; a partial result keeps the rows that decoded.
 func (x *activeBeadIndex) storeWork(name string, store beads.WorkStore) map[string]string {
 	key := beads.PhysicalStoreKey(store)
 	if work, ok := x.loaded[key]; ok {

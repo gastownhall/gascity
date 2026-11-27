@@ -414,12 +414,13 @@ func (s *activeReadFailingStore) count() int {
 }
 
 // TestActiveBeadIndexPartialErrors: an active-work read that fails is logged
-// once and reported once in the list's partial_errors, whatever the number of
-// rows reaching the store, and the store is not read again within the build.
-// A failed read answers no row, so a row falls through to the next store in
-// scope; a partial result still answers from the rows that decoded. A partial
-// agent list is not cached: the next request, once the store reads again,
-// rebuilds and answers in full.
+// once, whatever the number of rows reaching the store, and the store is not
+// read again within the build. A failed read answers no row, so a row falls
+// through to the next store in scope; a partial result still answers from the
+// rows that decoded. The agent list reports the failure once in its
+// partial_errors and is not cached: the next request, once the store reads
+// again, rebuilds and answers in full. A session list does not report it: its
+// partial flag says the roster is incomplete, and the roster is whole.
 func TestActiveBeadIndexPartialErrors(t *testing.T) {
 	failed := errors.New("bd list: exit status 1")
 	partial := &beads.PartialResultError{Op: "bd list", Err: errors.New("decoding an unrelated bead")}
@@ -542,9 +543,8 @@ func TestActiveBeadIndexPartialErrors(t *testing.T) {
 					t.Errorf("session %s active_bead = %q, want beta's %q", item.ID, item.ActiveBead, want[item.ID])
 				}
 			}
-			wantErrs := []string{fmt.Sprintf("rig alpha: looking up active work: %v", failed)}
-			if !resp.Partial || !slices.Equal(resp.PartialErrors, wantErrs) {
-				t.Errorf("partial = %v, partial_errors = %q, want true and %q", resp.Partial, resp.PartialErrors, wantErrs)
+			if resp.Partial || len(resp.PartialErrors) != 0 {
+				t.Errorf("partial = %v, partial_errors = %q; want a whole roster, not a partial one", resp.Partial, resp.PartialErrors)
 			}
 			if n := alpha.count(); n != 1 {
 				t.Errorf("failing store read %d times for %d sessions, want 1", n, len(want))
