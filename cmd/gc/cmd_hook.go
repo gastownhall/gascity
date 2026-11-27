@@ -1014,6 +1014,11 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 	}
 	report := newHookStoreFailureReport("gc hook --claim", stderr, emitFailure)
 	noteStoreFailure := report.note
+	// answers is this invocation's answer set (hookStoreAnswers): selection
+	// reads each store at most once, and a claim acts only on its store's
+	// fresh re-read.
+	answers := newHookStoreAnswers(run)
+	multiLeg := len(stores) > 1
 	remaining := stores
 	// claimsErrored aggregates the per-store signal that a store reported ready
 	// work but every eligible claim mutation errored, so the shared drain below can
@@ -1024,7 +1029,7 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 	// store's claim keeps the invocation quiet about it.
 	var left []beads.Bead
 	for len(remaining) > 0 {
-		discovered, selected, err := selectStoreWithWorkRetrying(workQuery, remaining, primary, run, &ops, noteStoreFailure)
+		discovered, selected, err := selectStoreWithWorkRetrying(workQuery, remaining, primary, answers.read, &ops, noteStoreFailure)
 		if err != nil {
 			report.failed(workQuery, err)
 			return reportClaimWorkQueryFailure(err, stderr)
@@ -1036,7 +1041,7 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		// mutation, and a primary-leg failure there is surfaced exactly like a
 		// discovery failure: it is the same read of the same store, moments
 		// later, so it gets the same classification.
-		claimOutput, claimStore, err := claimStoreWithFallback(workQuery, remaining, selected, primary, discovered, run, noteStoreFailure)
+		claimOutput, claimStore, err := claimStoreWithFallbackFrom(workQuery, remaining, selected, primary, discovered, answers, multiLeg, noteStoreFailure)
 		if err != nil {
 			report.failed(workQuery, err)
 			return reportClaimWorkQueryFailure(err, stderr)
@@ -1069,7 +1074,8 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		// every claimable row's claim mutation errored and was skipped. Drop it and
 		// reselect from the remaining stores so routed work in a later federated
 		// store is not stranded behind it; claimsErrored carries any write-failure
-		// signal to the shared drain.
+		// signal to the shared drain. The reselection ranks the answers this
+		// invocation already holds, so only the store it picks is read again.
 		remaining = removeHookStore(remaining, claimStore)
 	}
 	reportHookClaimLeftToAnotherSession(left, claimOpts.PoolSeat, stderr)

@@ -1049,23 +1049,41 @@ func hookRankCandidate(row map[string]any) hookCandidateRank {
 //
 // discovered is the output selection already read from this store, moments ago.
 //
+// run answers every read afresh. The claim loop, which holds the invocation's
+// answer set and reports failed secondaries, calls claimStoreWithFallbackFrom.
+func claimStoreWithFallback(command string, stores []hookStore, selected, primary hookStore, discovered string, run hookStoreRunner) (string, hookStore, error) {
+	answers := newHookStoreAnswers(run)
+	answers.reuse = false
+	return claimStoreWithFallbackFrom(command, stores, selected, primary, discovered, answers, len(stores) > 1)
+}
+
+// claimStoreWithFallbackFrom is claimStoreWithFallback over an invocation's
+// answer set. The selected store is re-read (answers.reread), so the claim acts
+// on a fresh answer, and a fallback reselects through answers.read, so a store
+// this invocation already read is not read again.
+//
+// multiLeg is whether the INVOCATION read more than one store. The claim loop
+// shrinks its store set as races are lost, but on a multi-leg invocation the
+// last store standing was selected from a saved answer and still needs its
+// fresh read.
+//
 // noted is forwarded to bestStoreWithWork for its failed-secondary reports.
-func claimStoreWithFallback(command string, stores []hookStore, selected, primary hookStore, discovered string, run hookStoreRunner, noted ...hookStoreFailureNote) (string, hookStore, error) {
-	if len(stores) == 1 {
+func claimStoreWithFallbackFrom(command string, stores []hookStore, selected, primary hookStore, discovered string, answers *hookStoreAnswers, multiLeg bool, noted ...hookStoreFailureNote) (string, hookStore, error) {
+	if !multiLeg {
 		return discovered, selected, nil
 	}
-	selectedOut, err := run(hookStoreCommand(selected, command), selected.dir, selected.env)
+	selectedOut, err := answers.reread(hookStoreCommand(selected, command), selected.dir, selected.env)
 	if err != nil {
 		if sameHookStore(selected, primary) {
 			return "", hookStore{}, err
 		}
-		return bestStoreWithWork(command, stores, primary, run, noted...)
+		return bestStoreWithWork(command, stores, primary, answers.read, noted...)
 	}
 	ready := filterUnreadyHookCandidates(normalizeWorkQueryOutput(strings.TrimSpace(selectedOut)), time.Now())
 	if workQueryHasReadyWork(ready) {
 		return selectedOut, selected, nil
 	}
-	return bestStoreWithWork(command, stores, primary, run, noted...)
+	return bestStoreWithWork(command, stores, primary, answers.read, noted...)
 }
 
 // hookClaimReadsPerTick counts the work-query runs one claim attempt performs
@@ -1119,4 +1137,77 @@ func sameHookStore(a, b hookStore) bool {
 		}
 	}
 	return true
+}
+
+// hookStoreAnswers is one invocation's answer set: the last successful output
+// of each store's work query, keyed by the exact (command, dir, env) a run
+// used. It exists so one `gc hook` or `gc hook --claim` invocation reads each
+// store at most once to select, rather than once per selection pass: the claim
+// loop reselects after every lost race, emptied selection and retried read
+// error, and each pass used to read every store again against the same
+// serialized server.
+//
+// read returns the saved answer when there is one and runs the query
+// otherwise; reread always runs it. Every run replaces the saved answer when
+// it succeeds and removes it when it fails, so a failed read is never served
+// again: a retry or a later selection runs exactly the stores whose latest
+// read failed. Callers pass read as bestStoreWithWork's runner, so ranking and
+// the failure rules stay in that one function.
+//
+// It lives on the stack of one invocation and is never persisted or shared
+// between processes. An answer reused without a re-read is only ever "this
+// store had nothing" or a store selection did not pick: a claim acts only on a
+// store's fresh re-read (claimStoreWithFallbackFrom).
+type hookStoreAnswers struct {
+	run hookStoreRunner
+	// reuse turns the saved answers on. Without it read runs every query, for
+	// a caller that hands claimStoreWithFallback a bare runner.
+	reuse bool
+	saved map[string]hookStoreAnswer
+	// runs counts the queries run; a saved answer records the count at its
+	// run, so answeredSince can tell an answer from before a mark from one
+	// after it.
+	runs int
+}
+
+// hookStoreAnswer is one saved successful read and the run that produced it.
+type hookStoreAnswer struct {
+	out string
+	run int
+}
+
+// newHookStoreAnswers returns an empty answer set over run.
+func newHookStoreAnswers(run hookStoreRunner) *hookStoreAnswers {
+	return &hookStoreAnswers{run: run, reuse: true, saved: map[string]hookStoreAnswer{}}
+}
+
+// hookStoreAnswerKey is the saved-answer key for one run. NUL appears in no
+// command, path or environment entry, so the joined form is unambiguous.
+func hookStoreAnswerKey(command, dir string, env []string) string {
+	return command + "\x00" + dir + "\x00" + strings.Join(env, "\x00")
+}
+
+// read returns the saved answer for (command, dir, env), running the query
+// only when there is none. Its signature is hookStoreRunner's.
+func (a *hookStoreAnswers) read(command, dir string, env []string) (string, error) {
+	if a.reuse {
+		if saved, ok := a.saved[hookStoreAnswerKey(command, dir, env)]; ok {
+			return saved.out, nil
+		}
+	}
+	return a.reread(command, dir, env)
+}
+
+// reread runs the query and replaces the saved answer with its result, or
+// removes the saved answer when the run fails.
+func (a *hookStoreAnswers) reread(command, dir string, env []string) (string, error) {
+	key := hookStoreAnswerKey(command, dir, env)
+	out, err := a.run(command, dir, env)
+	a.runs++
+	if err != nil {
+		delete(a.saved, key)
+		return out, err
+	}
+	a.saved[key] = hookStoreAnswer{out: out, run: a.runs}
+	return out, nil
 }
