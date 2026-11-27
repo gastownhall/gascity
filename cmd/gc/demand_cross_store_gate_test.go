@@ -751,3 +751,69 @@ func sortedIDs(rows []beads.Bead) []string {
 	slices.Sort(ids)
 	return ids
 }
+
+// TestGateReadyRowsKeepsUngatedRowsWhenAdmissionJudgmentFails covers AC-8's
+// demand arm: an input-admission read that fails inside the LegGate — the same
+// gate that judges cross-store blocks — keeps the snapshot it was handed and
+// reports a PartialResultError naming the judgment's failure, so demand is
+// never under-counted from a read hiccup and the pass never silently serves
+// ungated rows as fully judged.
+func TestGateReadyRowsKeepsUngatedRowsWhenAdmissionJudgmentFails(t *testing.T) {
+	mem := beads.NewMemStore()
+	fx := materializeInputWorkflowForGate(t, mem)
+	if err := mem.Update(fx.input.ID, beads.UpdateOpts{Labels: []string{"hold:external"}}); err != nil {
+		t.Fatalf("holding input: %v", err)
+	}
+	work := &failingGetStore{Store: mem, failID: fx.root.ID, err: errors.New("ledger unavailable")}
+	legs := []readywork.Leg{{Label: "city", Store: work}}
+	cache := newReadyDemandCache().withGateLegs(legs)
+
+	got, err := cache.gateSnapshot(work, []beads.Bead{fx.step}, nil)
+
+	if len(got) != 1 || got[0].ID != fx.step.ID {
+		t.Fatalf("gated rows = %v, want the snapshot as handed: demand is never under-counted from a failed judgment", beadIDsOf(got))
+	}
+	if !beads.IsPartialResult(err) {
+		t.Fatalf("gate error = %v, want a partial result", err)
+	}
+	for _, want := range []string{fx.step.ID, fx.root.ID, "city store"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("gate error = %q, want it to name %q", err.Error(), want)
+		}
+	}
+}
+
+// gateAdmissionWorkflow is one held-input workflow seeded for the demand
+// gate's judgment.
+type gateAdmissionWorkflow struct {
+	input, convoy, root, step beads.Bead
+}
+
+func materializeInputWorkflowForGate(t *testing.T, store beads.Store) gateAdmissionWorkflow {
+	t.Helper()
+	input, err := store.Create(beads.Bead{Title: "input", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conv, err := store.Create(beads.Bead{Title: "input convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DepAdd(conv.ID, input.ID, "tracks"); err != nil {
+		t.Fatalf("DepAdd tracks: %v", err)
+	}
+	root, err := store.Create(beads.Bead{Title: "workflow root", Type: "molecule", Metadata: map[string]string{
+		beadmeta.InputConvoyIDMetadataKey: conv.ID,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err := store.Create(beads.Bead{Title: "graph-step", Type: "task", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+		beadmeta.RoutedToMetadataKey:   "gascity/pool",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return gateAdmissionWorkflow{input: input, convoy: conv, root: root, step: step}
+}

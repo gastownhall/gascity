@@ -2,6 +2,8 @@ package readywork
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -446,4 +448,42 @@ func TestNativeInputAdmissionServesStoppedWorkflowRows(t *testing.T) {
 			t.Fatalf("Ready omits step %s of a cancel-requested workflow whose input is held; the stop gate must keep seeing it", fx.step.ID)
 		}
 	})
+}
+
+// failingGetStore is a store whose read of one id errors: a ledger that
+// cannot answer for the bead the judgment needs. Every other read passes
+// through, so only the admission probe fails.
+type failingGetStore struct {
+	beads.Store
+	id  string
+	err error
+}
+
+func (s *failingGetStore) Get(id string) (beads.Bead, error) {
+	if id == s.id {
+		return beads.Bead{}, s.err
+	}
+	return s.Store.Get(id)
+}
+
+// TestNativeInputAdmissionReadFailureFailsTheRead covers AC-8's ready arm: a
+// judgment whose store read fails fails the Read with an error naming the
+// judged row, the bead it could not read and the source that failed — a row is
+// never served unaudited, and never silently dropped either.
+func TestNativeInputAdmissionReadFailureFailsTheRead(t *testing.T) {
+	store := beads.NewMemStore()
+	fx := materializeInputWorkflow(t, store, nil)
+	if err := store.Update(fx.input.ID, beads.UpdateOpts{Labels: []string{"hold:external"}}); err != nil {
+		t.Fatalf("holding input: %v", err)
+	}
+	work := &failingGetStore{Store: store, id: fx.root.ID, err: errors.New("ledger unavailable")}
+	_, err := Read([]Leg{testLeg("city", work)}, fx.routedQuery())
+	if err == nil {
+		t.Fatal("Read succeeded over a store that cannot answer the judgment; want the read failed")
+	}
+	for _, want := range []string{fx.step.ID, fx.root.ID, "city store"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want it to name %q", err.Error(), want)
+		}
+	}
 }

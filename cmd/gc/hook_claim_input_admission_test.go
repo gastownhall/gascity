@@ -543,3 +543,39 @@ func TestDoHookClaimRetiresTerminalInputBeforeAdmissionGate(t *testing.T) {
 		}
 	}
 }
+
+// TestHookClaimNamesBeadAndStoreWhenAdmissionReadFails covers AC-8's hook arm:
+// a judgment whose store read fails fails the claim with an error naming the
+// judged row, the bead it could not read and the source that failed — never a
+// row served unaudited, and never a silent pass either.
+func TestHookClaimNamesBeadAndStoreWhenAdmissionReadFails(t *testing.T) {
+	f := newHookInputAdmissionFixture(t, beads.Bead{}, func(t *testing.T, store beads.Store, input beads.Bead) {
+		if err := store.Update(input.ID, beads.UpdateOpts{Labels: []string{"hold:external"}}); err != nil {
+			t.Fatalf("holding input: %v", err)
+		}
+	})
+	failing := &failingGetStore{Store: f.store, failID: f.root.ID, err: errors.New("ledger unavailable")}
+	ops := hookClaimOps{
+		Runner: serveRunner(f.step),
+		InputVerdict: func(context.Context, string, []string, beads.Bead, []string, workflowInputAbsenceProver) (workflowInputVerdict, error) {
+			return workflowInputVerdict{RootID: f.root.ID}, nil // pending: retirement stays out of the way
+		},
+		InputAdmission: func(ctx context.Context, _ string, _ []string, candidates []beads.Bead) (map[string]inputadmission.Withhold, error) {
+			adm := inputadmission.New([]inputadmission.Source{{
+				Label: "city",
+				Live:  beads.LiveFor(failing),
+				Work:  beads.WorkStore{Store: failing},
+			}}, time.Now())
+			return adm.Judge(ctx, 0, candidates)
+		},
+	}
+	var stdout, stderr bytes.Buffer
+	if code := doHookClaim("query", "/rig", hookAdmissionOptions(), ops, &stdout, &stderr); code != 1 {
+		t.Fatalf("doHookClaim = %d, want 1; stderr=%s", code, stderr.String())
+	}
+	for _, want := range []string{"checking input admission", f.step.ID, f.root.ID, "city store"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want it to name %q", stderr.String(), want)
+		}
+	}
+}
