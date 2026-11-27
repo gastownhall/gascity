@@ -9805,3 +9805,73 @@ func TestNudgeDispatcherLeavesHeldRecipientAsleep(t *testing.T) {
 		t.Fatalf("pending = %d, want the notice still queued", n)
 	}
 }
+
+// TestDormantQueueObserversIgnoreItemsWithoutWakeIntent: a queued item that
+// declared no wake (a `gc session nudge --delivery queue` nudge, or a
+// SourceSubmit turn as a deferred `gc session submit` and a handed-back
+// startup turn queue it) waits for the session's next run: neither the
+// poller's helper nor a supervisor dispatcher pass records a wake for it on
+// an asleep, unheld row.
+func TestDormantQueueObserversIgnoreItemsWithoutWakeIntent(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		enqueue func(t *testing.T, c *queuedNoticeCity)
+	}{
+		{
+			name: "queue-mode session nudge",
+			enqueue: func(t *testing.T, c *queuedNoticeCity) {
+				res, err := deliverSessionNudgeLegacy(c.target, c.store, c.fake, "check the build", nudgeDeliveryQueue, io.Discard)
+				if err != nil || !res.queued {
+					t.Fatalf("deliverSessionNudgeLegacy(queue) = %+v, %v; want it queued", res, err)
+				}
+			},
+		},
+		{
+			name: "deferred submit turn",
+			enqueue: func(t *testing.T, c *queuedNoticeCity) {
+				item := newQueuedNudgeWithOptions(c.target.agentKey(), "run the tests", nudgequeue.SourceSubmit, time.Now(), queuedNudgeOptionsFromTarget(c.target))
+				if err := enqueueQueuedNudge(c.dir, item); err != nil {
+					t.Fatalf("enqueueQueuedNudge(submit): %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newQueuedNoticeCity(t)
+			c.stop(t)
+			if err := nudgequeue.WithState(c.dir, func(state *nudgequeue.State) error {
+				state.Pending, state.InFlight = nil, nil
+				return nil
+			}); err != nil {
+				t.Fatalf("dropping the mail notice: %v", err)
+			}
+			tc.enqueue(t, c)
+			sleepUnheld(t, c.store, c.id)
+			pending := c.pending(t)
+			if len(pending) != 1 || pending[0].WakeIfNeeded {
+				t.Fatalf("pending = %+v, want one item without a wake intent", pending)
+			}
+
+			outcome, wanted, err := requestDormantQueuedNudgeWake(c.target, cliSessionFrontDoor(c.store, c.target.cfg, c.dir), c.mp, time.Now())
+			if err != nil {
+				t.Fatalf("requestDormantQueuedNudgeWake: %v", err)
+			}
+			if wanted || outcome != 0 {
+				t.Fatalf("helper: outcome, wanted = %v, %v; want nothing attempted", outcome, wanted)
+			}
+			snapshot, err := loadSessionBeadSnapshot(c.store)
+			if err != nil {
+				t.Fatalf("loadSessionBeadSnapshot: %v", err)
+			}
+			if _, err := dispatchAllQueuedNudges(c.dir, supervisorCfg(), c.store, c.store, c.fake, snapshot, nil); err != nil {
+				t.Fatalf("dispatchAllQueuedNudges: %v", err)
+			}
+			if got := c.wakeRequest(t); got != "" {
+				t.Fatalf("wake_request = %q, want none for an item without a wake intent", got)
+			}
+			if n := len(c.pending(t)); n != 1 {
+				t.Fatalf("pending = %d, want the item still queued", n)
+			}
+		})
+	}
+}
