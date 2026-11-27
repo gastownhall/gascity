@@ -509,6 +509,13 @@ func TestBareSupervisorForkNotWrappedInInfraScope(t *testing.T) {
 		fork(t)
 		assertNoSystemdRun(t, logPath)
 	})
+	// A user service's cgroup is one the scope suits, so dolt spawns from
+	// this caller are wrapped — the supervisor fork still never is.
+	t.Run("from a non-session user service", func(t *testing.T) {
+		logPath := installInfraScopeHost(t, infraScopeHost{linger: true, cgroup: userServiceCgroup})
+		fork(t)
+		assertNoSystemdRun(t, logPath)
+	})
 }
 
 // The drift respawn replaces the supervisor; like the bare fork it is never
@@ -531,6 +538,13 @@ func TestDriftSupervisorRespawnNotWrappedInInfraScope(t *testing.T) {
 	})
 	t.Run("outside a session", func(t *testing.T) {
 		logPath := installInfraScopeHost(t, infraScopeHost{linger: true, cgroup: userManagerCgroup})
+		respawn(t)
+		assertNoSystemdRun(t, logPath)
+	})
+	// A user service's cgroup is one the scope suits, so dolt spawns from
+	// this caller are wrapped — the drift respawn still never is.
+	t.Run("from a non-session user service", func(t *testing.T) {
+		logPath := installInfraScopeHost(t, infraScopeHost{linger: true, cgroup: userServiceCgroup})
 		respawn(t)
 		assertNoSystemdRun(t, logPath)
 	})
