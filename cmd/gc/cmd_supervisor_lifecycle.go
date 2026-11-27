@@ -1878,6 +1878,7 @@ func supervisorServiceExtraEnv() []supervisorServiceEnvVar {
 		// shell when explicitly opted in; routing must travel with the
 		// credential it accompanies, not with whatever shell ran install.
 		if isProviderRoutingEnv(key) && !explicitEnvKeySet[key] {
+			fmt.Fprintf(os.Stderr, "gc supervisor: not saving %s from the calling shell (a routing name); add it to GC_SUPERVISOR_ENV to keep it\n", key) //nolint:errcheck
 			continue
 		}
 		env[key] = val
