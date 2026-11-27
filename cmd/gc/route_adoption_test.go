@@ -234,3 +234,81 @@ func TestRouteAdoptionRefusesIneligibleBeads(t *testing.T) {
 		}
 	})
 }
+
+// claimConcurrently is a session claiming the bead after the lane's live
+// read: assigned and in progress, with gc.routed_to still empty.
+func claimConcurrently(id string) func(*beads.MemStore) {
+	return func(store *beads.MemStore) {
+		assignee, status := "researcher-session", "in_progress"
+		if err := store.Update(id, beads.UpdateOpts{Assignee: &assignee, Status: &status}); err != nil {
+			panic(err)
+		}
+	}
+}
+
+// TestRouteAdoptionLosesToAWriteAfterItsLiveRead is AC-4: when another writer
+// routes or a session claims an adoption candidate after the lane's live read,
+// that route or claim stands, and the lost write is neither an adoption nor a
+// restore charged to the flap limit.
+func TestRouteAdoptionLosesToAWriteAfterItsLiveRead(t *testing.T) {
+	const id = "ct-race"
+	races := map[string]func(string) func(*beads.MemStore){
+		"another writer routes": routeConcurrently,
+		"a session claims":      claimConcurrently,
+	}
+	passes := map[string]func(cr *CityRuntime) routeRecoveryReport{
+		"backstop": func(cr *CityRuntime) routeRecoveryReport {
+			return cr.runRouteRecoveryBackstop(backstopReasonCadence)
+		},
+		"delta": func(cr *CityRuntime) routeRecoveryReport {
+			cr.routeRecoveryLaneOf().observe(beadCreatedEvent(t, plainCreatedBead(id)))
+			return cr.recoverUnroutedWorkRoutesDelta()
+		},
+	}
+	for raceName, race := range races {
+		for passName, pass := range passes {
+			t.Run(raceName+"/"+passName, func(t *testing.T) {
+				before := beads.NewMemStoreFrom(0, []beads.Bead{plainCreatedBead(id)}, nil)
+				race(id)(before)
+				want, err := before.Get(id)
+				if err != nil {
+					t.Fatalf("Get: %v", err)
+				}
+
+				store := &raceAfterLiveReadStore{
+					MemStore: beads.NewMemStoreFrom(0, []beads.Bead{plainCreatedBead(id)}, nil),
+					target:   id,
+					race:     race(id),
+				}
+				cr := &CityRuntime{cityName: "city", cfg: adoptionTestConfig(), standaloneCityStore: store, stderr: io.Discard}
+
+				report := pass(cr)
+				if !store.fired {
+					t.Fatal("the competing write never ran; the pass did not re-read the bead")
+				}
+				if report.err != nil {
+					t.Fatalf("pass error = %v, want nil: losing the race is not an error", report.err)
+				}
+				if report.adopted != 0 || report.restored != 0 {
+					t.Fatalf("pass adopted=%d restored=%d, want 0/0", report.adopted, report.restored)
+				}
+				got, err := store.MemStore.Get(id)
+				if err != nil {
+					t.Fatalf("Get: %v", err)
+				}
+				if got.Assignee != want.Assignee || got.Status != want.Status ||
+					got.Metadata[beadmeta.RoutedToMetadataKey] != want.Metadata[beadmeta.RoutedToMetadataKey] {
+					t.Fatalf("after the pass assignee=%q status=%q routed_to=%q, want the other writer's %q/%q/%q",
+						got.Assignee, got.Status, got.Metadata[beadmeta.RoutedToMetadataKey],
+						want.Assignee, want.Status, want.Metadata[beadmeta.RoutedToMetadataKey])
+				}
+				lane := cr.routeRecoveryLaneOf()
+				lane.mu.Lock()
+				defer lane.mu.Unlock()
+				if n := lane.restores[id]; n != 0 {
+					t.Fatalf("flap tally for a lost race = %d, want 0", n)
+				}
+			})
+		}
+	}
+}

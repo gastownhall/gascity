@@ -1121,6 +1121,14 @@ func (l *routeRecoveryLane) restoreRoute(store beads.Store, live beads.Bead, bac
 		return out
 	}
 
+	if adoptedVia != "" {
+		if writer, ok := beads.ConditionalWriterForTarget(store); ok {
+			if out, fenced := l.adoptIfUnchanged(writer, live, route, adoptedVia); fenced {
+				return out
+			}
+		}
+	}
+
 	// The write is a key-level compare-and-set against the empty route the live
 	// read saw, so a route another writer stamped after that read — a graph
 	// activation's qualified route, a router, another pass — is never replaced
@@ -1169,6 +1177,37 @@ func (l *routeRecoveryLane) restoreRoute(store beads.Store, live beads.Bead, bac
 		return routeRestoreOutcome{writes: 1, err: fmt.Errorf("bead %s: restoring gc.routed_to=%q: %w", live.ID, route, err)}
 	}
 	return routedOutcome(adoptedVia, 1, nil)
+}
+
+// adoptIfUnchanged writes an adoption route only while the bead is still the
+// row the live read saw, so a session claim that landed after that read (which
+// leaves gc.routed_to empty, where the key-level compare-and-set cannot see it)
+// stands, exactly like a route another writer stamped. fenced is false when
+// conditional writes are off at the store; the caller then falls back to the
+// key-level compare-and-set.
+func (l *routeRecoveryLane) adoptIfUnchanged(writer beads.ConditionalWriter, live beads.Bead, route, adoptedVia string) (routeRestoreOutcome, bool) {
+	err := writer.UpdateIfMatch(live.ID, live.Revision, beads.UpdateOpts{
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: route},
+	})
+	var moved *beads.PreconditionFailedError
+	switch {
+	case err == nil:
+		return routedOutcome(adoptedVia, 1, nil), true
+	case errors.Is(err, beads.ErrConditionalWriteUnsupported):
+		return routeRestoreOutcome{}, false
+	case errors.As(err, &moved):
+		// The bead changed after the live read: a claim, a route, or any other
+		// write. That writer stands; a lost race is not an adoption and is not
+		// charged to the flap limit. The next pass re-reads it.
+		l.mu.Lock()
+		if l.restores[live.ID] > 0 {
+			l.restores[live.ID]--
+		}
+		l.mu.Unlock()
+		return routeRestoreOutcome{writes: 1}, true
+	default:
+		return routeRestoreOutcome{writes: 1, err: fmt.Errorf("bead %s: adopting gc.routed_to=%q: %w", live.ID, route, err)}, true
+	}
 }
 
 // routedOutcome is the outcome of a successful route write, classified by
