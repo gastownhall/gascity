@@ -2,8 +2,11 @@
 # it. `gc sling` does not nudge warm-idle workers (issue #1129, closed by
 # design), so without this a routed bead sits unclaimed until the worker's
 # next turn cycle. Event-driven and idempotent; routing is read straight
-# off the bead.updated event and a given (bead, routed_to) pair is nudged
-# at most once. See assets/scripts/nudge-on-route.sh.
+# off bead.created and bead.updated events above the seq mark the previous
+# run persisted, and a given (bead, routed_to) pair is nudged at most once.
+# The trigger is bead.updated only (an order matches one event type), so a
+# bead routed at creation is picked up on the next fire. See
+# assets/scripts/nudge-on-route.sh.
 #
 # Routing is mechanical: read gc.routed_to from the event, nudge the named
 # session. No LLM judgment needed, so the controller runs it via exec.

@@ -8,23 +8,32 @@
 # is newly set or changed sits unclaimed against any worker that is not
 # currently in an active turn cycle.
 #
-# This order is exactly that workaround, shipped. It subscribes to
-# bead.updated events; whenever a bead carries a gc.routed_to target it
-# runs `gc session nudge <target> "<message>"`. Idempotent: a given
-# (bead, routed_to) pair is nudged at most once. Dedup state lives in
-# $GC_PACK_STATE_DIR/nudge-on-route-state.json, so it is both city- and
-# pack-scoped — multi-city installs never cross-pollinate.
+# This order is exactly that workaround, shipped. It fires on bead.updated
+# and reads both bead.created and bead.updated events; whenever a bead
+# carries a gc.routed_to target it runs
+# `gc session nudge <target> "<message>"`. Routing is often stamped in the
+# CREATE payload (`gc order run`, formula pours, poured step beads), so the
+# only lifecycle event such a bead emits before it is claimed is
+# bead.created (#4382); it is picked up on the next fire, which on a live
+# city is seconds to a couple of minutes away.
 #
-# Two event sources, one window. Routing is often stamped in the CREATE
-# payload (`gc order run`, formula pours, poured step beads), so the only
-# lifecycle event such a bead ever emits before it is claimed is
-# bead.created (#4382); bead.updated alone misses every one of them. And
-# the controller fires this order on its own dispatch cadence — under
-# max_dispatches_per_tick that can be many minutes apart — while a fixed
-# wall-clock lookback only sees the last couple of minutes, so events
-# between two runs were dropped. Each run therefore processes every
-# bead.created/bead.updated event with seq > the high-water seq recorded by
-# the previous run (bounded by WINDOW), and records the new high-water mark.
+# Each event is evaluated once, and each pair nudged at most once. Two state
+# files live in $GC_PACK_STATE_DIR, so they are city- and pack-scoped and
+# multi-city installs never cross-pollinate:
+#   - nudge-on-route-seq: the highest event seq the previous run evaluated.
+#     Each run selects only events above it and advances it after every
+#     successful read, nudge failures included.
+#   - nudge-on-route-state.json: the (bead, routed_to) pairs already nudged.
+# New pairs are grouped by target, so each target is nudged once per run.
+#
+# Two windows. The controller fires this order on its own cadence, with no
+# promise about the gap between fires. Each run reads the fast window
+# (GC_NUDGE_ON_ROUTE_LOOKBACK, 2m); when its seqs do not reach back to the
+# mark, the run re-reads the catch-up window (GC_NUDGE_ON_ROUTE_MAX_LOOKBACK,
+# 1h), which is also the first run's read. A span that even the catch-up
+# read misses, or a seq that went backwards, is declared as a partial run
+# (order_outcome.sh), which the controller records as order.skipped, rather
+# than dropped silently.
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
@@ -32,6 +41,8 @@ set -euo pipefail
 __SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 . "$__SCRIPT_DIR/_bd_trace.sh" "nudge-on-route"
+# shellcheck disable=SC1091
+. "$__SCRIPT_DIR/order_outcome.sh"
 
 # jq is a hard dependency: without it the event stream cannot be decoded
 # and every nudge would be silently skipped. Fail loud at startup.
@@ -41,12 +52,19 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 CITY="${GC_CITY:-.}"
-# Upper bound on how far back one run reads. The real cut is the persisted
-# high-water seq; this only bounds the read (and is the lookback on the very
-# first run, when no seq has been recorded yet).
-WINDOW="${GC_NUDGE_ON_ROUTE_WINDOW:-${GC_NUDGE_ON_ROUTE_LOOKBACK:-1h}}"
+# Fast window, read on every run that has a usable seq mark. It only needs to
+# cover the usual gap between two fires: when its seqs do not reach back to
+# the mark, the gap is detected and caught up from MAX_LOOKBACK.
+LOOKBACK="${GC_NUDGE_ON_ROUTE_LOOKBACK:-2m}"
+# Catch-up window: the read used when there is no usable seq mark (first
+# run, garbage, or a mark above the log head) or the fast read missed
+# events. The real cut is the persisted high-water seq; this only bounds the
+# read. GC_NUDGE_ON_ROUTE_WINDOW is the earlier name of this setting and is
+# still honored.
+MAX_LOOKBACK="${GC_NUDGE_ON_ROUTE_MAX_LOOKBACK:-${GC_NUDGE_ON_ROUTE_WINDOW:-1h}}"
 # Dedup entries older than this are pruned so the state file stays bounded.
-# Must comfortably exceed WINDOW so an active routing — which keeps
+# Must be at least MAX_LOOKBACK, so a catch-up read never re-nudges a pair
+# pruned since it was nudged, and an active routing — which keeps
 # re-emitting bead.updated as the reconciler refreshes it — is never
 # pruned and re-nudged. Accepts a simple Ns / Nm / Nh duration.
 RETENTION="${GC_NUDGE_ON_ROUTE_RETENTION:-2h}"
@@ -67,6 +85,16 @@ duration_to_seconds() {
         *)  echo "$1" ;;
     esac
 }
+
+RETENTION_S="$(duration_to_seconds "$RETENTION")"
+# A short retention costs at most a duplicate nudge, so warn and run. The
+# catch-up window itself only goes to `gc events --since`, which takes any Go
+# duration (1h30m, 1.5h), so the check is skipped, never fatal, when it is
+# not a single Ns / Nm / Nh term.
+if [[ "$MAX_LOOKBACK" =~ ^[0-9]+[smh]?$ ]] \
+    && [ "$RETENTION_S" -lt "$(duration_to_seconds "$MAX_LOOKBACK")" ]; then
+    echo "nudge-on-route: GC_NUDGE_ON_ROUTE_RETENTION ($RETENTION) is shorter than GC_NUDGE_ON_ROUTE_MAX_LOOKBACK ($MAX_LOOKBACK); a catch-up read can re-nudge pruned pairs" >&2
+fi
 
 # Nudge the session(s) named by a routed_to target. A multi-session pool
 # routes to the pool BASE (NormalizePoolRouteTarget collapses slot -> base),
@@ -94,30 +122,64 @@ MEMBERS
     gc session nudge "$_target" "$NUDGE_MESSAGE" >/dev/null 2>&1
 }
 
-# Pull recent events. Best-effort: a read failure (API down) must not crash
-# the controller's order loop. One unfiltered read: `gc events --type` takes
-# a single exact type and both bead.created and bead.updated are needed.
-EVENTS="$(gc events --since "$WINDOW" 2>/dev/null)" || exit 0
-[ -n "$EVENTS" ] || exit 0
+# read_events reads `gc events --since <window>` into EVENTS and sets
+# LOW_SEQ/HEAD_SEQ to its lowest and highest parseable seq (empty when it
+# holds none). Best-effort: a failed read (API down) exits 0 with the mark
+# untouched, so it never crashes the controller's order loop. The read is
+# unfiltered: `gc events --type` takes a single exact type and both
+# bead.created and bead.updated are needed. Each line is parsed on its own
+# (`fromjson?`), so one malformed line — the local fallback reads
+# events.jsonl, which can hold a torn write — never drops the rest.
+read_events() {
+    EVENTS="$(gc events --since "$1" 2>/dev/null)" || exit 0
+    _seqs="$(printf '%s\n' "$EVENTS" | jq -R -r 'fromjson? | .seq? | numbers | floor' 2>/dev/null | sort -n)" || _seqs=""
+    # First and last line by parameter expansion, never a reader that exits
+    # early: once the list outgrows the pipe, `| head -1` kills its writer
+    # with SIGPIPE, and under pipefail the whole run with it.
+    LOW_SEQ="${_seqs%%$'\n'*}"
+    HEAD_SEQ="${_seqs##*$'\n'}"
+}
 
+# report_partial says why this run could not evaluate every event since the
+# mark: on stderr, and as a partial outcome that the controller records as
+# order.skipped instead of a bare order.completed.
+report_partial() {
+    echo "nudge-on-route: $1" >&2
+    order_outcome_set partial "$1"
+    order_outcome_write
+}
+
+# Highest seq the previous run evaluated; anything but digits is no mark.
 LAST_SEQ="$(cat "$SEQ_FILE" 2>/dev/null || true)"
-case "$LAST_SEQ" in ''|*[!0-9]*) LAST_SEQ=0 ;; esac
+case "$LAST_SEQ" in ''|*[!0-9]*) LAST_SEQ=0 ;; *) LAST_SEQ=$((10#$LAST_SEQ)) ;; esac
 
-# Newest event seq this run read (the next high-water mark).
-HEAD_SEQ="$(printf '%s\n' "$EVENTS" | jq -r '.seq // 0' 2>/dev/null | sort -n | tail -1)" || HEAD_SEQ=""
-case "$HEAD_SEQ" in ''|*[!0-9]*) HEAD_SEQ=0 ;; esac
-# Event log reset/rebuilt below our mark: start over rather than wedge.
-if [ "$LAST_SEQ" -gt 0 ] && [ "$HEAD_SEQ" -gt 0 ] && [ "$HEAD_SEQ" -lt "$LAST_SEQ" ]; then
-    echo "nudge-on-route: event seq went backwards ($HEAD_SEQ < $LAST_SEQ); resetting mark" >&2
-    LAST_SEQ=0
+# City event seqs are contiguous across all types, so the fast read covers
+# everything since the mark exactly when its lowest seq is at most mark+1 and
+# its head has not gone below the mark. A seq the reader omitted can only
+# force an extra catch-up read, never false coverage.
+FAST_OK=0
+if [ "$LAST_SEQ" -gt 0 ]; then
+    read_events "$LOOKBACK"
+    if [ -n "$HEAD_SEQ" ] && [ "$LOW_SEQ" -le $((LAST_SEQ + 1)) ] && [ "$HEAD_SEQ" -ge "$LAST_SEQ" ]; then
+        FAST_OK=1
+    fi
 fi
-
-# Warn when the read did not reach back to the previous mark (the walk was
-# bounded by WINDOW or truncated): routings in that gap are not seen.
-MIN_SEQ="$(printf '%s\n' "$EVENTS" | jq -r '.seq // empty' 2>/dev/null | sort -n | head -1)" || MIN_SEQ=""
-case "$MIN_SEQ" in ''|*[!0-9]*) MIN_SEQ=0 ;; esac
-if [ "$LAST_SEQ" -gt 0 ] && [ "$MIN_SEQ" -gt $((LAST_SEQ + 1)) ]; then
-    echo "nudge-on-route: events $((LAST_SEQ + 1))..$((MIN_SEQ - 1)) were not read (outside WINDOW or truncated walk); routings in that range are skipped" >&2
+if [ "$FAST_OK" -eq 0 ]; then
+    read_events "$MAX_LOOKBACK"
+    [ -n "$HEAD_SEQ" ] || exit 0
+    # Event log reset/rebuilt below our mark: start over rather than wedge.
+    if [ "$HEAD_SEQ" -lt "$LAST_SEQ" ]; then
+        report_partial "event seq went backwards ($HEAD_SEQ < $LAST_SEQ); resetting mark"
+        LAST_SEQ=0
+    fi
+    # The catch-up read has no wider fallback: when it starts above the mark
+    # (a gap longer than MAX_LOOKBACK, or an events walk cut short by its
+    # time budget) the span below it is lost. Say so, then evaluate what was
+    # read and advance as usual; holding the mark would livelock under
+    # sustained load, since every run would hit the same limit.
+    if [ "$LAST_SEQ" -gt 0 ] && [ "$LOW_SEQ" -gt $((LAST_SEQ + 1)) ]; then
+        report_partial "catch-up read starts at seq $LOW_SEQ above mark $LAST_SEQ; $((LOW_SEQ - LAST_SEQ - 1)) older event(s) not evaluated"
+    fi
 fi
 
 # Reduce to unique "<bead_id>\t<routed_to>" pairs from events newer than the
@@ -128,13 +190,15 @@ fi
 # directly under .payload (#5968) — same normalization as the sibling
 # notify-on-human-gate-creation.sh.
 PAIRS="$(printf '%s\n' "$EVENTS" \
-    | jq -r --argjson last "$LAST_SEQ" '
-        select((.seq // 0) > $last
-               and (.type == "bead.created" or .type == "bead.updated"))
-        | (.payload.bead // .payload) as $b
-        | select($b.metadata."gc.routed_to" != null
-                 and $b.metadata."gc.routed_to" != "")
-        | [$b.id, $b.metadata."gc.routed_to"] | @tsv' 2>/dev/null \
+    | jq -R -r --argjson last "$LAST_SEQ" '
+        fromjson? | try (
+            select((.seq // 0) > $last
+                   and (.type == "bead.created" or .type == "bead.updated"))
+            | (.payload.bead // .payload) as $b
+            | select($b.metadata."gc.routed_to" != null
+                     and $b.metadata."gc.routed_to" != "")
+            | [$b.id, $b.metadata."gc.routed_to"] | @tsv
+        ) catch empty' 2>/dev/null \
     | sort -u)" || PAIRS=""
 
 # Advance the high-water mark to the newest event seen, regardless of type,
@@ -161,7 +225,10 @@ echo "$STATE" | jq -e 'type == "object"' >/dev/null 2>&1 || STATE='{}'
 
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 NUDGED=0
-while IFS="$(printf '\t')" read -r bead_id routed_to; do
+TAB="$(printf '\t')"
+# Pairs not yet in the dedup state, one "<routed_to>\t<bead_id>" per line.
+NEW_PAIRS=""
+while IFS="$TAB" read -r bead_id routed_to; do
     if [ -z "$bead_id" ] || [ -z "$routed_to" ]; then continue; fi
     key="$bead_id|$routed_to"
     if echo "$STATE" | jq -e --arg k "$key" 'has($k)' >/dev/null 2>&1; then
@@ -170,17 +237,35 @@ while IFS="$(printf '\t')" read -r bead_id routed_to; do
         STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
         continue
     fi
-    if nudge_routed_target "$routed_to"; then
-        STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
-        NUDGED=$((NUDGED + 1))
-    fi
+    NEW_PAIRS="$NEW_PAIRS$routed_to$TAB$bead_id
+"
 done <<EOF
 $PAIRS
 EOF
-advance_seq
+
+# One nudge per target per run. A pour that stamps routing on N steps yields
+# N new pairs for one target in one batch, and each `gc session nudge`
+# interrupts the session to tell it the same thing: check for assigned work.
+# On success every new pair for the target is recorded; on failure none is,
+# so the next event that re-emits one of them retries it. Nudges are
+# best-effort: a pool target succeeds once any member took the nudge, and a
+# member whose nudge failed is not retried for these pairs.
+TARGETS="$(printf '%s' "$NEW_PAIRS" | cut -f1 | sort -u)"
+while IFS= read -r target; do
+    [ -n "$target" ] || continue
+    nudge_routed_target "$target" </dev/null || continue
+    while IFS="$TAB" read -r routed_to bead_id; do
+        [ "$routed_to" = "$target" ] || continue
+        STATE="$(echo "$STATE" | jq --arg k "$bead_id|$routed_to" --arg now "$NOW" '.[$k] = $now')"
+        NUDGED=$((NUDGED + 1))
+    done <<NEW
+$NEW_PAIRS
+NEW
+done <<TARGETS
+$TARGETS
+TARGETS
 
 # Prune entries older than RETENTION so the state file stays bounded.
-RETENTION_S="$(duration_to_seconds "$RETENTION")"
 STATE="$(echo "$STATE" | jq --argjson keep "$RETENTION_S" \
     'with_entries(select((now - (.value | fromdateiso8601)) <= $keep))')" || true
 
@@ -188,6 +273,9 @@ STATE="$(echo "$STATE" | jq --argjson keep "$RETENTION_S" \
 TMP="$(mktemp "$PACK_STATE_DIR/.nudge-on-route-state.XXXXXX")"
 printf '%s\n' "$STATE" > "$TMP"
 mv -f "$TMP" "$STATE_FILE"
+# The mark is written after the dedup state, so a crash between the two
+# re-evaluates the batch and the dedup state absorbs the repeats.
+advance_seq
 
 if [ "$NUDGED" -gt 0 ]; then
     echo "nudge-on-route: nudged $NUDGED newly-routed bead(s)"
