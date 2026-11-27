@@ -585,3 +585,32 @@ func TestEventListLimitWithTypeFilterReturnsTail(t *testing.T) {
 		t.Fatalf("subject = %v, want \"woke-new\" (newest matching); tail regressed", got)
 	}
 }
+
+// A write carrying a verified write grant is recorded under the verified key id,
+// not the actor the client claimed in the body (gascity#9180, API path).
+func TestHandleEventEmit_VerifiedPrincipalOverridesClaimedActor(t *testing.T) {
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+
+	body := `{"type":"deploy.completed","actor":"someone-else","subject":"myapp"}`
+	req := newPostRequest(cityURL(state, "/events"), strings.NewReader(body))
+	req = req.WithContext(withVerifiedPrincipal(req.Context(), "kid-operator-1"))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	ep := state.eventProv.(*events.Fake)
+	evts, err := ep.List(events.Filter{Type: "deploy.completed"})
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	if len(evts) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(evts))
+	}
+	if evts[0].Actor != "kid-operator-1" {
+		t.Errorf("actor = %q, want verified principal %q", evts[0].Actor, "kid-operator-1")
+	}
+}

@@ -229,7 +229,14 @@ func parseEventSince(value string) (time.Duration, bool, error) {
 // humaHandleEventEmit is the Huma-typed handler for POST /v0/events.
 // Body validation (Type and Actor required) is enforced by struct tags
 // on EventEmitInput.
-func (s *Server) humaHandleEventEmit(_ context.Context, input *EventEmitInput) (*EventEmitOutput, error) {
+func (s *Server) humaHandleEventEmit(ctx context.Context, input *EventEmitInput) (*EventEmitOutput, error) {
+	// A write carrying a verified write grant is attributed to the grant's key
+	// id: server fact, never the body's claimed actor (gascity#9180). Unverified
+	// writes keep the claimed actor, as before.
+	actor := input.Body.Actor
+	if kid, ok := VerifiedPrincipal(ctx); ok {
+		actor = kid
+	}
 	if events.IsJournalDerived(input.Body.Type) {
 		return nil, apierr.ValidationFailed.Msgf("journal_derived: %s is derived by the controller from an operation-journal row and cannot be emitted", input.Body.Type)
 	}
@@ -248,7 +255,7 @@ func (s *Server) humaHandleEventEmit(_ context.Context, input *EventEmitInput) (
 			}
 			ep.Record(events.Event{
 				Type:    input.Body.Type,
-				Actor:   input.Body.Actor,
+				Actor:   actor,
 				Subject: input.Body.Subject,
 				Message: input.Body.Message,
 			})
