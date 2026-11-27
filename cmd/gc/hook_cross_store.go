@@ -1019,24 +1019,6 @@ func hookRankCandidate(row map[string]any) hookCandidateRank {
 	return rank
 }
 
-// claimStoreWithFallback re-validates the discovery-selected store for
-// claim-time freshness, then falls back to federated re-selection across all
-// stores when that store has emptied since discovery. It exists because
-// gc hook --claim selects the first store with ready work, then must commit to
-// one store for the claim mutation. Re-running only the selected store would
-// drain as "no work" whenever its claimable row was taken between discovery and
-// claim — even though a later federated store still has ready routed work. The
-// returned output is the work-query result the claim should act on, paired with
-// the store it came from so the mutation runs against that store's bd context.
-// (The narrow window between this re-validation and the bd update --claim is
-// still handled by the claim itself skipping rows it cannot take.)
-//
-// A re-validation error on the selected store is returned as itself only when
-// that store is the primary (own) store. A secondary store erroring at claim
-// time falls through to re-selection, which reads every store again under
-// bestStoreWithWork's rules: work in a store that answers is taken, and with no
-// work anywhere that store's failed read is the answer.
-//
 // hookClaimReadsPerTick counts the work-query runs one claim attempt performs
 // over a given leg set: one per leg. Discovery reads each leg once and the
 // claim acts on that output directly — the CAS re-checks the row it takes — so
