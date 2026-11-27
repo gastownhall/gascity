@@ -179,6 +179,11 @@ type RunOpts struct {
 	// the trigger-env-failed pre-dispatch path which creates an already-labeled
 	// open bead so the open-work gate suppresses repeat ticks.
 	Outcome RunOutcome
+	// Deadline, when nonzero, is the absolute instant the run's execution is
+	// bounded by (dispatch time plus its effective timeout). CreateRun stamps
+	// it on the initial Create so the recovery sweeps can preserve the run
+	// until it has had its full lifetime plus a completion grace.
+	Deadline time.Time
 }
 
 // Store is the order-class domain wrapper. It holds the strongly-typed
@@ -304,9 +309,16 @@ func baseLabels(scoped string, outcome RunOutcome) []string {
 // {order-run, order-tracking[, outcome]}, NoHistory:true}) sites in
 // order_dispatch.go.
 func (s *Store) CreateRun(scoped string, opts RunOpts) (OrderRun, error) {
+	var metadata map[string]string
+	if !opts.Deadline.IsZero() {
+		metadata = map[string]string{
+			beadmeta.OrderRunDeadlineMetadataKey: opts.Deadline.UTC().Format(time.RFC3339Nano),
+		}
+	}
 	created, err := s.store.Create(beads.Bead{
 		Title:     trackingTitle(scoped),
 		Labels:    baseLabels(scoped, opts.Outcome),
+		Metadata:  metadata,
 		NoHistory: true,
 	})
 	if err != nil {

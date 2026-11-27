@@ -3345,7 +3345,9 @@ gc order sweep-nudge-mail [flags]
 Close stale open order-tracking beads and prune expired closed history.
 
 This is intended for maintenance exec orders. It only closes tracking beads
-older than --stale-after so a fresh in-flight order is not interrupted.
+older than --stale-after so a fresh in-flight order is not interrupted, and
+it leaves an unfinished run open until its dispatch deadline (dispatch time
+plus its effective timeout) and a one-minute completion grace have passed.
 Closed order-tracking history is deleted after
 [beads.policies.order_tracking].delete_after_close, defaulting to 7d, while
 always retaining at least the latest 10 closed tracking beads per order.

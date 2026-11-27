@@ -48,7 +48,10 @@ var newCityRuntimeOpenSweepStore = openStoreAtForCity
 // failures). It runs on startup only, never on config reload, and is
 // best-effort: a store it cannot open is reported and skipped, and the retry
 // with backoff is defense-in-depth against transient store errors immediately
-// after ensureBeadsProvider returns (#753).
+// after ensureBeadsProvider returns (#753). A run a previous instance
+// dispatched stays open until its persisted deadline plus the completion grace
+// has passed, even though its owner is gone: a child it started may still be
+// working, and a later sweep closes it once that bound expires.
 //
 // It sweeps the city work store AND, on a split city, the orders binding those
 // tracking beads are now born in. Both, not one. A converged city holds
@@ -72,8 +75,9 @@ func sweepOrphanedOrderTrackingAtBoot(routes *storageRoutes, cityPath string, cf
 	if ordersStore := resolveOrderStore(routes, nil, cfg, cityPath, rec); ordersStore != nil && ordersStore != workStore {
 		stores = append(stores, ordersStore)
 	}
+	now := time.Now()
 	for _, store := range stores {
-		if n, err := sweepOrphanedOrderTrackingRetryLimit(store, 3, time.Second, orderTrackingSweepCloseBudget); err != nil {
+		if n, err := sweepOrphanedOrderTrackingRetryLimit(store, now, 3, time.Second, orderTrackingSweepCloseBudget); err != nil {
 			fmt.Fprintf(stderr, "gc start: order tracking sweep (closed %d): %v\n", n, err) //nolint:errcheck // best-effort stderr
 		} else if n > 0 {
 			fmt.Fprintf(stderr, "gc start: closed %d orphaned order-tracking beads\n", n) //nolint:errcheck // best-effort stderr
@@ -2272,9 +2276,12 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(cfg *config.City, now time.
 	// order's tracking so that order could bootstrap and clean the rest — a
 	// single-point-of-failure: when slow reconciler cycles keep order-tracking-
 	// sweep from firing, every order's tracking jams and no order fires (#2168).
-	// The staleAfter cutoff still protects in-flight dispatches regardless of
-	// which order they belong to, so a direct all-orders sweep is safe and
-	// recovers the jam without depending on any single order being scheduled.
+	// An in-flight dispatch is protected regardless of which order it belongs
+	// to: the staleAfter cutoff spares a fresh one, and the persisted dispatch
+	// deadline holds an unfinished one until its deadline plus the completion
+	// grace (orders.Store.StaleOpenRuns), however long its timeout. A direct
+	// all-orders sweep is therefore safe and recovers the jam without depending
+	// on any single order being scheduled.
 	// Closed-history retention is intentionally left to the maintenance exec
 	// order or the gc order sweep-tracking CLI; the watchdog only recovers
 	// stale tracking beads that are not closed.
