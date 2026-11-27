@@ -55,7 +55,7 @@ func TestClaimHookWorkAssignedTierUnresolvableBeadDoesNotStrandLaterStore(t *tes
 		{dir: "city", env: []string{"GC_STORE=city"}},
 		{dir: "riga", env: []string{"GC_STORE=riga"}},
 	}
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		switch dir {
 		case "city":
 			return assignedGraphRow, nil
@@ -110,7 +110,7 @@ func TestClaimHookWorkAssignedTierUnresolvableBeadDoesNotStrandLaterStore(t *tes
 // bare exit 1 with an empty stdout that a --json caller cannot read.
 func TestClaimHookWorkAssignedTierUnresolvableBeadDrainsClaimsErrored(t *testing.T) {
 	stores := []hookStore{{dir: "city", env: []string{"GC_STORE=city"}}}
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		if dir != "city" {
 			t.Fatalf("unexpected store dir %q", dir)
 		}
@@ -160,7 +160,7 @@ func TestClaimHookWorkAssignedTierOperationalErrorStaysTerminal(t *testing.T) {
 		{dir: "city", env: []string{"GC_STORE=city"}},
 		{dir: "riga", env: []string{"GC_STORE=riga"}},
 	}
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		switch dir {
 		case "city":
 			return assignedGraphRow, nil

@@ -34,6 +34,7 @@ func newHookCmd(stdout, stderr io.Writer) *cobra.Command {
 	var drainAck bool
 	var jsonOut bool
 	var worktree bool
+	var timeout time.Duration
 	cmd := &cobra.Command{
 		Use:   "hook [agent]",
 		Short: "Find routed work for an agent",
@@ -78,6 +79,26 @@ managed Dolt server is not running is named on stderr but does not hold the
 answer up. A failed query is also recorded as a session.work_query_failed event,
 one per store that failed, naming it.
 
+With --timeout <duration>, or a GC_HOOK_DEADLINE inherited from gc hook run,
+the earlier of the two is the hook deadline. It bounds the store reads: the
+stores are read concurrently, and a read still running when only the answer
+margin is left (a third of the budget, at most 3s) is stopped, its process
+group killed. A stopped read is a failed read like any other, so with no
+other store serving work the hook exits 2 with GC_HOOK_STORE_UNAVAILABLE and
+the hook deadline named on stderr. With --claim it bounds the claim too: the
+claim fence and the claim mutation end by that same point, and a claim that
+lands later is released rather than handed out. Nothing else runs under the
+deadline. The session row reads and writes (the drain fences and drain-ack,
+the work_started record, the current-claim stamp), an adopted claim's
+ownership readback, a late claim's release, and the claimed bead's identity
+stamps, continuation assignment and --worktree provisioning keep their own
+budgets, so the answer can come after the deadline: a caller that kills a
+--claim at the deadline can lose the answer to a claim that landed, and the
+session's next --claim serves that claim again. An inherited GC_HOOK_DEADLINE
+that does not parse or had already passed when the hook started is ignored
+with a note on stderr. With neither, each store read is bounded only by its
+own 150s timeout.
+
 Before the work query, a session keyed by $GC_SESSION_ID is checked for a
 pending drain (the drain fence), with and without --claim. A draining session
 gets the drain result instead of work. If the session row cannot be read, the
@@ -113,6 +134,7 @@ The agent is determined from $GC_AGENT or a positional argument.`,
 				DrainAck:   drainAck,
 				JSON:       jsonOut,
 				Worktree:   worktree,
+				Timeout:    timeout,
 			}
 			// exitForCode, not `!= 0 → errExit`: the store-unavailable
 			// contract is exit 2 (reportWorkQueryFailure), and folding it
@@ -126,6 +148,7 @@ The agent is determined from $GC_AGENT or a positional argument.`,
 	cmd.Flags().BoolVar(&claim, "claim", false, "atomically claim one routed work item for the current session")
 	cmd.Flags().BoolVar(&drainAck, "drain-ack", false, "with --claim, acknowledge runtime drain when no work is available")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit a JSON protocol result (always with --claim; on the discovery door only for a drain refusal)")
+	cmd.Flags().DurationVar(&timeout, "timeout", 0, "end the store reads and the claim mutation a margin before this budget runs out (0: no budget; an inherited GC_HOOK_DEADLINE also bounds them)")
 	cmd.Flags().BoolVar(&worktree, "worktree", false, "with --claim, create or verify a gc-owned git worktree for the claimed work (Git LFS content is not smudged)")
 	if flag := cmd.Flags().Lookup("hook-format"); flag != nil {
 		flag.Hidden = true
@@ -310,6 +333,9 @@ type hookCommandOptions struct {
 	JSON       bool
 	Worktree   bool
 	DrainAckFn hookDrainAckFunc
+	// Timeout is the caller's budget for this invocation (--timeout); zero
+	// means none. hookInvocationDeadline turns it into the hook deadline.
+	Timeout time.Duration
 }
 
 // cmdHook is the CLI entry point for gc hook. Resolves the agent from
@@ -343,6 +369,11 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		fmt.Fprintln(stderr, "gc hook: --worktree requires --claim") //nolint:errcheck
 		return 1
 	}
+	if opts.Timeout < 0 {
+		fmt.Fprintf(stderr, "gc hook: --timeout must not be negative, got %s\n", opts.Timeout) //nolint:errcheck
+		return 1
+	}
+	deadline, hasDeadline := hookInvocationDeadline(opts.Timeout, stderr)
 
 	agentName := os.Getenv("GC_ALIAS")
 	if agentName == "" {
@@ -637,12 +668,14 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 				}
 			}
 		}
-		return claimHookWorkProvisioning(city, workQuery, workDir, queryEnv, stores, claimOpts, provisionWorktree, emitQueryFailure, stdout, stderr)
+		return claimHookWorkProvisioning(city, workQuery, workDir, queryEnv, stores, claimOpts, provisionWorktree, deadline, emitQueryFailure, stdout, stderr)
 	}
 	// The discovery door is fenced too: a draining seat must not be handed its
 	// preassigned continuation sibling by the packs' post-close `gc hook`.
 	visibility := hookDiscoveryVisibility(city, cityName, &a, identityCandidates, routeTargets, stderr)
-	runner := hookDiscoveryRunner(stores, hookRigLegRunner(cityPath, cfg, stores, shellWorkQueryWithEnv), visibility, emitQueryFailure, stderr)
+	readCtx, cancelReads := hookReadContext(context.Background(), deadline, hasDeadline)
+	defer cancelReads()
+	runner := hookDiscoveryRunner(readCtx, stores, hookRigLegRunner(cityPath, cfg, stores, shellWorkQueryWithEnvContext), visibility, emitQueryFailure, stderr)
 	return hookDiscover(workQuery, workDir, false, hookDiscoveryOptions(assignee, identityCandidates, queryEnv, opts, strictDrainAck), city.claimOps(), runner, stdout, stderr, visibility)
 }
 
@@ -921,13 +954,15 @@ func hookClaimSessionEligibility(info session.Info, instanceToken string) (hookC
 // city that relocates nothing the route is nil and the ops are the work-store
 // ops alone.
 func claimHookWork(city *hookCity, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
-	return claimHookWorkProvisioning(city, workQuery, workDir, queryEnv, stores, claimOpts, nil, emitFailure, stdout, stderr)
+	return claimHookWorkProvisioning(city, workQuery, workDir, queryEnv, stores, claimOpts, nil, time.Time{}, emitFailure, stdout, stderr)
 }
 
 // claimHookWorkProvisioning is claimHookWork with the claimed bead's worktree
 // provisioned before its receipt is delivered (gc hook --claim --worktree).
-// A nil provisionWorktree is the plain claim.
-func claimHookWorkProvisioning(city *hookCity, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, provisionWorktree hookProvisionWorktreeFunc, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
+// A nil provisionWorktree is the plain claim. deadline is the invocation
+// deadline (hookInvocationDeadline), zero for none: it bounds the claim's
+// reads, fence and mutation, not the writes after the claim lands.
+func claimHookWorkProvisioning(city *hookCity, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, provisionWorktree hookProvisionWorktreeFunc, deadline time.Time, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
 	// The city relocates a class and its front door could not be projected.
 	// Claiming through the work store anyway would write ownership into a
 	// ledger that does not hold the bead, which is the wrong-answer lane this
@@ -940,6 +975,7 @@ func claimHookWorkProvisioning(city *hookCity, workQuery, workDir string, queryE
 	// wrapped before the class route, whose binding writes announce themselves.
 	base := city.claimOps()
 	base.ProvisionWorktree = provisionWorktree
+	base.Deadline = deadline
 	ops, proceed := routedHookClaimOps(withHookClaimBeadEvents(base, city.path), opened, err, city.recorder, stderr)
 	if !proceed {
 		return 1
@@ -948,7 +984,7 @@ func claimHookWorkProvisioning(city *hookCity, workQuery, workDir string, queryE
 	// whatever is left on the way out (a release, a reclaim, a claim that
 	// stopped on an error).
 	defer ops.announceBeadEvents()
-	run := hookRigLegRunner(city.path, city.cfg, stores, shellWorkQueryWithEnv)
+	run := hookRigLegRunner(city.path, city.cfg, stores, shellWorkQueryWithEnvContext)
 	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, run, emitFailure, stdout, stderr)
 }
 
@@ -997,6 +1033,8 @@ func routedHookClaimOps(base hookClaimOps, opened *hookClaimClassRoute, err erro
 func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, ops hookClaimOps, run hookStoreRunner, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
 	ops.applyDefaults()
 	ops.ClassRoute.observeWorkLegs(stores)
+	ctx, cancelReads := hookReadContext(context.Background(), ops.Deadline, !ops.Deadline.IsZero())
+	defer cancelReads()
 	// primary is the agent's own store (the first entry). It is captured once
 	// here, before the loop shrinks remaining: only the primary's error is
 	// surfaced as itself and emitted as this session's work-query failure. Once
@@ -1024,7 +1062,7 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 	// store's claim keeps the invocation quiet about it.
 	var left []beads.Bead
 	for len(remaining) > 0 {
-		discovered, selected, err := selectStoreWithWorkRetrying(workQuery, remaining, primary, run, &ops, noteStoreFailure)
+		discovered, selected, err := selectStoreWithWorkRetrying(ctx, workQuery, remaining, primary, run, &ops, noteStoreFailure)
 		if err != nil {
 			report.failed(workQuery, err)
 			return reportClaimWorkQueryFailure(err, stderr)
@@ -1036,7 +1074,7 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		// mutation, and a primary-leg failure there is surfaced exactly like a
 		// discovery failure: it is the same read of the same store, moments
 		// later, so it gets the same classification.
-		claimOutput, claimStore, err := claimStoreWithFallback(workQuery, remaining, selected, primary, discovered, run, noteStoreFailure)
+		claimOutput, claimStore, err := claimStoreWithFallback(ctx, workQuery, remaining, selected, primary, discovered, run, noteStoreFailure)
 		if err != nil {
 			report.failed(workQuery, err)
 			return reportClaimWorkQueryFailure(err, stderr)
@@ -1161,8 +1199,8 @@ var (
 // A failed secondary store with no work anywhere is an error here too
 // (hookSecondaryStoreFailure), so it gets the same bounded retry. noted is
 // forwarded to bestStoreWithWork.
-func selectStoreWithWorkRetrying(workQuery string, stores []hookStore, primary hookStore, run hookStoreRunner, ops *hookClaimOps, noted ...hookStoreFailureNote) (string, hookStore, error) {
-	out, selected, err := bestStoreWithWork(workQuery, stores, primary, run, noted...)
+func selectStoreWithWorkRetrying(ctx context.Context, workQuery string, stores []hookStore, primary hookStore, run hookStoreRunner, ops *hookClaimOps, noted ...hookStoreFailureNote) (string, hookStore, error) {
+	out, selected, err := bestStoreWithWork(ctx, workQuery, stores, primary, run, noted...)
 	for attempt := 0; err != nil && attempt < hookClaimQueryRetryAttempts; attempt++ {
 		if ops.claimWindowSpentAfter(hookClaimQueryRetryInterval) {
 			return out, selected, hookClaimRetryWindowClosed(err, ops)
@@ -1171,7 +1209,7 @@ func selectStoreWithWorkRetrying(workQuery string, stores []hookStore, primary h
 		if ops.claimWindowSpentAfter(0) {
 			return out, selected, hookClaimRetryWindowClosed(err, ops)
 		}
-		out, selected, err = bestStoreWithWork(workQuery, stores, primary, run, noted...)
+		out, selected, err = bestStoreWithWork(ctx, workQuery, stores, primary, run, noted...)
 	}
 	return out, selected, err
 }
@@ -1353,8 +1391,15 @@ var hookWorkQueryTimeout = 150 * time.Second
 // a short bounded interval so startup hooks cannot strand sessions behind a
 // wedged data-plane command.
 func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
+	return shellWorkQueryWithEnvContext(context.Background(), command, dir, env)
+}
+
+// shellWorkQueryWithEnvContext is shellWorkQueryWithEnv stopping when parent is
+// done as well: the query's process group is killed at hookWorkQueryTimeout or
+// when parent ends, whichever comes first. It is the hook's store-leg runner.
+func shellWorkQueryWithEnvContext(parent context.Context, command, dir string, env []string) (string, error) {
 	if generated := generatedProgram(command); generated != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), hookWorkQueryTimeout)
+		ctx, cancel := context.WithTimeout(parent, hookWorkQueryTimeout)
 		defer cancel()
 		var stderr bytes.Buffer
 		out, err := generated(ctx, dir, execenv.WithUsageMetricsDisabled(workQueryEnvForDir(env, dir)), &stderr)
@@ -1363,13 +1408,17 @@ func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
 	if reason := runtime.ShellCommandUnavailable(command); reason != "" {
 		return "", fmt.Errorf("work query refused: %s", reason)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), hookWorkQueryTimeout)
+	ctx, cancel := context.WithTimeout(parent, hookWorkQueryTimeout)
 	defer cancel()
 	cmd, err := runtime.ShellCommandContext(ctx, command)
 	if err != nil {
 		return "", fmt.Errorf("running work query %q: %w", command, err)
 	}
 	cmd.WaitDelay = 2 * time.Second
+	if margin, ok := hookAnswerMargin(parent); ok {
+		// The pipes must not hold the hook past its deadline.
+		cmd.WaitDelay = min(cmd.WaitDelay, margin)
+	}
 	prepareProviderOpCommand(cmd)
 	if dir != "" {
 		cmd.Dir = dir
@@ -1384,9 +1433,15 @@ func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
 
 // workQueryResult turns a finished work query's output and error into
 // shellWorkQueryWithEnv's result. ctx is the query's own, bounded by
-// hookWorkQueryTimeout.
+// hookWorkQueryTimeout and by the hook deadline its parent may carry
+// (hookReadContext); a timeout names whichever bound stopped the query.
 func workQueryResult(ctx context.Context, command string, out []byte, stderr *bytes.Buffer, err error) (string, error) {
 	if ctx.Err() == context.DeadlineExceeded {
+		bound := fmt.Sprintf("timed out after %s", hookWorkQueryTimeout)
+		var reached *errHookDeadlineReached
+		if errors.As(context.Cause(ctx), &reached) {
+			bound = reached.Error()
+		}
 		// Wrap context.DeadlineExceeded so callers can classify the timeout as
 		// transient (dispatch.IsTransientControllerError / errors.Is). Without
 		// this, a work-query timeout reads as an opaque fatal error and kills
@@ -1395,9 +1450,9 @@ func workQueryResult(ctx context.Context, command string, out []byte, stderr *by
 		// "timed out after" text is preserved.
 		msg := strings.TrimSpace(string(out))
 		if msg != "" {
-			return string(out), fmt.Errorf("running work query %q: timed out after %s with partial stdout %q: %w", command, hookWorkQueryTimeout, msg, context.DeadlineExceeded)
+			return string(out), fmt.Errorf("running work query %q: %s with partial stdout %q: %w", command, bound, msg, context.DeadlineExceeded)
 		}
-		return "", fmt.Errorf("running work query %q: timed out after %s: %w", command, hookWorkQueryTimeout, context.DeadlineExceeded)
+		return "", fmt.Errorf("running work query %q: %s: %w", command, bound, context.DeadlineExceeded)
 	}
 	if err != nil {
 		msg := strings.TrimSpace(stderr.String())
@@ -1675,15 +1730,16 @@ func doHookDiscovery(workQuery, dir string, inject bool, opts hookClaimOptions, 
 // claims from a later one; so the listing names the work the claim would take
 // from a later store instead of reporting none. A failed query is returned as
 // its error and recorded through emitFailure, and a store whose failed read the
-// answer did not stop on is named on stderr (hookStoreFailureReport).
-func hookDiscoveryRunner(stores []hookStore, run hookStoreRunner, visibility hookVisibility, emitFailure func(command string, err error), stderr io.Writer) WorkQueryRunner {
+// answer did not stop on is named on stderr (hookStoreFailureReport). Every
+// read runs under ctx.
+func hookDiscoveryRunner(ctx context.Context, stores []hookStore, run hookStoreRunner, visibility hookVisibility, emitFailure func(command string, err error), stderr io.Writer) WorkQueryRunner {
 	report := newHookStoreFailureReport("gc hook", stderr, emitFailure)
 	return func(command, _ string) (string, error) {
 		// The primary is the agent's own store, matched by identity, so a later
 		// store never inherits its semantics once it is dropped.
 		remaining := stores
 		for {
-			out, selected, err := bestStoreWithWork(command, remaining, stores[0], run, report.note)
+			out, selected, err := bestStoreWithWork(ctx, command, remaining, stores[0], run, report.note)
 			report.failed(command, err)
 			if err != nil || isZeroHookStore(selected) || len(remaining) == 1 || workQueryHasReadyWork(hookListing(out, time.Now(), visibility)) {
 				return out, err

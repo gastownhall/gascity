@@ -40,7 +40,7 @@ func (c *retryWindowClock) Sleep(d time.Duration) {
 }
 
 // failingRun is a work-query runner whose every read fails after readCost.
-func (c *retryWindowClock) failingRun(_, _ string, _ []string) (string, error) {
+func (c *retryWindowClock) failingRun(_ context.Context, _, _ string, _ []string) (string, error) {
 	c.readStarts = append(c.readStarts, c.now.Sub(c.invokedAt))
 	c.now = c.now.Add(c.readCost)
 	return "", errors.New("bd ready: exit status 1")
@@ -74,7 +74,7 @@ func TestClaimReadRetryStopsWhenNextRetryWouldMissTheWindow(t *testing.T) {
 	ops := clock.ops()
 	stores := []hookStore{{dir: "/rig"}}
 
-	_, _, err := selectStoreWithWorkRetrying("query", stores, stores[0], clock.failingRun, ops)
+	_, _, err := selectStoreWithWorkRetrying(context.Background(), "query", stores, stores[0], clock.failingRun, ops)
 
 	if err == nil {
 		t.Fatal("selectStoreWithWorkRetrying returned no error for a leg that always fails")
@@ -103,7 +103,7 @@ func TestClaimReadRetryRunsOnlyRetriesThatStartInsideTheWindow(t *testing.T) {
 	ops := clock.ops()
 	stores := []hookStore{{dir: "/rig"}}
 
-	if _, _, err := selectStoreWithWorkRetrying("query", stores, stores[0], clock.failingRun, ops); err == nil {
+	if _, _, err := selectStoreWithWorkRetrying(context.Background(), "query", stores, stores[0], clock.failingRun, ops); err == nil {
 		t.Fatal("selectStoreWithWorkRetrying returned no error for a leg that always fails")
 	}
 
@@ -135,7 +135,7 @@ func TestClaimReadRetryDoesNotReadAfterASleepThatOverranTheWindow(t *testing.T) 
 	ops := clock.ops()
 	stores := []hookStore{{dir: "/rig"}}
 
-	_, _, err := selectStoreWithWorkRetrying("query", stores, stores[0], clock.failingRun, ops)
+	_, _, err := selectStoreWithWorkRetrying(context.Background(), "query", stores, stores[0], clock.failingRun, ops)
 
 	if err == nil || !strings.Contains(err.Error(), "claim window") {
 		t.Fatalf("err = %v, want the read failure annotated with the claim window", err)
@@ -153,7 +153,7 @@ func TestClaimReadRetryKeepsFullBudgetInsideTheWindow(t *testing.T) {
 	ops := clock.ops()
 	stores := []hookStore{{dir: "/rig"}}
 
-	_, _, err := selectStoreWithWorkRetrying("query", stores, stores[0], clock.failingRun, ops)
+	_, _, err := selectStoreWithWorkRetrying(context.Background(), "query", stores, stores[0], clock.failingRun, ops)
 
 	if err == nil {
 		t.Fatal("selectStoreWithWorkRetrying returned no error for a leg that always fails")
@@ -174,7 +174,7 @@ func TestClaimReadRetryWithoutAnInvocationWindowKeepsFullBudget(t *testing.T) {
 	ops := &hookClaimOps{Now: clock.Now, Sleep: clock.Sleep}
 	stores := []hookStore{{dir: "/rig"}}
 
-	if _, _, err := selectStoreWithWorkRetrying("query", stores, stores[0], clock.failingRun, ops); err == nil {
+	if _, _, err := selectStoreWithWorkRetrying(context.Background(), "query", stores, stores[0], clock.failingRun, ops); err == nil {
 		t.Fatal("selectStoreWithWorkRetrying returned no error for a leg that always fails")
 	}
 	if want := 1 + hookClaimQueryRetryAttempts; len(clock.readStarts) != want {
@@ -230,10 +230,10 @@ func TestHookClaimRetryCutByWindowExitsWithoutClaimOrDrain(t *testing.T) {
 				hookRunnerAnswer{err: tc.readErr},
 				hookRunnerAnswer{out: routedRowJSON("wb-1")},
 			)
-			run := func(command, dir string, env []string) (string, error) {
+			run := func(ctx context.Context, command, dir string, env []string) (string, error) {
 				clock.readStarts = append(clock.readStarts, clock.now.Sub(clock.invokedAt))
 				clock.now = clock.now.Add(156 * time.Second)
-				return h.run(command, dir, env)
+				return h.run(ctx, command, dir, env)
 			}
 			claimed := false
 			ops := h.ops()

@@ -208,7 +208,7 @@ func TestClaimHookStoreUnavailableEmitsToken(t *testing.T) {
 	withFastClaimRetries(t)
 	var stdout, stderr bytes.Buffer
 
-	failing := func(string, string, []string) (string, error) {
+	failing := func(context.Context, string, string, []string) (string, error) {
 		return "", fmt.Errorf("running work query %q: %w", "bd ready --json",
 			errors.New("exit status 1: Error: dial tcp 127.0.0.1:3307: connection refused"))
 	}
@@ -250,7 +250,7 @@ func TestClaimHookStoreUnavailableEmitsTokenOnFederatedRevalidation(t *testing.T
 		{dir: "riga", env: []string{"GC_STORE=riga"}}, // federated leg, empty
 	}
 	cityCalls := 0
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		switch dir {
 		case "city":
 			cityCalls++
@@ -307,7 +307,7 @@ func TestClaimHookApplicationErrorOnFederatedRevalidationStaysExitOne(t *testing
 		{dir: "riga", env: []string{"GC_STORE=riga"}},
 	}
 	cityCalls := 0
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		if dir == "riga" {
 			return "[]", nil
 		}

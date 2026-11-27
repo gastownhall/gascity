@@ -1,0 +1,319 @@
+//go:build unix
+
+package main
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+)
+
+// slowLegScript records its PID, then becomes a 30s sleep: a store read that
+// runs far past any hook deadline.
+const slowLegScript = `printf '%s\n' "$$" >> "$HOOK_PID_LOG"; exec sleep 30`
+
+// hookDeadlineTestBudget is the caller's budget in
+// TestHookDiscoveryAnswersBeforeDeadline: the hook must answer inside it.
+const hookDeadlineTestBudget = 2 * time.Second
+
+// deadlineHookCity writes a city from cityTOML whose agent "worker" runs its
+// work_query (or the default one against a fake bd running bdScript), points
+// the hook at it, and returns the file each slow leg writes its PID to.
+func deadlineHookCity(t *testing.T, cityTOML, bdScript string) string {
+	t.Helper()
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	cityDir := writeFenceTestCityAgents(t, cityTOML)
+	t.Setenv("GC_CITY", cityDir)
+	if bdScript != "" {
+		fakeBin := t.TempDir()
+		if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte("#!/bin/sh\n"+bdScript+"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	}
+	pidLog := filepath.Join(t.TempDir(), "pids")
+	t.Setenv("HOOK_PID_LOG", pidLog)
+	t.Setenv(hookDeadlineEnv, "")
+	prevStart := hookProcessStart
+	hookProcessStart = time.Now()
+	t.Cleanup(func() { hookProcessStart = prevStart })
+	return pidLog
+}
+
+type hookRun struct {
+	code           int
+	stdout, stderr string
+	elapsed        time.Duration
+}
+
+func runHookForDeadline(opts hookCommandOptions) hookRun {
+	var stdout, stderr bytes.Buffer
+	start := time.Now()
+	code := cmdHookWithOptions([]string{"worker"}, opts, &stdout, &stderr)
+	return hookRun{code: code, stdout: stdout.String(), stderr: stderr.String(), elapsed: time.Since(start)}
+}
+
+// slowLegStopGrace bounds how long assertSlowLegsKilled waits for a killed
+// slow leg to exit. It is a safety deadline: a leg the hook killed is gone, or
+// a zombie, within milliseconds of the answer.
+const slowLegStopGrace = 2 * time.Second
+
+// assertSlowLegsKilled fails unless every PID the slow legs logged has
+// stopped: gone, or a zombie (pidAlive). SIGKILL to a slow leg's process group
+// is delivered by the time the hook answers, but the exit itself is the
+// kernel's to finish, and nothing signals it to the test, so this polls the
+// process table on a ticker, as waitForProviderOwnedPIDStopped does. A leg
+// still running at slowLegStopGrace is killed, and the test fails with its
+// last observed state.
+func assertSlowLegsKilled(t *testing.T, pidLog string) {
+	t.Helper()
+	raw, err := os.ReadFile(pidLog)
+	if errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	if err != nil {
+		t.Fatalf("read pid log: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), slowLegStopGrace)
+	defer cancel()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for _, field := range strings.Fields(string(raw)) {
+		pid, err := strconv.Atoi(field)
+		if err != nil {
+			t.Fatalf("pid log entry %q: %v", field, err)
+		}
+		for pidAlive(pid) {
+			select {
+			case <-ctx.Done():
+				stat, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+				state := strings.TrimSpace(string(stat))
+				if err != nil {
+					state = err.Error()
+				}
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+				t.Fatalf("slow leg pid %d still running %s after the hook answered; last state: %s", pid, slowLegStopGrace, state)
+			case <-ticker.C:
+			}
+		}
+	}
+}
+
+// assertAnsweredAtDeadline is AC-3's answer: exit 2 before the budget, nothing
+// on stdout, the store-unavailable token and the hook deadline on stderr, and
+// the slow leg's process group killed.
+func assertAnsweredAtDeadline(t *testing.T, got hookRun, pidLog string) {
+	const budget = hookDeadlineTestBudget
+	t.Helper()
+	if got.code != hookExitWorkQueryFailed {
+		t.Errorf("exit = %d, want %d; stderr=%s", got.code, hookExitWorkQueryFailed, got.stderr)
+	}
+	if got.stdout != "" {
+		t.Errorf("stdout = %q, want nothing", got.stdout)
+	}
+	if !strings.Contains(got.stderr, hookStoreUnavailableToken) || !strings.Contains(got.stderr, "hook deadline") {
+		t.Errorf("stderr = %q, want %s and the hook deadline named", got.stderr, hookStoreUnavailableToken)
+	}
+	if got.elapsed >= budget {
+		t.Errorf("hook answered after %s, want before the %s deadline", got.elapsed.Round(time.Millisecond), budget)
+	}
+	assertSlowLegsKilled(t, pidLog)
+}
+
+// TestHookDiscoveryAnswersBeforeDeadline pins #5533's invocation deadline on
+// the discovery door: given a budget (gc hook --timeout, or the
+// GC_HOOK_DEADLINE gc hook run hands its child), a store read that would
+// outlast it is killed with its process group, and the hook answers with its
+// defined failure — exit 2, GC_HOOK_STORE_UNAVAILABLE — before the deadline,
+// instead of being killed itself with no answer.
+func TestHookDiscoveryAnswersBeforeDeadline(t *testing.T) {
+	const (
+		budget      = hookDeadlineTestBudget
+		singleStore = "[[agent]]\nname = \"worker\"\nscope = \"city\"\n"
+	)
+	customQuery := func(query string) string {
+		return "[[agent]]\nname = \"worker\"\nscope = \"city\"\nwork_query = " + strconv.Quote(query) + "\n"
+	}
+
+	t.Run("inherited GC_HOOK_DEADLINE", func(t *testing.T) {
+		pidLog := deadlineHookCity(t, singleStore, slowLegScript)
+		t.Setenv(hookDeadlineEnv, hookDeadlineEnvValue(time.Now().Add(budget)))
+		assertAnsweredAtDeadline(t, runHookForDeadline(hookCommandOptions{}), pidLog)
+	})
+	t.Run("--timeout", func(t *testing.T) {
+		pidLog := deadlineHookCity(t, singleStore, slowLegScript)
+		assertAnsweredAtDeadline(t, runHookForDeadline(hookCommandOptions{Timeout: budget}), pidLog)
+	})
+	t.Run("--timeout 1ms", func(t *testing.T) {
+		pidLog := deadlineHookCity(t, singleStore, slowLegScript)
+		assertAnsweredAtDeadline(t, runHookForDeadline(hookCommandOptions{Timeout: time.Millisecond}), pidLog)
+	})
+	t.Run("a later --timeout is bounded by the inherited deadline", func(t *testing.T) {
+		pidLog := deadlineHookCity(t, singleStore, slowLegScript)
+		t.Setenv(hookDeadlineEnv, hookDeadlineEnvValue(time.Now().Add(budget)))
+		assertAnsweredAtDeadline(t, runHookForDeadline(hookCommandOptions{Timeout: time.Minute}), pidLog)
+	})
+	t.Run("a custom work_query is bounded the same way", func(t *testing.T) {
+		pidLog := deadlineHookCity(t, customQuery(slowLegScript), "")
+		assertAnsweredAtDeadline(t, runHookForDeadline(hookCommandOptions{Timeout: budget}), pidLog)
+	})
+	for _, tc := range []struct{ name, value string }{
+		{name: "malformed", value: "not-a-time"},
+		{name: "already past", value: hookDeadlineEnvValue(time.Now().Add(-time.Minute))},
+	} {
+		t.Run("a "+tc.name+" GC_HOOK_DEADLINE is ignored with a note", func(t *testing.T) {
+			deadlineHookCity(t, singleStore, "printf '[]'")
+			t.Setenv(hookDeadlineEnv, tc.value)
+			got := runHookForDeadline(hookCommandOptions{})
+			if got.code != 1 || strings.TrimSpace(got.stdout) != "[]" {
+				t.Errorf("exit = %d stdout = %q, want the store's empty-queue answer (exit 1, []); stderr=%s", got.code, got.stdout, got.stderr)
+			}
+			if !strings.Contains(got.stderr, "ignoring "+hookDeadlineEnv) {
+				t.Errorf("stderr = %q, want a note that %s was ignored", got.stderr, hookDeadlineEnv)
+			}
+		})
+	}
+	t.Run("a GC_HOOK_DEADLINE that passes during startup is honored", func(t *testing.T) {
+		pidLog := deadlineHookCity(t, singleStore, slowLegScript)
+		// The process started before the inherited deadline, which has
+		// passed by the time discovery runs: the reads stop at once.
+		hookProcessStart = time.Now().Add(-time.Second)
+		t.Setenv(hookDeadlineEnv, hookDeadlineEnvValue(time.Now().Add(-time.Millisecond)))
+		got := runHookForDeadline(hookCommandOptions{})
+		if strings.Contains(got.stderr, "ignoring "+hookDeadlineEnv) {
+			t.Errorf("stderr = %q, want the deadline honored, not ignored", got.stderr)
+		}
+		assertAnsweredAtDeadline(t, got, pidLog)
+	})
+	t.Run("a GC_HOOK_DEADLINE that passes during startup stops every store's read", func(t *testing.T) {
+		// Two stores: the legs are dispatched under a read context that is
+		// already done, so a leg is either never started or stopped at once,
+		// and the agent's own store must name the hook deadline either way.
+		pidLog := deadlineHookCity(t, "[[rigs]]\nname = \"riga\"\npath = \"rigs/riga\"\n\n"+customQuery(slowLegScript), "")
+		if err := os.MkdirAll(filepath.Join(os.Getenv("GC_CITY"), "rigs", "riga"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		hookProcessStart = time.Now().Add(-time.Second)
+		t.Setenv(hookDeadlineEnv, hookDeadlineEnvValue(time.Now().Add(-time.Millisecond)))
+		assertAnsweredAtDeadline(t, runHookForDeadline(hookCommandOptions{}), pidLog)
+	})
+	t.Run("--inject ignores --timeout and reads nothing", func(t *testing.T) {
+		pidLog := deadlineHookCity(t, singleStore, slowLegScript)
+		got := runHookForDeadline(hookCommandOptions{Inject: true, Timeout: -time.Second})
+		if got.code != 0 || got.stdout != "" || got.stderr != "" {
+			t.Errorf("--inject = exit %d stdout %q stderr %q, want a silent exit 0", got.code, got.stdout, got.stderr)
+		}
+		if _, err := os.Stat(pidLog); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("--inject ran a store read (pid log: %v)", err)
+		}
+	})
+	t.Run("a negative --timeout is a usage error", func(t *testing.T) {
+		pidLog := deadlineHookCity(t, singleStore, slowLegScript)
+		got := runHookForDeadline(hookCommandOptions{Timeout: -time.Second})
+		if got.code != 1 || got.stdout != "" || !strings.Contains(got.stderr, "--timeout") {
+			t.Errorf("negative --timeout = exit %d stdout %q stderr %q, want exit 1 naming --timeout", got.code, got.stdout, got.stderr)
+		}
+		if _, err := os.Stat(pidLog); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("a usage error ran a store read (pid log: %v)", err)
+		}
+	})
+	t.Run("another store's work is served when the slow leg is killed", func(t *testing.T) {
+		query := `case "$GC_RIG_ROOT" in */rigs/riga) ` + slowLegScript + `;; esac; printf '%s' '` + routedCityRow + `'`
+		pidLog := deadlineHookCity(t, "[[rigs]]\nname = \"riga\"\npath = \"rigs/riga\"\n\n"+customQuery(query), "")
+		if err := os.MkdirAll(filepath.Join(os.Getenv("GC_CITY"), "rigs", "riga"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		got := runHookForDeadline(hookCommandOptions{Timeout: budget})
+		if got.code != 0 || !strings.Contains(got.stdout, "hw-city") {
+			t.Errorf("exit = %d stdout = %q, want the city store's work served; stderr=%s", got.code, got.stdout, got.stderr)
+		}
+		if !strings.Contains(got.stderr, "riga") {
+			t.Errorf("stderr = %q, want the killed riga leg reported", got.stderr)
+		}
+		if got.elapsed >= budget {
+			t.Errorf("hook answered after %s, want before the %s deadline", got.elapsed.Round(time.Millisecond), budget)
+		}
+		assertSlowLegsKilled(t, pidLog)
+	})
+}
+
+// TestHookWithoutDeadlineKeepsDefaultBudgets guards AC-6 of #5533: with
+// neither --timeout nor GC_HOOK_DEADLINE, gc hook keeps today's budgets. Each
+// store read is bounded only by hookWorkQueryTimeout (150s), the claim window
+// is hookClaimWindowDefault (or GC_HOOK_CLAIM_WINDOW when set), and the claim
+// reserve is hookClaimMutationTimeout (10s).
+func TestHookWithoutDeadlineKeepsDefaultBudgets(t *testing.T) {
+	t.Setenv(hookDeadlineEnv, "")
+	t.Setenv("GC_HOOK_CLAIM_WINDOW", "")
+	if hookWorkQueryTimeout != 150*time.Second || hookClaimMutationTimeout != 10*time.Second || hookClaimWindowDefault != 160*time.Second {
+		t.Fatalf("default budgets = read %s, reserve %s, window %s; want 150s, 10s, 160s",
+			hookWorkQueryTimeout, hookClaimMutationTimeout, hookClaimWindowDefault)
+	}
+
+	t.Run("discovery reads are bounded only by the per-query timeout", func(t *testing.T) {
+		var stderr bytes.Buffer
+		deadline, ok := hookInvocationDeadline(0, &stderr)
+		if ok || stderr.Len() != 0 {
+			t.Fatalf("invocation deadline = %s, %t (stderr %q); want none", deadline, ok, stderr.String())
+		}
+		ctx, cancel := hookReadContext(context.Background(), deadline, ok)
+		defer cancel()
+		if d, has := ctx.Deadline(); has {
+			t.Fatalf("read context deadline = %s, want none", d)
+		}
+		if margin, has := hookAnswerMargin(ctx); has {
+			t.Fatalf("read context answer margin = %s, want none", margin)
+		}
+		prev := hookWorkQueryTimeout
+		hookWorkQueryTimeout = 300 * time.Millisecond
+		t.Cleanup(func() { hookWorkQueryTimeout = prev })
+		start := time.Now()
+		_, err := shellWorkQueryWithEnvContext(ctx, "exec sleep 30", t.TempDir(), nil)
+		if elapsed := time.Since(start); elapsed > 5*time.Second {
+			t.Fatalf("the read ran %s, want it stopped at the %s per-query timeout", elapsed.Round(time.Millisecond), hookWorkQueryTimeout)
+		}
+		if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(fmt.Sprint(err), "timed out after 300ms") || strings.Contains(fmt.Sprint(err), "hook deadline") {
+			t.Fatalf("read error = %v, want the per-query timeout named, not a hook deadline", err)
+		}
+	})
+
+	for _, tc := range []struct {
+		name, env  string
+		wantWindow time.Duration
+	}{
+		{name: "the claim window and reserve are the defaults", wantWindow: 160 * time.Second},
+		{name: "GC_HOOK_CLAIM_WINDOW still sets the claim window", env: "45s", wantWindow: 45 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_HOOK_CLAIM_WINDOW", tc.env)
+			c := newDeadlineClaim(t, 0, 0)
+			if window, reserve := resolvedClaimBudgets(c.ops); window != tc.wantWindow || reserve != 10*time.Second {
+				t.Fatalf("claim window, reserve = %s, %s; want %s, 10s", window, reserve, tc.wantWindow)
+			}
+			code, stdout, stderr := c.run(c.reader(time.Second, turnBoundRoutedWork))
+			if code != 0 || len(c.rec.claims) != 1 {
+				t.Fatalf("exit = %d, claims = %v; want one claim; stdout=%q stderr=%s", code, c.rec.claims, stdout, stderr)
+			}
+			if len(c.readCtx) != 1 {
+				t.Fatalf("reads = %d, want 1", len(c.readCtx))
+			}
+			if d, has := c.readCtx[0].Deadline(); has {
+				t.Fatalf("claim read context deadline = %s, want none beyond the per-query timeout", d)
+			}
+			d, has := c.rec.claimCtx[0].Deadline()
+			if left := time.Until(d); !has || left < 8*time.Second || left > 10*time.Second {
+				t.Fatalf("claim mutation deadline = %s away (set %t), want the full 10s reserve", left.Round(time.Millisecond), has)
+			}
+		})
+	}
+}

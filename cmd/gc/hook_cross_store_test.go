@@ -1,8 +1,12 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"math/rand"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -70,16 +74,17 @@ func TestAppendOneRigHookStoreSkipsUnknownInput(t *testing.T) {
 }
 
 func TestBestStoreWithWorkReturnsTheOnlyStoreThatHasWork(t *testing.T) {
+	pinHookStoreLegsSerial(t) // asserts the serial call sequence
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}, {dir: "rigb"}}
 	var calls []string
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		calls = append(calls, dir)
 		if dir == "riga" {
 			return `[{"id":"va-1"}]`, nil
 		}
 		return `[]`, nil
 	}
-	out, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
+	out, gotStore, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -101,13 +106,13 @@ func TestBestStoreWithWorkReturnsTheOnlyStoreThatHasWork(t *testing.T) {
 // unreachable no matter how urgent it was.
 func TestBestStoreWithWorkPrefersHigherPriorityInALaterStore(t *testing.T) {
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		if dir == "city" {
 			return `[{"id":"ci-1","priority":2}]`, nil
 		}
 		return `[{"id":"va-1","priority":0}]`, nil
 	}
-	out, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
+	out, gotStore, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -132,13 +137,13 @@ func TestBestStoreWithWorkPrefersHigherPriorityInALaterStore(t *testing.T) {
 // replacement.)
 func TestBestStoreWithWorkDoesNotInvertTheBug(t *testing.T) {
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		if dir == "city" {
 			return `[{"id":"ci-1","priority":1}]`, nil
 		}
 		return `[{"id":"va-1","priority":3}]`, nil
 	}
-	_, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
+	_, gotStore, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -166,7 +171,7 @@ func withHookTieBreakClock(t *testing.T, now time.Time) {
 // first store in the slice.
 func TestBestStoreWithWorkRotatesExactTies(t *testing.T) {
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		if dir == "city" {
 			return `[{"id":"ci-1","priority":1}]`, nil
 		}
@@ -174,7 +179,7 @@ func TestBestStoreWithWorkRotatesExactTies(t *testing.T) {
 	}
 
 	withHookTieBreakClock(t, time.Unix(0, 0))
-	_, gotCity, err := bestStoreWithWork("q", stores, stores[0], run)
+	_, gotCity, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -183,7 +188,7 @@ func TestBestStoreWithWorkRotatesExactTies(t *testing.T) {
 	}
 
 	withHookTieBreakClock(t, time.Unix(0, 1))
-	_, gotRiga, err := bestStoreWithWork("q", stores, stores[0], run)
+	_, gotRiga, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -199,7 +204,7 @@ func TestBestStoreWithWorkRotatesExactTies(t *testing.T) {
 // every tied store, not just the first one in the slice, forever.
 func TestBestStoreWithWorkRepeatedTiesVisitEveryStoreOverTime(t *testing.T) {
 	stores := []hookStore{{dir: "city"}, {dir: "gascity"}, {dir: "cairn"}, {dir: "beads"}}
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		return `[{"id":"tied-` + dir + `","priority":1}]`, nil
 	}
 
@@ -210,7 +215,7 @@ func TestBestStoreWithWorkRepeatedTiesVisitEveryStoreOverTime(t *testing.T) {
 	for i := 0; i < len(stores); i++ {
 		offset := int64(i)
 		hookTieBreakClock = func() time.Time { return time.Unix(0, offset) }
-		_, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
+		_, gotStore, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run)
 		if err != nil {
 			t.Fatalf("call %d: err: %v", i, err)
 		}
@@ -235,7 +240,7 @@ func TestBestStoreWithWorkRepeatedTiesVisitEveryStoreOverTime(t *testing.T) {
 // shared id must not.
 func TestBestStoreWithWorkDoesNotRotateOnACoResidentDuplicateID(t *testing.T) {
 	stores := []hookStore{{dir: "riga"}, {dir: "city"}}
-	run := func(_, _ string, _ []string) (string, error) {
+	run := func(_ context.Context, _, _ string, _ []string) (string, error) {
 		// Same id, same rank, from every store: a co-resident duplicate, not
 		// two different pieces of work.
 		return `[{"id":"dup-1","assignee":"worker-1"}]`, nil
@@ -245,7 +250,7 @@ func TestBestStoreWithWorkDoesNotRotateOnACoResidentDuplicateID(t *testing.T) {
 	// uses to prove rotation moves off the first store; here the tied
 	// candidates share an id, so it must NOT move off riga.
 	withHookTieBreakClock(t, time.Unix(0, 1))
-	_, got, err := bestStoreWithWork("q", stores, stores[0], run)
+	_, got, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -309,13 +314,13 @@ func TestBestStoreWithWorkRanksTierAheadOfPriority(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stores := []hookStore{{dir: "city"}, {dir: "riga"}}
-			run := func(_, dir string, _ []string) (string, error) {
+			run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 				if dir == "city" {
 					return tc.cityRow, nil
 				}
 				return tc.rigRow, nil
 			}
-			_, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
+			_, gotStore, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run)
 			if err != nil {
 				t.Fatalf("err: %v", err)
 			}
@@ -344,13 +349,13 @@ func TestBestStoreWithWorkRanksTierAheadOfPriority(t *testing.T) {
 // across stores.
 func TestBestStoreWithWorkTreatsAssignedTierAsRoutedAcrossStores(t *testing.T) {
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		if dir == "city" {
 			return `[{"id":"ci-1","priority":3,"assignee":"x"}]`, nil
 		}
 		return `[{"id":"va-1","priority":0}]`, nil
 	}
-	_, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
+	_, gotStore, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -363,16 +368,17 @@ func TestBestStoreWithWorkTreatsAssignedTierAsRoutedAcrossStores(t *testing.T) {
 // this session's own interrupted work is unconditional, so the primary store's
 // in_progress row is taken without consulting any federated store at all.
 func TestBestStoreWithWorkShortCircuitsOwnInProgress(t *testing.T) {
+	pinHookStoreLegsSerial(t) // asserts the serial call sequence
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
 	var calls []string
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		calls = append(calls, dir)
 		if dir == "city" {
 			return `[{"id":"ci-1","priority":3,"status":"in_progress","assignee":"me"}]`, nil
 		}
 		return `[{"id":"va-1","priority":0,"status":"in_progress","assignee":"me"}]`, nil
 	}
-	_, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
+	_, gotStore, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -390,13 +396,13 @@ func TestBestStoreWithWorkShortCircuitsOwnInProgress(t *testing.T) {
 // rather than reordering on a comparison that was never made.
 func TestBestStoreWithWorkDegradesToFirstHitOnUnrankableOutput(t *testing.T) {
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		if dir == "city" {
 			return "va-1 some plain-text row", nil
 		}
 		return `[{"id":"va-2","priority":0}]`, nil
 	}
-	_, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
+	_, gotStore, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -439,8 +445,8 @@ func TestBestHookCandidateRank(t *testing.T) {
 
 func TestBestStoreWithWorkReturnsLastWhenNoneHasWork(t *testing.T) {
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
-	run := func(_, _ string, _ []string) (string, error) { return `[]`, nil }
-	out, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
+	run := func(_ context.Context, _, _ string, _ []string) (string, error) { return `[]`, nil }
+	out, gotStore, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -457,13 +463,13 @@ func TestBestStoreWithWorkSurfacesOwnStoreErrorWhenNoWork(t *testing.T) {
 	// federated rig store returns no work — otherwise emitCityWorkQueryFailure
 	// never fires and a transient timeout is silently downgraded to "no work".
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		if dir == "city" {
 			return "", errTestStoreTimeout
 		}
 		return `[]`, nil
 	}
-	if _, _, err := bestStoreWithWork("q", stores, stores[0], run); !errors.Is(err, errTestStoreTimeout) {
+	if _, _, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run); !errors.Is(err, errTestStoreTimeout) {
 		t.Fatalf("own-store error must be surfaced when no store has work; got %v", err)
 	}
 }
@@ -476,13 +482,13 @@ func TestBestStoreWithWorkSurfacesRigStoreErrorWhenOwnStoreHasNoWork(t *testing.
 	// failure: a failed query to the caller, but not this session's own store
 	// failing (hookStoreFailureReport emits it under the rig store's name).
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		if dir == "city" {
 			return `[]`, nil
 		}
 		return "", errTestStoreTimeout
 	}
-	out, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
+	out, gotStore, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run)
 	var secondary *hookSecondaryStoreFailure
 	if !errors.As(err, &secondary) {
 		t.Fatalf("err = %v, want a *hookSecondaryStoreFailure", err)
@@ -503,13 +509,13 @@ func TestBestStoreWithWorkOwnStoreErrorTakesPrecedenceOverRigStoreError(t *testi
 	// itself, so emitCityWorkQueryFailure still classifies it.
 	errRig := errors.New("rig store down")
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		if dir == "city" {
 			return "", errTestStoreTimeout
 		}
 		return "", errRig
 	}
-	_, _, err := bestStoreWithWork("q", stores, stores[0], run)
+	_, _, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run)
 	if !errors.Is(err, errTestStoreTimeout) {
 		t.Fatalf("err = %v, want the own store's error", err)
 	}
@@ -559,13 +565,13 @@ func TestHookStoreFailureReportEmitsEachFailedStoreOnce(t *testing.T) {
 func TestBestStoreWithWorkSkipsStoreWithOnlyUnreadyRows(t *testing.T) {
 	// A store whose only row is dep-blocked is NOT a hit; federation moves on.
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		if dir == "city" {
 			return `[{"id":"x","blocked_by":[{"status":"open"}]}]`, nil
 		}
 		return `[{"id":"va-2"}]`, nil
 	}
-	out, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
+	out, gotStore, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -583,10 +589,11 @@ func TestBestStoreWithWorkSkipsStoreWithOnlyUnreadyRows(t *testing.T) {
 // must re-select across the federated stores instead of draining as "no work"
 // while a later store still has ready routed work.
 func TestClaimStoreWithFallbackFallsBackWhenSelectedStoreRerunsEmpty(t *testing.T) {
+	pinHookStoreLegsSerial(t) // asserts the serial call sequence
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
 	selected := stores[0]
 	var calls []string
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		calls = append(calls, dir)
 		switch len(calls) {
 		case 1: // claim-time re-validation of the selected store: now empty.
@@ -601,7 +608,7 @@ func TestClaimStoreWithFallbackFallsBackWhenSelectedStoreRerunsEmpty(t *testing.
 		}
 	}
 
-	out, gotStore, err := claimStoreWithFallback("q", stores, selected, stores[0], "", run)
+	out, gotStore, err := claimStoreWithFallback(context.Background(), "q", stores, selected, stores[0], "", run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -623,12 +630,12 @@ func TestClaimStoreWithFallbackUsesSelectedStoreWhenStillReady(t *testing.T) {
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
 	selected := stores[0]
 	var calls []string
-	run := func(_, dir string, _ []string) (string, error) {
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
 		calls = append(calls, dir)
 		return `[{"id":"va-1"}]`, nil
 	}
 
-	out, gotStore, err := claimStoreWithFallback("q", stores, selected, stores[0], "", run)
+	out, gotStore, err := claimStoreWithFallback(context.Background(), "q", stores, selected, stores[0], "", run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -640,5 +647,312 @@ func TestClaimStoreWithFallbackUsesSelectedStoreWhenStillReady(t *testing.T) {
 	}
 	if len(calls) != 1 || calls[0] != "city" {
 		t.Fatalf("calls = %v, want a single [city] re-validation", calls)
+	}
+}
+
+// pinHookStoreLegsSerial reads store legs one at a time, in store order, for
+// the rest of t: tests that assert the order of reads, or record them in a
+// shared slice, pin it. A runner that only counts or keys its reads guards
+// them with a lock instead, so the test still reads the legs concurrently.
+func pinHookStoreLegsSerial(t *testing.T) {
+	t.Helper()
+	prev := hookStoreLegConcurrency
+	hookStoreLegConcurrency = 1
+	t.Cleanup(func() { hookStoreLegConcurrency = prev })
+}
+
+// TestBestStoreWithWorkOverlapsStoreLegs pins the store-leg concurrency of
+// #5533 deterministically: each of five legs blocks until all five have
+// entered, so the selection finishes only when every leg is in flight at once.
+// Read one store at a time, the first leg waits alone for a second that never
+// starts.
+func TestBestStoreWithWorkOverlapsStoreLegs(t *testing.T) {
+	const barrierTimeout = 5 * time.Second
+	stores := []hookStore{{dir: "city"}, {dir: "sl"}, {dir: "syst"}, {dir: "te"}, {dir: "wr"}}
+	var entered sync.WaitGroup
+	entered.Add(len(stores))
+	allIn := make(chan struct{})
+	go func() {
+		entered.Wait()
+		close(allIn)
+	}()
+	run := func(_ context.Context, _, dir string, _ []string) (string, error) {
+		entered.Done()
+		select {
+		case <-allIn:
+			return `[]`, nil
+		case <-time.After(barrierTimeout):
+			return "", fmt.Errorf("leg %s waited %s alone: the other legs were not started while it ran", dir, barrierTimeout)
+		}
+	}
+	out, selected, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run)
+	if err != nil {
+		t.Fatalf("bestStoreWithWork: %v", err)
+	}
+	if strings.TrimSpace(out) != "[]" || !isZeroHookStore(selected) {
+		t.Fatalf("out = %q, store = %+v; want the no-work answer []", out, selected)
+	}
+}
+
+// TestHookStoreLegsNameEveryLegTheDeadlineStops pins how a store leg reports a
+// read context that ended before the leg started (#5533): a hook deadline that
+// had already passed when the legs were dispatched, or that passed while a leg
+// waited for a slot. Such a leg answers as a leg the deadline stopped mid-read
+// does, naming its own command and the hook deadline, never with a bare
+// context error. The dispatcher picks at random between starting a leg and
+// seeing the context done, so every round reads the legs afresh.
+func TestHookStoreLegsNameEveryLegTheDeadlineStops(t *testing.T) {
+	const command = "shared query"
+	deadline := time.Now().Add(-time.Second)
+	stores := []hookStore{{dir: "city"}, {dir: "riga", command: "riga query"}, {dir: "rigb"}}
+	// run answers as shellWorkQueryWithEnvContext does for a read its context
+	// stopped.
+	run := func(ctx context.Context, query, _ string, _ []string) (string, error) {
+		<-ctx.Done()
+		return "", fmt.Errorf("running work query %q: %w", query, context.Cause(ctx))
+	}
+	for round := range 64 {
+		ctx, cancel := context.WithDeadlineCause(context.Background(), deadline, &errHookDeadlineReached{deadline: deadline})
+		legs := startHookStoreLegs(ctx, command, stores, run)
+		for i, st := range stores {
+			_, err := legs.result(i)
+			var reached *errHookDeadlineReached
+			if !errors.As(err, &reached) || !errors.Is(err, context.DeadlineExceeded) ||
+				!strings.Contains(fmt.Sprint(err), fmt.Sprintf("%q", hookStoreCommand(st, command))) {
+				t.Fatalf("round %d: leg %s answered %v; want its command and the hook deadline named", round, st.dir, err)
+			}
+		}
+		legs.cancel()
+		cancel()
+	}
+}
+
+// hookLegAnswer is one store leg's fixed read result in
+// TestBestStoreWithWorkSelectionIndependentOfCompletionOrder.
+type hookLegAnswer struct {
+	out string
+	err error
+}
+
+// hookSelection is what bestStoreWithWork decided, reduced to what a caller
+// acts on: the output, the store it came from, the class of error and the
+// failed stores passed to noted, in the order they were noted.
+type hookSelection struct {
+	out   string
+	store string
+	err   string
+	noted []string
+}
+
+func hookSelectionErrClass(err error) string {
+	if err == nil {
+		return "nil"
+	}
+	var secondary *hookSecondaryStoreFailure
+	if errors.As(err, &secondary) {
+		dirs := make([]string, 0, len(secondary.failures))
+		for _, f := range secondary.failures {
+			dirs = append(dirs, f.dir)
+		}
+		return "secondary:" + strings.Join(dirs, ",")
+	}
+	return "own:" + err.Error()
+}
+
+// TestBestStoreWithWorkSelectionIndependentOfCompletionOrder pins #5533's
+// selection invariant: reading the store legs concurrently must not change what
+// bestStoreWithWork answers. For each set of fixed per-store results, the
+// answer read one store at a time is the reference, and the same results
+// arriving in store order, reversed, and in a seeded shuffle must give the same
+// output, store, error class and noted stores. Where a store answers early (own
+// in-progress work), the legs still running must be canceled.
+func TestBestStoreWithWorkSelectionIndependentOfCompletionOrder(t *testing.T) {
+	const (
+		inProgress = `[{"id":"ci-1","priority":3,"status":"in_progress","assignee":"me"}]`
+		rigResume  = `[{"id":"va-9","priority":3,"status":"in_progress","assignee":"me"}]`
+		p0         = `[{"id":"va-1","priority":0}]`
+		p1         = `[{"id":"va-2","priority":1}]`
+		p1b        = `[{"id":"vb-2","priority":1}]`
+		p1c        = `[{"id":"ci-2","priority":1}]`
+		p2         = `[{"id":"ci-3","priority":2}]`
+		empty      = `[]`
+		plain      = "va-5 some plain-text row"
+	)
+	errOwn := errors.New("own store read failed")
+	errRig := errors.New("rig store read failed")
+	errDown := fmt.Errorf("%w: %w", errHookRigRuntimeUnavailable, errTestStoreTimeout)
+	plainStores := []hookStore{{dir: "city"}, {dir: "riga", rig: "riga"}, {dir: "rigb", rig: "rigb"}, {dir: "rigc", rig: "rigc"}}
+	// The federated reader pinned to the primary: the extras run their own
+	// single-store command (hookFederationPinnedToPrimary).
+	pinnedStores := []hookStore{{dir: "city"}, {dir: "riga", rig: "riga", command: "single"}, {dir: "rigb", rig: "rigb", command: "single"}, {dir: "rigc", rig: "rigc", command: "single"}}
+
+	// Each row's want* fields are today's one-store-at-a-time answer, so the
+	// serial oracle the schedules are compared against is itself pinned.
+	rows := []struct {
+		name         string
+		stores       []hookStore
+		answers      map[string]hookLegAnswer
+		shortCircuit bool
+		want         hookSelection
+	}{
+		{name: "primary in-progress short-circuit", stores: plainStores, shortCircuit: true, answers: map[string]hookLegAnswer{
+			"city": {out: inProgress}, "riga": {out: p0}, "rigb": {out: empty}, "rigc": {err: errRig},
+		}, want: hookSelection{out: inProgress, store: "city", err: "nil"}},
+		{name: "rank winner", stores: plainStores, answers: map[string]hookLegAnswer{
+			"city": {out: p2}, "riga": {out: p1}, "rigb": {out: p0}, "rigc": {out: empty},
+		}, want: hookSelection{out: p0, store: "rigb", err: "nil"}},
+		// Three stores tie at priority 1; the tie-break clock pinned at 1ns
+		// rotates to index 1 % 3.
+		{name: "pinned tie", stores: plainStores, answers: map[string]hookLegAnswer{
+			"city": {out: p1c}, "riga": {out: p1}, "rigb": {out: p1b}, "rigc": {out: empty},
+		}, want: hookSelection{out: p1, store: "riga", err: "nil"}},
+		{name: "unrankable first-hit", stores: plainStores, answers: map[string]hookLegAnswer{
+			"city": {out: empty}, "riga": {out: plain}, "rigb": {out: p0}, "rigc": {out: p1},
+		}, want: hookSelection{out: plain, store: "riga", err: "nil"}},
+		{name: "served with a failed secondary", stores: plainStores, answers: map[string]hookLegAnswer{
+			"city": {out: p1c}, "riga": {err: errRig}, "rigb": {out: empty}, "rigc": {err: errDown},
+		}, want: hookSelection{out: p1c, store: "city", err: "nil", noted: []string{"riga", "rigc"}}},
+		{name: "primary error with work in a rig", stores: plainStores, answers: map[string]hookLegAnswer{
+			"city": {err: errOwn}, "riga": {out: empty}, "rigb": {out: p1}, "rigc": {out: empty},
+		}, want: hookSelection{out: p1, store: "rigb", err: "nil"}},
+		{name: "primary error with no work anywhere", stores: plainStores, answers: map[string]hookLegAnswer{
+			"city": {err: errOwn}, "riga": {out: empty}, "rigb": {err: errRig}, "rigc": {out: empty},
+		}, want: hookSelection{err: "own:" + errOwn.Error()}},
+		{name: "secondary failures only", stores: plainStores, answers: map[string]hookLegAnswer{
+			"city": {out: empty}, "riga": {err: errRig}, "rigb": {out: empty}, "rigc": {err: errRig},
+		}, want: hookSelection{err: "secondary:riga,rigc"}},
+		{name: "down managed rig", stores: plainStores, answers: map[string]hookLegAnswer{
+			"city": {out: empty}, "riga": {err: errDown}, "rigb": {out: empty}, "rigc": {out: empty},
+		}, want: hookSelection{out: empty, err: "nil", noted: []string{"riga"}}},
+		{name: "federated-pinned primary failure", stores: pinnedStores, answers: map[string]hookLegAnswer{
+			"city": {err: errOwn}, "riga": {out: p0}, "rigb": {err: errRig}, "rigc": {out: empty},
+		}, want: hookSelection{err: "own:" + errOwn.Error()}},
+		{name: "federated-pinned primary failure with a resume answer", stores: pinnedStores, shortCircuit: true, answers: map[string]hookLegAnswer{
+			"city": {err: errOwn}, "riga": {out: empty}, "rigb": {out: rigResume}, "rigc": {out: p0},
+		}, want: hookSelection{out: rigResume, store: "rigb", err: "nil"}},
+	}
+
+	const step = 15 * time.Millisecond
+	type schedule struct {
+		name  string
+		delay func(i, n int) time.Duration
+	}
+	shuffled := rand.New(rand.NewSource(5533)).Perm(len(plainStores))
+	schedules := []schedule{
+		{name: "store order", delay: func(i, _ int) time.Duration { return time.Duration(i) * step }},
+		{name: "reversed", delay: func(i, n int) time.Duration { return time.Duration(n-1-i) * step }},
+		{name: "seeded shuffle", delay: func(i, _ int) time.Duration { return time.Duration(shuffled[i]) * step }},
+	}
+
+	selectWith := func(t *testing.T, stores []hookStore, answers map[string]hookLegAnswer, delay func(i, n int) time.Duration) hookSelection {
+		t.Helper()
+		index := make(map[string]int, len(stores))
+		for i, st := range stores {
+			index[st.dir] = i
+		}
+		run := func(ctx context.Context, _, dir string, _ []string) (string, error) {
+			select {
+			case <-time.After(delay(index[dir], len(stores))):
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+			a, ok := answers[dir]
+			if !ok {
+				t.Errorf("leg read unknown store %q", dir)
+			}
+			return a.out, a.err
+		}
+		var noted []string
+		out, st, err := bestStoreWithWork(context.Background(), "q", stores, stores[0], run, func(f *hookStoreReadError) {
+			noted = append(noted, f.dir)
+		})
+		return hookSelection{out: out, store: st.dir, err: hookSelectionErrClass(err), noted: noted}
+	}
+
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			withHookTieBreakClock(t, time.Unix(0, 1))
+			prev := hookStoreLegConcurrency
+			hookStoreLegConcurrency = 1
+			want := selectWith(t, row.stores, row.answers, func(int, int) time.Duration { return 0 })
+			hookStoreLegConcurrency = prev
+			if want.out != row.want.out || want.store != row.want.store || want.err != row.want.err || strings.Join(want.noted, ",") != strings.Join(row.want.noted, ",") {
+				t.Fatalf("one-store-at-a-time selection = %+v, want today's %+v", want, row.want)
+			}
+
+			for _, sched := range schedules {
+				got := selectWith(t, row.stores, row.answers, sched.delay)
+				if got.out != want.out || got.store != want.store || got.err != want.err || strings.Join(got.noted, ",") != strings.Join(want.noted, ",") {
+					t.Errorf("%s: selection = %+v, want the one-store-at-a-time %+v", sched.name, got, want)
+				}
+			}
+
+			if !row.shortCircuit {
+				return
+			}
+			// The answering store is fast and every later leg would take far
+			// longer: an early answer must cancel them, not wait them out. The
+			// answering leg returns only once every later leg has entered, so
+			// the cancel reaches running legs. A leg the cancel reaches before
+			// it starts is never run (TestHookStoreLegsNameEveryLegTheDeadlineStops).
+			const slow = 5 * time.Second
+			answering := 0
+			for i, st := range row.stores {
+				if st.dir == want.store {
+					answering = i
+				}
+			}
+			later := len(row.stores) - answering - 1
+			entered := make(chan struct{}, later)
+			canceled := make(chan string, later)
+			run := func(ctx context.Context, _, dir string, _ []string) (string, error) {
+				i := 0
+				for j, st := range row.stores {
+					if st.dir == dir {
+						i = j
+					}
+				}
+				a := row.answers[dir]
+				if i < answering {
+					return a.out, a.err
+				}
+				if i == answering {
+					timeout := time.After(slow)
+					for n := 0; n < later; n++ {
+						select {
+						case <-entered:
+						case <-timeout:
+							return "", fmt.Errorf("only %d of %d later legs started while answering leg %s waited %s", n, later, dir, slow)
+						}
+					}
+					return a.out, a.err
+				}
+				entered <- struct{}{}
+				select {
+				case <-time.After(slow):
+					return a.out, a.err
+				case <-ctx.Done():
+					canceled <- dir
+					return "", ctx.Err()
+				}
+			}
+			start := time.Now()
+			_, st, err := bestStoreWithWork(context.Background(), "q", row.stores, row.stores[0], run)
+			if err != nil || st.dir != want.store {
+				t.Fatalf("early answer = (%q, %v), want %q", st.dir, err, want.store)
+			}
+			if elapsed := time.Since(start); elapsed >= slow {
+				t.Fatalf("early answer took %s: it waited for the later legs", elapsed)
+			}
+			// Cancellation reaches the later legs asynchronously.
+			timeout := time.After(slow)
+			for n := 0; n < later; n++ {
+				select {
+				case <-canceled:
+				case <-timeout:
+					t.Fatalf("%d of %d later legs observed ctx.Done() after the early answer", n, later)
+				}
+			}
+		})
 	}
 }

@@ -98,7 +98,7 @@ func TestClassEscalationWaitsForEveryWorkLeg(t *testing.T) {
 	// Both work legs are served the same co-resident row; only the CITY leg's
 	// bd context can resolve it, exactly as appendCityHookStore documents.
 	row := `[{"id":"gcg-77","status":"open","assignee":"worker-1","metadata":{"gc.kind":"wisp"}}]`
-	run := func(_, _ string, _ []string) (string, error) { return row, nil }
+	run := func(_ context.Context, _, _ string, _ []string) (string, error) { return row, nil }
 
 	var claimDirs []string
 	base := hookFanoutBaseOps(func(_ context.Context, dir string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
@@ -141,7 +141,7 @@ func TestClassEscalationStillReachesABindingOnlyBead(t *testing.T) {
 	route := newFanoutClassRoute(t, class)
 
 	row := `[{"id":"gcg-88","status":"open","assignee":"worker-1","metadata":{"gc.kind":"wisp"}}]`
-	run := func(_, _ string, _ []string) (string, error) { return row, nil }
+	run := func(_ context.Context, _, _ string, _ []string) (string, error) { return row, nil }
 	var claimDirs []string
 	base := hookFanoutBaseOps(func(_ context.Context, dir string, _ []string, beadID, _ string) (beads.Bead, bool, error) {
 		claimDirs = append(claimDirs, dir)
@@ -227,7 +227,7 @@ func TestBindingClaimRefusalIsPerBeadNotPerTick(t *testing.T) {
 	// the refusal is reached before the healthy bead either way.
 	row := `[{"id":"gcg-6","status":"open","assignee":"worker-1","metadata":{"gc.kind":"wisp"}},` +
 		`{"id":"gc-77","status":"open","metadata":{"gc.routed_to":"worker"}}]`
-	run := func(_, _ string, _ []string) (string, error) { return row, nil } //nolint:unparam // the runner seam returns an error the healthy rows never produce
+	run := func(_ context.Context, _, _ string, _ []string) (string, error) { return row, nil } //nolint:unparam // the runner seam returns an error the healthy rows never produce
 	newBase := func() hookClaimOps {
 		return hookFanoutBaseOps(func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
 			if strings.HasPrefix(beadID, "gcg-") {
@@ -283,7 +283,7 @@ func TestBindingClaimRefusalIsPerBeadNotPerTick(t *testing.T) {
 // --json caller can read, not a bare exit 1 with empty stdout.
 func TestBindingClaimRefusalAloneStillDrains(t *testing.T) {
 	row := `[{"id":"gcg-6","status":"open","assignee":"worker-1","metadata":{"gc.kind":"wisp"}}]`
-	run := func(_, _ string, _ []string) (string, error) { return row, nil }
+	run := func(_ context.Context, _, _ string, _ []string) (string, error) { return row, nil }
 	base := hookFanoutBaseOps(func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, bool, error) {
 		return beads.Bead{}, false, fmt.Errorf("claiming bead %q: %w", beadID, beads.ErrNotFound)
 	})

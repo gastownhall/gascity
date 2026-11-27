@@ -2804,7 +2804,7 @@ func conformanceAssignedTierClaimsTheGraphStep(t *testing.T, e splitEnv, assigne
 		{dir: e.cityPath, env: []string{"GC_HOOK_LEG=assigned"}},
 		{dir: e.cityPath, env: []string{"GC_HOOK_LEG=routed"}},
 	}
-	run := func(_, _ string, env []string) (string, error) {
+	run := func(_ context.Context, _, _ string, env []string) (string, error) {
 		if len(env) > 0 && env[0] == "GC_HOOK_LEG=assigned" {
 			return `[{"id":"` + assignedGraphBeadID + `","status":"open","assignee":"` + e.qualified + `"}]`, nil
 		}
@@ -2885,7 +2885,7 @@ func conformanceUnresolvableCandidateStillDoesNotStrandWork(t *testing.T, e spli
 		{dir: e.cityPath, env: []string{"GC_HOOK_LEG=assigned"}},
 		{dir: e.cityPath, env: []string{"GC_HOOK_LEG=routed"}},
 	}
-	run := func(_, _ string, env []string) (string, error) {
+	run := func(_ context.Context, _, _ string, env []string) (string, error) {
 		if len(env) > 0 && env[0] == "GC_HOOK_LEG=assigned" {
 			return `[{"id":"` + assignedGraphBeadID + `","status":"open","assignee":"` + e.qualified + `"}]`, nil
 		}
