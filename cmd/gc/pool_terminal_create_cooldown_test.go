@@ -642,7 +642,7 @@ func TestPoolTerminalCreateCooldownWorkDirResolveFailureFailsOpenAndIsVisible(t 
 		stderr:    &stderr,
 	}
 
-	if poolTerminalCreateCooldownActive(bp, &agent, "worker", "worker", time.Now()) {
+	if poolTerminalCreateCooldownActive(bp, &agent, "worker", "worker", "", time.Now()) {
 		t.Fatal("gate suppressed a create it could not resolve a work dir for, want fail-open")
 	}
 	if reads := fault.closedHistoryReads.Load(); reads != 0 {
@@ -667,7 +667,7 @@ func TestPoolTerminalCreateCooldownWorkDirResolutionDoesNotCreateDirectories(t *
 		stderr:    io.Discard,
 	}
 
-	poolTerminalCreateCooldownActive(bp, &agent, "claude", "claude", time.Now())
+	poolTerminalCreateCooldownActive(bp, &agent, "claude", "claude", "", time.Now())
 
 	if _, err := os.Stat(filepath.Join(cityPath, "agents")); !os.IsNotExist(err) {
 		t.Fatalf("gate evaluation created directories under the city path (stat err = %v)", err)
@@ -691,10 +691,64 @@ func TestPoolTerminalCreateCooldownPlanOnlyReadsNothing(t *testing.T) {
 		beadStore: fault, stderr: io.Discard, planOnly: true,
 	}
 
-	if poolTerminalCreateCooldownActive(bp, &agent, "worker", "worker", now) {
+	if poolTerminalCreateCooldownActive(bp, &agent, "worker", "worker", "", now) {
 		t.Fatal("plan-only build was throttled by history it must not read")
 	}
 	if reads := fault.closedHistoryReads.Load(); reads != 0 {
 		t.Fatalf("plan-only gate performed %d closed-history reads, want 0", reads)
+	}
+}
+
+// TestPoolTerminalCreateCooldownKeysOnPlannedRoutedWorkDir pins the gate's key
+// to the plan's routed work dir (the work_dir stamped on the row it would
+// create), falling back to the configured work dir only when no routed dir is
+// planned.
+func TestPoolTerminalCreateCooldownKeysOnPlannedRoutedWorkDir(t *testing.T) {
+	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+	recent := now.Add(-30 * time.Second)
+
+	tests := []struct {
+		name           string
+		historyDir     func(cityPath string) string
+		plannedWorkDir func(cityPath string) string
+		want           bool
+	}{
+		{
+			name:           "history_at_routed_dir_with_routed_plan",
+			historyDir:     func(cityPath string) string { return filepath.Join(cityPath, "pack-x") },
+			plannedWorkDir: func(cityPath string) string { return filepath.Join(cityPath, "pack-x") },
+			want:           true,
+		},
+		{
+			name:           "history_at_configured_dir_does_not_hold_routed_plan",
+			historyDir:     sameTerminalCooldownDir,
+			plannedWorkDir: func(cityPath string) string { return filepath.Join(cityPath, "pack-x") },
+			want:           false,
+		},
+		{
+			name:           "unrouted_plan_falls_back_to_configured_dir",
+			historyDir:     func(cityPath string) string { return filepath.Join(cityPath, "pack-x") },
+			plannedWorkDir: func(string) string { return "" },
+			want:           false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			store := beads.NewMemStore()
+			dir := tt.historyDir(cityPath)
+			terminalCooldownSeedHistory(t, store, "history", "worker", "ephemeral",
+				dir, dir, terminalCooldownCollisionReason, &recent, true)
+			agent := terminalCooldownAgent("worker", sameTerminalCooldownDir(cityPath))
+			bp := &agentBuildParams{
+				city: terminalCooldownCity(agent), cityName: "cooldown-city", cityPath: cityPath,
+				beadStore: store, stderr: io.Discard,
+			}
+
+			if got := poolTerminalCreateCooldownActive(bp, &agent, "worker", "worker", tt.plannedWorkDir(cityPath), now); got != tt.want {
+				t.Fatalf("poolTerminalCreateCooldownActive = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

@@ -270,27 +270,33 @@ const (
 )
 
 // poolTerminalCreateCooldownActive reports whether a fresh ephemeral create
-// for template at qualifiedInstance's resolved work directory should be
-// suppressed because a terminal provider error was recorded for the same
-// (template, resolved work dir) within poolTerminalCreateCooldown of
-// decisionTime. The window is measured on the tick's decision time, never on
+// for template should be suppressed because a terminal provider error was
+// recorded for the same (template, work dir) within poolTerminalCreateCooldown
+// of decisionTime. The work dir key is plannedWorkDir, the plan's routed work
+// dir (pack, workspace or verified worktree) as stamped on the row it would
+// create; when that is empty it falls back to qualifiedInstance's configured
+// work dir. The window is measured on the tick's decision time, never on
 // bp.beaconTime, which is frozen at controller start.
 //
 // It fails open (returns false, allowing the create) whenever it cannot
 // establish a clear, current match, and says so on bp.stderr where the cause is
 // an error: the build is plan-only (no store reads, so no history to consult),
-// the prospective work dir cannot be resolved, the history read fails, or the
+// the configured fallback work dir cannot be resolved, the history read fails, or the
 // matching rows lack a usable timestamp (see
 // session.Store.LatestEphemeralTerminalFailure). The work dir is resolved
 // without creating it, so evaluating the gate has no filesystem effect.
-func poolTerminalCreateCooldownActive(bp *agentBuildParams, cfgAgent *config.Agent, template, qualifiedInstance string, decisionTime time.Time) bool {
+func poolTerminalCreateCooldownActive(bp *agentBuildParams, cfgAgent *config.Agent, template, qualifiedInstance, plannedWorkDir string, decisionTime time.Time) bool {
 	if bp.planOnly {
 		return false
 	}
-	workDir, err := resolveConfiguredWorkDirPath(bp.cityPath, bp.cityName, qualifiedInstance, cfgAgent, bp.rigs)
-	if err != nil {
-		fmt.Fprintf(bp.stderr, "buildDesiredState: pool %q: terminal-cooldown work dir unresolved: %v (fail-open, fresh create allowed)\n", qualifiedInstance, err) //nolint:errcheck
-		return false
+	workDir := strings.TrimSpace(plannedWorkDir)
+	if workDir == "" {
+		resolved, err := resolveConfiguredWorkDirPath(bp.cityPath, bp.cityName, qualifiedInstance, cfgAgent, bp.rigs)
+		if err != nil {
+			fmt.Fprintf(bp.stderr, "buildDesiredState: pool %q: terminal-cooldown work dir unresolved: %v (fail-open, fresh create allowed)\n", qualifiedInstance, err) //nolint:errcheck
+			return false
+		}
+		workDir = resolved
 	}
 	if strings.TrimSpace(workDir) == "" {
 		return false
@@ -4349,7 +4355,7 @@ func realizePoolDesiredSessionsAt(
 				return item
 			}
 			if plan != nil {
-				if poolTerminalCreateCooldownActive(bp, cfgAgent, poolState.Template, plan.qualifiedInstance, poolDecisionTime) {
+				if poolTerminalCreateCooldownActive(bp, cfgAgent, poolState.Template, plan.qualifiedInstance, plan.metadata[beadmeta.LegacyWorkDirMetadataKey], poolDecisionTime) {
 					// The plan already claimed a slot and a create-budget
 					// token; give both back so this tick's other requests
 					// can use them.
