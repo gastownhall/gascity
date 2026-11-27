@@ -131,6 +131,12 @@ type Server struct {
 	// statusBuildSlot in handler_status.go.
 	statusBuilds map[string]*statusBuildSlot
 
+	// agentListBuilds and sessionListBuilds share each list's fresh builds
+	// among concurrent identical readers. See listBuildSharer in
+	// list_build_share.go.
+	agentListBuilds   listBuildSharer[agentResponse]
+	sessionListBuilds listBuildSharer[sessionResponse]
+
 	// storeHealth caches the on-disk size walk and maintenance-log read
 	// for /v0/status's StoreHealth block. Refreshed on expiry; missing
 	// store directories produce a zero-value entry so repeated requests

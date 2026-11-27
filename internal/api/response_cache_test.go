@@ -722,21 +722,27 @@ func (s *gatedWorkReadStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 // open releases the parked read; it is safe to call more than once.
 func (s *gatedWorkReadStore) open() { s.closeOnce.Do(func() { close(s.release) }) }
 
-// TestHandleAgentListKeepsLaterStartedBuild pins the overlap rule: on a loaded
-// city list builds overlap and can finish out of order, and the age floor
-// serves whatever the slot holds. A build that started first and finishes
-// last must not replace the list a later-started build cached, or requests
-// are served the older list and X-GC-Index steps back.
+// TestHandleAgentListKeepsLaterStartedBuild pins what a repeat sees when a
+// list build runs while the state changes: a reader arriving behind a running
+// build joins the one build queued after it, that build reads the newer state
+// when it starts, and the cache ends up holding its newer list — a repeat is
+// served from the cache at the newer X-GC-Index, not rebuilt, and never
+// stepped back to the older build's view.
 func TestHandleAgentListKeepsLaterStartedBuild(t *testing.T) {
 	pinAgentListCache(t, time.Hour, time.Hour)
 	// Every build counts as slow, so a cached list is served across index
-	// changes and the slot alone decides what the repeat gets.
+	// changes and the cache alone decides what the repeat gets.
 	pinAgentListBuildsSlow(t)
 
 	state := newFakeState(t)
 	gate := newGatedWorkReadStore()
 	state.stores["myrig"] = gate
-	h := newTestCityHandler(t, state)
+	srv := New(state)
+	// joins reports each reader taking its build: whether it started one
+	// or joined the build queued behind the running one.
+	joins := make(chan bool, 4)
+	srv.agentListBuilds.joined = func(_ string, started bool) { joins <- started }
+	h := newTestCityHandlerWith(t, state, srv)
 
 	// The first build reads the worker stopped, then parks in its
 	// active-work read.
@@ -751,25 +757,44 @@ func TestHandleAgentListKeepsLaterStartedBuild(t *testing.T) {
 		<-firstDone
 	})
 	select {
+	case started := <-joins:
+		if !started {
+			t.Fatal("the first reader did not start a build")
+		}
+	case <-firstDone:
+		t.Fatal("first reader finished without taking a shared build")
+	}
+	select {
 	case <-gate.entered:
 	case <-firstDone:
 		t.Fatal("first build finished without an active-work read; the test cannot hold it open")
 	}
 
-	// While it is parked, the worker starts and a second build caches the
-	// newer list.
+	// While the first build is parked, the worker starts. A second reader
+	// joins the build queued behind the running one.
 	if err := state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}); err != nil {
 		t.Fatalf("start myrig--worker: %v", err)
 	}
 	state.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "gc", Subject: "myrig--worker"})
-	newer, newerIndex := listedWorker(t, getAgents(h, state))
-	if !newer.Running {
-		t.Fatal("second build read myrig/worker stopped after its session started")
+	var second *httptest.ResponseRecorder
+	secondDone := make(chan struct{})
+	go func() {
+		defer close(secondDone)
+		second = getAgents(h, state)
+	}()
+	if started := <-joins; started {
+		t.Fatal("the second reader started a build beside the parked one instead of queuing behind it")
 	}
 
-	// The first build finishes last and tries to cache its older list.
+	// The first build finishes with its older view, then the queued build
+	// starts, reads the started worker and caches the newer list.
 	gate.open()
 	<-firstDone
+	<-secondDone
+	newer, newerIndex := listedWorker(t, second)
+	if !newer.Running {
+		t.Fatal("queued build read myrig/worker stopped after its session started")
+	}
 	older, olderIndex := listedWorker(t, first)
 	if older.Running || olderIndex >= newerIndex {
 		t.Fatalf("first build read running=%v at index %d, want a stopped worker before index %d; the test no longer models an older build", older.Running, olderIndex, newerIndex)
@@ -778,7 +803,7 @@ func TestHandleAgentListKeepsLaterStartedBuild(t *testing.T) {
 	reads := gate.reads.Load()
 	row, index := listedWorker(t, getAgents(h, state))
 	if !row.Running || index != newerIndex {
-		t.Fatalf("repeat served running=%v at X-GC-Index %d, want the later-started build's running=true at %d: the build that finished last replaced it", row.Running, index, newerIndex)
+		t.Fatalf("repeat served running=%v at X-GC-Index %d, want the queued build's running=true at %d: the older build's list won the cache", row.Running, index, newerIndex)
 	}
 	if got := gate.reads.Load(); got != reads {
 		t.Fatalf("active-work reads = %d after the repeat, want %d: it was rebuilt, not served from the cache", got, reads)
