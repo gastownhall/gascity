@@ -1238,3 +1238,30 @@ func TestDispatchClaimsReadTheirOwnCensusWithinAPass(t *testing.T) {
 		t.Fatalf("delivered=%d nudges=%v, want s1 and s2 each delivered once", delivered, msgs)
 	}
 }
+
+// TestNudgeDispatcherWakesAsleepRecipientOfQueuedMailNotice: in a supervisor
+// city, a dispatcher pass that finds the recipient of a queued mail notice
+// asleep and unheld records the managed wake the notice declared, delivers
+// nothing, and leaves the notice queued for the woken session.
+func TestNudgeDispatcherWakesAsleepRecipientOfQueuedMailNotice(t *testing.T) {
+	c := newQueuedNoticeCity(t)
+	c.stop(t)
+	sleepUnheld(t, c.store, c.id)
+	snapshot, err := loadSessionBeadSnapshot(c.store)
+	if err != nil {
+		t.Fatalf("loadSessionBeadSnapshot: %v", err)
+	}
+	delivered, err := dispatchAllQueuedNudges(c.dir, supervisorCfg(), c.store, c.store, c.fake, snapshot, nil)
+	if err != nil {
+		t.Fatalf("dispatchAllQueuedNudges: %v", err)
+	}
+	if delivered != 0 {
+		t.Fatalf("delivered = %d, want 0 to an asleep session", delivered)
+	}
+	if got := c.wakeRequest(t); got != string(session.WakeCauseExplicit) {
+		t.Fatalf("wake_request = %q, want %q", got, session.WakeCauseExplicit)
+	}
+	if n := len(c.pending(t)); n != 1 {
+		t.Fatalf("pending = %d, want the notice still queued", n)
+	}
+}
