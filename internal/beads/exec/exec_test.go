@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
@@ -1215,6 +1216,108 @@ esac
 	}
 	if got[0].Metadata["name"] != "ok" {
 		t.Errorf("Metadata[name] = %q, want %q", got[0].Metadata["name"], "ok")
+	}
+}
+
+// A non-string gc.exclude_claimants must fail closed. Coercing the raw JSON
+// text onto the bead lets sling copy a value that matches no claimant. Get
+// rejects the bead; list reads skip it, as the native store does, so one bad
+// row does not fail the whole list.
+func TestGetRejectsAndListSkipsNonStringExcludeClaimants(t *testing.T) {
+	for _, value := range []string{`["reviewer-one"]`, `42`, `null`} {
+		t.Run("get/"+value, func(t *testing.T) {
+			dir := t.TempDir()
+			script := writeScript(t, dir, `
+case "$1" in
+  get)
+    echo '{"id":"EX-1","title":"test","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z","metadata":{"`+beadmeta.ExcludeClaimantsMetadataKey+`":`+value+`,"flag":true}}'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+			s := NewStore(script)
+			_, err := s.Get("EX-1")
+			if err == nil || !strings.Contains(err.Error(), beadmeta.ExcludeClaimantsMetadataKey) || !strings.Contains(err.Error(), "must be a string") {
+				t.Fatalf("Get %s: got %v, want error naming %s", value, err, beadmeta.ExcludeClaimantsMetadataKey)
+			}
+			if !errors.Is(err, beads.ErrMetadataParse) {
+				t.Fatalf("Get %s: got %v, want ErrMetadataParse", value, err)
+			}
+		})
+		t.Run("list/"+value, func(t *testing.T) {
+			dir := t.TempDir()
+			script := writeScript(t, dir, `
+case "$1" in
+  list)
+    echo '[{"id":"EX-1","title":"test","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z","metadata":{"`+beadmeta.ExcludeClaimantsMetadataKey+`":`+value+`}},{"id":"EX-2","title":"test","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z","metadata":{"`+beadmeta.ExcludeClaimantsMetadataKey+`":"reviewer-one"}}]'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+			s := NewStore(script)
+			got, err := s.ListOpen()
+			if err != nil {
+				t.Fatalf("List %s: got error %v, want bad row skipped", value, err)
+			}
+			if len(got) != 1 || got[0].ID != "EX-2" {
+				t.Fatalf("List %s: got %+v, want only EX-2", value, got)
+			}
+			if got[0].Metadata[beadmeta.ExcludeClaimantsMetadataKey] != "reviewer-one" {
+				t.Fatalf("List %s: EX-2 exclude = %q, want reviewer-one", value, got[0].Metadata[beadmeta.ExcludeClaimantsMetadataKey])
+			}
+		})
+	}
+}
+
+func TestGet_stringExcludeClaimantsRoundTrips(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, `
+case "$1" in
+  get)
+    echo '{"id":"EX-1","title":"test","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z","metadata":{"`+beadmeta.ExcludeClaimantsMetadataKey+`":"reviewer-one","flag":true,"retries":3}}'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	got, err := s.Get("EX-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Metadata[beadmeta.ExcludeClaimantsMetadataKey] != "reviewer-one" {
+		t.Errorf("exclude = %q, want reviewer-one", got.Metadata[beadmeta.ExcludeClaimantsMetadataKey])
+	}
+	if got.Metadata["flag"] != "true" {
+		t.Errorf("flag = %q, want true (non-string coercion unchanged)", got.Metadata["flag"])
+	}
+	if got.Metadata["retries"] != "3" {
+		t.Errorf("retries = %q, want 3 (non-string coercion unchanged)", got.Metadata["retries"])
+	}
+}
+
+func TestCreateAndUpdateRejectNonStringExcludeClaimants(t *testing.T) {
+	bad := `{"id":"EX-1","title":"test","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z","metadata":{"` + beadmeta.ExcludeClaimantsMetadataKey + `":["reviewer-one"]}}`
+	dir := t.TempDir()
+	script := writeScript(t, dir, `
+case "$1" in
+  create)
+    cat > /dev/null
+    echo '`+bad+`'
+    ;;
+  update)
+    cat > /dev/null
+    echo '`+bad+`'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+	if _, err := s.Create(beads.Bead{Title: "test"}); err == nil || !strings.Contains(err.Error(), beadmeta.ExcludeClaimantsMetadataKey) {
+		t.Fatalf("Create: got %v, want error naming %s", err, beadmeta.ExcludeClaimantsMetadataKey)
+	}
+	if err := s.Update("EX-1", beads.UpdateOpts{}); err == nil || !strings.Contains(err.Error(), beadmeta.ExcludeClaimantsMetadataKey) {
+		t.Fatalf("Update: got %v, want error naming %s", err, beadmeta.ExcludeClaimantsMetadataKey)
 	}
 }
 
