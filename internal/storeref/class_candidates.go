@@ -98,9 +98,10 @@ type PrefixedStore struct {
 // rather than only about prefixed ones. cmd/gc/cmd_bd_by_id.go's
 // bdByIDClassDoor.resolve does exactly that, for exactly this reason. Nothing
 // on the internal/api by-id path does, so there a legacy-prefixed relocated
-// bead is still answered from the work store's retained pre-migration copy (the
-// migration never deletes its source). Giving that path a residence probe is
-// open work, not a property of this function.
+// bead is answered from the work store: not-found on a cleared city, or the
+// retained pre-migration copy on a city an older build migrated and nobody
+// cleared. Giving that path a residence probe is open work, not a property of
+// this function.
 // # Now an internal helper of the ByID intent
 //
 // The list this returns IS Plan(ByID)'s in-namespace arm, computed by the same

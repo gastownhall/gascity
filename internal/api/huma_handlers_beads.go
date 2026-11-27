@@ -127,12 +127,14 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	}
 
 	// Bead ids are globally unique, so an id is one bead no matter how many legs
-	// hold a row for it. A migrated split city really does hold both: `gc storage
-	// migrate` copies infrastructure rows into the binding with their ids
-	// preserved (CreateWithForeignID) and never deletes them back, so the work
-	// store keeps its copy — convergence is DEFINED as that full overlap. First
-	// leg wins, and the graph leg is federated last, so the work store's row is
-	// the one served — byte-identical to the rule humaHandleBeadReady applies.
+	// hold a row for it. `gc storage migrate` copies infrastructure rows into the
+	// binding with their ids preserved (CreateWithForeignID) and then clears the
+	// work store's copies, so a served city holds each relocated id in one leg;
+	// a city an older build migrated keeps both rows until `gc storage migrate
+	// --from-work --fleet-stopped` clears them, and boot refuses it meanwhile.
+	// First leg wins, and the graph leg is federated last, so where both rows
+	// exist the work store's is the one served — byte-identical to the rule
+	// humaHandleBeadReady applies.
 	seen := map[string]bool{}
 	var pa partialAggregator
 	for i, leg := range legs {
@@ -547,9 +549,10 @@ func readyFederationQuery() beads.ReadyQuery {
 //     (beads.SQLiteStore.Ready) alike that is the canonical (priority ASC,
 //     created_at ASC, id ASC) order, so each leg is sorted on its own.
 //   - Dedupe: first leg to return an id wins. The graph leg runs last, so a bead
-//     co-resident in the work store and the binding — the documented steady
-//     state of a migrated city, where the migration preserves ids and never
-//     deletes back — resolves to the work store's row on both endpoints.
+//     co-resident in the work store and the binding — a city an older build
+//     migrated and nobody cleared, which boot refuses; the migration now clears
+//     the work store's copies — resolves to the work store's row on both
+//     endpoints.
 //   - Merged order: leg concatenation, deliberately NOT re-sorted. A global
 //     re-sort would change the bytes a multi-rig single-store city already
 //     serves, and the graph leg must be free for such a city. Both sides are

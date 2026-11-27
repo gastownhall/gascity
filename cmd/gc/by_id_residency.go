@@ -184,8 +184,10 @@ func byIDBeadForTopology(topo storeref.Topology, id string) (beads.Bead, error) 
 // as a leg, and neither should be: the scan is what those commands are. What
 // they were missing is the leg in FRONT of it. A relocated class binding is not
 // one of the city's directories, so a directory scan cannot reach it at all,
-// and the id it cannot reach is answered instead by the retained pre-migration
-// copy sitting in the city store — successfully, with no error to notice.
+// and the id it cannot reach is answered from the city store instead — from the
+// retained pre-migration copy on a city an older build migrated, successfully
+// with no error to notice, and not at all on a cleared city, whose clear
+// removed the copy (#7074).
 //
 // So the plan is executed by storeref.ResolveBindingOwner, the executor that
 // walks the binding legs and stops at the work axis. ok=true is a binding that

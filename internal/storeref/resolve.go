@@ -28,8 +28,9 @@ package storeref
 //     (ga-axin6/#5245, #5132). Retired per ClassBinding.MintsReserved. The
 //     probe tolerates a standing refusal, because a refused city still serves
 //     work — unless the binding is PROVEN to hold such relics, where skipping
-//     it falls back to the migration's frozen copy rather than to nothing
-//     (ga-q8ick).
+//     it falls back to the work store: not-found on a cleared city, or a
+//     frozen copy on one an older build migrated and nobody cleared, rather
+//     than to the binding's row (ga-q8ick).
 //
 //   ByID, single-store city
 //     [work], returned unprobed. The identity fast-path: a city that relocates
@@ -37,8 +38,14 @@ package storeref
 //
 //   RoutedWork
 //     [work, rigs ascending, binding LAST], first-leg-wins dedupe (#5148).
-//     Binding-last is what keeps a co-resident id answering from work, so the
-//     demand surface agrees with the claim surface.
+//     A served city holds no co-resident relocated id: `gc storage migrate`
+//     clears the work-store copies after the proven copy, and boot refuses a
+//     city that still holds one (retained-copies). Binding-last is therefore a
+//     tie-break only a refused state exercises, where it keeps a co-resident
+//     id answering from work so the demand surface agrees with the claim
+//     surface. A demand/claim disagreement over a relocated id must not be
+//     "fixed" by flipping this order: #5987 was fixed in the data model
+//     (#7074) — one id, one row.
 //
 //   AssignedWork, claim escalation
 //     work legs FIRST, binding last, escalating only on a PROVEN all-work-legs
@@ -668,11 +675,14 @@ func ResolveOwnerRow(p ResolvedPlan, id string) (Owner, error) {
 // answers — and closes — a refused city's by-id read from the frozen
 // pre-migration copy. Converting it is deferred, not done: ga-3htcm.
 //
-// That untouched work leg is the whole point. `gc storage migrate` preserved
-// ids and deleted nothing, so the work store still holds a frozen copy of every
-// relocated bead. Probing it here would hand a caller its own stale copy as an
+// That untouched work leg is the whole point. `gc storage migrate` preserves
+// ids, and a city an older build migrated keeps a frozen work-store copy of
+// every relocated bead until `gc storage migrate --from-work --fleet-stopped`
+// clears it; boot refuses such a city, but its operator paths still resolve
+// here. Probing the work leg there would hand a caller its own stale copy as an
 // authoritative owner — succeeding, against the wrong store, with no
-// diagnostic. TestResolveBindingOwnerNeverProbesTheWorkLeg pins the zero.
+// diagnostic; on a cleared city it would only answer not-found.
+// TestResolveBindingOwnerNeverProbesTheWorkLeg pins the zero.
 //
 // The walk stops at the FIRST leg of that axis rather than at the plan's last
 // leg, so legs ordered below it — a rig whose configured prefix shadows the id
@@ -684,7 +694,8 @@ func ResolveOwnerRow(p ResolvedPlan, id string) (Owner, error) {
 //
 // A read fault is still an error rather than a decline: a binding that could
 // not answer has said nothing about the id, and turning that into "no binding
-// owns it" sends the caller straight at the frozen copy.
+// owns it" sends the caller straight at the stale copy — or, on a cleared
+// city, at nothing.
 func ResolveBindingOwner(p ResolvedPlan, id string) (Owner, bool, error) {
 	return resolveByID(p, id, true)
 }

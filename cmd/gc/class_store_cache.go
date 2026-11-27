@@ -51,9 +51,10 @@ package main
 //
 // One known limit: a relic — a bead `gc storage migrate` carried into the
 // binding under its original work-ledger id — refreshes only at the re-scan.
-// Its events route by prefix to the work store, and the work ledger keeps a
-// frozen same-id copy of it, so applying those events to the binding as well
-// would let the two caches trade the copy and the row back and forth forever.
+// Its events route by prefix to the work store, and on a city an older build
+// migrated and nobody cleared the work ledger keeps a frozen same-id copy of
+// it, so applying those events to the binding as well would let the two caches
+// trade the copy and the row back and forth forever.
 // Relics are rarely written; the re-scan bound (above) is theirs.
 //
 // # Tier

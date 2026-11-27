@@ -48,13 +48,15 @@ package main
 // beads.Store. The in-process form of the same list, for the one-shot commands
 // that hold two ordinary stores, is by_id_store_route.go.
 //
-// The class leg is probed for ids outside the class namespace too, not only
-// for ids inside it, because `gc storage migrate` preserves ids — so a bead the
+// The class leg is probed for ids outside the class namespace too, not only for
+// ids inside it, because `gc storage migrate` preserves ids — so a bead the
 // migration relocated keeps its HQ/rig-era prefix, and without a residence
-// probe its reads are answered from the work store's retained pre-migration
-// copy, frozen at migration time. That probe is storeref's, not this surface's:
-// resolve runs the shared plan, which keeps the probe for exactly as long as
-// the binding has not been certified free of relics. See resolve.
+// probe its reads go to the work store: not-found once the migration has
+// cleared its copy, or, on a city an older build migrated and nobody cleared,
+// the retained pre-migration copy, frozen at migration time. That probe is
+// storeref's, not this surface's: resolve runs the shared plan, which keeps the
+// probe for exactly as long as the binding has not been certified free of
+// relics. See resolve.
 //
 // # Three deliberate properties
 //
@@ -876,11 +878,12 @@ func openBdByIDClassFrontDoor(cityPath string) (bdByIDClassDoor, bool, error) {
 // census, actually taken this process, that found none.
 //
 // The census counting CLOSED residents too (ga-qdt5y.19) is load-bearing here,
-// not incidental. Migration never deletes the source, so the work store keeps a
-// frozen pre-migration copy of every relic forever; a verdict that retired the
-// probe when the last relic closed would serve that id from the frozen copy —
-// OPEN, with pre-migration fields, permanently. The door depends on the wider
-// verdict, which is why the two landed together.
+// not incidental. A verdict that retired the probe when the last relic closed
+// would send that id to the work store: on a cleared city one that answers
+// not-found for a bead the binding holds, and on a city an older build migrated
+// and nobody cleared its frozen pre-migration copy — OPEN, with pre-migration
+// fields, permanently. The door depends on the wider verdict, which is why the
+// two landed together.
 //
 // A read failure is an error, never absence: flattening "the binding could not
 // answer" into "the bead is not there" is the root-loss shape this lane exists
@@ -1147,9 +1150,9 @@ func bdByIDResolveTableArgv(inv *bdflags.Inventory, bdArgs []string) (string, []
 // (an agent told to "record the note" there would erase the bead's
 // description). The listing one says there is nothing to list.
 //
-// The work store is described as not holding the LIVE bead: a migrated relic
-// keeps a frozen pre-migration copy there, so "does not hold the bead" would
-// be false.
+// The work store is described as not holding the LIVE bead: on a city an
+// older build migrated and nobody cleared, a migrated relic keeps a frozen
+// pre-migration copy there, so "does not hold the bead" would be false.
 func refuseClassOwnedTableTarget(door bdByIDClassDoor, path, id string, stderr io.Writer) (int, bool) {
 	if !bdByIDCommentPaths[path] {
 		return refuseClassOwnedTarget(door, path, id, "", stderr)

@@ -136,9 +136,10 @@ type ClassBinding struct {
 	// binding both mints truthfully AND holds no such relic.
 	//
 	// Closed relics count. A closed bead is still shown, reopened, claimed and
-	// written by id, and the migration never deleted the work store's copy, so
-	// retiring on the last CLOSE would answer that id from a frozen
-	// pre-migration record forever (ga-qdt5y.19).
+	// written by id, so retiring on the last CLOSE would send that id to the
+	// work store: one that answers not-found on a cleared city, or a frozen
+	// pre-migration record on a city an older build migrated and nobody
+	// cleared (ga-qdt5y.19).
 	//
 	// Constructors set this TRUE until a census can say otherwise: "not known
 	// to hold relics" and "known to hold none" are different claims, and only
@@ -390,10 +391,11 @@ func (b ClassBinding) holdsLegacyResidents() bool {
 // The tolerated-refusal carve-out rests on one sentence — a refused city still
 // serves WORK, so a probe for an id no relocated class could own may skip the
 // refusing leg — and a binding PROVEN to hold ids outside its reserved
-// namespaces has falsified it. Skipping it there does not fall back to "no
-// answer": the migration preserved those ids and deleted nothing, so it falls
-// back to the frozen pre-migration copy in the work store, which answers
-// confidently and wrongly.
+// namespaces has falsified it. Skipping it there falls back to the work store
+// for ids the migration preserved, which answers wrongly either way: not-found
+// for a bead the binding holds on a cleared city, or confidently from the
+// frozen pre-migration copy on a city an older build migrated and nobody
+// cleared.
 func (b ClassBinding) probeRefusalPolicy() ErrPolicy {
 	if b.KnownLegacyResidents {
 		return PolicyFatal

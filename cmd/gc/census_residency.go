@@ -177,9 +177,10 @@ func routedWorkCityDemandLegs(
 // from the work census in one way that matters: the sessions binding LEADS.
 //
 // The binding is the authority for the session class, so on a co-resident
-// session bead — the steady state of a migrated city, where `gc storage migrate`
-// preserves ids and never deletes back — the first-leg-wins fold must resolve to
-// the binding's row, not to the pre-relocation residue in the work ledger. That
+// session bead — a city an older build migrated and nobody cleared, where `gc
+// storage migrate` preserved ids and kept the work ledger's copy — the
+// first-leg-wins fold must resolve to the binding's row, not to the
+// pre-relocation residue in the work ledger. That
 // is also the leg this arm has always read first, so a converged split's
 // leading answer is unchanged and what it gains is the work and rig legs behind
 // it (#5187's session-verb blindness: graph-run session beads in work stores are

@@ -26,11 +26,13 @@ import (
 //
 // # Why dual residency is the shape worth pinning
 //
-// `gc storage migrate` copies every non-work bead with its id PRESERVED and
-// never deletes the source, so after a migration a relocated bead exists twice:
-// the binding holds the row the controller and the class doors read and write,
-// and the work store holds a copy frozen at migration time. Both answer a Get
-// for the same id. A binding-blind surface therefore does not 404 and does not
+// `gc storage migrate` copies every non-work bead with its id PRESERVED. A
+// build that kept the source left every relocated bead existing twice — the
+// binding holding the row the controller and the class doors read and write,
+// the work store a copy frozen at migration time — and that city keeps both
+// until `gc storage migrate --from-work --fleet-stopped` clears the copies.
+// Boot refuses it, but its operator paths still run, and both stores answer a
+// Get for the same id. A binding-blind surface therefore does not 404 and does not
 // error — it succeeds, against the stale copy, and a write that follows it
 // lands where nothing reads. Exit 0, no diagnostic. That silence is why this
 // has to be asserted rather than reasoned about.

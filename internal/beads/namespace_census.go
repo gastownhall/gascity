@@ -29,11 +29,12 @@ import (
 //
 // Implementations MUST count CLOSED beads and BOTH tiers. Closing a bead does
 // not make it findable by prefix: it is still shown, reopened, claimed and
-// written by id, and the class migration that carried it across never deletes
-// the work store's pre-migration copy. A predicate that skipped closed rows
-// would report clean the moment the last relic closed, retiring the probe and
-// sending that id back to a frozen copy that reads OPEN forever (ga-qdt5y.19).
-// Because nothing deletes such a bead, the closed-inclusive answer is also
+// written by id. A predicate that skipped closed rows would report clean the
+// moment the last relic closed, retiring the probe and sending that id back to
+// the work store: not-found once the class migration has cleared its
+// pre-migration copy, or a frozen copy that reads OPEN forever on a city an
+// older build migrated and nobody cleared (ga-qdt5y.19). Because nothing
+// deletes such a bead from the binding, the closed-inclusive answer is also
 // MONOTONE, which is what makes it safe to take once per process.
 //
 // Answering FALSE strands every bead the implementation failed to see, so a

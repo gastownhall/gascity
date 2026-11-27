@@ -1547,9 +1547,10 @@ func (c *sourceWorkflowRootCollector) appendRoots(index int, store beads.Store, 
 }
 
 // supersedeRetainedTwins drops the work-leg rows the city's relocated graph
-// binding supersedes: a storage migration copies a class into the binding with
-// ids preserved and deletes nothing, so the migration source's copy is a frozen
-// duplicate of a row the binding now owns.
+// binding supersedes: a storage migration by an older build copied a class into
+// the binding with ids preserved and deleted nothing, so until `gc storage
+// migrate --from-work --fleet-stopped` clears it the migration source's copy is
+// a frozen duplicate of a row the binding now owns.
 //
 // The question is put to the BINDING, about the ids the later legs reported, and
 // not read off the two live-root scans. Those are different questions:

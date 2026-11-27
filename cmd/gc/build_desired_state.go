@@ -1639,9 +1639,10 @@ func suspendedRigPathsWithState(cfg *config.City, suspState suspensionstate.Stat
 // The fold is FIRST-LEG-WINS by session id, which the pre-resolver arm did not
 // need: it read one store per scope, so no id could appear twice. The session
 // plan leads with the sessions binding and keeps the work ledger behind it, and
-// a migrated city legitimately holds the same session bead in both — the
-// migration preserves ids and never deletes back. Counting that session twice
-// would make a pool read as over-scaled and reap a live worker.
+// a city an older build migrated holds the same session bead in both until
+// `gc storage migrate --from-work --fleet-stopped` clears the work ledger's
+// copy — that migration preserved ids and kept the source. Counting that
+// session twice would make a pool read as over-scaled and reap a live worker.
 func collectAllOpenSessionInfos(
 	cityPath string,
 	cfg *config.City,
