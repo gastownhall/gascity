@@ -188,6 +188,7 @@ TestOrderSweepTrackingConfirmAboveThresholdSweepsAndPrunes	fails under the gate:
 TestOrderSweepTrackingRequiresConfirm	fails under the gate: cmdOrderSweepTrackingWithOptions (no confirm) = 0, want 1; stderr: warning: this city does not import required builtin pack(s) core; run "gc doctor --fix" to ad
 TestOrderTrackingRetentionLaneFirstPassHonorsDeleteBudget	fails under the gate: the seam makes the city look split, so the retention sweep's scope-store read finds nothing to prune and no pruned line is logged (as TestOrderTrackingRetentionWatchdog_PrunesEligibleBeads)
 TestOrderTrackingRetentionLaneFirstPassPrunesCityAndOrdersBinding	fails under the gate: the seam makes the city look split, so the retention sweep's scope-store read finds nothing to prune and no pruned line is logged (as TestOrderTrackingRetentionWatchdog_PrunesEligibleBeads)
+TestOrderTrackingRetentionLaneSkipsSweepUnderFSPressure	fails under the gate: the seam makes the city look split, so the forced pass's scope-store read finds nothing to prune and the eligible beads stay (as TestOrderTrackingRetentionWatchdog_PrunesEligibleBeads)
 TestOrderTrackingRetentionWatchdog_LogsPrunedCount	fails under the gate: stderr = "", want 'pruned' in output
 TestOrderTrackingRetentionWatchdog_PrunesEligibleBeads	fails under the gate: Get(prune-00) err = <nil>, want ErrNotFound (should be pruned)
 TestOrderTrackingRetentionWatchdog_PrunesWhenBackupFresh	fails under the gate: Get(guard-00) err = <nil>, want ErrNotFound (should be pruned)
