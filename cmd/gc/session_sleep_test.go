@@ -90,6 +90,88 @@ func TestResolveSessionSleepPolicyPrecedence(t *testing.T) {
 	}
 }
 
+// genericRigWorkerSleepCity is a city whose rig-a runs a named session of a
+// generic rig-scoped agent: the agent has scope "rig" and no dir, so the
+// session's template is rig-a/worker while the agent's qualified name is the
+// bare worker.
+func genericRigWorkerSleepCity() *config.City {
+	return &config.City{
+		Rigs: []config.Rig{{Name: "rig-a"}},
+		Agents: []config.Agent{{
+			Name:  "worker",
+			Scope: "rig",
+		}},
+	}
+}
+
+func resolveGenericRigWorkerSleepPolicy(cfg *config.City, template string) resolvedSessionSleepPolicy {
+	session := makeBead("b1", map[string]string{
+		"template":     template,
+		"session_name": "rig-a--worker",
+	})
+	return resolveSessionSleepPolicyInfo(seedSessionInfo(session), cfg, runtime.NewFake())
+}
+
+func TestResolveSessionSleepPolicyGenericRigAgentUsesAgentValue(t *testing.T) {
+	cfg := genericRigWorkerSleepCity()
+	cfg.Agents[0].SleepAfterIdle = "10s"
+	cfg.Agents[0].SleepAfterIdleSource = "agent"
+
+	policy := resolveGenericRigWorkerSleepPolicy(cfg, "rig-a/worker")
+	if policy.Effective != "10s" {
+		t.Fatalf("Effective = %q, want 10s", policy.Effective)
+	}
+	if policy.Source != "agent" {
+		t.Fatalf("Source = %q, want agent", policy.Source)
+	}
+	if !strings.Contains(policy.Fingerprint, "template=rig-a/worker") {
+		t.Fatalf("Fingerprint = %q, want it to contain template=rig-a/worker", policy.Fingerprint)
+	}
+}
+
+func TestResolveSessionSleepPolicyGenericRigAgentUsesRigDefault(t *testing.T) {
+	cfg := genericRigWorkerSleepCity()
+	cfg.Rigs[0].SessionSleep = config.SessionSleepConfig{InteractiveResume: "5m"}
+
+	policy := resolveGenericRigWorkerSleepPolicy(cfg, "rig-a/worker")
+	if policy.Class != config.SessionSleepInteractiveResume {
+		t.Fatalf("Class = %q, want %q", policy.Class, config.SessionSleepInteractiveResume)
+	}
+	if policy.Source != config.SessionSleepSourceRigDefault {
+		t.Fatalf("Source = %q, want %q", policy.Source, config.SessionSleepSourceRigDefault)
+	}
+	if policy.Effective != "5m" {
+		t.Fatalf("Effective = %q, want 5m", policy.Effective)
+	}
+}
+
+func TestResolveSessionSleepPolicyGenericRigAgentUsesWorkspaceDefault(t *testing.T) {
+	cfg := genericRigWorkerSleepCity()
+	cfg.SessionSleep = config.SessionSleepConfig{InteractiveResume: "60s"}
+
+	policy := resolveGenericRigWorkerSleepPolicy(cfg, "rig-a/worker")
+	if policy.Source != config.SessionSleepSourceWorkspaceDefault {
+		t.Fatalf("Source = %q, want %q", policy.Source, config.SessionSleepSourceWorkspaceDefault)
+	}
+	if policy.Effective != "60s" {
+		t.Fatalf("Effective = %q, want 60s", policy.Effective)
+	}
+}
+
+func TestResolveSessionSleepPolicyGenericRigAgentUnknownRigStaysOff(t *testing.T) {
+	cfg := genericRigWorkerSleepCity()
+	cfg.Agents[0].SleepAfterIdle = "10s"
+	cfg.Agents[0].SleepAfterIdleSource = "agent"
+
+	policy := resolveGenericRigWorkerSleepPolicy(cfg, "rig-z/worker")
+	if policy.Effective != config.SessionSleepOff || policy.Source != config.SessionSleepSourceLegacyOff {
+		t.Fatalf("effective/source = %q/%q, want %q/%q", policy.Effective, policy.Source, config.SessionSleepOff, config.SessionSleepSourceLegacyOff)
+	}
+	if policy.Fingerprint != "" {
+		t.Fatalf("Fingerprint = %q, want empty for an unresolved template", policy.Fingerprint)
+	}
+}
+
 func TestWakeReasonsInteractiveResumeGraceWindow(t *testing.T) {
 	now := time.Date(2026, 3, 23, 12, 0, 0, 0, time.UTC)
 	cfg := &config.City{
