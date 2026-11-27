@@ -32,12 +32,21 @@ def _package_urls(templates, path, sha256):
         for t in templates
     ]
 
-def _deb_sysroot_impl(rctx):
+def fetch_debs(rctx, packages, urls, output):
+    """Downloads pinned .debs concurrently and unpacks their files into output.
+
+    Args:
+      rctx: the repository_ctx.
+      packages: pool path (pool/<component>/...) to the .deb's sha256.
+      urls: URL templates tried in order for every package, as deb_sysroot's
+        urls attribute.
+      output: the directory (relative to the repository) to unpack into.
+    """
     pending = []
-    for path, sha256 in rctx.attr.packages.items():
+    for path, sha256 in packages.items():
         deb = "_debs/" + path.rsplit("/", 1)[-1]
         pending.append((deb, rctx.download(
-            url = _package_urls(rctx.attr.urls, path, sha256),
+            url = _package_urls(urls, path, sha256),
             output = deb,
             sha256 = sha256,
             block = False,
@@ -50,8 +59,11 @@ def _deb_sysroot_impl(rctx):
         data = [f for f in rctx.path(unpacked).readdir() if f.basename.startswith("data.tar")]
         if len(data) != 1:
             fail("%s: expected one data.tar.* member, found %s" % (deb, data))
-        rctx.extract(data[0], output = ".")
+        rctx.extract(data[0], output = output)
     rctx.delete("_debs")
+
+def _deb_sysroot_impl(rctx):
+    fetch_debs(rctx, rctx.attr.packages, rctx.attr.urls, ".")
 
     res = rctx.execute(
         ["bash", "-c", _POSTPROCESS],
