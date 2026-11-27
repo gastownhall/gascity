@@ -53,6 +53,9 @@ const (
 	// userManagerCgroup is a scope under the user manager, such as a
 	// GC_AGENT_SLICE pane scope.
 	userManagerCgroup = "/user.slice/user-<uid>.slice/user@<uid>.service/app.slice/run-r1.scope"
+	// userServiceCgroup is a user service that is not an agent session,
+	// such as a one-shot or bot service a timer or the operator runs.
+	userServiceCgroup = "/user.slice/user-<uid>.slice/user@<uid>.service/app.slice/nudge-drainer.service"
 	// supervisorSliceServiceCgroup is the supervisor run as a system
 	// service in a slice of its own; its agent panes share its cgroup.
 	supervisorSliceServiceCgroup = "/gascity.slice/gascity-prod.slice/gascity-supervisor.service"
@@ -363,32 +366,43 @@ func TestScopeWatchdogSpawnWrappedInInfraScope(t *testing.T) {
 		return configPath, started
 	}
 
-	t.Run("from a session", func(t *testing.T) {
-		logPath := installInfraScopeHost(t, wrappableFromSession)
-		configPath, started := start(t)
-		exe, err := managedDoltWatchdogExecutable()
-		if err != nil {
-			t.Fatalf("watchdog executable: %v", err)
-		}
-		waitForSystemdRunInvocation(t, logPath, " -- "+exe+" "+managedDoltScopeWatchdogArg+" "+configPath)
-		assertScopedInvocation(t, logPath, started.InfraScope, "gascity infra: managed dolt for city "+cityPath)
-		// The dolt server is the watchdog's child and inherits its scope;
-		// it is not wrapped a second time. (The other line is the probe.)
-		data, _ := os.ReadFile(logPath)
-		if n := strings.Count(string(data), " "+managedDoltScopeWatchdogArg+" "); n != 1 {
-			t.Fatalf("watchdog wrapped %d times, want 1; log:\n%s", n, data)
-		}
-		if strings.Contains(string(data), "-- dolt ") {
-			t.Fatalf("watchdog's dolt child was wrapped again; log:\n%s", data)
-		}
-	})
+	for _, tc := range []struct {
+		name string
+		host infraScopeHost
+	}{
+		{name: "from a session", host: wrappableFromSession},
+		// A user service stopped under KillMode=control-group would take
+		// a watchdog left in its cgroup, and the store, with it.
+		{name: "outside a session in a user service", host: infraScopeHost{cgroup: userServiceCgroup}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logPath := installInfraScopeHost(t, tc.host)
+			configPath, started := start(t)
+			exe, err := managedDoltWatchdogExecutable()
+			if err != nil {
+				t.Fatalf("watchdog executable: %v", err)
+			}
+			waitForSystemdRunInvocation(t, logPath, " -- "+exe+" "+managedDoltScopeWatchdogArg+" "+configPath)
+			assertScopedInvocation(t, logPath, started.InfraScope, "gascity infra: managed dolt for city "+cityPath)
+			// The dolt server is the watchdog's child and inherits its
+			// scope; it is not wrapped a second time. (The other line is
+			// the probe.)
+			data, _ := os.ReadFile(logPath)
+			if n := strings.Count(string(data), " "+managedDoltScopeWatchdogArg+" "); n != 1 {
+				t.Fatalf("watchdog wrapped %d times, want 1; log:\n%s", n, data)
+			}
+			if strings.Contains(string(data), "-- dolt ") {
+				t.Fatalf("watchdog's dolt child was wrapped again; log:\n%s", data)
+			}
+		})
+	}
 	for _, tc := range []struct {
 		name     string
 		host     infraScopeHost
 		sliceEnv string
 	}{
-		{name: "outside a session", host: infraScopeHost{linger: true, cgroup: userManagerCgroup}},
 		{name: "from a session with GC_INFRA_SLICE=off", host: wrappableFromSession, sliceEnv: "off"},
+		{name: "outside a session with GC_INFRA_SLICE=off", host: infraScopeHost{cgroup: userServiceCgroup}, sliceEnv: "off"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			logPath := installInfraScopeHost(t, tc.host)
