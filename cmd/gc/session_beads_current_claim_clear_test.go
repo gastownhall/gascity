@@ -63,7 +63,7 @@ func TestReleaseWorkFromClosedSessionBeadClearsTheCurrentClaim(t *testing.T) {
 	sessionBead, workBead := seedClaimingSession(t, store)
 
 	var stderr bytes.Buffer
-	releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", servingCity("rig/worker"), store, nil), sessionBead, nil, &stderr)
+	releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", servingCity("rig/worker"), store, nil), sessionBead, nil, "", &stderr)
 
 	if got := currentClaimStamp(t, store, sessionBead.ID); got != "" {
 		t.Fatalf("current claim = %q, want cleared once the work was released", got)

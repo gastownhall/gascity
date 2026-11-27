@@ -42,14 +42,18 @@ const (
 
 // closeSpec is a close intent's kind and what its L5 branches read: for a
 // SESS-080 phantom the assignees it keeps (their work is the configured
-// identity's, so L5 is skipped and the cascade releases none of it); an
-// orphan drained as orphaned (SESS-082's release); a killed pool seat (B1's
+// identity's, so L5 is skipped and the cascade releases none of it); for an
+// orphaned canonical singleton seat its configured identity (#9245: L5 reads
+// the row's work without the claims held under it, which the orphan release
+// and the cascade give back, keeping only those routed to it); an orphan
+// drained as orphaned (SESS-082's release); a killed pool seat (B1's
 // release, never the stranded branch); and a pool slot whose stranded marker
 // has aged (SESS-625's repair).
 type closeSpec struct {
 	Kind     closeKind
 	Phantom  bool
 	Preserve []string
+	Identity string
 	Orphaned bool
 	Killed   bool
 	Repair   bool
@@ -118,11 +122,11 @@ func armClose(r *rowFacts) (intent, bool) {
 		if keep, ok := r.w.Phantoms[r.k]; ok {
 			// Both forms a claim on the configured identity can carry.
 			it.Closing.Phantom, it.Closing.Preserve = true, keep
-		} else if identity, ok := r.canonicalSingletonOrphan(e.DrainReason); ok {
+		} else if identity, ok := r.canonicalSingletonOrphan(orphaned); ok {
 			// A canonical singleton seat's alias claims are its configured
-			// identity's (#9245): L5 reads the row's work without them, and
-			// the cascade keeps them for the next seat.
-			it.Closing.Preserve = []string{identity}
+			// identity's (#9245): they do not keep the row, and they go back
+			// to its pool.
+			it.Closing.Identity = identity
 		}
 	default:
 		return intent{}, false
@@ -131,11 +135,12 @@ func armClose(r *rowFacts) (intent, bool) {
 	return it, true
 }
 
-// canonicalSingletonOrphan is the identity an orphaned canonical singleton
-// pool seat's close keeps (canonicalSingletonSeatIdentity), as legacy's
-// orphan close keeps it; any other drain reports false.
-func (r *rowFacts) canonicalSingletonOrphan(reason string) (string, bool) {
-	if reason != drainOrphaned || r.w.Env == nil {
+// canonicalSingletonOrphan is the configured identity of a canonical
+// singleton pool seat (canonicalSingletonSeatIdentity) whose close is an
+// orphan's (orphaned: legacy closes the row as orphaned, an agent's suspend
+// included); a row a city suspend keeps reports false.
+func (r *rowFacts) canonicalSingletonOrphan(orphaned bool) (string, bool) {
+	if !orphaned || r.w.Env == nil {
 		return "", false
 	}
 	return canonicalSingletonSeatIdentity(r.row.Info, r.w.Env.Cfg)

@@ -3001,7 +3001,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						gate = closeFreeSlot
 					}
 					closed, cause := closeSeatFor(store, sw, infoByID[id], closeWhy{reason: reason, gate: gate}, clk.Now().UTC(), stderr)
-					preservedIdentity := ""
+					canonicalIdentity := ""
 					// An operator's suspend keeps the seat whole: its claims are
 					// not released, nor is it closed through the releasing gate.
 					if !closed && reason == "orphaned" && cause != causeKeepsSlot {
@@ -3028,13 +3028,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						}
 						// A canonical singleton seat's alias is its agent's
 						// configured identity, and work claimed under it is that
-						// identity's (#9245): when nothing else holds the seat, it
-						// closes keeping those claims for the next seat.
+						// identity's (#9245): when nothing else a lane serves holds
+						// the seat, it closes, and its cascade gives those claims
+						// back to the pool, keeping only the ones routed to the
+						// identity, and keeps its own unserved claims (O5).
 						if !closed {
-							if identity, ok := canonicalSingletonSeatIdentity(infoByID[id], cfg); ok && rowOwnsNoWorkBesidesIdentity(sw, infoByID[id], cfg, identity) {
-								closed = closeSeat(store, sw, infoByID[id], closeWhy{reason: reason, gate: closeReleasing, preserve: []string{identity}}, clk.Now().UTC(), stderr)
+							if identity, ok := canonicalSingletonSeatIdentity(infoByID[id], cfg); ok && rowOwnsNoServedWorkBesidesIdentity(sw, infoByID[id], cfg, identity) {
+								closed = closeSeat(store, sw, infoByID[id], closeWhy{reason: reason, gate: closeReleasing, identity: identity}, clk.Now().UTC(), stderr)
 								if closed {
-									preservedIdentity = identity
+									canonicalIdentity = identity
+									fmt.Fprintf(stdout, "Closed orphaned canonical singleton seat '%s' (claims under %q go back to its pool; process gone)\n", name, identity) //nolint:errcheck
 								}
 							}
 						}
@@ -3068,11 +3071,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								"assigned_work_store_cnt":         len(reconcileOpts.assignedWorkStores),
 							}
 						}
-						if preservedIdentity != "" {
+						if canonicalIdentity != "" {
 							if payload == nil {
 								payload = traceRecordPayload{}
 							}
-							payload["preserved_identity"] = preservedIdentity
+							payload["canonical_identity"] = canonicalIdentity
 						}
 						trace.RecordDecision(TraceSiteReconcilerCloseOrphan, TraceReasonCode(reason), outcome, template, name, payload)
 					}

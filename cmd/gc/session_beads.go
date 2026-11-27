@@ -1366,8 +1366,9 @@ func releaseDrainAckClaims(legs WorkLegs, sessionBead beads.Bead, refuseStarted 
 	return nil
 }
 
-// logRelease reports what a release could not do: a failed read, a failed
-// write and a claim kept because no lane serves it.
+// logRelease reports what a release could not do, or chose not to: a failed
+// read, a failed write, a claim kept because no lane serves it, and a claim
+// left with a canonical singleton's configured identity (keptIdentity).
 func logRelease(stderr io.Writer, kind, sessionID string, out ReleaseOutcome, err error) {
 	if err != nil {
 		fmt.Fprintf(stderr, "session beads: releasing work held by %s session %s: %v\n", kind, sessionID, err) //nolint:errcheck
@@ -1377,6 +1378,11 @@ func logRelease(stderr io.Writer, kind, sessionID string, out ReleaseOutcome, er
 	}
 	for _, c := range out.Unserved() {
 		fmt.Fprintf(stderr, "session beads: %s session %s keeps claim %s: no lane serves route %q\n", kind, sessionID, c.id, c.route) //nolint:errcheck
+	}
+	for _, c := range out.Kept {
+		if out.Why[c.bead.ID] == keptIdentity {
+			fmt.Fprintf(stderr, "session beads: %s session %s leaves claim %s with identity %q, which it routes to\n", kind, sessionID, c.bead.ID, strings.TrimSpace(c.bead.Assignee)) //nolint:errcheck
+		}
 	}
 }
 
@@ -4303,7 +4309,7 @@ func staleReapStartBoundaryInfo(i session.Info) (time.Time, bool) {
 // only store: on a split city store is the sessions binding, which holds none
 // of the seat's claims (mc-3ixn3.16).
 func closeBead(store beads.Store, sw *SeatWork, expected session.Info, reason string, now time.Time, stderr io.Writer) bool {
-	return closeBeadPreservingAssignees(store, sw, expected, reason, nil, now, stderr)
+	return closeBeadPreservingAssignees(store, sw, expected, reason, nil, "", now, stderr)
 }
 
 // closeBeadPreservingAssignees is closeBead with an opt-in exception list: any
@@ -4318,9 +4324,14 @@ func closeBead(store beads.Store, sw *SeatWork, expected session.Info, reason st
 // re-materialize the identity's canonical session, turning a recoverable
 // name-collision into silently stranded work.
 //
-// With a nil or empty preserve set this behaves exactly like closeBead, which
-// is the contract every other caller relies on.
-func closeBeadPreservingAssignees(store beads.Store, sw *SeatWork, expected session.Info, reason string, preserve []string, now time.Time, stderr io.Writer) bool {
+// identity narrows that exception for a canonical singleton seat's orphan
+// close (#9245): its pool brings a seat back only for the claims held under
+// its identity that route to it, so only those keep their assignee, and the
+// rest are released with the others (ReleaseOpts.Identity).
+//
+// With a nil or empty preserve set and no identity this behaves exactly like
+// closeBead, which is the contract every other caller relies on.
+func closeBeadPreservingAssignees(store beads.Store, sw *SeatWork, expected session.Info, reason string, preserve []string, identity string, now time.Time, stderr io.Writer) bool {
 	id := expected.ID
 	if stderr == nil {
 		stderr = io.Discard
@@ -4377,7 +4388,7 @@ func closeBeadPreservingAssignees(store beads.Store, sw *SeatWork, expected sess
 	if snapshotErr == nil {
 		// A claim no lane serves stays on the closed row: stranded work, which
 		// the seat's alert reports (owner ruling O5, revised).
-		out := releaseWorkFromClosedSessionBeadExcept(store, sw, snapshot, preserveSet, stderr)
+		out := releaseWorkFromClosedSessionBeadExcept(store, sw, snapshot, preserveSet, identity, stderr)
 		strand(sw.stranded(), releaseSeatOfBead(snapshot), reason, out, now, stderr)
 	}
 	return true
@@ -4405,7 +4416,8 @@ func assigneePreserveSet(preserve []string) map[string]struct{} {
 // releaseWorkFromClosedSessionBeadExcept is the close cascade: it clears the
 // assignee on every open or in_progress work bead assigned to the closing
 // session and resets in_progress work to open. An identity in preserve is
-// dropped from the release, so work assigned under it keeps its assignee.
+// dropped from the release, so work assigned under it keeps its assignee. A
+// canonical singleton's identity (#9245) keeps only the claims routed to it.
 //
 // The identities are the seat's ReleaseScope, the narrow set the close gates
 // read, not the alias history: a gate that judged the seat free on one set
@@ -4420,7 +4432,7 @@ func assigneePreserveSet(preserve []string) map[string]struct{} {
 // Best-effort: errors are logged to stderr but never fail the caller, since
 // releaseOrphanedPoolAssignments at the top of the next reconcile tick is
 // our idempotent fallback.
-func releaseWorkFromClosedSessionBeadExcept(store beads.Store, sw *SeatWork, sessionBead beads.Bead, preserve map[string]struct{}, stderr io.Writer) ReleaseOutcome {
+func releaseWorkFromClosedSessionBeadExcept(store beads.Store, sw *SeatWork, sessionBead beads.Bead, preserve map[string]struct{}, identity string, stderr io.Writer) ReleaseOutcome {
 	if store == nil {
 		return ReleaseOutcome{}
 	}
@@ -4444,7 +4456,7 @@ func releaseWorkFromClosedSessionBeadExcept(store beads.Store, sw *SeatWork, ses
 	// and restoreCarriedWorkRoutes (#3421) then backfills gc.routed_to from it.
 	// The close-time re-read (Late) adds what was assigned since sw's read.
 	scope := releaseScopeOfBead(sessionBead, sw.Legs().cfg).except(preserve)
-	out, err := ReleaseClaims(sw, scope, releaseSeatOfBead(sessionBead), releaseCloseCascade, ReleaseOpts{Late: true})
+	out, err := ReleaseClaims(sw, scope, releaseSeatOfBead(sessionBead), releaseCloseCascade, ReleaseOpts{Late: true, Identity: identity})
 	logRelease(stderr, "closing", sessionBead.ID, out, err)
 	return out
 }

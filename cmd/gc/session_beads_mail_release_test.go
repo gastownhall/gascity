@@ -56,7 +56,7 @@ func TestReleaseWorkFromClosedSessionBeadLeavesMailBeadUntouched(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", nil, store, nil), sessionBead, nil, &stderr)
+	releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", nil, store, nil), sessionBead, nil, "", &stderr)
 
 	got, err := store.Get(mailBead.ID)
 	if err != nil {
@@ -116,7 +116,7 @@ func TestReleaseWorkFromClosedSessionBeadStillReleasesRealWork(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", servingCity("worker"), store, nil), sessionBead, nil, &stderr)
+	releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", servingCity("worker"), store, nil), sessionBead, nil, "", &stderr)
 
 	gotMail, err := store.Get(mailBead.ID)
 	if err != nil {

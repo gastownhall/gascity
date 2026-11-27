@@ -53,7 +53,7 @@ func TestReleaseWorkFromClosedSessionBeadRestoresPoolRouteForUnroutedWork(t *tes
 	}
 
 	var stderr bytes.Buffer
-	releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", servingCity("gascity/gastown.polecat"), store, nil), sessionBead, nil, &stderr)
+	releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", servingCity("gascity/gastown.polecat"), store, nil), sessionBead, nil, "", &stderr)
 
 	got, err := store.Get(work.ID)
 	if err != nil {
@@ -104,7 +104,7 @@ func TestReleaseWorkFromClosedSessionBeadRestoresRunTargetForWorkflowKind(t *tes
 	}
 
 	var stderr bytes.Buffer
-	releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", servingCity("graph/worker"), store, nil), sessionBead, nil, &stderr)
+	releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", servingCity("graph/worker"), store, nil), sessionBead, nil, "", &stderr)
 
 	got, err := store.Get(work.ID)
 	if err != nil {
@@ -147,7 +147,7 @@ func TestReleaseWorkFromClosedSessionBeadLeavesExistingRouteUntouched(t *testing
 	}
 
 	var stderr bytes.Buffer
-	releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", servingCity("gascity/other-pool"), store, nil), sessionBead, nil, &stderr)
+	releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", servingCity("gascity/other-pool"), store, nil), sessionBead, nil, "", &stderr)
 
 	got, err := store.Get(work.ID)
 	if err != nil {
@@ -188,7 +188,7 @@ func TestReleaseWorkFromClosedSessionBeadWithoutTemplateKeepsUnroutableWork(t *t
 	}
 
 	var stderr bytes.Buffer
-	releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", servingCity("worker"), store, nil), sessionBead, nil, &stderr)
+	releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", servingCity("worker"), store, nil), sessionBead, nil, "", &stderr)
 
 	got, err := store.Get(work.ID)
 	if err != nil {

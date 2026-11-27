@@ -56,13 +56,15 @@ const (
 const causeKeepsSlot = "keeps-slot"
 
 // closeWhy is why a legacy close closes: its reason, its gate, a gate's own
-// work filter (the drain finalize excludes the seat's own drain step), and
-// the assignees its cascade keeps (closeBeadPreservingAssignees).
+// work filter (the drain finalize excludes the seat's own drain step), the
+// assignees its cascade keeps, and the canonical singleton identity whose
+// routed claims its cascade keeps (closeBeadPreservingAssignees).
 type closeWhy struct {
 	reason   string
 	gate     closeGate
 	keep     func(beads.Store, beads.Bead) (bool, error)
 	preserve []string
+	identity string
 }
 
 // closePermitted is the pure part of the precondition, which v2's close
@@ -124,7 +126,7 @@ func closeSeatFor(store beads.Store, sw *SeatWork, info sessionpkg.Info, why clo
 	case why.gate == closeRollback, why.gate != closeReleasing && isFailedCreateSessionInfo(info):
 		return closeFailedCreateBead(sessionFrontDoor(store), info, now, stderr), ""
 	}
-	return closeBeadPreservingAssignees(store, sw, info, why.reason, why.preserve, now, stderr), ""
+	return closeBeadPreservingAssignees(store, sw, info, why.reason, why.preserve, why.identity, now, stderr), ""
 }
 
 // closeRefusalLog is each row's last logged close refusal, so a refusal is
