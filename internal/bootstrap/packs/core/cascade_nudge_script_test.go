@@ -795,3 +795,116 @@ func TestCascadeNudgeLeavesItsOwnBlockedCloseUnrecordedBesideAnotherBlocker(t *t
 		t.Fatalf("ga-blk's passing close must nudge worker-1; gc calls:\n%s", logged)
 	}
 }
+
+// TestCascadeNudgeSkipsSessionAndMessageCloses pins the lifecycle skip. Session
+// and message beads never block anything, and after order-tracking beads they
+// are most of a busy city's closes: a close of one must cost no dependency
+// lookup. A close of any other type, or with no type in its payload, is still
+// looked up and nudged.
+func TestCascadeNudgeSkipsSessionAndMessageCloses(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; cascade-nudge-on-blocker-close.sh requires it")
+	}
+	cases := []struct {
+		name      string
+		bead      string
+		wantLooks bool
+	}{
+		{"session close is skipped", `"issue_type":"session","labels":["gc:session"]`, false},
+		{"message close is skipped", `"issue_type":"message","labels":["gc:archive-after-inject"]`, false},
+		{"task close is kept", `"issue_type":"task"`, true},
+		{"close with no type is kept", `"labels":["gc:task"]`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			eventsPath := filepath.Join(dir, "events.jsonl")
+			line := `{"seq":7,"type":"bead.closed","actor":"gc","subject":"ga-blk","payload":{"bead":{"id":"ga-blk","status":"closed",` + tc.bead + `}}}` + "\n"
+			if err := os.WriteFile(eventsPath, []byte(line), 0o644); err != nil {
+				t.Fatalf("write events: %v", err)
+			}
+			binDir, logPath := fakeGCBin(t, cascadeFake{
+				eventsPath: eventsPath,
+				depJSON:    `[{"id":"ga-dep","status":"open","assignee":"worker-1"}]`,
+				failDir:    dir,
+			}.body())
+			if out, err := runCascadeNudge(t, binDir, filepath.Join(dir, "state")); err != nil {
+				t.Fatalf("cascade-nudge-on-blocker-close.sh failed: %v\n%s", err, out)
+			}
+			got, logged := countNudges(t, logPath)
+			looked := strings.Contains(logged, "gc bd dep list ga-blk")
+			if looked != tc.wantLooks {
+				t.Fatalf("dep lookup for ga-blk = %v, want %v; gc calls:\n%s", looked, tc.wantLooks, logged)
+			}
+			if !tc.wantLooks {
+				if got != 0 {
+					t.Fatalf("a %s must nudge no one; gc calls:\n%s", tc.name, logged)
+				}
+				return
+			}
+			if got != 1 || countNudgesTo(t, logPath, "worker-1") != 1 {
+				t.Fatalf("nudges = %d, want exactly 1 to worker-1; gc calls:\n%s", got, logged)
+			}
+		})
+	}
+}
+
+// TestCascadeNudgeReadsABlockerWithNoDependentsOnce pins the memo of blockers
+// with nothing to wake. A close stays in the lookback for every run inside it,
+// and most closed beads block nothing, so each run read each of them again.
+// A read that finds no dependents is recorded, and later runs skip that
+// blocker; a read that fails is not, so the next run reads it again.
+func TestCascadeNudgeReadsABlockerWithNoDependentsOnce(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; cascade-nudge-on-blocker-close.sh requires it")
+	}
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	failMarker := filepath.Join(dir, "dep-list-fails")
+	eventsPath := writeCascadeCloseEvent(t, "ga-blk")
+	binDir, logPath := fakeGCBin(t, "case \"$1\" in\n"+
+		"events) cat '"+eventsPath+"' ;;\n"+
+		"bd) if [ -e '"+failMarker+"' ]; then exit 1; fi; printf '%s\\n' '[]' ;;\n"+
+		"esac\nexit 0\n")
+	depLists := func() int {
+		t.Helper()
+		logged, err := os.ReadFile(logPath)
+		if err != nil {
+			t.Fatalf("read gc log: %v", err)
+		}
+		return strings.Count(string(logged), "gc bd dep list ga-blk ")
+	}
+	run := func(n int) {
+		t.Helper()
+		if out, err := runCascadeNudge(t, binDir, stateDir); err != nil {
+			t.Fatalf("run %d: cascade-nudge-on-blocker-close.sh failed: %v\n%s", n, err, out)
+		}
+	}
+
+	if err := os.WriteFile(failMarker, nil, 0o644); err != nil {
+		t.Fatalf("write fail marker: %v", err)
+	}
+	run(1)
+	if got := depLists(); got != 1 {
+		t.Fatalf("run 1: dep lists = %d, want 1", got)
+	}
+	if cascadeStateHasKey(t, stateDir, "ga-blk|") {
+		t.Fatal("a failed read must not record the blocker as having no dependents")
+	}
+
+	if err := os.Remove(failMarker); err != nil {
+		t.Fatalf("remove fail marker: %v", err)
+	}
+	run(2)
+	if got := depLists(); got != 2 {
+		t.Fatalf("run 2: dep lists = %d, want 2; a failed read must be retried", got)
+	}
+	if !cascadeStateHasKey(t, stateDir, "ga-blk|") {
+		t.Fatal("a read with no dependents must be recorded")
+	}
+
+	run(3)
+	if got := depLists(); got != 2 {
+		t.Fatalf("run 3: dep lists = %d, want 2; a blocker with no dependents must not be read again", got)
+	}
+}

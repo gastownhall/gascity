@@ -175,11 +175,16 @@ still_held() {
 EVENTS="$(gc events --type bead.closed --since "$LOOKBACK" 2>/dev/null)" || exit 0
 [ -n "$EVENTS" ] || exit 0
 
+# Session and message beads are left out: they are lifecycle records, never
+# blockers, and in a busy city they are many of the closes.
 BLOCKERS="$(printf '%s\n' "$EVENTS" \
-    | jq -r '.payload.bead.id // empty' 2>/dev/null | sort -u)" || BLOCKERS=""
+    | jq -r 'select((.payload.bead.issue_type // "") as $t | $t != "session" and $t != "message")
+             | .payload.bead.id // empty' 2>/dev/null | sort -u)" || BLOCKERS=""
 [ -n "$BLOCKERS" ] || exit 0
 
 # Load dedup state (object mapping "<blocker>|<dependent>" -> ISO timestamp).
+# A "<blocker>|" key, with no dependent, records a blocker whose dependency
+# read found no dependents.
 STATE="$(cat "$STATE_FILE" 2>/dev/null || true)"
 echo "$STATE" | jq -e 'type == "object"' >/dev/null 2>&1 || STATE='{}'
 
@@ -188,11 +193,20 @@ NUDGED=0
 while IFS= read -r blocker; do
     [ -n "$blocker" ] || continue
 
+    # A blocker read before with no dependents is not read again: its close
+    # stays in the lookback for several runs, and a dependency added after it
+    # closed never waits on it.
+    if echo "$STATE" | jq -e --arg k "$blocker|" 'has($k)' >/dev/null 2>&1; then continue; fi
+
     set_rig_args "$blocker"
     [ -z "$RIG_SUSPENDED" ] || continue
     DEPS="$(gc bd dep list "$blocker" ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} \
             --direction=up --type=blocks --json 2>/dev/null)" || continue
-    if [ -z "$DEPS" ] || [ "$DEPS" = "[]" ]; then continue; fi
+    if [ "$DEPS" = "[]" ]; then
+        STATE="$(echo "$STATE" | jq --arg k "$blocker|" --arg now "$NOW" '.[$k] = $now')"
+        continue
+    fi
+    [ -n "$DEPS" ] || continue
 
     # Dependents that are still open/deferred and have somewhere to send the
     # wake-up: an assigned dependent is nudged at its assignee; an unassigned
