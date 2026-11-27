@@ -12,6 +12,8 @@ description: The shortest path for new contributors to get productive in Gas Cit
 - [Primitive Test](primitive-test.md)
 - [PR Review Handoff Notes](pr-review-handoff.md)
 - [Reconciler Debugging](reconciler-debugging.md)
+- [CPU Profiling a gc Invocation](cpu-profiling.md) when a one-shot `gc`
+  command is slower or hungrier than it should be
 - [Infra-Class Store Routing Audit](infra-class-store-routing-audit.md) when
   opening a store on a bead id — which class a bead belongs to decides which
   store answers, and the audit inventories the sites that got it wrong

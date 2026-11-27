@@ -51,6 +51,10 @@ func mainExitCode(args []string, stdout, stderr io.Writer) int {
 	if handled, code := privateProductMetricsEntrypoint(args); handled {
 		return code
 	}
+	// GC_CPUPROFILE profiles the whole dispatch; stopping on return (and on
+	// panic) is what completes the profile file.
+	stopCPUProfile := startCPUProfileFromEnv(stderr)
+	defer stopCPUProfile()
 	code := run(args, stdout, stderr)
 	// A process that recorded program-status shadow comparisons writes the
 	// ones still queued before it exits, bounded so exit never waits long.
