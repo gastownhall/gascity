@@ -19,6 +19,77 @@
     "summary"
   ],
   "properties": {
+    "runtime_sessions": {
+      "type": "object",
+      "description": "Complete per-SID native/provider identity projection; separate from configured UI agents. Present when the command reports runtime session identities.",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "observed_at",
+        "provider_complete",
+        "sessions"
+      ],
+      "properties": {
+        "schema": {
+          "type": "string",
+          "description": "Projection schema identifier (gascity.runtime-sessions/v1)."
+        },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "RFC 3339 time the projection was observed."
+        },
+        "provider_complete": {
+          "type": "boolean",
+          "description": "True when the recorded native identities were read completely."
+        },
+        "sessions": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "description": "One row per recorded open native session.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "template",
+              "agent_name",
+              "runtime_name",
+              "provider",
+              "running"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Recorded native session id (SID)."
+              },
+              "template": {
+                "type": "string",
+                "description": "Agent template the session was started from."
+              },
+              "agent_name": {
+                "type": "string",
+                "description": "Agent name recorded with the session."
+              },
+              "runtime_name": {
+                "type": "string",
+                "description": "Provider handle the session was recorded under."
+              },
+              "provider": {
+                "type": "string",
+                "description": "Provider boundary type the identity was observed through."
+              },
+              "running": {
+                "type": "boolean",
+                "description": "True when the provider currently lists the recorded handle."
+              }
+            }
+          }
+        }
+      }
+    },
     "_cache_age_s": {
       "type": "number",
       "description": "Present only on output read from the city's API (supervisor or controller); absent on locally built output. Age in seconds of the cached state the server answered from: its bead cache's snapshot age, or the served response's own age when greater (a stale response served while it refreshes); 0 when the server reported no age."

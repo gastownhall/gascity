@@ -300,10 +300,15 @@ func TestAgentAndRigListsListRuntimeSessionsOncePerRequest(t *testing.T) {
 	}
 }
 
-// statusBodyJSON marshals body without its clock-derived field.
+// statusBodyJSON marshals body without its clock-derived fields: uptime and
+// the SID projection's observation time both come from the wall clock, so the
+// shared-vs-per-prefix comparison below must not read them.
 func statusBodyJSON(t *testing.T, body StatusBody) string {
 	t.Helper()
 	body.UptimeSec = 0
+	if body.RuntimeSessions != nil {
+		body.RuntimeSessions.ObservedAt = time.Time{}
+	}
 	raw, err := json.Marshal(body)
 	if err != nil {
 		t.Fatal(err)

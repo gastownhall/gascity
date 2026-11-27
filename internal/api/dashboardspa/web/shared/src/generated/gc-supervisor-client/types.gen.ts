@@ -3783,6 +3783,22 @@ export type RunsListOutputBody = {
     status_counts: RunStatusCounts;
 };
 
+export type RuntimeSessionStatus = {
+    agent_name: string;
+    id: string;
+    provider: string;
+    running: boolean;
+    runtime_name: string;
+    template: string;
+};
+
+export type RuntimeSessions = {
+    observed_at: string;
+    provider_complete: boolean;
+    schema: string;
+    sessions: Array<RuntimeSessionStatus> | null;
+};
+
 export type ScopeGroup = {
     [key: string]: never;
 };
@@ -6178,6 +6194,10 @@ export type StatusBody = {
      * Number of running agent processes.
      */
     running: number;
+    /**
+     * Complete per-SID native/provider identity projection; separate from configured UI agents.
+     */
+    runtime_sessions?: RuntimeSessions;
     /**
      * Active/suspended session counts. Omitted when unavailable.
      */

@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/runtime/observation"
 )
 
 // This file hosts stable, CLI-facing read-path envelope types that are
@@ -77,9 +78,12 @@ type StatusView struct {
 	// ConditionalWrites is the daemon's latched §12.5 snapshot, verbatim from
 	// the wire (the view reuses the wire struct — it is already CLI-shaped).
 	ConditionalWrites *StatusConditionalWrites
-	Summary           StatusSummaryView
-	Partial           bool
-	PartialErrors     []string
+	// RuntimeSessions is the complete per-SID native/provider identity
+	// projection, verbatim from the wire; nil when the server sent none.
+	RuntimeSessions *observation.RuntimeSessions
+	Summary         StatusSummaryView
+	Partial         bool
+	PartialErrors   []string
 }
 
 // StatusAgentView is the CLI-facing per-agent row.

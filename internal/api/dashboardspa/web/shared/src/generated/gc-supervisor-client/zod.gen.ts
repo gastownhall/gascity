@@ -1970,6 +1970,22 @@ export const zRunsListOutputBody = z.object({
     status_counts: zRunStatusCounts
 });
 
+export const zRuntimeSessionStatus = z.object({
+    agent_name: z.string(),
+    id: z.string(),
+    provider: z.string(),
+    running: z.boolean(),
+    runtime_name: z.string(),
+    template: z.string()
+});
+
+export const zRuntimeSessions = z.object({
+    observed_at: z.iso.datetime(),
+    provider_complete: z.boolean(),
+    schema: z.string(),
+    sessions: z.array(zRuntimeSessionStatus).nullable()
+});
+
 export const zScopeGroup = z.record(z.string(), z.never());
 
 export const zServiceRestartOutputBody = z.object({
@@ -3679,6 +3695,7 @@ export const zStatusBody = z.object({
     rig_details: z.array(zStatusRigDetail).nullish(),
     rigs: zStatusRigCounts,
     running: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    runtime_sessions: zRuntimeSessions.optional(),
     session_counts_detail: zStatusSessionCountsDetail.optional(),
     store_health: zStatusStoreHealth.optional(),
     stores_not_read: z.boolean().optional(),

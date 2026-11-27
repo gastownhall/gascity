@@ -8821,6 +8821,69 @@
         ],
         "type": "object"
       },
+      "RuntimeSessionStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_name": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "running": {
+            "type": "boolean"
+          },
+          "runtime_name": {
+            "type": "string"
+          },
+          "template": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "template",
+          "agent_name",
+          "runtime_name",
+          "provider",
+          "running"
+        ],
+        "type": "object"
+      },
+      "RuntimeSessions": {
+        "additionalProperties": false,
+        "properties": {
+          "observed_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "provider_complete": {
+            "type": "boolean"
+          },
+          "schema": {
+            "type": "string"
+          },
+          "sessions": {
+            "items": {
+              "$ref": "#/components/schemas/RuntimeSessionStatus"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "schema",
+          "observed_at",
+          "provider_complete",
+          "sessions"
+        ],
+        "type": "object"
+      },
       "ScopeGroup": {
         "additionalProperties": false,
         "type": "object"
@@ -13978,6 +14041,10 @@
             "description": "Number of running agent processes.",
             "format": "int64",
             "type": "integer"
+          },
+          "runtime_sessions": {
+            "$ref": "#/components/schemas/RuntimeSessions",
+            "description": "Complete per-SID native/provider identity projection; separate from configured UI agents."
           },
           "session_counts_detail": {
             "$ref": "#/components/schemas/StatusSessionCountsDetail",

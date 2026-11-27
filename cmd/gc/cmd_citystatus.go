@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/observation"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -20,6 +21,9 @@ import (
 
 // StatusJSON is the JSON output format for gc status.
 type StatusJSON struct {
+	// RuntimeSessions is the complete per-SID native/provider identity
+	// projection; omitted when the city has no runtime sessions to report.
+	RuntimeSessions *observation.RuntimeSessions `json:"runtime_sessions,omitempty"`
 	// CacheAgeS is set only on output read from the city's API: the age in
 	// seconds the server reported for the status it answered with
 	// (X-GC-Cache-Age-S). Nil, and so absent, on locally built output.
@@ -333,6 +337,7 @@ func renderCityStatusFromAPI(cityPath string, cfg *config.City, cr api.CachedRea
 // helpers produce identical output on the API path.
 func snapshotFromStatusView(cityPath string, v api.StatusView) cityStatusSnapshot {
 	snapshot := cityStatusSnapshot{
+		RuntimeSessions:   v.RuntimeSessions,
 		CityName:          v.CityName,
 		CityPath:          v.CityPath,
 		Suspended:         v.Suspended,
@@ -698,6 +703,18 @@ func doCityStatusJSONWithDiagnosticAndSnapshot(
 	}
 
 	status := cityStatusJSONFromSnapshot(snapshot, snapshot.Summary)
+	identities := []observation.NativeStatusIdentity{}
+	if statusSnapshot != nil {
+		for _, info := range statusSnapshot.OpenInfos() {
+			if info.Closed || session.State(strings.TrimSpace(info.MetadataState)) == session.StateArchived {
+				continue
+			}
+			identities = append(identities, observation.NativeStatusIdentity{ID: info.ID, Template: info.Template, AgentName: info.AgentName, RuntimeName: info.SessionNameMetadata})
+		}
+	}
+	projection, problems := observation.ProjectRuntimeSessions(context.Background(), identities, !snapshotDegraded, sp, nil, time.Now())
+	status.RuntimeSessions = &projection
+	status.PartialErrors = append(status.PartialErrors, problems...)
 	data, err := json.MarshalIndent(status, "", "  ")
 	if err != nil {
 		fmt.Fprintf(stderr, "gc status: %v\n", err) //nolint:errcheck // best-effort stderr

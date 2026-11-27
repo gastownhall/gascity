@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/runtime/observation"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
@@ -407,7 +408,13 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	if !citySuspended {
 		graphWork = s.graphActiveWorkBySession()
 	}
+	// pools answers unlimited-pool expansion for this request from one full
+	// listing. The SID projection joins the same listing, so a city with both
+	// recorded identities and unlimited pools forks the provider once, not once
+	// per consumer (#8801). With no recorded identity the projection enumerates
+	// nothing and probes no provider.
 	pools := newRequestSessionListing(sp)
+	runtimeSessions, runtimeErrors := observation.ProjectRuntimeSessions(ctx, sessionSnapshot.identities, len(sessionSnapshot.partialErrors) == 0, sp, pools, time.Now())
 	for _, a := range cfg.Agents {
 		rigName := workdirutil.ConfiguredRigName(s.state.CityPath(), a, cfg.Rigs)
 		scope := "city"
@@ -570,7 +577,10 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 		}
 	}
 
+	legacyPartial := len(partialErrors) > 0
+	partialErrors = append(partialErrors, runtimeErrors...)
 	return StatusBody{
+		RuntimeSessions:     &runtimeSessions,
 		Name:                cityName,
 		Path:                s.state.CityPath(),
 		Version:             s.state.Version(),
@@ -586,7 +596,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 		Rigs:                rc,
 		Work:                wc,
 		Mail:                mc,
-		Partial:             len(partialErrors) > 0,
+		Partial:             legacyPartial,
 		PartialErrors:       partialErrors,
 		StoreHealth:         storeHealth,
 		Beads:               s.cityBeadsDiagnostic(),
@@ -714,6 +724,7 @@ func (s *Server) countSessions(snapshot statusSessionSnapshot) (active, suspende
 }
 
 type statusSessionSnapshot struct {
+	identities    []observation.NativeStatusIdentity
 	bySessionName map[string]statusSessionInfo
 	byTemplate    map[string][]statusSessionInfo
 	partialErrors []string
@@ -897,6 +908,12 @@ func (s *Server) statusSessionSnapshot(ctx context.Context, st storeref.Stores) 
 	for _, sessInfo := range infos {
 		if sessInfo.Closed {
 			continue
+		}
+		if statusSessionStateInfo(sessInfo) != session.StateArchived {
+			snapshot.identities = append(snapshot.identities, observation.NativeStatusIdentity{
+				ID: sessInfo.ID, Template: sessInfo.Template, AgentName: sessInfo.AgentName,
+				RuntimeName: sessInfo.SessionNameMetadata,
+			})
 		}
 		info := statusSessionInfo{
 			id:          strings.TrimSpace(sessInfo.ID),

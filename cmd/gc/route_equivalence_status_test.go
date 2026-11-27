@@ -238,6 +238,29 @@ func TestCityStatusJSONValidatesOnEveryRoute(t *testing.T) {
 	}
 }
 
+// normalizeCityStatusRouteVolatile pins the runtime-sessions observation time.
+// Each route stamps observed_at from its own clock: the local route builds the
+// projection in-process, the API route reads the time the server observed. The
+// projection is otherwise identical, so the equivalence check compares every
+// field but that volatile stamp.
+func normalizeCityStatusRouteVolatile(t *testing.T, raw []byte) []byte {
+	t.Helper()
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("gc status --json is not one JSON object: %v\n%s", err, raw)
+	}
+	if sessions, ok := payload["runtime_sessions"].(map[string]any); ok {
+		if _, present := sessions["observed_at"]; present {
+			sessions["observed_at"] = "<observed-at>"
+		}
+	}
+	out, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
 // TestCityStatusJSONRouteEquivalence pins the #8453 contract for gc status:
 // the API route prints the local rendering, plus only the declared API-only
 // keys. The rigs' prefix and default sling targets live only in city.toml,
@@ -250,6 +273,8 @@ func TestCityStatusJSONRouteEquivalence(t *testing.T) {
 
 	local := cityStatusRouteJSON(t, h, lanes, "serverless")
 	viaAPI := cityStatusRouteJSON(t, h, lanes, "alive")
+	local = normalizeCityStatusRouteVolatile(t, local)
+	viaAPI = normalizeCityStatusRouteVolatile(t, viaAPI)
 	if diff := chartest.JSONShapeDiff(local, viaAPI, cityStatusRouteAdditiveKeys); diff != "" {
 		t.Fatalf("gc status --json differs by route: %s\nlocal:\n%s\napi:\n%s", diff, local, viaAPI)
 	}
