@@ -1060,19 +1060,18 @@ func TestDoHookClaimDrainAckOnNoWork(t *testing.T) {
 }
 
 // TestClaimHookWorkRetriesLaterStoreWhenSelectedStoreLosesClaimRace is the
-// post-merge regression for the federated claim race: when the discovery-
-// selected store still reports ready work at claim-time re-validation but every
-// claimable row is lost to another claimant before the mutation, the claim must
-// drop that store and reselect across the remaining federated stores instead of
-// draining as "no work" while a later store still has claimable routed work.
+// post-merge regression for the federated claim race: when every claimable row
+// of the discovery-selected store is lost to another claimant at its CAS, the
+// claim must drop that store and reselect across the remaining federated stores
+// instead of draining as "no work" while a later store still has claimable
+// routed work.
 func TestClaimHookWorkRetriesLaterStoreWhenSelectedStoreLosesClaimRace(t *testing.T) {
 	stores := []hookStore{
 		{dir: "city", env: []string{"GC_STORE=city"}},
 		{dir: "riga", env: []string{"GC_STORE=riga"}},
 	}
-	// Both stores report ready routed work on every query, so the selected
-	// store's claim-time re-validation succeeds; the only reason the city claim
-	// fails is the lost race below, not an emptied store.
+	// Both stores report ready routed work on every query, so the only reason
+	// the city claim fails is the lost race below, not an emptied store.
 	run := func(_, dir string, _ []string) (string, error) {
 		switch dir {
 		case "city":

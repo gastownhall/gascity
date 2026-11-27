@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -582,13 +583,23 @@ var hookRigRuntimeUnavailable = func(cityPath string, cfg *config.City, rig stri
 // stores more than once. The first store is the agent's own and is never
 // marked: its failure is this session's read failing, whatever the cause.
 func hookRigLegRunner(cityPath string, cfg *config.City, stores []hookStore, run hookStoreRunner) hookStoreRunner {
+	legs := hookRigLegRunnerContext(cityPath, cfg, stores, hookClaimReadRunnerFor(run))
+	return func(command, dir string, env []string) (string, error) {
+		return legs(context.Background(), command, dir, env)
+	}
+}
+
+// hookRigLegRunnerContext is hookRigLegRunner over a runner that takes each
+// read's parent context, which the claim path's read guard gives every read
+// (hookClaimReadGuard.readContext).
+func hookRigLegRunnerContext(cityPath string, cfg *config.City, stores []hookStore, run hookClaimReadRunner) hookClaimReadRunner {
 	if len(stores) < 2 {
 		return run
 	}
 	secondary := stores[1:]
 	down := make(map[string]bool, len(secondary))
-	return func(command, dir string, env []string) (string, error) {
-		out, err := run(command, dir, env)
+	return func(parent context.Context, command, dir string, env []string) (string, error) {
+		out, err := run(parent, command, dir, env)
 		if err == nil {
 			return out, nil
 		}

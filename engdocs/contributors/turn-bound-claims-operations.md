@@ -15,46 +15,59 @@ drain gives back any `in_progress` claim it is still holding (F-D).
 
 ## `GC_HOOK_CLAIM_WINDOW` — the one tuning knob
 
-Default **45s**. It bounds the time from `gc hook --claim` starting to a claim
-mutation being allowed to run. Past it the command exits 1, emits
+Default **160s**: the work-query timeout (150s) plus the claim mutation budget
+(10s). It bounds the time from `gc hook --claim` starting to a claim mutation
+being allowed to start. Past it the command exits 1, emits
 `execution.claim_window_expired`, and deliberately writes **no drain record** —
 a spent window is a dead invocation, not an idle store.
 
-Raise it when honest claim latency approaches the window. The alarm that tells
-you to is `execution.claim_window_expired` volume: a steady stream of them with
-`parent_alive=true` means real claims are being refused (raise the window, or
-fix the store), while `parent_alive=false` means the claimer was orphaned by a
-dead provider tool call, which is the fence working as intended.
+The window also sets the claim **read budget**: the window less a 10s reserve
+(half the window when the window is under 20s), so 150s at the default. A claim
+mutation may start only on work read inside it, so the mutation can still start
+inside the window. An answer that arrives later is still acted on wherever it
+needs no mutation, however far past the read budget it arrives: an idle fan-out
+drains `no_work`, the session's own `in_progress` bead is resumed, a workflow
+whose input work is already done is retired, and work the claim leaves alone (a
+build-budget deferral, a bead bound to another seat's worktree) is skipped as
+usual. Only a mutation on a late answer's work is refused, and it is reported
+as a timed-out read: exit 2 with `GC_HOOK_STORE_UNAVAILABLE`, a
+`session.work_query_failed` event naming the leg, and no drain record. Each read
+stays bounded by its own 150s work-query timeout, and a failed read is retried
+while the window is open. Once a read has found work, the reads after it stop at
+the read budget, so that work is still claimed.
 
-Keep it **strictly below 90s** (`idleClaimNudgeGrace`, `cmd/gc/idle_nudge.go`).
-At or above that, the idle-claim backstop can re-nudge a seat whose claim is
-still running, and two live claim attempts for one seat is the state the window
-exists to prevent. 90s itself is not a legal value — the bound is exclusive.
+Raise the window when the honest read latency of the whole fan-out approaches
+the read budget. Two alarms tell you to:
 
-### Deploy-lane override (interim)
+- `execution.claim_window_expired` volume. A steady stream with
+  `parent_alive=true` means real claims are being refused (raise the window, or
+  fix the store), while `parent_alive=false` means the claimer was orphaned by a
+  dead provider tool call, which is the fence working as intended.
+- Store-unavailable exits whose read trace (the `gc hook --claim: reads
+  (budget …)` line on stderr) lists a `budget-cut` read.
 
-Cities whose observed claim latency runs 15–70s need more than the 45s default
-or the fence becomes fresh-claim starvation: honest claims are refused, seats
-exit 1, and the demand is re-served without ever being worked.
+The default is above the idle-claim backstop's 90s grace
+(`idleClaimNudgeGrace`, `cmd/gc/idle_nudge.go`). A claim still running past the
+grace earns only the backstop's idempotent re-nudge, never a second claim.
 
-**75s** is the value to use. It clears the top of the observed latency band with
-headroom and still leaves 15s below the backstop grace, so neither end of the
-range races.
+### Setting an override
+
+An override replaces the default. The claim reads its legs one after another,
+so size it from the slowest honest fan-out: the read budget must cover every
+leg's read up to and including the leg that answers with work, so set the window
+to at least that total plus the 10s reserve. A window whose read budget falls
+short of it is fresh-claim starvation: work answered past the budget is refused,
+seats exit 2, and the demand is re-served without ever being worked. For a
+fan-out whose reads take up to 230s in all:
 
 ```toml
 [[patches.agent]]
 name = "gc.run-operator"
-env = { GC_HOOK_CLAIM_WINDOW = "75s" }
+env = { GC_HOOK_CLAIM_WINDOW = "240s" }
 ```
 
 Repeat the stanza for each role agent of the same class — the override is
-per-agent, and an unpatched sibling silently keeps the 45s default.
-
-This is **interim**. It exists because claim latency is currently dominated by
-read convergence, not by real work; it retires when the binding-first read lands
-(ga-4qdfn) and latency drops back under the default. Before removing it, check
-that `execution.claim_window_expired` with `parent_alive=true` is at zero for
-the class.
+per-agent, and an unpatched sibling silently keeps the 160s default.
 
 ## Failure shape: a leaked marker fences the whole fleet
 
