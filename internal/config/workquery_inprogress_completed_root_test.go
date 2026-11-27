@@ -318,3 +318,36 @@ func TestInProgressTierServesWorkflowRootWithLiveMember(t *testing.T) {
 		}
 	}
 }
+
+// TestInProgressTierServesRootOnlyAndFreshWorkflowRoots covers AC-3: a root no
+// worker step has closed under yet — a never-expanded root-only workflow, a
+// freshly expanded one, or one whose member window the read cannot see the
+// end of — is still served.
+func TestInProgressTierServesRootOnlyAndFreshWorkflowRoots(t *testing.T) {
+	const root = "wf-root-1"
+	latches := []string{memberJSON("step-a", root, "closed", "task"), memberJSON("fin", root, "open", "workflow-finalize")}
+	for i := 0; len(latches) < workflowMemberReadLimit+1; i++ {
+		latches = append(latches, memberJSON("scope-"+string(rune('a'+i)), root, "open", "scope"))
+	}
+	for shape, members := range map[string]string{
+		"root only": ``,
+		"fresh":     jsonRows(memberJSON("step-a", root, "open", "task"), memberJSON("fin", root, "open", "workflow-finalize")),
+		"fresh with only latches open": jsonRows(memberJSON("fin", root, "open", "workflow-finalize"),
+			memberJSON("scope", root, "open", "scope")),
+		"only closed topology members": jsonRows(memberJSON("scope", root, "closed", "scope"),
+			memberJSON("spec", root, "closed", "spec")),
+		"saturated member window": jsonRows(latches...),
+	} {
+		for _, form := range inProgressTierForms() {
+			t.Run(shape+"/"+form.name, func(t *testing.T) {
+				run := runInProgressTierForm(t, form, workflowRootFake{
+					inProgress: jsonRows(workflowRootJSON(root, ``)),
+					members:    members,
+				})
+				if ids := run.ids(t); len(ids) != 1 || ids[0] != root {
+					t.Fatalf("%s workflow root was not served: %v (stdout %q)", shape, ids, run.stdout)
+				}
+			})
+		}
+	}
+}
