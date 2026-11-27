@@ -317,3 +317,83 @@ func TestClaimAuthorityAllowsReleaseAndNonRoutedWrites(t *testing.T) {
 		})
 	}
 }
+
+func (f claimAuthorityFixture) doltCommits(t *testing.T) int {
+	t.Helper()
+	var n int
+	if err := f.db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dolt_log").Scan(&n); err != nil {
+		t.Fatalf("count dolt_log: %v", err)
+	}
+	return n
+}
+
+func (f claimAuthorityFixture) assertArmedCurrent(t *testing.T, when string) {
+	t.Helper()
+	state, err := ReadClaimAuthorityTriggerState(t.Context(), f.db, f.tables)
+	if err != nil {
+		t.Fatalf("ReadClaimAuthorityTriggerState: %v", err)
+	}
+	if !state.Armed() || !state.Current {
+		t.Fatalf("%s: trigger state = %+v, want the current triggers installed", when, state)
+	}
+}
+
+// AC-5: after local_metadata is wiped under live triggers, an off-mode
+// co-tenant's tick emits no DDL and no commit and leaves the triggers in
+// place; the arming city's next tick republishes its rows, so its live
+// session's routed claim, refused in the window, succeeds; unrouted writes
+// succeed throughout.
+func TestClaimAuthorityWipeKeepsTriggersUntilArmingCityRepublishes(t *testing.T) {
+	f := newClaimAuthorityFixture(t)
+	alpha := testClaimAuthorityPublisher("alpha", ClaimAuthorityModeAuto)
+	bravo := testClaimAuthorityPublisher("bravo", ClaimAuthorityModeOff)
+	const live, cotenant = "rig/live", "rig/bravo-1"
+	f.reconcile(t, alpha, true, live)
+	f.assertArmedCurrent(t, "after arming")
+
+	if _, err := f.db.ExecContext(t.Context(), "DELETE FROM `local_metadata` WHERE `key` LIKE 'gc.claim_authority.%'"); err != nil {
+		t.Fatalf("wipe local_metadata: %v", err)
+	}
+	unrouted := func(when string) {
+		t.Helper()
+		plain, err := f.store.Create(Bead{Title: "unrouted", Type: "task"})
+		if err != nil {
+			t.Fatalf("Create unrouted bead: %v", err)
+		}
+		if _, _, err := f.store.Claim(plain.ID, absentClaimant); err != nil {
+			t.Fatalf("%s: unrouted claim: %v", when, err)
+		}
+	}
+	work := f.createRouted(t, false)
+	_, _, err := f.store.Claim(work.ID, live)
+	assertClaimAuthorityRefusal(t, "live session claim after the wipe", err)
+	unrouted("after the wipe")
+
+	commits := f.doltCommits(t)
+	report := f.reconcile(t, bravo, true, cotenant)
+	if report.ArmedNow || !report.Armed {
+		t.Fatalf("off-mode co-tenant reconcile = %+v, want the store left armed and untouched", report)
+	}
+	if got := f.doltCommits(t); got != commits {
+		t.Fatalf("off-mode co-tenant tick made %d Dolt commit(s), want none", got-commits)
+	}
+	f.assertArmedCurrent(t, "after the off-mode co-tenant tick")
+	_, _, err = f.store.Claim(work.ID, live)
+	assertClaimAuthorityRefusal(t, "live session claim before its city republishes", err)
+	unrouted("after the co-tenant tick")
+
+	report = f.reconcile(t, alpha, true, live)
+	if report.ArmedNow || !report.Published.Changed() {
+		t.Fatalf("arming city's tick after the wipe = %+v, want a republish and no DDL", report)
+	}
+	f.assertArmedCurrent(t, "after the arming city's tick")
+	if _, _, err := f.store.Claim(work.ID, live); err != nil {
+		t.Fatalf("live session claim after its city republished: %v", err)
+	}
+	assertClaimed(t, f.store, work.ID, live)
+	other := f.createRouted(t, false)
+	if _, _, err := f.store.Claim(other.ID, cotenant); err != nil {
+		t.Fatalf("off-mode co-tenant's session claim on the armed store: %v", err)
+	}
+	unrouted("after the republish")
+}
