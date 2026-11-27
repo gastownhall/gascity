@@ -843,6 +843,7 @@ RigPatch modifies an existing rig identified by Name.
 | `suspended_on_start` | boolean |  |  | SuspendedOnStart overrides the rig's desired suspension state at city start. Mirrors Rig.SuspendedOnStart. |
 | `formula_vars` | map[string]string |  |  | FormulaVars adds or overrides rig-scoped formula var defaults. Additive merge: patch keys win over existing rig keys, unspecified keys are preserved. |
 | `beads_proxied_idle_timeout` | string |  |  | BeadsProxiedIdleTimeout overrides the rig's beads_proxied_idle_timeout. |
+| `unrouted_work_target` | string |  |  | UnroutedWorkTarget overrides the rig's unrouted_work_target. Set to "" to clear it, so the rig adopts no unrouted work. |
 
 ## Service
 

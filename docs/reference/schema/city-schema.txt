@@ -2984,6 +2984,10 @@
         "beads_proxied_idle_timeout": {
           "type": "string",
           "description": "BeadsProxiedIdleTimeout overrides the rig's beads_proxied_idle_timeout."
+        },
+        "unrouted_work_target": {
+          "type": "string",
+          "description": "UnroutedWorkTarget overrides the rig's unrouted_work_target. Set to \"\"\nto clear it, so the rig adopts no unrouted work."
         }
       },
       "additionalProperties": false,

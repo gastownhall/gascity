@@ -3461,6 +3461,7 @@ export type RigPatch = {
     Prefix: string | null;
     Suspended: boolean | null;
     SuspendedOnStart: boolean | null;
+    UnroutedWorkTarget: string | null;
 };
 
 export type RigPatchSetInputBody = {

@@ -243,6 +243,9 @@ type RigPatch struct {
 	FormulaVars map[string]string `toml:"formula_vars,omitempty" json:"FormulaVars,omitempty"`
 	// BeadsProxiedIdleTimeout overrides the rig's beads_proxied_idle_timeout.
 	BeadsProxiedIdleTimeout *string `toml:"beads_proxied_idle_timeout,omitempty"`
+	// UnroutedWorkTarget overrides the rig's unrouted_work_target. Set to ""
+	// to clear it, so the rig adopts no unrouted work.
+	UnroutedWorkTarget *string `toml:"unrouted_work_target,omitempty"`
 }
 
 // ProviderPatch modifies an existing provider identified by Name.
@@ -767,6 +770,9 @@ func applyRigPatch(cfg *City, patch *RigPatch) error {
 			if patch.BeadsProxiedIdleTimeout != nil {
 				v := *patch.BeadsProxiedIdleTimeout
 				r.BeadsProxiedIdleTimeout = &v
+			}
+			if patch.UnroutedWorkTarget != nil {
+				r.UnroutedWorkTarget = *patch.UnroutedWorkTarget
 			}
 			if len(patch.FormulaVars) > 0 {
 				if r.FormulaVars == nil {

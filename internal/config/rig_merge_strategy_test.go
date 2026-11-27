@@ -100,3 +100,27 @@ func TestApplyRigPatch_ClearsDefaultMergeStrategy(t *testing.T) {
 		t.Errorf("DefaultMergeStrategy = %q, want empty after explicit clear", got)
 	}
 }
+
+func TestApplyRigPatch_SetsAndClearsUnroutedWorkTarget(t *testing.T) {
+	cfg := &City{Rigs: []Rig{{Name: "hello-world", Path: "/repos/hw"}}}
+	target := "hello-world/researcher"
+	if err := applyRigPatch(cfg, &RigPatch{Name: "hello-world", UnroutedWorkTarget: &target}); err != nil {
+		t.Fatalf("applyRigPatch(set): %v", err)
+	}
+	if got := cfg.Rigs[0].UnroutedWorkTarget; got != target {
+		t.Fatalf("UnroutedWorkTarget = %q, want %q", got, target)
+	}
+	if err := applyRigPatch(cfg, &RigPatch{Name: "hello-world"}); err != nil {
+		t.Fatalf("applyRigPatch(unset): %v", err)
+	}
+	if got := cfg.Rigs[0].UnroutedWorkTarget; got != target {
+		t.Fatalf("UnroutedWorkTarget = %q after a patch that leaves it unset, want %q", got, target)
+	}
+	cleared := ""
+	if err := applyRigPatch(cfg, &RigPatch{Name: "hello-world", UnroutedWorkTarget: &cleared}); err != nil {
+		t.Fatalf("applyRigPatch(clear): %v", err)
+	}
+	if got := cfg.Rigs[0].UnroutedWorkTarget; got != "" {
+		t.Fatalf("UnroutedWorkTarget = %q, want empty after explicit clear", got)
+	}
+}

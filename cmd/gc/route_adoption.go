@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
@@ -133,4 +135,34 @@ func adoptableUnroutedWork(b beads.Bead) bool {
 		return false
 	}
 	return !isRouteRecoveryQuarantined(b)
+}
+
+// validateUnroutedWorkTargets checks every configured unrouted_work_target:
+// it must resolve to a configured agent through resolveAgentIdentity, the
+// resolver gc sling uses, and that agent must use built-in routing, since a custom sling_query
+// routes some other way one gc.routed_to write cannot reproduce. Each error
+// names the scope, unrouted_work_target and the value.
+func validateUnroutedWorkTargets(cfg *config.City) error {
+	if cfg == nil {
+		return nil
+	}
+	var errs []error
+	check := func(scope, target string) {
+		target = strings.TrimSpace(target)
+		if target == "" {
+			return
+		}
+		agent, ok := resolveAgentIdentity(cfg, target, "")
+		switch {
+		case !ok:
+			errs = append(errs, fmt.Errorf("%s: unrouted_work_target %q names no configured agent", scope, target))
+		case isCustomSlingQuery(agent):
+			errs = append(errs, fmt.Errorf("%s: unrouted_work_target %q names agent %q, which has a custom sling_query; adoption needs built-in sling routing", scope, target, agent.QualifiedName()))
+		}
+	}
+	check("workspace", cfg.Workspace.UnroutedWorkTarget)
+	for _, rig := range cfg.Rigs {
+		check(fmt.Sprintf("rig %q", rig.Name), rig.UnroutedWorkTarget)
+	}
+	return errors.Join(errs...)
 }
