@@ -89,10 +89,11 @@ func (cr *CityRuntime) newPlannerHost() plannerHost {
 			Episodes: func() (map[string]sessionpkg.StartupHealthEpisode, error) {
 				return readStartupHealthEpisodes(cr.v2SessionsStore())
 			},
-			Suspension: func() (suspensionstate.State, error) { return cr.wakeSuspension() },
-			Nudges:     cr.nudgesBeadStore,
-			WorkStore:  cr.cityBeadStore,
-			Capacity:   func() *endpointCapacityGuard { return guard },
+			Suspension:   func() (suspensionstate.State, error) { return cr.wakeSuspension() },
+			HostPressure: func() hostPressure { return readHostPressure(cr.stderr) },
+			Nudges:       cr.nudgesBeadStore,
+			WorkStore:    cr.cityBeadStore,
+			Capacity:     func() *endpointCapacityGuard { return guard },
 			Templates: func(env *reconcileEnv, now time.Time) templateResolver {
 				return newTemplateResolver(newAgentBuildParams(cr.cityName, cr.cityPath, env.Cfg, env.SP, now.UTC(), cr.v2SessionsStore(), cr.stderr))
 			},

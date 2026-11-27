@@ -137,7 +137,7 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 		Now: now, Cfg: cfg, Bucket: p.bucket, FairSeed: p.fairSeed, InFlight: w.InFlight, BringUp: w.Census.BringUp(cfg),
 		Endpoints: w.Gates, Backoff: w.Backoff, Paused: w.Paused,
 		BootOpen: w.Boot.open(), // P2
-		Hold:     decideStartHold(startHoldInput{SuspensionErr: w.SuspensionErr}),
+		Hold:     decideStartHold(startHoldInput{SuspensionErr: w.SuspensionErr, HostPressure: w.HostPressure}),
 	}, intents)
 	res.Deferred = append(res.Deferred, unregistered...)
 	next = earliest(next, res.NextBackoff) // a row backoff's expiry is a row deadline (v5.10d (b))

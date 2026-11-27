@@ -13,6 +13,9 @@ const (
 	// but does not parse: the operator's brake cannot be read, so nothing
 	// wakes until it can.
 	causeSuspensionUnreadable = "suspension-unreadable"
+	// causeHostPressure holds starts while host CPU pressure is above the
+	// threshold, so a loaded host is not loaded further.
+	causeHostPressure = "host-pressure"
 )
 
 // startHold is a pass's controller-wide hold on starts and creates. Cause is
@@ -30,13 +33,19 @@ func (h startHold) held() bool { return h.Cause != "" }
 type startHoldInput struct {
 	// SuspensionErr is the pass's wake read error of the suspension file.
 	SuspensionErr error
+	// HostPressure is the pass's CPU pressure reading.
+	HostPressure hostPressure
 }
 
 // decideStartHold is the pass's start hold. An unreadable suspension file
-// holds every start and create and never trickles.
+// holds every start and create and never trickles; it wins over high CPU
+// pressure, which holds them too.
 func decideStartHold(in startHoldInput) startHold {
-	if in.SuspensionErr != nil {
+	switch {
+	case in.SuspensionErr != nil:
 		return startHold{Cause: causeSuspensionUnreadable}
+	case in.HostPressure.High:
+		return startHold{Cause: causeHostPressure}
 	}
 	return startHold{}
 }
@@ -63,8 +72,9 @@ func (cr *CityRuntime) wakeSuspension() (suspensionstate.State, error) {
 	return st, err
 }
 
-// startHold is the legacy tick's start hold over a fresh wake read.
+// startHold is the legacy tick's start hold over a fresh wake read and CPU
+// pressure reading.
 func (cr *CityRuntime) startHold() startHold {
 	_, err := cr.wakeSuspension()
-	return decideStartHold(startHoldInput{SuspensionErr: err})
+	return decideStartHold(startHoldInput{SuspensionErr: err, HostPressure: readHostPressure(cr.stderr)})
 }

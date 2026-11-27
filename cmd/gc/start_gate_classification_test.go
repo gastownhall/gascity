@@ -63,6 +63,7 @@ var startOutcomeClassification = map[string]startOutcomeClass{
 	// The start hold re-offers every candidate on the first pass it lifts and
 	// writes nothing; recording keeps the held creates past their lease.
 	"deferred_by_suspension_unreadable": {records: true},
+	"deferred_by_host_pressure":         {records: true},
 
 	"blocked_on_dependencies":       {reason: "clause (a): the candidate's own dependencies are not alive"},
 	"deferred_by_on_death_hook":     {reason: "clause (a): its own runtime name's on_death hook is pending"},
@@ -672,6 +673,7 @@ func startGateRecordingDrivers() map[string]func(t *testing.T) {
 		"deferred_by_async_start_limit":     driveAsyncLimitRecords,
 		"deferred_by_prepare_budget":        drivePrepareBudgetRecords,
 		"deferred_by_suspension_unreadable": driveStartHoldRecords(startHold{Cause: causeSuspensionUnreadable}, TraceOutcomeDeferredBySuspensionUnreadable),
+		"deferred_by_host_pressure":         driveStartHoldRecords(startHold{Cause: causeHostPressure}, TraceOutcomeDeferredByHostPressure),
 	}
 }
 

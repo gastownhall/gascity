@@ -4856,6 +4856,15 @@ func (m *prepareMeter) deferIfSpent(stderr io.Writer, trace *sessionReconcilerTr
 	return true
 }
 
+// startHoldOutcome is the deferral outcome of a start hold's cause: host
+// pressure, or else the unreadable suspension file.
+func startHoldOutcome(cause string) TraceOutcomeCode {
+	if cause == causeHostPressure {
+		return TraceOutcomeDeferredByHostPressure
+	}
+	return TraceOutcomeDeferredBySuspensionUnreadable
+}
+
 // deferIfHeld defers a start candidate the pass's start hold holds: it logs
 // and traces the deferral before any slot, lease, ticket, breaker accounting
 // or write.
@@ -4863,9 +4872,10 @@ func (h startHold) deferIfHeld(stderr io.Writer, trace *sessionReconcilerTraceCy
 	if !h.held() {
 		return false
 	}
-	logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), string(TraceOutcomeDeferredBySuspensionUnreadable), time.Time{}, time.Time{}, nil)
+	outcome := startHoldOutcome(h.Cause)
+	logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), string(outcome), time.Time{}, time.Time{}, nil)
 	if trace != nil {
-		trace.RecordDecision(TraceSiteLifecycleStartRun, TraceReasonStartHold, TraceOutcomeDeferredBySuspensionUnreadable, candidate.tp.TemplateName, candidate.name(), traceRecordPayload{"cause": h.Cause})
+		trace.RecordDecision(TraceSiteLifecycleStartRun, TraceReasonStartHold, outcome, candidate.tp.TemplateName, candidate.name(), traceRecordPayload{"cause": h.Cause})
 	}
 	return true
 }

@@ -2,12 +2,7 @@
 
 package main
 
-import (
-	"fmt"
-	"os"
-	"strconv"
-	"strings"
-)
+import "os"
 
 // fsPressurePath is the default Linux PSI (Pressure Stall Information) path
 // for filesystem/block IO pressure. It is a var so tests can inject a fake.
@@ -23,30 +18,5 @@ var fsPressureReadFile = os.ReadFile
 // as errors so the caller can decide how to treat them — the gate treats any
 // error as "proceed normally" to fail open.
 func readFSPressureAvg60(path string) (float64, error) {
-	data, err := fsPressureReadFile(path)
-	if err != nil {
-		return 0, err
-	}
-	// PSI format example:
-	//   some avg10=0.00 avg60=0.00 avg300=0.00 total=0
-	//   full avg10=0.00 avg60=0.00 avg300=0.00 total=0
-	// We want the avg60 on the "some" line.
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "some ") {
-			continue
-		}
-		for _, field := range strings.Fields(line) {
-			if !strings.HasPrefix(field, "avg60=") {
-				continue
-			}
-			v, perr := strconv.ParseFloat(strings.TrimPrefix(field, "avg60="), 64)
-			if perr != nil {
-				return 0, fmt.Errorf("parse avg60: %w", perr)
-			}
-			return v, nil
-		}
-		return 0, fmt.Errorf("avg60 field not found on 'some' line")
-	}
-	return 0, fmt.Errorf("'some' line not found in %s", path)
+	return readPSIAvg(fsPressureReadFile, path, "avg60")
 }
