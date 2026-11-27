@@ -8,6 +8,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // writeScopeBeadsMetadata writes a scope's .beads/metadata.json verbatim so a
@@ -345,5 +347,83 @@ func TestProviderOwnedProxiedScopeWithoutStoreStillStops(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(data)); got != "stop" {
 		t.Fatalf("stop invocations = %q, want %q", got, "stop")
+	}
+}
+
+// An embedded-Dolt scope stores data in-process: there is no server to stop
+// and `bd dolt stop` refuses outright ("not supported in embedded mode").
+// A provider-owned journaled scope left in embedded mode — an interrupted
+// init completed by an external `bd init`, a bd-side handoff, or a manual
+// migration — still answers owned, so a retiring op reaches it. Retiring must
+// be a no-op for the scope instead of erroring the whole `gc stop`/`gc
+// restart`.
+func TestProviderOwnedEmbeddedScopeRetiresNothing(t *testing.T) {
+	city := t.TempDir()
+	logPath := filepath.Join(city, "bd-invocations")
+	script := filepath.Join(city, "provider.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \""+logPath+"\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace]\nname = \"t\"\n[beads]\nprovider = \"exec:"+script+"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	embedded := `{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"hq"}`
+	writeScopeBeadsMetadata(t, city, embedded)
+	if err := persistProviderScopeOwnership(city, city, providerScopeIntent{Transport: "direct", Target: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	// A detached journaled rig scope — a `path:` record not in city.toml —
+	// is visited by retiring ops too, so it must be skipped the same way.
+	rig := filepath.Join(city, "rigs", "detached")
+	writeScopeBeadsMetadata(t, rig, embedded)
+	if err := persistProviderScopeOwnership(city, rig, providerScopeIntent{Transport: "direct", Target: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, op := range []string{"stop", "shutdown"} {
+		if err := runProviderOwnedScopesLifecycleOp(city, op); err != nil {
+			t.Fatalf("runProviderOwnedScopesLifecycleOp(%s): %v", op, err)
+		}
+	}
+	if _, err := os.Stat(logPath); !errors.Is(err, os.ErrNotExist) {
+		data, _ := os.ReadFile(logPath)
+		t.Fatalf("retiring an embedded scope invoked bd: %v\n%s", err, data)
+	}
+}
+
+// The embedded-mode predicate must only answer true on an explicit persisted
+// binding: absent, mode-less, or unparseable metadata all fall back to the
+// legacy proxied path (status quo, no regression — bd's own refusal reports an
+// actually-embedded store). The contract readers' tolerant-parse contract
+// (ReadDoltMode/ReadMetadataBackend) and the script's scope_is_embedded
+// agree on this, so neither side guesses a lifecycle action.
+func TestScopeMetadataRecordsEmbeddedDoltTruthTable(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		metadata string // "" means no metadata.json at all
+		want     bool
+	}{
+		{name: "no metadata file", want: false},
+		{name: "non-dolt backend", metadata: `{"database":"sqlite","backend":"sqlite"}`, want: false},
+		{name: "dolt backend without mode", metadata: `{"database":"dolt","backend":"dolt"}`, want: false},
+		{name: "dolt backend proxied mode", metadata: `{"database":"dolt","backend":"dolt","dolt_mode":"proxied"}`, want: false},
+		{name: "dolt backend managed mode", metadata: `{"database":"dolt","backend":"dolt","dolt_mode":"managed"}`, want: false},
+		{name: "embedded", metadata: `{"database":"dolt","backend":"dolt","dolt_mode":"embedded"}`, want: true},
+		{name: "embedded case-insensitive", metadata: `{"database":"Dolt","backend":"DOLT","dolt_mode":"Embedded"}`, want: true},
+		{name: "corrupt json falls back", metadata: `{"database":"dolt","backend":`, want: false},
+		{name: "empty object", metadata: `{}`, want: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			scopeRoot := filepath.Join(t.TempDir(), "scope")
+			if tt.metadata != "" {
+				writeScopeBeadsMetadata(t, scopeRoot, tt.metadata)
+			}
+			got, err := scopeMetadataRecordsEmbeddedDolt(fsys.OSFS{}, scopeRoot)
+			if err != nil {
+				t.Fatalf("scopeMetadataRecordsEmbeddedDolt(%q): %v", tt.metadata, err)
+			}
+			if got != tt.want {
+				t.Fatalf("scopeMetadataRecordsEmbeddedDolt(%q) = %v, want %v", tt.metadata, got, tt.want)
+			}
+		})
 	}
 }
