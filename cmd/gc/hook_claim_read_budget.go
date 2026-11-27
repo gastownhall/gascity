@@ -43,9 +43,11 @@ func (ops *hookClaimOps) claimReadDeadline() (time.Time, bool) {
 }
 
 // claimReadBudgetSpentAfter reports whether the read budget is spent, or runs
-// out exactly then, once a further wait of d has elapsed. The boundary counts
-// as spent, as for claimWindowSpentAfter. It never fires without an invocation
-// window.
+// out exactly then, once a further wait of d has elapsed. A retry loop consults
+// it BEFORE sleeping, so it stops at the deadline rather than discovering only
+// after the sleep that it has passed. The boundary counts as spent: a read
+// started at the last instant cannot answer inside the budget. Like
+// claimWindowSpent, it never fires without an invocation window.
 func (ops *hookClaimOps) claimReadBudgetSpentAfter(d time.Duration) bool {
 	deadline, ok := ops.claimReadDeadline()
 	if !ok {
