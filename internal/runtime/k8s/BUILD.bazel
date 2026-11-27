@@ -36,6 +36,7 @@ go_test(
     srcs = [
         "beads_script_test.go",
         "controller_script_test.go",
+        "example_city_test.go",
         "exec_provider_test.go",
         "name_test.go",
         "pod_prompt_test.go",
@@ -58,10 +59,13 @@ go_test(
     embed = [":k8s"],
     deps = [
         "//internal/bazeltest",
+        "//internal/config",
+        "//internal/fsys",
         "//internal/runtime",
         "//internal/runtime/runtimetest",
         "//internal/shellquote",
         "//internal/testenv",
+        "@com_github_burntsushi_toml//:toml",
         "@io_k8s_api//core/v1:core",
         "@io_k8s_apimachinery//pkg/api/errors",
         "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
