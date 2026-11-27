@@ -37,6 +37,9 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
+	if err := dolttest.ArmOwnerReaper(); err != nil {
+		panic("tutorial-goldens: arming owner reaper: " + err.Error())
+	}
 
 	tmpRoot, err := acceptanceTempRoot()
 	if err != nil {

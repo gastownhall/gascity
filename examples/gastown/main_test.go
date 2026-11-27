@@ -36,6 +36,9 @@ const gastownTestRootPrefix = "gc-examples-gastown-"
 // uses (cmd/gc/main_test.go) to keep Guard's kill-scope limited to this
 // run's own processes rather than every dolt sql-server on the host.
 func TestMain(m *testing.M) {
+	if err := dolttest.ArmOwnerReaper(); err != nil {
+		panic("examples/gastown TestMain: arming owner reaper: " + err.Error())
+	}
 	parent := os.TempDir()
 	runRoot, err := os.MkdirTemp(parent, fmt.Sprintf("%s%d-", gastownTestRootPrefix, os.Getpid()))
 	if err != nil {
