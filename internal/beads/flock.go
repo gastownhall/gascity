@@ -1,8 +1,12 @@
 package beads
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
+	"syscall"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/platform/filelock"
 )
@@ -66,3 +70,81 @@ type nopLocker struct{}
 
 func (nopLocker) Lock() error   { return nil }
 func (nopLocker) Unlock() error { return nil }
+
+// flockPollInterval is how long a bounded flock wait sleeps between attempts
+// while the lock is contended.
+const flockPollInterval = 10 * time.Millisecond
+
+// flockAcquire is the single call every bounded flock attempt goes through. It
+// is a variable so a test can count attempts and inject errnos.
+var flockAcquire = filelock.Acquire
+
+// flockExclusive takes an exclusive lock on f, waiting for contention only as
+// long as ctx allows. It tries first without blocking, so a free lock acquires
+// even when ctx is already done: ctx bounds the wait, not the attempt. Only
+// contention is waited out, one flockPollInterval at a time; EINTR retries at
+// once and any other error returns at once. When ctx ends first it returns
+// ctx.Err(); callers that own the wait add ErrStoreTimeout (mapStoreTimeout).
+// A context that can never end keeps the plain blocking acquire. A context
+// already done makes this exactly one attempt.
+func flockExclusive(ctx context.Context, f *os.File, label string) (*filelock.Lock, error) {
+	if ctx.Done() == nil {
+		for {
+			lock, err := flockAcquire(f, filelock.Options{Mode: filelock.Exclusive, Label: label})
+			if !errors.Is(err, syscall.EINTR) {
+				return lock, err
+			}
+		}
+	}
+	for {
+		lock, err := tryFlockExclusive(f, label)
+		switch {
+		case err == nil:
+			return lock, nil
+		case errors.Is(err, syscall.EINTR):
+			continue
+		case !errors.Is(err, filelock.ErrBusy):
+			return nil, err
+		}
+		if err := waitFlockPoll(ctx); err != nil {
+			return nil, err
+		}
+	}
+}
+
+// waitFlockPoll sleeps one flockPollInterval and reports ctx.Err() when ctx
+// ends first or is already done.
+func waitFlockPoll(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	timer := time.NewTimer(flockPollInterval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// tryFlockExclusive makes exactly one non-blocking attempt at an exclusive lock
+// on f and reports contention as filelock.ErrBusy.
+func tryFlockExclusive(f *os.File, label string) (*filelock.Lock, error) {
+	return flockAcquire(f, filelock.Options{Mode: filelock.Exclusive, NonBlocking: true, Label: label})
+}
+
+// mapStoreTimeout turns the end of a store-owned wait into ErrStoreTimeout.
+// waitCtx is the context that bounded the wait and parent the one it derives
+// from. err comes back unchanged when it is nil, when the wait is still live,
+// when the parent is done (a caller's own cancel is never the store's timeout)
+// or when err already carries ErrStoreTimeout. Otherwise the result matches
+// ErrStoreTimeout, the wait context's error and err. waitCtx is read before
+// parent: a done parent always ends its child first, so this order cannot take
+// a caller's cancel for a timeout.
+func mapStoreTimeout(waitCtx, parent context.Context, err error) error {
+	if err == nil || waitCtx.Err() == nil || parent.Err() != nil || errors.Is(err, ErrStoreTimeout) {
+		return err
+	}
+	return fmt.Errorf("%w: %w: %w", ErrStoreTimeout, waitCtx.Err(), err)
+}
