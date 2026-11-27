@@ -591,9 +591,8 @@ func TestClaimStoreWithFallbackFallsBackWhenSelectedStoreRerunsEmpty(t *testing.
 		switch len(calls) {
 		case 1: // claim-time re-validation of the selected store: now empty.
 			return `[]`, nil
-		case 2: // federated re-selection: own store still empty.
-			return `[]`, nil
-		case 3: // later store still has ready routed work.
+		case 2: // federated re-selection: the later store still has ready routed
+			// work. The own store is ranked from its empty re-read, not run again.
 			return `[{"id":"va-3"}]`, nil
 		default:
 			t.Fatalf("unexpected call %d to %q", len(calls), dir)
@@ -601,7 +600,7 @@ func TestClaimStoreWithFallbackFallsBackWhenSelectedStoreRerunsEmpty(t *testing.
 		}
 	}
 
-	out, gotStore, err := claimStoreWithFallback("q", stores, selected, stores[0], "", run)
+	out, gotStore, err := claimStoreWithFallback("q", stores, selected, stores[0], "", newHookStoreAnswers(run), 0, len(stores) > 1)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -611,8 +610,8 @@ func TestClaimStoreWithFallbackFallsBackWhenSelectedStoreRerunsEmpty(t *testing.
 	if gotStore.dir != "riga" {
 		t.Fatalf("store.dir = %q, want riga", gotStore.dir)
 	}
-	if len(calls) != 3 || calls[0] != "city" || calls[1] != "city" || calls[2] != "riga" {
-		t.Fatalf("calls = %v, want [city city riga]", calls)
+	if len(calls) != 2 || calls[0] != "city" || calls[1] != "riga" {
+		t.Fatalf("calls = %v, want [city riga]", calls)
 	}
 }
 
@@ -628,7 +627,7 @@ func TestClaimStoreWithFallbackUsesSelectedStoreWhenStillReady(t *testing.T) {
 		return `[{"id":"va-1"}]`, nil
 	}
 
-	out, gotStore, err := claimStoreWithFallback("q", stores, selected, stores[0], "", run)
+	out, gotStore, err := claimStoreWithFallback("q", stores, selected, stores[0], "", newHookStoreAnswers(run), 0, len(stores) > 1)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}

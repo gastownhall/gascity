@@ -13,8 +13,8 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// One `gc hook --claim` invocation reads each store at most once to select,
-// plus one fresh re-read of each store a claim is about to act on
+// One `gc hook --claim` invocation reads each store that answers at most once
+// to select, plus one fresh re-read of each store a claim is about to act on
 // (hookStoreAnswers). These rows pin the per-store read counts on the paths
 // that used to re-read every store: a lost claim race, a selection that
 // emptied before the claim, and a retried read failure.
@@ -106,6 +106,143 @@ func TestClaimHookWorkLostRaceReselectsFromSavedAnswers(t *testing.T) {
 		t.Fatalf("won claims ran against %v, want [/rigb]", won)
 	}
 	assertStoreReads(t, h, map[string]int{"/city": 1, "/riga": 2, "/rigb": 2, "/rigc": 1})
+}
+
+// Whether to re-read before a claim is the invocation's question (multiLeg),
+// not the shrinking store set's: once lost races leave one store standing, it
+// was still selected from the answer it gave at discovery, so it is re-read
+// and the claim takes the row that read returns, never the stale one.
+func TestClaimHookWorkLastStoreStandingIsRereadBeforeTheClaim(t *testing.T) {
+	withFastClaimRetries(t)
+	stores := answerReuseStores()[:2]
+	h := newFailureHookHarness()
+	h.script("/city",
+		hookRunnerAnswer{out: routedRowWithPriorityJSON("pc-1", 2)},
+		hookRunnerAnswer{out: routedRowWithPriorityJSON("pc-2", 2)},
+	)
+	h.script("/riga", hookRunnerAnswer{out: routedRowWithPriorityJSON("ra-1", 1)})
+	var won []string
+	ops := losingClaimOps(h, map[string]bool{"ra-1": true}, &won)
+
+	result, code, stderr := runAnswerReuseClaim(t, h, stores, ops)
+
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr)
+	}
+	if result.Action != "work" || result.BeadID != "pc-2" {
+		t.Fatalf("result = %+v, want pc-2 from the city store's fresh re-read, not its discovery row pc-1", result)
+	}
+	if len(won) != 1 || won[0] != "/city" {
+		t.Fatalf("won claims ran against %v, want [/city]", won)
+	}
+	assertStoreReads(t, h, map[string]int{"/city": 2, "/riga": 2})
+}
+
+// The agent's own store, picked from an answer an earlier pass saved, has no
+// other read in the pass that picks it, so a failed claim-time re-read of it is
+// not that pass's discovery failure. Ready work in another store is claimed, as
+// the full pass the claim used to make with the own store failing claimed it:
+// after a lost race, and after a selection that emptied. With no work anywhere
+// the own store's failure is still the answer: the store-unavailable exit, no
+// result and no drain. The control: when the selection read the own store
+// itself, a failed re-read moments later is that selection's own failure, and
+// it ends the claim even with ready work elsewhere.
+func TestClaimHookWorkPrimaryRereadFailureFallsThroughForASavedPick(t *testing.T) {
+	refused := fmt.Errorf("running work query %q: %w", "work-query",
+		errors.New("exit status 1: Error: dial tcp 127.0.0.1:3307: connect: connection refused"))
+	t.Run("after a lost race", func(t *testing.T) {
+		withFastClaimRetries(t)
+		stores := answerReuseStores()[:3]
+		h := newFailureHookHarness()
+		h.script("/city",
+			hookRunnerAnswer{out: routedRowWithPriorityJSON("pc-1", 2)},
+			hookRunnerAnswer{err: refused},
+		)
+		h.script("/riga", hookRunnerAnswer{out: routedRowWithPriorityJSON("ra-1", 1)})
+		h.script("/rigb", hookRunnerAnswer{out: routedRowWithPriorityJSON("rb-1", 3)})
+		var won []string
+		ops := losingClaimOps(h, map[string]bool{"ra-1": true}, &won)
+
+		result, code, stderr := runAnswerReuseClaim(t, h, stores, ops)
+
+		if code != 0 {
+			t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr)
+		}
+		if result.Action != "work" || result.BeadID != "rb-1" {
+			t.Fatalf("result = %+v, want rb-1 claimed from rigb past the own store's failed re-read", result)
+		}
+		if len(won) != 1 || won[0] != "/rigb" {
+			t.Fatalf("won claims ran against %v, want [/rigb]", won)
+		}
+		assertStoreReads(t, h, map[string]int{"/city": 3, "/riga": 2, "/rigb": 2})
+	})
+	t.Run("after an emptied selection", func(t *testing.T) {
+		withFastClaimRetries(t)
+		stores := answerReuseStores()[:3]
+		h := newFailureHookHarness()
+		h.script("/city",
+			hookRunnerAnswer{out: routedRowWithPriorityJSON("pc-1", 2)},
+			hookRunnerAnswer{err: refused},
+		)
+		h.script("/riga",
+			hookRunnerAnswer{out: routedRowWithPriorityJSON("ra-1", 1)},
+			hookRunnerAnswer{out: "[]"},
+		)
+		h.script("/rigb", hookRunnerAnswer{out: routedRowWithPriorityJSON("rb-1", 3)})
+
+		result, code, stderr := runAnswerReuseClaim(t, h, stores, h.ops())
+
+		if code != 0 {
+			t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr)
+		}
+		if result.Action != "work" || result.BeadID != "rb-1" {
+			t.Fatalf("result = %+v, want rb-1 claimed from rigb past the own store's failed re-read", result)
+		}
+		assertStoreReads(t, h, map[string]int{"/city": 3, "/riga": 2, "/rigb": 2})
+	})
+	t.Run("no work elsewhere keeps the failure", func(t *testing.T) {
+		withFastClaimRetries(t)
+		stores := answerReuseStores()[:3]
+		h := newFailureHookHarness()
+		h.script("/city",
+			hookRunnerAnswer{out: routedRowWithPriorityJSON("pc-1", 2)},
+			hookRunnerAnswer{err: refused},
+		)
+		h.script("/riga", hookRunnerAnswer{out: routedRowWithPriorityJSON("ra-1", 1)})
+		var won []string
+		ops := losingClaimOps(h, map[string]bool{"ra-1": true}, &won)
+
+		result, code, stderr := runAnswerReuseClaim(t, h, stores, ops)
+
+		if code != 2 || !strings.Contains(stderr, hookStoreUnavailableToken) {
+			t.Fatalf("exit = %d stderr = %q, want exit 2 with %s for the own store's failure", code, stderr, hookStoreUnavailableToken)
+		}
+		if result.Action != "" || h.drained || len(won) != 0 {
+			t.Fatalf("result = %+v drained = %v won = %v, want no result, no drain-ack and no claim", result, h.drained, won)
+		}
+	})
+	t.Run("a pick the selection read keeps the failure", func(t *testing.T) {
+		withFastClaimRetries(t)
+		stores := answerReuseStores()[:3]
+		h := newFailureHookHarness()
+		h.script("/city",
+			hookRunnerAnswer{out: routedRowWithPriorityJSON("pc-1", 1)},
+			hookRunnerAnswer{err: refused},
+		)
+		h.script("/riga", hookRunnerAnswer{out: routedRowWithPriorityJSON("ra-1", 2)})
+		var won []string
+		ops := losingClaimOps(h, nil, &won)
+
+		result, code, stderr := runAnswerReuseClaim(t, h, stores, ops)
+
+		if code != 2 || !strings.Contains(stderr, hookStoreUnavailableToken) {
+			t.Fatalf("exit = %d stderr = %q, want exit 2 with %s for the own store's failure", code, stderr, hookStoreUnavailableToken)
+		}
+		if result.Action != "" || h.drained || len(won) != 0 {
+			t.Fatalf("result = %+v drained = %v won = %v, want no result, no drain-ack and riga's ra-1 left unclaimed", result, h.drained, won)
+		}
+		assertStoreReads(t, h, map[string]int{"/city": 2, "/riga": 1, "/rigb": 1})
+	})
 }
 
 // AC-2: the selected store emptied between discovery and its claim-time
@@ -240,7 +377,7 @@ func TestClaimHookWorkReportsProgressPastThreshold(t *testing.T) {
 		if want := []int{0, 0, 1, 1}; fmt.Sprint(linesAtRead) != fmt.Sprint(want) {
 			t.Fatalf("progress lines before each read = %v, want %v; stderr=%s", linesAtRead, want, stderr)
 		}
-		want := `gc hook --claim: still working after 20s of the 160s claim window: reading rig "rigb" store (2 of 4 stores answered, 0 claim races lost)` + "\n"
+		want := `gc hook --claim: still working after 20s of the 160s claim window: reading rig "rigb" store (2 of 4 stores answered, 0 stores yielded no claim)` + "\n"
 		if stderr != want {
 			t.Fatalf("stderr = %q, want exactly %q", stderr, want)
 		}
@@ -249,6 +386,48 @@ func TestClaimHookWorkReportsProgressPastThreshold(t *testing.T) {
 		_, _, stderr, _ := claim(t, 0)
 		if strings.Contains(stderr, "still working") {
 			t.Fatalf("stderr = %q, want no progress line on a claim under the threshold", stderr)
+		}
+	})
+	// A store dropped because every claim write errored lost no race, so the
+	// line counts dropped stores by what they yielded, not as lost races.
+	t.Run("counts a store dropped for failed claim writes", func(t *testing.T) {
+		now := start
+		h := newFailureHookHarness()
+		h.script("/riga", hookRunnerAnswer{out: routedRowWithPriorityJSON("ra-1", 1)})
+		h.script("/rigb", hookRunnerAnswer{out: routedRowWithPriorityJSON("rb-1", 2)})
+		run := func(command, dir string, env []string) (string, error) {
+			now = now.Add(20 * time.Second)
+			return h.run(command, dir, env)
+		}
+		ops := h.ops()
+		ops.Now = func() time.Time { return now }
+		ops.InvokedAt = start
+		ops.ClaimWindow = 160 * time.Second
+		ops.EmitClaimFailed = func(string, hookClaimOptions, error) {}
+		ops.Claim = func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			if beadID == "ra-1" {
+				return beads.Bead{}, false, errors.New("claim write failed")
+			}
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "rig/worker"}}, true, nil
+		}
+		stores := answerReuseStores()[:3]
+		var stdout, stderr bytes.Buffer
+		code := claimHookWorkWithRunner("work-query", stores[0].dir, stores[0].env, stores, failureClaimOptions(), ops,
+			run, h.emitFailure, &stdout, &stderr)
+
+		var result hookClaimJSONResult
+		if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil || code != 0 || result.BeadID != "rb-1" {
+			t.Fatalf("exit = %d stdout = %q (%v), want rb-1 claimed after ra-1's claim write failed; stderr=%s", code, stdout.String(), err, stderr.String())
+		}
+		var last string
+		for _, line := range strings.Split(stderr.String(), "\n") {
+			if strings.Contains(line, "still working") {
+				last = line
+			}
+		}
+		want := `gc hook --claim: still working after 100s of the 160s claim window: claiming from rig "rigb" store (3 of 3 stores answered, 1 store yielded no claim)`
+		if last != want {
+			t.Fatalf("last progress line = %q, want %q; stderr=%s", last, want, stderr.String())
 		}
 	})
 }

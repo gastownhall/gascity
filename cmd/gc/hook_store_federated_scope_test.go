@@ -143,7 +143,7 @@ func TestFederatedClaimTickIssuesOneWorkQueryRun(t *testing.T) {
 		calls++
 		return `[{"id":"gcg-1","status":"open"}]`, nil
 	}
-	out, store, err := claimStoreWithFallback(federated, one, one[0], one[0], `[{"id":"gcg-1","status":"open"}]`, run)
+	out, store, err := claimStoreWithFallback(federated, one, one[0], one[0], `[{"id":"gcg-1","status":"open"}]`, newHookStoreAnswers(run), 0, len(one) > 1)
 	if err != nil {
 		t.Fatalf("claimStoreWithFallback: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestFederatedClaimTickIssuesOneWorkQueryRun(t *testing.T) {
 	// having removed the freshness read.
 	twoLegs := []hookStore{{dir: "city"}, {dir: "riga"}}
 	calls = 0
-	if _, _, err := claimStoreWithFallback("q", twoLegs, twoLegs[0], twoLegs[0], "stale", run); err != nil {
+	if _, _, err := claimStoreWithFallback("q", twoLegs, twoLegs[0], twoLegs[0], "stale", newHookStoreAnswers(run), 0, len(twoLegs) > 1); err != nil {
 		t.Fatalf("claimStoreWithFallback (two legs): %v", err)
 	}
 	if calls != 1 {
@@ -247,7 +247,7 @@ func TestClaimStoreWithFallbackRunsTheSelectedStoresOwnCommand(t *testing.T) {
 		}
 		return `[]`, nil
 	}
-	if _, store, err := claimStoreWithFallback("federated query", stores, stores[1], stores[0], "", run); err != nil || store.dir != "riga" {
+	if _, store, err := claimStoreWithFallback("federated query", stores, stores[1], stores[0], "", newHookStoreAnswers(run), 0, len(stores) > 1); err != nil || store.dir != "riga" {
 		t.Fatalf("claimStoreWithFallback = (%q, %v), want riga", store.dir, err)
 	}
 	if revalidated != "single-store query" {
