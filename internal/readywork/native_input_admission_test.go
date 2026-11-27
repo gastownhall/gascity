@@ -2,7 +2,9 @@ package readywork
 
 import (
 	"context"
+	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -324,6 +326,54 @@ func TestNativeInputAdmissionAdmitsOpenOrOwnedInput(t *testing.T) {
 					t.Fatalf("Ready = %v lacks step %s whose input %s is admissible (%s); want it served", ids, wf.step.ID, wf.input.ID, name)
 				}
 			})
+		}
+	}
+}
+
+// failingDepsStore is a store whose dependency reads of one bead fail, as a
+// store that dropped its connection mid-read does.
+type failingDepsStore struct {
+	*beads.MemStore
+	failID string
+}
+
+func (s *failingDepsStore) DepListBatch(ids []string) (map[string][]beads.Dep, error) {
+	if slices.Contains(ids, s.failID) {
+		return nil, errors.New("connection refused")
+	}
+	out := make(map[string][]beads.Dep, len(ids))
+	for _, id := range ids {
+		deps, err := s.MemStore.DepList(id, "down")
+		if err != nil {
+			return nil, err
+		}
+		out[id] = deps
+	}
+	return out, nil
+}
+
+func (s *failingDepsStore) DepList(id, direction string) ([]beads.Dep, error) {
+	if id == s.failID {
+		return nil, errors.New("connection refused")
+	}
+	return s.MemStore.DepList(id, direction)
+}
+
+// TestNativeInputAdmissionReadErrorNamesBeadAndStore pins AC-8's gc ready
+// half: an input-admission read that fails fails the read, naming the step it
+// was judging and the store that failed, and serves no partial answer.
+func TestNativeInputAdmissionReadErrorNamesBeadAndStore(t *testing.T) {
+	store := &failingDepsStore{MemStore: beads.NewMemStore()}
+	wf := newNativeWorkflow(t, store, store, beads.Bead{})
+	store.failID = wf.input.ID
+
+	rows, err := Read([]Leg{testLeg("city", store)}, poolQuery)
+	if err == nil {
+		t.Fatalf("Read = %d rows, nil error; want the failed input read of %s", len(rows), wf.input.ID)
+	}
+	for _, want := range []string{wf.step.ID, "city store", wf.input.ID} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Read error %q does not name %q", err, want)
 		}
 	}
 }

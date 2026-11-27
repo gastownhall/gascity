@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"maps"
 	"strings"
@@ -227,4 +228,39 @@ func TestHookClaimFederatedFallbackOnWithheldRoutedWindow(t *testing.T) {
 		t.Fatalf("claimed %v, want only %s", claimed, f.free.ID)
 	}
 	f.requireUntouched(t)
+}
+
+// TestHookClaimInputAdmissionReadErrorFailsLoud pins AC-8's hook half: a
+// candidate whose input could not be judged is never claimed, and the hook
+// fails with the judge's error, which names the bead and store.
+func TestHookClaimInputAdmissionReadErrorFailsLoud(t *testing.T) {
+	f := newAdmissionFixture(t, 1, "")
+	var claimed []string
+	ops := f.ops(t, &claimed)
+	ops.Runner = func(string, string) (string, error) { return f.output(t, f.steps[0], f.free), nil }
+	readErr := errors.New("judging input admission of " + f.steps[0].ID + ": work store: connection refused")
+	ops.InputAdmission = func(context.Context, string, []string, []beads.Bead) (map[string]inputadmission.Withhold, error) {
+		return nil, readErr
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("query", "/rig", hookClaimOptions{
+		Assignee:     "worker-1",
+		RouteTargets: []string{"worker"},
+		JSON:         true,
+		DrainAck:     true,
+	}, ops, &stdout, &stderr)
+
+	if code == 0 {
+		t.Fatalf("doHookClaim = 0, want a failure (stdout=%q)", stdout.String())
+	}
+	if len(claimed) != 0 {
+		t.Fatalf("claimed %v after the admission read failed", claimed)
+	}
+	if !strings.Contains(stderr.String(), readErr.Error()) {
+		t.Fatalf("stderr = %q, want the admission error %q", stderr.String(), readErr)
+	}
+	if strings.Contains(stdout.String(), "no_work") {
+		t.Fatalf("stdout = %q, laundered an admission failure into a no_work drain", stdout.String())
+	}
 }
