@@ -233,3 +233,48 @@ func TestLegacyRehomeReportLog(t *testing.T) {
 		}
 	})
 }
+
+// TestCanonicalizeLegacyRoutedWorkRefusesAddDirectionOnSharedRigLeg is AC-2 of
+// the #5846 design: on a shared rig leg the reverse "add" rewrite — a bare
+// legacy identity resolving onto a bound agent — is refused too. A bare
+// identity carries no mark of which city minted the binding the rewrite would
+// gain, and the rewrite would mint that binding on the row, so no question
+// asked of the local config can prove it is this city's legacy spelling.
+func TestCanonicalizeLegacyRoutedWorkRefusesAddDirectionOnSharedRigLeg(t *testing.T) {
+	bound := poolAgent("omp", "qcore", intPtr(3), 0)
+	bound.BindingName = "pool"
+	cfg := &config.City{
+		Imports: map[string]config.Import{"pool": {Source: "./packs/pool"}},
+		Agents:  []config.Agent{bound},
+	}
+	if got := bound.QualifiedName(); got != "qcore/pool.omp" {
+		t.Fatalf("bound canonical identity = %q, want qcore/pool.omp", got)
+	}
+
+	wb := workBead("wb-add", "qcore/omp", "", "open", 2)
+	mem := beads.NewMemStoreFrom(0, []beads.Bead{wb}, nil)
+	store := &updateCountingStore{Store: mem}
+
+	report := canonicalizeLegacyBoundUnassignedRoutedWork(cfg, []beads.Bead{wb}, []beads.Store{store}, []string{"rig:qcore"}, io.Discard)
+
+	if store.updates != 0 {
+		t.Errorf("add-direction rewrite issued %d Update call(s) on a shared leg, want 0", store.updates)
+	}
+	got, err := mem.Get("wb-add")
+	if err != nil {
+		t.Fatalf("Get(wb-add): %v", err)
+	}
+	if routed := got.Metadata["gc.routed_to"]; routed != "qcore/omp" {
+		t.Errorf("gc.routed_to = %q, want %q (bare legacy identity left alone)", routed, "qcore/omp")
+	}
+	if len(report.Rehomed) != 0 {
+		t.Errorf("report rehomed %+v, want none", report.Rehomed)
+	}
+	if len(report.Refused) != 1 {
+		t.Fatalf("report refused %+v, want exactly the add-direction refusal", report.Refused)
+	}
+	want := legacyRehomeEntry{ID: "wb-add", Leg: "rig:qcore", Field: "gc.routed_to", From: "qcore/omp", To: "qcore/pool.omp"}
+	if report.Refused[0] != want {
+		t.Errorf("refusal = %+v, want %+v", report.Refused[0], want)
+	}
+}

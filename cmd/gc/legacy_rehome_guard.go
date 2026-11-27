@@ -88,8 +88,11 @@ func legacyRehomeLegIsOwn(ref string) bool {
 // "<dir>/<binding>.<name>", and this city mints <binding> on <dir>
 // (cityMintsBindingOnRig) — the same test the pool orphan sweeper applies, so
 // sweeper and re-home agree on every identity. An empty binding, a from that is
-// not a bound form, or an unresolvable agent refuses. The add direction (a bare
-// identity resolving onto a bound agent) is unchanged so far.
+// not a bound form, or an unresolvable agent refuses. The ADD direction (a bare
+// identity resolving onto a bound agent) is refused on shared legs too: a bare
+// identity carries no mark of which city minted the binding it would gain, and
+// the rewrite would mint that binding on the row, so no question asked of the
+// local config can prove it is this city's legacy spelling.
 func legacyRehomeAllowed(cfg *config.City, own bool, from string, agent *config.Agent) bool {
 	if agent == nil {
 		return false
@@ -98,8 +101,10 @@ func legacyRehomeAllowed(cfg *config.City, own bool, from string, agent *config.
 		return true
 	}
 	if strings.TrimSpace(agent.BindingName) != "" {
-		// Add direction: unchanged so far.
-		return true
+		// Add direction: the resolver matched a BARE persisted identity onto a
+		// bound agent. On a shared leg that match is exactly how two cities'
+		// vocabularies cross-read (#5846), so refuse.
+		return false
 	}
 	dir, local := config.ParseQualifiedName(strings.TrimSpace(from))
 	binding, _, ok := strings.Cut(local, ".")
