@@ -222,8 +222,24 @@ func dispatchQueuedNudges(queue nudgeQueueHandle, cityPath string, cfg *config.C
 			continue
 		}
 		if !obs.Running {
+			// A dormant session gets no delivery, but its queued nudges that
+			// declared a wake get it recorded. The pass runs inside the
+			// controller, whose next reconcile reads the recorded wake, so
+			// nothing is poked.
+			detail := ""
+			mp := newMailProviderWithSessionStore(resolveMailMessagesStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil), sessStore)
+			outcome, wakeErr := requestDormantQueuedNudgeWake(target, sessionFrontDoor(sessStore), mp, now)
+			switch {
+			case wakeErr != nil:
+				if firstErr == nil {
+					firstErr = wakeErr
+				}
+				detail = wakeErr.Error()
+			case outcome == sessionpkg.WakeRecorded:
+				detail = "wake requested"
+			}
 			skipCounts["not-running"]++
-			logNudgeDispatchSkip(debugOut, "not-running", target.agentKey(), target.sessionName, "")
+			logNudgeDispatchSkip(debugOut, "not-running", target.agentKey(), target.sessionName, detail)
 			continue
 		}
 		// The pass's snapshot census only lets the target skip: when, judged

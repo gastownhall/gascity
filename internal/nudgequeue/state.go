@@ -62,6 +62,11 @@ type Item struct {
 	// set when the queue commits the item's exit (a dead letter, an ack). The
 	// shadow write happens after the queue lock is released.
 	Shadow *ShadowDebt `json:"shadow,omitempty"`
+	// WakeIfNeeded is the producer's declared wake intent: an observer that
+	// finds the item's session asleep or drained, and not held, while the item
+	// is still pending records the session's managed wake for it. An item
+	// without it waits for the session's next run.
+	WakeIfNeeded bool `json:"wake_if_needed,omitempty"`
 }
 
 // ShadowDebt is the terminal record an item's gc:nudge shadow bead owes: the
