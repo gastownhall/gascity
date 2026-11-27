@@ -96,18 +96,6 @@ func infraParkedStatus(b beads.Bead) string {
 	return b.SourceStatus
 }
 
-// infraRawStatus is b's status in its source store: the raw status a
-// bd-backed read keeps beside the folded one, else the folded one.
-func infraRawStatus(b beads.Bead) string {
-	switch {
-	case b.SourceStatus != "":
-		return b.SourceStatus
-	case b.IndefinitelyDeferred:
-		return "deferred"
-	}
-	return b.Status
-}
-
 // infraCarriedStatus is the status a class binding holds a row with whose
 // status in its source store is raw: the binding records only open,
 // in_progress and closed, and a bd-backed read folds every other status to
@@ -131,7 +119,7 @@ func infraCarriedStatus(raw string) string {
 func infraCarryParkedHold(b beads.Bead) beads.Bead {
 	status := infraParkedStatus(b)
 	if _, recorded := b.Metadata[beadmeta.MigratedParkedHoldMetadataKey]; status == "" && !recorded && b.DeferUntil != nil && b.DeferUntil.Equal(infraParkedDeferUntil) {
-		status = infraRawStatus(b)
+		status = beads.RecordedStatus(b)
 	}
 	if status == "" {
 		return b

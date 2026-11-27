@@ -81,11 +81,23 @@ type releasePolicy struct {
 	// detached holds a claim carrying gc.detached until its probe attests the
 	// runtime dead (detachedProbeAllowsOrphanRelease).
 	detached bool
+	// releaseParked gives back a claim parked as bd's blocked or deferred
+	// (parkedReleasable), keeping that status, and reads the scope's parked
+	// claims to find it (parkedSeatWork): the path releases from a holder
+	// that is gone, so the claim would otherwise stay on it for good (#7685).
+	releaseParked bool
 }
 
 var (
 	openOrStarted = []string{"open", "in_progress"}
 	startedOnly   = []string{"in_progress"}
+	// parkedReleasable are the parked statuses (beads.IsParked) a release
+	// gives back, keeping the status: bd's built-in holds on work. Every other
+	// parked status is kept with its holder (keptParked): a pinned bead is
+	// persistent context, a hooked bead is an identity's hook, which its next
+	// session runs, and a status a city declares may be one bd counts done (a
+	// done category), whose assignee records who did the work.
+	parkedReleasable = []string{"blocked", "deferred"}
 )
 
 // releasePolicies is every release path's started-work policy, in one place
@@ -122,14 +134,30 @@ var (
 //     that is gone, and only the dead-assignee sweep would probe it again,
 //     on a pool route alone;
 //   - every release clears the gc.detached of the claim it gives back, in
-//     the same write (releaseServed), so no reopened claim carries a probe.
+//     the same write (releaseServed), so no reopened claim carries a probe;
+//   - the paths whose holder is gone (the cascade, both orphan releases and
+//     the retired-session sweep) also give back a claim its holder parked as
+//     blocked or deferred (releaseParked, parkedReleasable), keeping its
+//     status: the hold stays for whoever lifts it, and only the dead holder
+//     goes. A deferred claim keeps its defer_until too, and reads ready once
+//     the store wakes it. This supersedes #6207's rule (#8442) that kept a
+//     dead assignee until the store woke the row: it held only while a
+//     release wrote status=open, un-deferring the row and stranding its date,
+//     and a parked release writes no status. A claim in any other parked
+//     status (pinned, hooked, one a city declares) is kept, as keptParked,
+//     and named in the release log. The stranded repair keeps a parked claim
+//     too (keptParked), and does not read for one: the close it ends in runs
+//     the cascade, which gives the claim back, and inside a tick the repair
+//     releases from the tick's index alone. The paths of a live seat (killed,
+//     drain-ack, ladder, stalled) keep a parked claim (keptParked): it is the
+//     seat's own, and if its row later closes the cascade releases it.
 var releasePolicies = map[releaseWhy]releasePolicy{
 	releaseKilledSeat:     {statuses: openOrStarted, startedKeeps: true, lane: laneDirect, seatRoute: true},
 	releaseDrainAck:       {statuses: startedOnly, startedNamedKeeps: true, lane: laneCarried, seatRoute: true},
-	releaseCloseCascade:   {statuses: openOrStarted, lane: laneCarried, seatRoute: true},
+	releaseCloseCascade:   {statuses: openOrStarted, lane: laneCarried, seatRoute: true, releaseParked: true},
 	releaseStrandedRepair: {statuses: openOrStarted, lane: laneCarried, seatRoute: true, detached: true},
-	releaseOrphan:         {statuses: openOrStarted, lane: laneDirect, pool: true, detached: true},
-	releaseRetired:        {statuses: openOrStarted, lane: laneCarried, seatRoute: true},
+	releaseOrphan:         {statuses: openOrStarted, lane: laneDirect, pool: true, detached: true, releaseParked: true},
+	releaseRetired:        {statuses: openOrStarted, lane: laneCarried, seatRoute: true, releaseParked: true},
 	releaseLadder:         {statuses: startedOnly, lane: laneCarried, seatRoute: true},
 	releaseStalled:        {statuses: openOrStarted, lane: laneCarried, seatRoute: true},
 }
@@ -141,6 +169,7 @@ const (
 	keptUnservedRoute = "unserved-route"
 	keptMoved         = "moved"
 	keptDetachedHeld  = "detached-held" // its gc.detached probe did not attest the runtime dead
+	keptParked        = "parked"        // parked in a status the path does not give back (releasesParked)
 	failedBudget      = "budget"
 )
 
@@ -293,6 +322,23 @@ func (o ReleaseOutcome) Unserved() []strandedClaim {
 	return out
 }
 
+// keptParkedClaim is one claim kept because the path does not give back its
+// parked status.
+type keptParkedClaim struct{ id, status string }
+
+// Parked are the claims kept as keptParked, with the status each is parked
+// in, by ID.
+func (o ReleaseOutcome) Parked() []keptParkedClaim {
+	var out []keptParkedClaim
+	for _, k := range o.Kept {
+		if o.Why[k.bead.ID] == keptParked {
+			out = append(out, keptParkedClaim{id: k.bead.ID, status: beads.RecordedStatus(k.bead)})
+		}
+	}
+	slices.SortFunc(out, func(a, b keptParkedClaim) int { return strings.Compare(a.id, b.id) })
+	return out
+}
+
 // HeldDetached counts the claims kept because their gc.detached probe did not
 // attest the runtime dead: work that may still run elsewhere, still assigned
 // to the seat.
@@ -307,14 +353,19 @@ func (o ReleaseOutcome) HeldDetached() int {
 }
 
 // ReleaseClaims gives back the claims scope holds on sw's legs, as why's
-// policy says. A read that fails releases nothing on a startedKeeps path,
-// whose gate needs the whole seat; elsewhere what was read is released.
+// policy says. A policy that releases parked claims also reads them
+// (parkedSeatWork). A read that fails releases nothing on a startedKeeps
+// path, whose gate needs the whole seat; elsewhere what was read is released.
 func ReleaseClaims(sw *SeatWork, scope ReleaseScope, seat releaseSeat, why releaseWhy, opts ReleaseOpts) (ReleaseOutcome, error) {
 	p := releasePolicies[why]
 	claims, err := sw.snapshot(seatWorkQuery{scope: scope, statuses: p.statuses}, false)
 	if opts.Late {
-		late, lateErr := lateSeatWork(sw.Legs(), scope, p.statuses, nil)
+		late, lateErr := lateSeatWork(sw.Legs(), scope, p.statuses, nil, closeReRead)
 		claims, err = appendUniqueSeatWork(claims, late), errors.Join(err, lateErr)
+	}
+	if p.releaseParked {
+		parked, parkedErr := parkedSeatWork(sw.Legs(), scope)
+		claims, err = appendUniqueSeatWork(claims, parked), errors.Join(err, parkedErr)
 	}
 	// The refusal needs no config: it releases nothing, so a seat whose
 	// config did not load is still refused, not acked past its started work.
@@ -338,6 +389,28 @@ func ReleaseClaims(sw *SeatWork, scope ReleaseScope, seat releaseSeat, why relea
 	return releaseListed(claims, why, seat, sw.Legs().cfg, opts), err
 }
 
+// parkedSeatWork reads the scope's parked claims (beads.IsParked), which the
+// open/in_progress reads cannot list: a live read lists raw open, and an
+// event-fed cache row carries the parked status. It lists every leg
+// not-closed, per identity (lateSeatWork's parkedRead: a cached leg answers
+// from its cache alone), and keeps the parked rows. Every parked claim is
+// kept, whatever its status, so releaseListed classifies it: a claim the
+// path does not give back is kept as keptParked and named in the release
+// log. A leg the read could not list in full (a bd leg whose cache cannot
+// answer, a cache primed in part) is named in the error, so the release log
+// reports what it may have left assigned.
+func parkedSeatWork(legs WorkLegs, scope workScope) ([]seatWorkHit, error) {
+	hits, err := lateSeatWork(legs, scope, []string{""}, nil, parkedRead)
+	return slices.DeleteFunc(hits, func(h seatWorkHit) bool { return !beads.IsParked(h.bead) }), err
+}
+
+// releasesParked reports whether the path gives back b, a parked claim
+// (beads.IsParked): it releases parked claims, and b's recorded status is one
+// a release gives back (parkedReleasable).
+func (p releasePolicy) releasesParked(b beads.Bead) bool {
+	return p.releaseParked && slices.Contains(parkedReleasable, beads.RecordedStatus(b))
+}
+
 // releaseListed is ReleaseClaims' body for claims a caller already listed
 // (the orphan releases list them from the tick's census).
 func releaseListed(claims []seatWorkHit, why releaseWhy, seat releaseSeat, cfg *config.City, opts ReleaseOpts) ReleaseOutcome {
@@ -346,7 +419,16 @@ func releaseListed(claims []seatWorkHit, why releaseWhy, seat releaseSeat, cfg *
 	keep := func(c seatWorkHit, why string) { out.Kept = append(out.Kept, c); out.Why[c.bead.ID] = why }
 	var mine []seatWorkHit
 	for _, c := range claims {
-		if slices.Contains(p.statuses, c.bead.Status) {
+		switch {
+		case beads.IsParked(c.bead):
+			// Classified on the recorded status before the status filter: a
+			// folding store reads a parked claim as "open".
+			if !p.releasesParked(c.bead) {
+				keep(c, keptParked)
+				continue
+			}
+			mine = append(mine, c)
+		case slices.Contains(p.statuses, c.bead.Status):
 			mine = append(mine, c)
 		}
 	}
@@ -402,7 +484,11 @@ func releaseListed(claims []seatWorkHit, why releaseWhy, seat releaseSeat, cfg *
 // into the claim's next assignment, where once its socket is gone it holds
 // the work for good.
 func releaseServed(c seatWorkHit, wa workAssignment, p releasePolicy, fallback string) (string, error) {
-	if p.pool && !liveWorkAssignmentStillReleasable(c.store, c.bead.ID, c.bead.Status, strings.TrimSpace(c.bead.Assignee)) {
+	// A parked claim skips the raw-status re-read, which lists open and so
+	// cannot see it: every write the release can take is fenced on the
+	// snapshot (the revision CAS, or releaseAssignmentFenced on its recorded
+	// status and assignee), and ReleaseIfCurrent takes in_progress only.
+	if p.pool && !p.releasesParked(c.bead) && !liveWorkAssignmentStillReleasable(c.store, c.bead.ID, c.bead.Status, strings.TrimSpace(c.bead.Assignee)) {
 		return keptMoved, nil
 	}
 	if p.detached {
@@ -416,6 +502,15 @@ func releaseServed(c seatWorkHit, wa workAssignment, p releasePolicy, fallback s
 			return keptMoved, nil
 		}
 		return "", nil
+	}
+	if p.releasesParked(c.bead) {
+		// A parked claim that moved on since the snapshot is kept, not
+		// reported released: nothing was written.
+		released, err := wa.releaseWorkBead(c.bead, fallback, clearDetached)
+		if err == nil && !released {
+			return keptMoved, nil
+		}
+		return "", err
 	}
 	if clearDetached {
 		return "", wa.ReleaseDetachedWorkBead(c.bead, fallback)

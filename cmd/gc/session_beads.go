@@ -1367,7 +1367,8 @@ func releaseDrainAckClaims(legs WorkLegs, sessionBead beads.Bead, refuseStarted 
 }
 
 // logRelease reports what a release could not do: a failed read, a failed
-// write and a claim kept because no lane serves it.
+// write, a claim kept because no lane serves it and a claim kept in a parked
+// status the release does not give back, named with that status.
 func logRelease(stderr io.Writer, kind, sessionID string, out ReleaseOutcome, err error) {
 	if err != nil {
 		fmt.Fprintf(stderr, "session beads: releasing work held by %s session %s: %v\n", kind, sessionID, err) //nolint:errcheck
@@ -1377,6 +1378,9 @@ func logRelease(stderr io.Writer, kind, sessionID string, out ReleaseOutcome, er
 	}
 	for _, c := range out.Unserved() {
 		fmt.Fprintf(stderr, "session beads: %s session %s keeps claim %s: no lane serves route %q\n", kind, sessionID, c.id, c.route) //nolint:errcheck
+	}
+	for _, c := range out.Parked() {
+		fmt.Fprintf(stderr, "session beads: %s session %s keeps claim %s: parked as %q\n", kind, sessionID, c.id, c.status) //nolint:errcheck
 	}
 }
 

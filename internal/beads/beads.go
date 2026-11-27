@@ -399,7 +399,9 @@ type ConditionalAssigneeTransferer interface {
 
 // AssignmentGuardedUpdater is implemented by stores whose backend can apply an
 // update only while the bead still has an expected status and assignee,
-// checked inside the same write. It fences an assignment change on the facts
+// checked inside the same write. expectedStatus is the status the store
+// recorded (RecordedStatus), not the folded one: a bd row parked as blocked
+// matches "blocked", never "open". It fences an assignment change on the facts
 // it was decided from where the store has no revision fence: BdStore without
 // --if-revision answers it with `bd update --if-status --if-assignee`.
 //
@@ -960,6 +962,35 @@ func HasReadyExcludedLabel(b Bead) bool {
 func IsDeferred(b Bead, now time.Time) bool {
 	return b.IndefinitelyDeferred ||
 		(b.DeferUntil != nil && b.DeferUntil.After(now))
+}
+
+// RecordedStatus is the status the backing store recorded for b, the value a
+// Live status read and a guarded update's expected status (bd's --if-status)
+// compare against: SourceStatus when a read kept it beside the folded Status,
+// else "deferred" for a row an event re-derived as IndefinitelyDeferred, else
+// Status, which a store that does not fold (and an event-patched cache row)
+// already records raw.
+func RecordedStatus(b Bead) string {
+	if s := strings.TrimSpace(b.SourceStatus); s != "" {
+		return s
+	}
+	if b.IndefinitelyDeferred {
+		return "deferred"
+	}
+	return b.Status
+}
+
+// IsParked reports whether b's recorded status (RecordedStatus) is one Gas
+// City's three-state model has no place for: bd's blocked, deferred, pinned
+// or hooked, or a custom status a city declares. Such a bead reads as "open"
+// through a folding store, yet a Live "open" read and a guarded update
+// expecting "open" both miss it.
+func IsParked(b Bead) bool {
+	switch RecordedStatus(b) {
+	case "", "open", "in_progress", "closed":
+		return false
+	}
+	return true
 }
 
 // setBeadStatus applies an explicit Gas City status transition. Any such

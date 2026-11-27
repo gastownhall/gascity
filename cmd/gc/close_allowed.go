@@ -91,7 +91,7 @@ func closeAllowed(sw *SeatWork, info sessionpkg.Info, why closeWhy) (string, err
 	if err != nil || held {
 		return causeHasWork, err
 	}
-	late, err := lateSeatWork(sw.Legs(), scope, seatWorkStatuses, why.keep)
+	late, err := lateSeatWork(sw.Legs(), scope, seatWorkStatuses, why.keep, closeReRead)
 	switch {
 	case err != nil:
 		return causeHasWork, fmt.Errorf("re-reading its work: %w", err)

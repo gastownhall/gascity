@@ -29,15 +29,60 @@ func TestReleasePoliciesTable(t *testing.T) {
 	want := map[releaseWhy]releasePolicy{
 		releaseKilledSeat:     {statuses: []string{"open", "in_progress"}, startedKeeps: true, lane: laneDirect, seatRoute: true},
 		releaseDrainAck:       {statuses: []string{"in_progress"}, startedNamedKeeps: true, lane: laneCarried, seatRoute: true},
-		releaseCloseCascade:   {statuses: []string{"open", "in_progress"}, lane: laneCarried, seatRoute: true},
+		releaseCloseCascade:   {statuses: []string{"open", "in_progress"}, lane: laneCarried, seatRoute: true, releaseParked: true},
 		releaseStrandedRepair: {statuses: []string{"open", "in_progress"}, lane: laneCarried, seatRoute: true, detached: true},
-		releaseOrphan:         {statuses: []string{"open", "in_progress"}, lane: laneDirect, pool: true, detached: true},
-		releaseRetired:        {statuses: []string{"open", "in_progress"}, lane: laneCarried, seatRoute: true},
+		releaseOrphan:         {statuses: []string{"open", "in_progress"}, lane: laneDirect, pool: true, detached: true, releaseParked: true},
+		releaseRetired:        {statuses: []string{"open", "in_progress"}, lane: laneCarried, seatRoute: true, releaseParked: true},
 		releaseLadder:         {statuses: []string{"in_progress"}, lane: laneCarried, seatRoute: true},
 		releaseStalled:        {statuses: []string{"open", "in_progress"}, lane: laneCarried, seatRoute: true},
 	}
 	if !reflect.DeepEqual(releasePolicies, want) {
 		t.Fatalf("releasePolicies = %+v\nwant %+v", releasePolicies, want)
+	}
+}
+
+// TestReleaseListedLiveSeatPoliciesKeepParkedClaims: a path that releases
+// from a live seat keeps the claim its seat parked, assignee and status both:
+// the hold is the seat's own, and the cascade gives it back once the seat's
+// row closes. It is kept as parked in both shapes a parked claim reaches
+// release code in: bd's folded read and a store that records the raw status.
+func TestReleaseListedLiveSeatPoliciesKeepParkedClaims(t *testing.T) {
+	for name, why := range map[string]releaseWhy{
+		"killed seat": releaseKilledSeat,
+		"drain-ack":   releaseDrainAck,
+		"ladder":      releaseLadder,
+		"stalled":     releaseStalled,
+	} {
+		t.Run(name, func(t *testing.T) {
+			bd := newParkedBdStore()
+			folded := foldBdStatus(seedParkedClaim(t, bd.mem, "live-seat", "blocked", map[string]string{beadmeta.RoutedToMetadataKey: "worker"}))
+			mem := beads.NewMemStore()
+			raw := seedParkedClaim(t, mem, "live-seat", "blocked", map[string]string{beadmeta.RoutedToMetadataKey: "worker"})
+			seat := releaseSeat{id: "live-seat", fallback: "worker"}
+
+			out := releaseListed([]seatWorkHit{{store: bd, bead: folded}, {store: mem, bead: raw}}, why, seat, testPoolReleaseConfig(), ReleaseOpts{})
+			if len(out.Released) != 0 || len(out.Failed) != 0 {
+				t.Fatalf("released %d, failed %d; want the parked claims kept", len(out.Released), len(out.Failed))
+			}
+			for _, c := range []struct {
+				mem *beads.MemStore
+				id  string
+			}{{bd.mem, folded.ID}, {mem, raw.ID}} {
+				if out.Why[c.id] != keptParked {
+					t.Errorf("%s kept as %q, want %q", c.id, out.Why[c.id], keptParked)
+				}
+				got, err := c.mem.Get(c.id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got.Assignee != "live-seat" || got.Status != "blocked" {
+					t.Errorf("%s assignee=%q status=%q, want live-seat and blocked kept", c.id, got.Assignee, got.Status)
+				}
+			}
+			if len(bd.guarded) != 0 || bd.writes != 0 {
+				t.Errorf("bd writes: guarded=%d other=%d, want none", len(bd.guarded), bd.writes)
+			}
+		})
 	}
 }
 
@@ -1295,5 +1340,280 @@ func TestDetectorKeepsAFreshStampALaggingListCallsStale(t *testing.T) {
 	detectStrandedClaims(testWorkLegs("", cfg, lagging, nil), store, nil, &strandedClaimAlerts{rec: events.NewFake(), scanned: now.Add(-strandedRealertEvery)}, now)
 	if got, _ := store.Get(claim.ID); got.Metadata[beadmeta.StrandedSessionMetadataKey] != "gc-9" {
 		t.Fatalf("stamp %v, want the fresh stamp for gc-9 kept", got.Metadata)
+	}
+}
+
+// TestReleaseListedKeepsPinnedHookedAndCustomStatusClaims: the paths that
+// give back a dead holder's blocked or deferred claim keep a pinned, hooked or
+// custom-status one, assignee and status both, and write nothing: a pinned
+// bead is persistent context, a hooked bead is its identity's hook, whose next
+// session runs it, and a status a city declares may be one bd counts done. The
+// kept claim is logged with the status it is parked in. Each store shape is
+// covered: bd's folded read, a store recording the raw status, and a
+// revision-CAS store.
+func TestReleaseListedKeepsPinnedHookedAndCustomStatusClaims(t *testing.T) {
+	paths := map[string]releaseWhy{
+		"close cascade":   releaseCloseCascade,
+		"stranded repair": releaseStrandedRepair,
+		"orphan":          releaseOrphan,
+		"retired":         releaseRetired,
+	}
+	routed := map[string]string{beadmeta.RoutedToMetadataKey: "worker"}
+	for name, why := range paths {
+		for _, status := range []string{"pinned", "hooked", "archived", "review"} {
+			t.Run(name+"/"+status, func(t *testing.T) {
+				bd := newParkedBdStore()
+				folded := foldBdStatus(seedParkedClaim(t, bd.mem, "dead-session", status, routed))
+				// Each store numbers its beads apart, so every claim has its own ID.
+				mem := beads.NewMemStoreFrom(10, nil, nil)
+				raw := seedParkedClaim(t, mem, "dead-session", status, routed)
+				cas := &revisionReleaseStore{MemStore: beads.NewMemStoreFrom(20, nil, nil)}
+				stampConditionalWrites(t, cas, gate.Require)
+				casClaim := seedParkedClaim(t, cas.MemStore, "dead-session", status, routed)
+				seat := releaseSeat{id: "dead-session", fallback: "worker"}
+
+				out := releaseListed([]seatWorkHit{
+					{store: bd, bead: folded},
+					{store: mem, bead: raw},
+					{store: cas, bead: casClaim},
+				}, why, seat, testPoolReleaseConfig(), ReleaseOpts{Late: why == releaseCloseCascade})
+				if len(out.Released) != 0 || len(out.Failed) != 0 {
+					t.Fatalf("released %d, failed %d; want the %s claims kept", len(out.Released), len(out.Failed), status)
+				}
+				for _, c := range []struct {
+					mem *beads.MemStore
+					id  string
+				}{{bd.mem, folded.ID}, {mem, raw.ID}, {cas.MemStore, casClaim.ID}} {
+					if out.Why[c.id] != keptParked {
+						t.Errorf("%s kept as %q, want %q", c.id, out.Why[c.id], keptParked)
+					}
+					got, err := c.mem.Get(c.id)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if got.Assignee != "dead-session" || got.Status != status {
+						t.Errorf("%s assignee=%q status=%q, want dead-session and %s kept", c.id, got.Assignee, got.Status, status)
+					}
+				}
+				if len(bd.guarded) != 0 || bd.writes != 0 {
+					t.Errorf("bd writes: guarded=%d other=%d, want none", len(bd.guarded), bd.writes)
+				}
+				if cas.conditionalCalls != 0 || cas.legacyCalls != 0 {
+					t.Errorf("revision-CAS writes: conditional=%d legacy=%d, want none", cas.conditionalCalls, cas.legacyCalls)
+				}
+
+				var stderr bytes.Buffer
+				logRelease(&stderr, "closed", "dead-session", out, nil)
+				for _, id := range []string{folded.ID, raw.ID, casClaim.ID} {
+					want := "keeps claim " + id + ": parked as \"" + status + "\""
+					if !strings.Contains(stderr.String(), want) {
+						t.Errorf("release log = %q, want it to contain %q", stderr.String(), want)
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestReleaseClaimsParkedReadReleasesRetiredHolds: the retired sweep gives
+// back a retired seat's claim parked as blocked or deferred, keeping its
+// status, though its open/in_progress read cannot list it, and keeps one in a
+// status a city declares (which may be a done category), naming it as kept.
+// Each holds in both shapes a parked claim is read in: bd's folded row, which
+// records the raw status in SourceStatus, and a store that records it as
+// Status.
+func TestReleaseClaimsParkedReadReleasesRetiredHolds(t *testing.T) {
+	seatBead := beads.Bead{ID: "retired-seat", Metadata: map[string]string{"session_name": "worker-1"}}
+	routed := map[string]string{beadmeta.RoutedToMetadataKey: "worker"}
+	release := func(t *testing.T, store beads.Store) ReleaseOutcome {
+		t.Helper()
+		scope := releaseScopeOwn(seatBead)
+		out, err := ReleaseClaims(seatWorkFor(testWorkLegs("", servingCity("worker"), store, nil), scope), scope, releaseSeatOfBead(seatBead), releaseRetired, ReleaseOpts{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	for _, status := range []string{"blocked", "deferred"} {
+		t.Run(status+"/folded", func(t *testing.T) {
+			bd := newParkedBdStore()
+			claim := seedParkedClaim(t, bd.mem, seatBead.ID, status, routed)
+
+			if out := release(t, bd); len(out.Released) != 1 {
+				t.Fatalf("released %d claims, want %s (kept as %q)", len(out.Released), claim.ID, out.Why[claim.ID])
+			}
+			assertParkedRelease(t, bd.mem, claim.ID, status)
+			if len(bd.guarded) != 1 || bd.guarded[0].status != status {
+				t.Errorf("guarded updates = %+v, want one fenced on %s", bd.guarded, status)
+			}
+		})
+		t.Run(status+"/raw", func(t *testing.T) {
+			mem := beads.NewMemStore()
+			claim := seedParkedClaim(t, mem, seatBead.ID, status, routed)
+
+			if out := release(t, mem); len(out.Released) != 1 {
+				t.Fatalf("released %d claims, want %s (kept as %q)", len(out.Released), claim.ID, out.Why[claim.ID])
+			}
+			assertParkedRelease(t, mem, claim.ID, status)
+		})
+	}
+	t.Run("custom status/folded", func(t *testing.T) {
+		bd := newParkedBdStore()
+		claim := seedParkedClaim(t, bd.mem, seatBead.ID, "archived", routed)
+
+		out := release(t, bd)
+		if len(out.Released) != 0 || out.Why[claim.ID] != keptParked {
+			t.Fatalf("released %d claims, %s kept as %q; want it kept as %q", len(out.Released), claim.ID, out.Why[claim.ID], keptParked)
+		}
+		assertWork(t, bd.mem, claim.ID, "archived", seatBead.ID)
+		if len(bd.guarded) != 0 || bd.writes != 0 {
+			t.Errorf("bd writes: guarded=%d other=%d, want none", len(bd.guarded), bd.writes)
+		}
+	})
+	t.Run("custom status/raw", func(t *testing.T) {
+		mem := beads.NewMemStore()
+		claim := seedParkedClaim(t, mem, seatBead.ID, "archived", routed)
+
+		out := release(t, mem)
+		if len(out.Released) != 0 || out.Why[claim.ID] != keptParked {
+			t.Fatalf("released %d claims, %s kept as %q; want it kept as %q", len(out.Released), claim.ID, out.Why[claim.ID], keptParked)
+		}
+		assertWork(t, mem, claim.ID, "archived", seatBead.ID)
+	})
+}
+
+// TestReleaseParkedClaimStaleSnapshotWritesNothing: a dead-holder release of
+// a parked claim whose bead moved on after the snapshot writes nothing and
+// fails nothing, so the next pass decides again on what it reads then. The
+// bead moved on either by being unblocked (its raw status is open now, and
+// may be claimed from the queue at any moment) or by being claimed again. The
+// fence holds on both write tiers: bd's guarded update on a folded snapshot,
+// and the revision CAS on a raw one.
+func TestReleaseParkedClaimStaleSnapshotWritesNothing(t *testing.T) {
+	routed := map[string]string{beadmeta.RoutedToMetadataKey: "worker"}
+	moves := map[string]beads.UpdateOpts{
+		"unblocked": {Status: stringPtr("open")},
+		"reclaimed": {Assignee: stringPtr("new-seat")},
+	}
+	paths := map[string]releaseWhy{"close cascade": releaseCloseCascade, "orphan": releaseOrphan}
+	for pathName, why := range paths {
+		for moveName, move := range moves {
+			t.Run(pathName+"/"+moveName+"/guarded update", func(t *testing.T) {
+				bd := newParkedBdStore()
+				snapshot := foldBdStatus(seedParkedClaim(t, bd.mem, "dead-session", "blocked", routed))
+				if err := bd.mem.Update(snapshot.ID, move); err != nil {
+					t.Fatal(err)
+				}
+				want, err := bd.mem.Get(snapshot.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				out := releaseListed([]seatWorkHit{{store: bd, bead: snapshot}}, why, releaseSeat{id: "dead-session", fallback: "worker"}, testPoolReleaseConfig(), ReleaseOpts{})
+				if len(out.Released) != 0 || len(out.Failed) != 0 {
+					t.Fatalf("released %d, failed %d (%q); want the stale snapshot left for the next pass", len(out.Released), len(out.Failed), out.Why[snapshot.ID])
+				}
+				if bd.writes != 0 {
+					t.Errorf("bd wrote %d times, want none", bd.writes)
+				}
+				assertBeadUnchanged(t, bd.mem, want)
+			})
+			t.Run(pathName+"/"+moveName+"/revision CAS", func(t *testing.T) {
+				store := openRevisionReleaseStore(t, gate.Require)
+				snapshot := seedParkedClaim(t, store.MemStore, "dead-session", "blocked", routed)
+				if err := store.MemStore.Update(snapshot.ID, move); err != nil {
+					t.Fatal(err)
+				}
+				want, err := store.Get(snapshot.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				out := releaseListed([]seatWorkHit{{store: store, bead: snapshot}}, why, releaseSeat{id: "dead-session", fallback: "worker"}, testPoolReleaseConfig(), ReleaseOpts{})
+				if len(out.Released) != 0 || len(out.Failed) != 0 {
+					t.Fatalf("released %d, failed %d (%q); want the stale snapshot left for the next pass", len(out.Released), len(out.Failed), out.Why[snapshot.ID])
+				}
+				if store.legacyCalls != 0 {
+					t.Errorf("legacy writes = %d, want none", store.legacyCalls)
+				}
+				assertBeadUnchanged(t, store.MemStore, want)
+			})
+		}
+	}
+}
+
+// TestReleaseParkedClaimLostRevisionCASFails: a dead-holder release of a
+// parked claim that loses the revision CAS reads the conflict as moved on
+// only when the live re-read shows the claim moved (unblocked, or claimed
+// again; TestReleaseParkedClaimStaleSnapshotWritesNothing). When an unrelated
+// write moved the revision but left status and assignee, or when the re-read
+// fails, the claim is reported failed and nothing is written: a stranded
+// repair or a close gated on the release must not take it for a kept claim
+// and close the seat over a claim still assigned to it.
+func TestReleaseParkedClaimLostRevisionCASFails(t *testing.T) {
+	routed := map[string]string{beadmeta.RoutedToMetadataKey: "worker"}
+	for _, tc := range []struct {
+		name      string
+		reReadErr error
+	}{
+		{name: "unrelated write"},
+		{name: "failed re-read", reReadErr: errors.New("live read failed")},
+	} {
+		for pathName, why := range map[string]releaseWhy{"close cascade": releaseCloseCascade, "retired": releaseRetired} {
+			t.Run(tc.name+"/"+pathName, func(t *testing.T) {
+				store := openRevisionReleaseStore(t, gate.Require)
+				snapshot := seedParkedClaim(t, store.MemStore, "dead-session", "blocked", routed)
+				if err := store.MemStore.Update(snapshot.ID, beads.UpdateOpts{Metadata: map[string]string{"note": "unrelated"}}); err != nil {
+					t.Fatal(err)
+				}
+				want, err := store.Get(snapshot.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if want.Revision == snapshot.Revision {
+					t.Fatalf("the unrelated write left revision %d, want it moved", want.Revision)
+				}
+				var leg beads.Store = store
+				if tc.reReadErr != nil {
+					leg = &liveReadFailingStore{revisionReleaseStore: store, err: tc.reReadErr}
+				}
+
+				out := releaseListed([]seatWorkHit{{store: leg, bead: snapshot}}, why, releaseSeat{id: "dead-session", fallback: "worker"}, testPoolReleaseConfig(), ReleaseOpts{})
+				if len(out.Failed) != 1 || len(out.Released) != 0 || len(out.Kept) != 0 {
+					t.Fatalf("failed %d, released %d, kept %d (%q); want the lost CAS reported failed", len(out.Failed), len(out.Released), len(out.Kept), out.Why[snapshot.ID])
+				}
+				if store.conditionalCalls != 1 || store.legacyCalls != 0 {
+					t.Errorf("writes: conditional=%d legacy=%d, want only the CAS that lost", store.conditionalCalls, store.legacyCalls)
+				}
+				assertBeadUnchanged(t, store.MemStore, want)
+			})
+		}
+	}
+}
+
+// liveReadFailingStore is a revision-CAS store whose reads by ID fail, as the
+// live re-read after a lost revision CAS can. Its writes and its
+// conditional-writes stamp are the store's (ConditionalWritesResolveTarget).
+type liveReadFailingStore struct {
+	*revisionReleaseStore
+	err error
+}
+
+func (s *liveReadFailingStore) Get(string) (beads.Bead, error) { return beads.Bead{}, s.err }
+
+func (s *liveReadFailingStore) ConditionalWritesResolveTarget() beads.Store {
+	return s.revisionReleaseStore
+}
+
+// assertBeadUnchanged checks that the bead still has want's assignee, status,
+// revision and metadata.
+func assertBeadUnchanged(t *testing.T, mem *beads.MemStore, want beads.Bead) {
+	t.Helper()
+	got, err := mem.Get(want.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Assignee != want.Assignee || got.Status != want.Status || got.Revision != want.Revision || !reflect.DeepEqual(got.Metadata, want.Metadata) {
+		t.Errorf("%s = %q/%q rev %d %v, want unchanged %q/%q rev %d %v", want.ID, got.Status, got.Assignee, got.Revision, got.Metadata, want.Status, want.Assignee, want.Revision, want.Metadata)
 	}
 }
