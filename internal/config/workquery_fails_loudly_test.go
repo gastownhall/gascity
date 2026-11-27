@@ -153,6 +153,31 @@ func TestSingleStoreWorkQueriesFailWhenBDExitsNonZero(t *testing.T) {
 	}
 }
 
+// fakeBDSchemaMismatch is a bd older than the store gc linked: every read
+// fails with the schema-version mismatch at the center of ga-upttvz.
+const fakeBDSchemaMismatch = `#!/bin/sh
+printf 'bd: schema version mismatch: database is at v65, binary knows up to v64\n' >&2
+exit 1
+`
+
+// TestSingleStoreWorkQueriesFailOnSchemaVersionMismatch is the ga-upttvz
+// characterisation of the same contract above: a bd built from another beads
+// version than the one gc links fails every read identically, so a tier that
+// swallowed the failure would hand every hooked agent the empty hook of an
+// idle queue while its assigned work stays invisible. The query must fail
+// loudly with bd's mismatch line instead.
+func TestSingleStoreWorkQueriesFailOnSchemaVersionMismatch(t *testing.T) {
+	a := &Agent{Name: "worker"}
+	for topoName, topo := range singleStoreTopologies() {
+		for kind, command := range workQueryKinds(a, topo) {
+			t.Run(topoName+"/"+kind, func(t *testing.T) {
+				res := runGeneratedQueryWithBD(t, command, workerSessionEnv(), fakeGCReadyFails, fakeBDSchemaMismatch)
+				assertQueryFailedLoudly(t, res, "schema version mismatch: database is at v65, binary knows up to v64")
+			})
+		}
+	}
+}
+
 // TestSingleStoreWorkQueriesStillAnswerAnEmptyQueue keeps the other half of the
 // contract exactly as it was: a healthy `bd` with nothing to serve is "[]" and
 // exit 0, with nothing on stderr.

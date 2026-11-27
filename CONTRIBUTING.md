@@ -254,6 +254,7 @@ Run `make help` for the full list. The most useful targets are:
 | `make setup` | Install local tools and git hooks |
 | `make build` | Build `gc` with version metadata |
 | `make install` | Install `gc` into `$(go env GOPATH)/bin` |
+| `make install-bd` | Build `bd` from the beads version `go.mod` pins and install it there too. It only upgrades: it keeps a newer `bd`, and refuses one whose beads version it cannot read |
 | `make check` | Fast quality gates: `bazel test //...` (unit, nogo, format, generated artifacts, policy) plus shell guards |
 | `make check-docs` | Docs sync tests, `bazel test //test/docsync:docsync_test` (on-disk link checker; does not run `mint broken-links`) |
 | `make check-all` | `make check` plus the acceptance and integration Bazel suites |
@@ -279,7 +280,10 @@ Run `make help` for the full list. The most useful targets are:
 > intended, run `make install INSTALL_DIR=<dir>` (the `install` target writes
 > `$(go env GOPATH)/bin` and ignores `GOBIN`), or for a plain
 > `go install ./cmd/gc` set `GOBIN=<dir>`. `make build` (→ `./bin/gc`) is
-> unaffected.
+> unaffected. `make install` never builds or replaces `bd`; it notes when the
+> `bd` on `PATH` is missing or older than the pin. `make install-bd` writes
+> only `$(INSTALL_DIR)/bd` and names, without touching it, a `bd` earlier on
+> `PATH` such as `~/.local/bin/bd`.
 
 ## macOS Local Development
 

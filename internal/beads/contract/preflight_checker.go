@@ -569,18 +569,18 @@ func (c PreflightChecker) checkBDVersionHint(ctx PreflightBDContext, err error) 
 		// reports a verdict the check never had the evidence to reach.
 		return NewPreflightCheckResult(PreflightCheckBDVersionHint, PreflightCheckPass, "linked beads library version unconfirmed ("+reason+")", details)
 	}
-	if strings.TrimPrefix(ctx.BDVersion, "v") != libraryVersion {
-		if newerSemverCompatibleBD(ctx.BDVersion, libraryVersion) {
-			return NewPreflightCheckResult(PreflightCheckBDVersionHint, PreflightCheckPass, "bd version is a newer semver-compatible release of the linked beads library version", details)
-		}
-		if samePrereleaseSeries(ctx.BDVersion, libraryVersion) {
-			return NewPreflightCheckResult(PreflightCheckBDVersionHint, PreflightCheckPass, "bd and the linked beads library are prereleases of the same release", details)
-		}
+	switch RelateBDVersion(ctx.BDVersion, libraryVersion) {
+	case BDVersionMatches:
+		return NewPreflightCheckResult(PreflightCheckBDVersionHint, PreflightCheckPass, "bd and linked beads library versions match", details)
+	case BDVersionNewer:
+		return NewPreflightCheckResult(PreflightCheckBDVersionHint, PreflightCheckPass, "bd version is a newer semver-compatible release of the linked beads library version", details)
+	case BDVersionSamePrerelease:
+		return NewPreflightCheckResult(PreflightCheckBDVersionHint, PreflightCheckPass, "bd and the linked beads library are prereleases of the same release", details)
+	default:
 		// A bd/library semver difference is informational only — see the
 		// function doc for why semver is not the compatibility signal.
 		return NewPreflightCheckResult(PreflightCheckBDVersionHint, PreflightCheckWarn, "bd version differs from the linked beads library version", details)
 	}
-	return NewPreflightCheckResult(PreflightCheckBDVersionHint, PreflightCheckPass, "bd and linked beads library versions match", details)
 }
 
 // schemaLatestVersion returns the linked beads library's schema ceiling,
@@ -716,6 +716,10 @@ func (b beadsLibrary) unconfirmableReason() string {
 		return "source build"
 	case b.Replaced:
 		return "replaced module"
+	case strings.HasSuffix(version, "+dirty"):
+		// Go stamps a build from a modified checkout +dirty: its code is
+		// whatever the working tree held, not the version it names.
+		return "modified source build"
 	case !comparableReleaseVersion(version):
 		// A pseudo-version names an untagged commit, not a release. gc pins
 		// beads at one whenever it tracks beads ahead of its last tag.
@@ -733,23 +737,36 @@ func comparableReleaseVersion(version string) bool {
 	return semver.IsValid(canonical) && !module.IsPseudoVersion(canonical)
 }
 
-// linkedBeadsLibraryFrom extracts the linked beads library from build info.
+// linkedBeadsLibraryFrom extracts the linked beads library from build info:
+// gc's beads dependency, or a bd's main module.
 func linkedBeadsLibraryFrom(info *debug.BuildInfo) beadsLibrary {
-	if info == nil {
+	mod := beadsModuleIn(info)
+	if mod == nil {
 		return beadsLibrary{}
 	}
-	for _, dep := range info.Deps {
-		if dep == nil || dep.Path != beadsModulePath {
-			continue
-		}
-		if dep.Replace != nil {
-			// Report the replacement's own version — including the empty one a
-			// local-path replace records — never the require line it displaced.
-			return beadsLibrary{Version: dep.Replace.Version, Replaced: true}
-		}
-		return beadsLibrary{Version: dep.Version}
+	if mod.Replace != nil {
+		// Report the replacement's own version — including the empty one a
+		// local-path replace records — never the require line it displaced.
+		return beadsLibrary{Version: mod.Replace.Version, Replaced: true}
 	}
-	return beadsLibrary{}
+	return beadsLibrary{Version: mod.Version}
+}
+
+// beadsModuleIn returns the beads module a binary was built from: its main
+// module when that is beads (a bd), else its beads dependency (gc), or nil.
+func beadsModuleIn(info *debug.BuildInfo) *debug.Module {
+	if info == nil {
+		return nil
+	}
+	if info.Main.Path == beadsModulePath {
+		return &info.Main
+	}
+	for _, dep := range info.Deps {
+		if dep != nil && dep.Path == beadsModulePath {
+			return dep
+		}
+	}
+	return nil
 }
 
 type preflightMetadata struct {

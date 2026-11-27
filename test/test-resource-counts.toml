@@ -3332,6 +3332,11 @@ resource = "subprocess"
 calls = 4
 
 [[count]]
+path = "scripts/install_bd_pinned_test.go"
+resource = "subprocess"
+calls = 3
+
+[[count]]
 path = "scripts/makefile_cgo_test.go"
 resource = "subprocess"
 calls = 1

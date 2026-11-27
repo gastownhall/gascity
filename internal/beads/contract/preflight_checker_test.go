@@ -1162,6 +1162,7 @@ func TestLinkedBeadsLibraryFromBuildInfo(t *testing.T) {
 		{"nil build info", nil, beadsLibrary{}},
 		{"beads is not linked", &debug.BuildInfo{Deps: []*debug.Module{{Path: "github.com/spf13/cobra", Version: "v1.10.2"}}}, beadsLibrary{}},
 		{"plain require", dep("v1.1.0", nil), beadsLibrary{Version: "v1.1.0"}},
+		{"a bd, whose main module is beads", &debug.BuildInfo{Main: debug.Module{Path: beadsModulePath, Version: "v1.3.4"}}, beadsLibrary{Version: "v1.3.4"}},
 		{
 			"module replace records the replacement's version",
 			dep("v1.1.1-0.20260805093327-bf97b73749ac", &debug.Module{Path: "github.com/gascity/bd-enterprise", Version: "v0.0.0-20260810084121-1aa7bf160786"}),

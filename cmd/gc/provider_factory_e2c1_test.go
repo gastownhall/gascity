@@ -153,7 +153,7 @@ func runE2c1ProviderFailureHelper(t *testing.T, cityPath, markerPath string) {
 	}
 	defer func() { shutdownBeadsProviderForStop = oldShutdown }()
 
-	startStderr := "gc start: warmup: 1 check(s) failed (Warning); see mail to mayor and `gc doctor` for details\n" +
+	startStderr := "gc start: warmup: 1 check(s) failed (Warning): rig:frontend:root-branch; see mail to mayor and `gc doctor` for details\n" +
 		"gc start: " + e2c1ProviderConstructionFailure + "\n" + startSummaryLine(startSummary{
 		PID:      currentSupervisorPID(),
 		Binary:   startSummaryBinaryPath(),
