@@ -1006,8 +1006,19 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 	ops.applyDefaults()
 	ops.ClassRoute.observeWorkLegs(stores)
 	// Every read below shares the invocation's read budget, so found work
-	// always leaves the CAS its reserve inside the claim window.
-	run = newHookClaimReadGuard(&ops, run).read
+	// always leaves the CAS its reserve inside the claim window. The guard also
+	// records each read for the one trace line a failed invocation prints.
+	reads := newHookClaimReadGuard(&ops, run, stores)
+	run = reads.read
+	// A window refusal is the one terminal claim result the trace explains, so
+	// the expiry is noted on its way to the event bus.
+	var refusedAt time.Duration
+	windowRefused := false
+	emitWindowExpired := ops.EmitClaimWindowExpired
+	ops.EmitClaimWindowExpired = func(expiry hookClaimWindowExpiry) {
+		refusedAt, windowRefused = expiry.InvocationAge, true
+		emitWindowExpired(expiry)
+	}
 	// primary is the agent's own store (the first entry). It is captured once
 	// here, before the loop shrinks remaining: only the primary's error is
 	// surfaced as itself and emitted as this session's work-query failure. Once
@@ -1038,7 +1049,9 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		discovered, selected, err := selectStoreWithWorkRetrying(workQuery, remaining, primary, run, &ops, noteStoreFailure)
 		if err != nil {
 			report.failed(workQuery, err)
-			return reportClaimWorkQueryFailure(err, stderr)
+			code := reportClaimWorkQueryFailure(err, stderr)
+			reads.writeTrace(stderr, "no claim started")
+			return code
 		}
 		if isZeroHookStore(selected) {
 			break // no remaining store has ready work
@@ -1061,6 +1074,9 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		storeOps.Runner = func(string, string) (string, error) { return claimOutput, nil }
 		res := tryHookClaim(workQuery, storeDir, &storeOpts, &storeOps, stdout, stderr)
 		if res.terminal {
+			if windowRefused {
+				reads.writeTrace(stderr, fmt.Sprintf("claim refused at +%s: window spent", hookClaimTraceDuration(refusedAt)))
+			}
 			return res.code
 		}
 		if res.claimsErrored {
@@ -1076,7 +1092,11 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		remaining = removeHookStore(remaining, claimStore)
 	}
 	reportHookClaimLeftToAnotherSession(left, claimOpts.PoolSeat, stderr)
-	return writeHookClaimNoWork(claimOpts, ops, claimsErrored, workDir, stdout, stderr)
+	code := writeHookClaimNoWork(claimOpts, ops, claimsErrored, workDir, stdout, stderr)
+	if claimsErrored {
+		reads.writeTrace(stderr, "claims errored")
+	}
+	return code
 }
 
 // reportClaimWorkQueryFailure reports a failed claim-path work query on stderr

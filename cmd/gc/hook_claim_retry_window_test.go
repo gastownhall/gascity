@@ -360,6 +360,17 @@ func budgetLegs(rigs ...string) []hookStore {
 
 var budgetEmpty = hookRunnerAnswer{out: "[]"}
 
+// readTraceLines returns the read-trace lines a claim wrote to stderr.
+func readTraceLines(stderr string) []string {
+	var lines []string
+	for _, line := range strings.Split(stderr, "\n") {
+		if strings.HasPrefix(line, "gc hook --claim: reads (") {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
 // The reported defect on the production claim path: two legs at the code's own
 // measured worst-case read cost (~70s). Discovery finds the routed bead at 140s,
 // inside the window. Nothing may spend the rest of the window between that
@@ -665,4 +676,125 @@ func TestClaimReadRetryCannotLandFoundWorkPastTheReadBudget(t *testing.T) {
 			t.Fatalf("claims = %v, want none", b.claims)
 		}
 	})
+}
+
+// Every claim that ends without work for a reason other than "every leg
+// answered empty" writes one read-trace line naming each read; a claim and a
+// no_work drain write none.
+func TestClaimFailureExitsCarryOneReadTrace(t *testing.T) {
+	cases := []struct {
+		name      string
+		setup     func(b *budgetClaimHarness, ops *hookClaimOps) []hookStore
+		wantCode  int
+		wantTrace bool
+		// wantParts must all appear in the trace line.
+		wantParts []string
+		wantReads int
+	}{
+		{
+			name: "spent read budget",
+			setup: func(b *budgetClaimHarness, _ *hookClaimOps) []hookStore {
+				b.leg("/city", 80*time.Second, budgetEmpty)
+				b.leg("/rig-alpha", 80*time.Second, hookRunnerAnswer{out: routedRowJSON("work-1")})
+				return budgetLegs("alpha")
+			},
+			wantCode:  2,
+			wantTrace: true,
+			wantParts: []string{"budget 2m30s of 2m40s window", "own +0s 1m20s empty", "rig:alpha +1m20s 1m20s budget-cut", "no claim started"},
+			wantReads: 2,
+		},
+		{
+			name: "non-transport read failure",
+			setup: func(b *budgetClaimHarness, _ *hookClaimOps) []hookStore {
+				b.leg("/city", time.Second, hookRunnerAnswer{err: errors.New("bd ready: exit status 1: unknown flag")})
+				return budgetLegs()
+			},
+			wantCode:  1,
+			wantTrace: true,
+			wantParts: []string{"own +0s 1s error", "own +6s 1s error", "own +12s 1s error", "own +18s 1s error", "no claim started"},
+			wantReads: 4,
+		},
+		{
+			name: "window refusal",
+			setup: func(b *budgetClaimHarness, ops *hookClaimOps) []hookStore {
+				b.leg("/city", time.Second, hookRunnerAnswer{out: routedRowJSON("work-1")})
+				// The drain probe is the last store read before the CAS; a
+				// stall there spends the window without any work-query read.
+				ops.DrainPending = func(string) (bool, error) {
+					b.clock.now = b.clock.now.Add(3 * time.Minute)
+					return false, nil
+				}
+				stores := budgetLegs()
+				stores[0].env = append(stores[0].env, "GC_SESSION_ID=gcs-1")
+				return stores
+			},
+			wantCode:  1,
+			wantTrace: true,
+			wantParts: []string{"own +0s 1s work", "claim refused at +3m1s: window spent"},
+			wantReads: 1,
+		},
+		{
+			name: "claims_errored drain",
+			setup: func(b *budgetClaimHarness, ops *hookClaimOps) []hookStore {
+				b.leg("/city", time.Second, hookRunnerAnswer{out: routedRowJSON("work-1")})
+				ops.Claim = func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
+					return beads.Bead{}, false, errors.New("bd update: exit status 1: database is locked")
+				}
+				return budgetLegs()
+			},
+			wantCode:  0,
+			wantTrace: true,
+			wantParts: []string{"own +0s 1s work", "claims errored"},
+			wantReads: 1,
+		},
+		{
+			name: "claim",
+			setup: func(b *budgetClaimHarness, _ *hookClaimOps) []hookStore {
+				b.leg("/city", time.Second, hookRunnerAnswer{out: routedRowJSON("work-1")})
+				return budgetLegs()
+			},
+			wantCode: 0,
+		},
+		{
+			name: "no_work drain",
+			setup: func(b *budgetClaimHarness, _ *hookClaimOps) []hookStore {
+				b.leg("/city", time.Second, budgetEmpty)
+				b.leg("/rig-alpha", time.Second, budgetEmpty)
+				return budgetLegs("alpha")
+			},
+			wantCode: 0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withProductionClaimRetryPacing(t)
+			b := newBudgetClaimHarness()
+			ops := b.ops()
+			stores := tc.setup(b, &ops)
+
+			code, _, stderr := b.claim(stores, ops)
+
+			if code != tc.wantCode {
+				t.Fatalf("exit = %d, want %d; stderr=%s", code, tc.wantCode, stderr)
+			}
+			lines := readTraceLines(stderr)
+			if !tc.wantTrace {
+				if len(lines) != 0 {
+					t.Fatalf("trace lines = %q, want none for this outcome", lines)
+				}
+				return
+			}
+			if len(lines) != 1 {
+				t.Fatalf("trace lines = %q, want exactly one; stderr=%s", lines, stderr)
+			}
+			for _, part := range tc.wantParts {
+				if !strings.Contains(lines[0], part) {
+					t.Fatalf("trace line %q is missing %q", lines[0], part)
+				}
+			}
+			if got := strings.Count(lines[0], "; ") + 1; got != tc.wantReads+1 {
+				t.Fatalf("trace line %q lists %d entries, want %d reads plus the outcome", lines[0], got, tc.wantReads)
+			}
+		})
+	}
 }
