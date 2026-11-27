@@ -29,6 +29,8 @@ type fakeGitProbe struct {
 	hasUncommitted   bool
 	hasUnpushed      bool
 	unpushedErr      error
+	worktrees        []git.Worktree
+	worktreeListErr  error
 	worktreeRemove   func(path string, force bool) error
 	removedPath      string
 	removedForce     bool
@@ -44,6 +46,10 @@ func (f *fakeGitProbe) CurrentBranch() (string, error) {
 	return f.currentBranch, f.currentBranchErr
 }
 func (f *fakeGitProbe) HasUncommittedWork() bool { return f.hasUncommitted }
+func (f *fakeGitProbe) WorktreeList() ([]git.Worktree, error) {
+	return f.worktrees, f.worktreeListErr
+}
+
 func (f *fakeGitProbe) HasUnpushedCommitsResult() (bool, error) {
 	return f.hasUnpushed, f.unpushedErr
 }
@@ -56,6 +62,20 @@ func (f *fakeGitProbe) WorktreeRemove(path string, force bool) error {
 		return f.worktreeRemove(path, force)
 	}
 	return nil
+}
+
+func TestPruneAgentHomeWorktreeIfSafe_NestedGitPreserved(t *testing.T) {
+	fx := newPruneFixture(t)
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, currentBranch: "home"})
+	nested := filepath.Join(fx.workerDir, "ignored", "repo", ".git")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
+		t.Fatal("removed a home containing nested git metadata")
+	}
+	assertWorktreeStaleMarker(t, fx.workerDir, "home", "nested-worktree")
 }
 
 // assertWorktreeStaleMarker fails the test unless workerDir contains a
