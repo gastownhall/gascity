@@ -1107,7 +1107,7 @@ func TestDeadRuntimeHealTakesAClassifiedDeadRuntime(t *testing.T) {
 			if tc.zombie {
 				l = runtime.Liveness{Running: true, ObjectID: "$1", ObjectCreated: "1", PanePID: "42"}
 			}
-			f := &freshObserver{Fake: runtime.NewFake(), l: l, env: map[string]string{"GC_SESSION_ID": c.k.ID, "GC_INSTANCE_TOKEN": tc.fresh, "GC_RUNTIME_EPOCH": "3"}}
+			f := &freshObserver{Fake: runtime.NewFake(), l: l, env: map[string]string{"GC_SESSION_ID": c.k.ID, "GC_INSTANCE_TOKEN": tc.fresh, "GC_RUNTIME_EPOCH": "3", "GT_PROCESS_NAMES": "agent"}}
 			if tc.fresh == "moving" {
 				n := 0
 				f.env["GC_INSTANCE_TOKEN"] = "tok-3"

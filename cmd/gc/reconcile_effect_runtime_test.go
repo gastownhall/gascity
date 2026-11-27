@@ -400,3 +400,55 @@ func TestReadRuntimeBlankNameAndALateCorpse(t *testing.T) {
 		}
 	}
 }
+
+// providerReloadLeaf models an existing process whose launch-time names differ
+// from the newly loaded template. Its liveness probe uses the supplied names.
+type providerReloadLeaf struct {
+	*simProvider
+	processAlive bool
+	envError     bool
+}
+
+func (p *providerReloadLeaf) GetAllEnvironment(_ string) (map[string]string, error) {
+	if p.envError {
+		return nil, runtime.ErrRuntimeUnavailable
+	}
+	return map[string]string{"GC_SESSION_ID": "gc-1", "GC_RUNTIME_EPOCH": "1", "GC_INSTANCE_TOKEN": "tok", "GT_PROCESS_NAMES": "codex"}, nil
+}
+
+func (p *providerReloadLeaf) ObserveLivenessSince(name string, names []string, since time.Time) (runtime.Liveness, error) {
+	l, err := p.simProvider.ObserveLivenessSince(name, names, since)
+	if l.Running {
+		l.Alive = p.processAlive && slices.Contains(names, "codex")
+	}
+	return l, err
+}
+
+func TestReadRuntimeKeepsLaunchProcessNamesAcrossProviderReload(t *testing.T) {
+	sp := &providerReloadLeaf{simProvider: newSimProvider(), processAlive: true}
+	sp.put("seat", "gc-1", "1", "tok")
+	read := func() *txRuntime {
+		t.Helper()
+		rt, cause := readRuntime(context.Background(), sp, []string{"claude"}, "seat", gatherNow, time.Now)
+		if cause != "" {
+			t.Fatalf("read refused: %s", cause)
+		}
+		return rt
+	}
+	rt := read()
+	if !rt.Alive() {
+		t.Fatalf("running old provider after reload: %+v, want alive", rt)
+	}
+	step := zombieStep(txView{RT: rt}, deadPeek{}, nil)
+	if !step.Done || len(step.Facts.Events) != 0 || len(step.Write) != 0 {
+		t.Fatalf("live runtime produced zombie effects: %+v", step)
+	}
+	sp.processAlive = false
+	if rt := read(); rt.Class != rtZombie {
+		t.Fatalf("old provider exited: %+v, want zombie", rt)
+	}
+	sp.envError = true
+	if rt := read(); rt.Class != rtUnknown {
+		t.Fatalf("launch identity unavailable: %+v, want unknown", rt)
+	}
+}
