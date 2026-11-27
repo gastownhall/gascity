@@ -9875,3 +9875,119 @@ func TestDormantQueueObserversIgnoreItemsWithoutWakeIntent(t *testing.T) {
 		})
 	}
 }
+
+// TestMailNotifyDeliversLiveToIdleWrappedClaudeProvider guards
+// gastownhall/gascity#6264: gc mail send --notify to a running, idle session
+// whose provider is a wrapped claude alias (claude-opus-4-8, base =
+// "builtin:claude") must request a turn live, not queue behind a
+// "live delivery is unsupported for claude-opus-4-8" downgrade.
+func TestMailNotifyDeliversLiveToIdleWrappedClaudeProvider(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	fake := runtime.NewFake()
+	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	fake.WaitForIdleErrors["sess-worker"] = nil // idle at its prompt
+	prev := startNudgePoller
+	startNudgePoller = func(string, string, string) error { return nil }
+	t.Cleanup(func() { startNudgePoller = prev })
+
+	base := "builtin:claude"
+	target := nudgeTarget{
+		cityPath: dir,
+		agent:    config.Agent{Name: "worker", Provider: "claude-opus-4-8"},
+		cfg: &config.City{Providers: map[string]config.ProviderSpec{
+			"claude-opus-4-8": {Base: &base},
+		}},
+		sessionName: "sess-worker",
+	}
+
+	queued, err := deliverMailNotifyLegacy(target, nil, fake, mailNotifyText("human"), "")
+	if err != nil {
+		t.Fatalf("deliverMailNotifyLegacy: %v", err)
+	}
+	if queued {
+		t.Fatal("mail notify was queued; want live delivery to an idle claude-family session")
+	}
+	counts := map[string]int{}
+	for _, call := range fake.Calls {
+		counts[call.Method]++
+	}
+	if counts["NudgeNow"] != 1 {
+		t.Errorf("NudgeNow calls = %d, want 1 (live turn request)", counts["NudgeNow"])
+	}
+	pending, _, _, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Errorf("pending queued nudges = %d, want 0", len(pending))
+	}
+}
+
+// TestSendMailNotifyDeliversLiveToIdleWrappedClaudeProvider pins #7728
+// (fd99d7cd79): a provider that only wraps claude — resolved name claude-mux
+// over a builtin:claude base, its session row carrying provider_kind claude —
+// counts as claude for both wait-idle gates, so a mail notice to its idle
+// session is delivered live (the wait-idle leg runs, one nudge arrives)
+// instead of queueing behind a wake that live delivery would never need.
+func TestSendMailNotifyDeliversLiveToIdleWrappedClaudeProvider(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	base := "builtin:claude"
+	cfg := &config.City{
+		Agents:    []config.Agent{{Name: "worker", Provider: "claude-mux"}},
+		Providers: map[string]config.ProviderSpec{"claude-mux": {Base: &base}},
+	}
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: dir, Provider: "claude-mux", Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual", "provider_kind": "claude"}})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := mgr.Start(context.Background(), testOperatorIn(t, dir), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	fake.WaitForIdleErrors[info.SessionName] = nil
+	target := nudgeTarget{
+		cityPath:    dir,
+		cfg:         cfg,
+		sessionID:   info.ID,
+		sessionName: info.SessionName,
+		identity:    "worker",
+		agent:       cfg.Agents[0],
+		resolved:    &config.ResolvedProvider{Name: "claude-mux", BuiltinAncestor: "claude"},
+	}
+	prevManaged, prevPoke, prevWarn := nudgeCityUsesManagedReconciler, nudgePokeController, nudgeWarningWriter
+	nudgeCityUsesManagedReconciler = func(string) bool { return false }
+	nudgePokeController = func(string, reconcilekey.Key) error { return nil }
+	nudgeWarningWriter = io.Discard
+	t.Cleanup(func() {
+		nudgeCityUsesManagedReconciler, nudgePokeController, nudgeWarningWriter = prevManaged, prevPoke, prevWarn
+	})
+	if err := sendMailNotifyWithWorker(target, store, fake, ""); err != nil {
+		t.Fatalf("sendMailNotifyWithWorker: %v", err)
+	}
+	if got := fake.CountCalls("WaitForIdle", info.SessionName); got < 1 {
+		t.Fatalf("WaitForIdle calls = %d, want at least 1: the wrapped provider must take the claude wait-idle leg", got)
+	}
+	if got := fake.CountCalls("Nudge", info.SessionName) + fake.CountCalls("NudgeNow", info.SessionName); got != 1 {
+		t.Fatalf("nudge deliveries = %d, want exactly 1 live delivery", got)
+	}
+	pending, inFlight, dead, err := listQueuedNudgesForTarget(dir, target, time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudgesForTarget: %v", err)
+	}
+	if len(pending) != 0 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("pending/inFlight/dead = %d/%d/%d, want none: the notice delivered live", len(pending), len(inFlight), len(dead))
+	}
+	row, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := row.Metadata["wake_request"]; got != "" {
+		t.Fatalf("wake_request = %q, want none: a live delivery requests no wake", got)
+	}
+}
