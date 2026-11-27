@@ -234,7 +234,15 @@ func collectRalphBodyStepIDs(steps []*Step) map[string]bool {
 	return ids
 }
 
+// namespaceRalphBodySteps moves an already-expanded check body into the
+// iteration iterationID of owner. Body nodes join the iteration as members,
+// except what a nested check-with-children expanded into: its iteration scope
+// and that scope's members keep the nested loop's own membership and loop
+// stamps, and only their IDs, refs and lineage are namespaced. The nested
+// loop's control is the member that joins this iteration, which is the shape
+// dispatch.buildAttemptRecipe re-spawns for iterations 2 and later.
 func namespaceRalphBodySteps(steps []*Step, iterationID string, owner *Step, attempt int, bodyIDs map[string]bool) ([]*Step, []string) {
+	nestedRoots := nestedLoopIterationRoots(steps)
 	var out []*Step
 	var topLevel []string
 	var walk func([]*Step, bool)
@@ -258,15 +266,30 @@ func namespaceRalphBodySteps(steps []*Step, iterationID string, owner *Step, att
 			if childStepID == "" {
 				childStepID = node.ID
 			}
-			childMeta := map[string]string{
-				beadmeta.ScopeRefMetadataKey:    iterationID,
-				beadmeta.OnFailMetadataKey:      metadataDefault(node.Metadata, beadmeta.OnFailMetadataKey, "abort_scope"),
-				beadmeta.ScopeRoleMetadataKey:   metadataDefault(node.Metadata, beadmeta.ScopeRoleMetadataKey, beadmeta.ScopeRoleMember),
-				beadmeta.StepIDMetadataKey:      childStepID,
-				beadmeta.RalphStepIDMetadataKey: owner.ID,
-				beadmeta.AttemptMetadataKey:     RalphBodyChildAttempt(node, attempt),
-				beadmeta.IterationMetadataKey:   strconv.Itoa(attempt),
-				beadmeta.StepRefMetadataKey:     clone.ID,
+			var childMeta map[string]string
+			switch nestedScopeRef := node.Metadata[beadmeta.ScopeRefMetadataKey]; {
+			case nestedRoots[node.ID]:
+				// A nested loop's iteration scope belongs to no enclosing scope:
+				// its control is the enclosing iteration's member.
+				childMeta = map[string]string{beadmeta.StepRefMetadataKey: clone.ID}
+			case nestedRoots[nestedScopeRef]:
+				// A member of a nested loop's iteration stays scoped to that
+				// iteration, under its namespaced ID.
+				childMeta = map[string]string{
+					beadmeta.ScopeRefMetadataKey: iterationID + "." + nestedScopeRef,
+					beadmeta.StepRefMetadataKey:  clone.ID,
+				}
+			default:
+				childMeta = map[string]string{
+					beadmeta.ScopeRefMetadataKey:    iterationID,
+					beadmeta.OnFailMetadataKey:      metadataDefault(node.Metadata, beadmeta.OnFailMetadataKey, "abort_scope"),
+					beadmeta.ScopeRoleMetadataKey:   metadataDefault(node.Metadata, beadmeta.ScopeRoleMetadataKey, beadmeta.ScopeRoleMember),
+					beadmeta.StepIDMetadataKey:      childStepID,
+					beadmeta.RalphStepIDMetadataKey: owner.ID,
+					beadmeta.AttemptMetadataKey:     RalphBodyChildAttempt(node, attempt),
+					beadmeta.IterationMetadataKey:   strconv.Itoa(attempt),
+					beadmeta.StepRefMetadataKey:     clone.ID,
+				}
 			}
 			// A nested control's attempt/iteration root carries gc.control_for as
 			// the bare inner-control step id (stamped by expandRetry/expandRalph
@@ -296,6 +319,30 @@ func namespaceRalphBodySteps(steps []*Step, iterationID string, owner *Step, att
 	}
 	walk(steps, true)
 	return out, topLevel
+}
+
+// nestedLoopIterationRoots returns the IDs of the expanded body nodes that are
+// a nested loop's physical iteration scope (attemptScopeControl), keyed by
+// their pre-namespacing ID. Only a check-with-children expands into one: a
+// retry attempt keeps its authored kind, a childless check's iteration is its
+// work bead, and an authored plain scope has no attempt lineage.
+func nestedLoopIterationRoots(steps []*Step) map[string]bool {
+	byID := make(map[string]*Step)
+	var index func([]*Step)
+	index = func(nodes []*Step) {
+		for _, node := range nodes {
+			byID[node.ID] = node
+			index(node.Children)
+		}
+	}
+	index(steps)
+	roots := make(map[string]bool)
+	for id, node := range byID {
+		if attemptScopeControl(node, byID) != nil {
+			roots[id] = true
+		}
+	}
+	return roots
 }
 
 func markRalphBodyOutputSinks(steps []*Step) {

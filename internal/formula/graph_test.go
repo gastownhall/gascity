@@ -1,6 +1,7 @@
 package formula
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -748,4 +749,89 @@ func TestApplyGraphControlsFanoutControlKeepsNoDownstreamAsSink(t *testing.T) {
 	if !containsString(finalizer.Needs, "A-fanout") {
 		t.Fatalf("workflow-finalize needs = %v, want A-fanout", finalizer.Needs)
 	}
+}
+
+// TestApplyGraphControlsFinalizerExcludesNestedCheckWithChildrenLineage pins
+// the workflow-finalize sinks of a check-with-children nested in a check body
+// (#9412): only the outermost logical control is a sink; the nested loop's
+// control, iteration scope and members roll up through the enclosing attempt.
+func TestApplyGraphControlsFinalizerExcludesNestedCheckWithChildrenLineage(t *testing.T) {
+	t.Parallel()
+
+	steps := compileNestedSteps(t, []*Step{nestedCheck("outer",
+		nestedCheck("inner", nestedPlain("i1")),
+		nestedPlain("o1", "inner"),
+	)})
+	finalizer := findGraphStepByID(steps, "workflow-finalize")
+	if finalizer == nil {
+		t.Fatal("missing workflow-finalize")
+	}
+	if !containsString(finalizer.Needs, "outer") {
+		t.Fatalf("workflow-finalize needs = %v, want the outer control", finalizer.Needs)
+	}
+	for _, stale := range []string{
+		"outer.iteration.1",
+		"outer.iteration.1.inner",
+		"outer.iteration.1.inner.iteration.1",
+		"outer.iteration.1.inner.iteration.1.i1",
+		"outer.iteration.1.inner.iteration.1.i1-scope-check",
+	} {
+		if containsString(finalizer.Needs, stale) {
+			t.Errorf("workflow-finalize needs = %v, must not include nested physical lineage %q", finalizer.Needs, stale)
+		}
+	}
+}
+
+// TestGraphSinkStepIDsRollsNestedLoopUpThroughEnclosingAttempt: a loop whose
+// iteration scope has no gc.scope_ref contributes its control as a sink only
+// when that control is not itself a member of an enclosing retry/ralph attempt.
+// A loop inside an authored plain scope keeps its control as a sink.
+func TestGraphSinkStepIDsRollsNestedLoopUpThroughEnclosingAttempt(t *testing.T) {
+	t.Parallel()
+
+	loop := func(id, scopeRef string) []*Step {
+		control := &Step{ID: id, Needs: []string{id + ".iteration.1"}, Metadata: map[string]string{
+			beadmeta.KindMetadataKey:   beadmeta.KindRalph,
+			beadmeta.StepIDMetadataKey: id[strings.LastIndex(id, ".")+1:],
+		}}
+		if scopeRef != "" {
+			control.Metadata[beadmeta.ScopeRefMetadataKey] = scopeRef
+		}
+		iteration := &Step{ID: id + ".iteration.1", Metadata: map[string]string{
+			beadmeta.KindMetadataKey:       beadmeta.KindScope,
+			beadmeta.AttemptMetadataKey:    "1",
+			beadmeta.ControlForMetadataKey: id,
+			beadmeta.StepIDMetadataKey:     control.Metadata[beadmeta.StepIDMetadataKey],
+		}}
+		return []*Step{control, iteration}
+	}
+
+	t.Run("nested in an enclosing loop attempt", func(t *testing.T) {
+		t.Parallel()
+		steps := append(loop("outer", ""), loop("outer.iteration.1.inner", "outer.iteration.1")...)
+		steps[1].Needs = []string{"outer.iteration.1.inner"}
+		sinks := graphSinkStepIDs(steps)
+		if !containsString(sinks, "outer") {
+			t.Errorf("sinks = %v, want the outer control", sinks)
+		}
+		for _, stale := range []string{"outer.iteration.1", "outer.iteration.1.inner", "outer.iteration.1.inner.iteration.1"} {
+			if containsString(sinks, stale) {
+				t.Errorf("sinks = %v, must not include nested lineage %q", sinks, stale)
+			}
+		}
+	})
+
+	t.Run("inside an authored plain scope", func(t *testing.T) {
+		t.Parallel()
+		steps := append(loop("loop", "body"), &Step{ID: "body", Needs: []string{"loop"}, Metadata: map[string]string{
+			beadmeta.KindMetadataKey:      beadmeta.KindScope,
+			beadmeta.ScopeRoleMetadataKey: beadmeta.ScopeRoleBody,
+		}})
+		sinks := graphSinkStepIDs(steps)
+		for _, want := range []string{"loop", "body"} {
+			if !containsString(sinks, want) {
+				t.Errorf("sinks = %v, want %q", sinks, want)
+			}
+		}
+	})
 }

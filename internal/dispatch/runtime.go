@@ -1014,7 +1014,8 @@ func (s scopeSnapshot) skipOpenScopeMembers(store beads.GraphStore, skipControlI
 
 // scopeUnsettledMembers collects the scope beads that count as unsettled:
 // the scope's members except spec, body and teardown roles, plus the
-// logical descendants of nested retry/ralph members (a spawned attempt's own
+// logical descendants of its retry/ralph members, through every loop nested
+// below them (addUnsettledLoopDescendants; a spawned attempt's own
 // membership is its control's, so the descendants are visited through the
 // root membership). skipControlID is exempt; the caller that drives the
 // selection owns its own close.
@@ -1039,27 +1040,59 @@ func scopeUnsettledMembers(members, all []beads.Bead, skipControlID string, unse
 		}
 		pending[member.ID] = member
 	}
+	var loops []beads.Bead
 	for _, member := range members {
-		switch strings.TrimSpace(member.Metadata[beadmeta.KindMetadataKey]) {
-		case "retry", "ralph":
-		default:
+		if !isLoopControl(member) {
 			continue
 		}
 		switch member.Metadata[beadmeta.ScopeRoleMetadataKey] {
 		case "body", "teardown":
 			continue
 		}
+		loops = append(loops, member)
+	}
+	addUnsettledLoopDescendants(pending, loops, all, unsettled)
+	return pending
+}
+
+// addUnsettledLoopDescendants adds to pending the unsettled logical
+// descendants of each loop control in loops and of every loop control below
+// them, closed ones included. A loop nested in an iteration of another owns
+// its iteration scope and members: they name the nested loop, not the one
+// enclosing it, and the compile mints their refs short, so only the nested
+// control reaches them. isLogicalDescendant keeps every hop inside one loop
+// instance, and each control is walked once.
+func addUnsettledLoopDescendants(pending map[string]beads.Bead, loops, all []beads.Bead, unsettled func(beads.Bead) bool) {
+	walked := make(map[string]bool, len(loops))
+	for len(loops) > 0 {
+		loop := loops[len(loops)-1]
+		loops = loops[:len(loops)-1]
+		if walked[loop.ID] {
+			continue
+		}
+		walked[loop.ID] = true
 		for _, candidate := range all {
-			if !unsettled(candidate) {
+			if !isLogicalDescendant(loop, candidate) {
 				continue
 			}
-			if !isLogicalDescendant(member, candidate) {
-				continue
+			if isLoopControl(candidate) {
+				loops = append(loops, candidate)
 			}
-			pending[candidate.ID] = candidate
+			if unsettled(candidate) {
+				pending[candidate.ID] = candidate
+			}
 		}
 	}
-	return pending
+}
+
+// isLoopControl reports whether bead is a retry or ralph control, whose
+// logical descendants are its attempts or iterations.
+func isLoopControl(bead beads.Bead) bool {
+	switch strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]) {
+	case beadmeta.KindRetry, beadmeta.KindRalph:
+		return true
+	}
+	return false
 }
 
 // describeStuckScopeMembers renders the members that are still pending after a
@@ -2152,12 +2185,43 @@ func isLogicalDescendant(logical, candidate beads.Bead) bool {
 			return true
 		}
 	}
+	// A ralph body member names its loop by step id, which every instance of a
+	// nested loop shares: the inner loop of each outer iteration. Only a member
+	// inside an iteration of this control's own instance descends from it, so a
+	// stale abort of one outer iteration cannot sweep the inner loop the next
+	// outer iteration seeded.
 	if logicalStepID := strings.TrimSpace(logical.Metadata[beadmeta.StepIDMetadataKey]); logicalStepID != "" {
-		if strings.TrimSpace(candidate.Metadata[beadmeta.RalphStepIDMetadataKey]) == logicalStepID {
+		if strings.TrimSpace(candidate.Metadata[beadmeta.RalphStepIDMetadataKey]) == logicalStepID &&
+			(refInLoopIteration(candidateRef, logicalRef) ||
+				refInLoopIteration(strings.TrimSpace(candidate.Metadata[beadmeta.ScopeRefMetadataKey]), logicalRef)) {
 			return true
 		}
 	}
 	return false
+}
+
+// refInLoopIteration reports whether ref names a bead inside an iteration of
+// the loop whose control carries loopRef: a prefix of ref that ends just
+// before an ".iteration." segment names that loop. A ref is either short,
+// below the formula name, or full: the compile mints iteration 1's refs short
+// except its scope-checks', a control mints a re-spawned iteration's refs
+// below its own ref, and a top-level control's ref is full. So the prefix and
+// loopRef also match as a dotted suffix of one another, as matchesScopeRef
+// compares them.
+func refInLoopIteration(ref, loopRef string) bool {
+	const iterationSegment = ".iteration."
+	for offset := 0; ; {
+		i := strings.Index(ref[offset:], iterationSegment)
+		if i < 0 {
+			return false
+		}
+		prefix := ref[:offset+i]
+		if prefix != "" && (prefix == loopRef ||
+			strings.HasSuffix(prefix, "."+loopRef) || strings.HasSuffix(loopRef, "."+prefix)) {
+			return true
+		}
+		offset += i + len(iterationSegment)
+	}
 }
 
 func findScopeBody(all []beads.Bead, rootID, scopeRef string) (beads.Bead, bool) {
@@ -2432,20 +2496,49 @@ func terminalAbortScopeFailureMember(store beads.GraphStore, rootID, finalizerID
 // (gc.ralph_step_id + gc.attempt) whose owning ralph control closed
 // gc.outcome=pass: a later iteration of its loop succeeded, so its own failure
 // must not fail the workflow at finalize. The owner is the control of the
-// innermost loop in the member's step ref, which is the ref up to its last
-// ".iteration.<attempt>" segment, matched against a control's gc.step_ref by
-// equality or dotted suffix (iteration-1 refs are short, the control's is
-// full). Zero or several matching controls, or an owner that is not closed
-// with gc.outcome=pass, leave the member terminal.
+// innermost loop in the member's step ref (ralphBodyMemberOwner).
+//
+// An owner that closed failed or skipped inside an iteration of an enclosing
+// loop (a nested loop's control is a body member there) did so because that
+// iteration aborted around it: a failed member aborts its scope, and only an
+// abort skips one. The member is then superseded when its owner is, so a
+// passing enclosing loop supersedes everything in the iteration it replaced.
+// Any other owner state, or an owner that cannot be resolved, leaves the
+// member terminal.
 func supersededRalphBodyMember(bead beads.Bead, members []beads.Bead) bool {
+	visited := make(map[string]bool)
+	for {
+		owner, ok := ralphBodyMemberOwner(bead, members)
+		if !ok || owner.Status != "closed" || visited[owner.ID] {
+			return false
+		}
+		switch strings.TrimSpace(owner.Metadata[beadmeta.OutcomeMetadataKey]) {
+		case beadmeta.OutcomePass:
+			return true
+		case beadmeta.OutcomeFail, beadmeta.OutcomeSkipped:
+			visited[owner.ID] = true
+			bead = owner
+		default:
+			return false
+		}
+	}
+}
+
+// ralphBodyMemberOwner returns the control of the innermost loop whose
+// iteration holds bead, a ralph body member (gc.ralph_step_id + gc.attempt):
+// the ralph control whose gc.step_ref is the member's step ref up to its last
+// ".iteration.<attempt>" segment, by equality or dotted suffix (iteration-1
+// refs are short, the control's is full). It reports false for a bead that is
+// not a body member, and when zero or several controls match.
+func ralphBodyMemberOwner(bead beads.Bead, members []beads.Bead) (beads.Bead, bool) {
 	attempt := strings.TrimSpace(bead.Metadata[beadmeta.AttemptMetadataKey])
 	if strings.TrimSpace(bead.Metadata[beadmeta.RalphStepIDMetadataKey]) == "" || attempt == "" {
-		return false
+		return beads.Bead{}, false
 	}
 	stepRef := strings.TrimSpace(bead.Metadata[beadmeta.StepRefMetadataKey])
 	cut := strings.LastIndex(stepRef+".", ".iteration."+attempt+".")
 	if cut <= 0 {
-		return false
+		return beads.Bead{}, false
 	}
 	loopRef := stepRef[:cut]
 	var owner beads.Bead
@@ -2460,8 +2553,10 @@ func supersededRalphBodyMember(bead beads.Bead, members []beads.Bead) bool {
 			matches++
 		}
 	}
-	return matches == 1 && owner.Status == "closed" &&
-		strings.TrimSpace(owner.Metadata[beadmeta.OutcomeMetadataKey]) == beadmeta.OutcomePass
+	if matches != 1 {
+		return beads.Bead{}, false
+	}
+	return owner, true
 }
 
 func terminalAbortScopeFailure(bead beads.Bead) bool {
@@ -2484,8 +2579,8 @@ func terminalAbortScopeFailure(bead beads.Bead) bool {
 	// finalize (#4008). The logical bead's own final disposition is the
 	// authoritative signal. A genuinely terminal, non-superseded hard failure
 	// still returns true. A ralph body member carries no gc.logical_bead_id; it
-	// is superseded when its owning ralph control passed, which needs the
-	// workflow's other beads, so terminalAbortScopeFailureMember checks it
-	// (supersededRalphBodyMember).
+	// is superseded when a loop enclosing it passed after its iteration, which
+	// needs the workflow's other beads, so terminalAbortScopeFailureMember
+	// checks it (supersededRalphBodyMember).
 	return !isRetryAttemptSubject(bead)
 }

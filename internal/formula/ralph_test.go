@@ -854,3 +854,55 @@ func TestBindCheckMaxAttemptsVars_KeepsFirstBinding(t *testing.T) {
 		t.Fatalf("resolved check = %+v, want MaxAttempts 2 from the first binding", got)
 	}
 }
+
+// TestApplyRalph_NestedRalphWithChildrenKeepsInnerScope pins issue #9412: a
+// check loop with children nested in another check loop's body must leave the
+// inner iteration scope and its members scoped to the inner loop, so the inner
+// member's scope-check evaluates the inner iteration, not the outer one.
+func TestApplyRalph_NestedRalphWithChildrenKeepsInnerScope(t *testing.T) {
+	steps := []*Step{
+		{
+			ID:    "outer",
+			Title: "Outer loop",
+			Ralph: &RalphSpec{MaxAttempts: 2, Check: &RalphCheckSpec{Mode: "exec", Path: "scripts/pass.sh"}},
+			Children: []*Step{
+				{
+					ID:       "inner",
+					Title:    "Inner loop",
+					Ralph:    &RalphSpec{MaxAttempts: 2, Check: &RalphCheckSpec{Mode: "exec", Path: "scripts/pass.sh"}},
+					Children: []*Step{{ID: "i1", Title: "Inner work"}},
+				},
+				{ID: "o1", Title: "Outer work", Needs: []string{"inner"}},
+			},
+		},
+	}
+
+	got, err := ApplyRalph(steps)
+	if err != nil {
+		t.Fatalf("ApplyRalph failed: %v", err)
+	}
+	byID := make(map[string]*Step, len(got))
+	for _, s := range got {
+		byID[s.ID] = s
+	}
+
+	const innerIteration = "outer.iteration.1.inner.iteration.1"
+	member := byID[innerIteration+".i1"]
+	if member == nil {
+		t.Fatalf("missing inner member %s.i1", innerIteration)
+	}
+	if ref := member.Metadata[beadmeta.ScopeRefMetadataKey]; ref != innerIteration {
+		t.Errorf("inner member gc.scope_ref = %q, want %q", ref, innerIteration)
+	}
+	if owner := member.Metadata[beadmeta.RalphStepIDMetadataKey]; owner != "inner" {
+		t.Errorf("inner member gc.ralph_step_id = %q, want %q", owner, "inner")
+	}
+
+	scope := byID[innerIteration]
+	if scope == nil {
+		t.Fatalf("missing inner iteration scope %s", innerIteration)
+	}
+	if ref := scope.Metadata[beadmeta.ScopeRefMetadataKey]; ref == "outer.iteration.1" {
+		t.Errorf("inner iteration scope gc.scope_ref = %q: inner scope joined the outer iteration as a member", ref)
+	}
+}

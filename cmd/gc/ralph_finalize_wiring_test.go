@@ -118,13 +118,17 @@ func wiringTopologyFormula(topology string, maxAttempts int) string {
 }
 
 // wiringScenario is one run. failMembers maps "<loop>.<member>@<iteration>" to a
-// failure class ("" = none). checkPassIter maps a loop id to the first
+// failure class ("" = none). failRefs does the same for one worker bead named by
+// its step ref below the formula ("outer.iteration.2.inner.iteration.1.i1"): a
+// nested loop's member key is the same in every outer iteration, so only the ref
+// can fail it in one of them. checkPassIter maps a loop id to the first
 // GC_ITERATION on which its check script exits 0 (0 = never); every ralph loop of
 // the formula needs an entry.
 type wiringScenario struct {
 	formula       string
 	checkPassIter map[string]int
 	failMembers   map[string]string
+	failRefs      map[string]string
 }
 
 // wiringControl is one ProcessControl result that did work, in call order.
@@ -141,7 +145,10 @@ type wiringResult struct {
 	sourceID    string
 	finalizerID string
 	trace       []wiringControl
-	all         []beads.Bead
+	// workerAt maps a worker bead id to len(trace) when the worker closed it, so
+	// a test can order a worker bead against the control results before it.
+	workerAt map[string]int
+	all      []beads.Bead
 }
 
 var wiringWorkerRef = regexp.MustCompile(`^(.*)\.iteration\.([0-9]+)\.([^.]+)$`)
@@ -245,7 +252,7 @@ func startWiringWorkflow(t *testing.T, sc wiringScenario) (*beads.MemStore, stri
 func runWiringWorkflow(t *testing.T, sc wiringScenario) *wiringResult {
 	t.Helper()
 	store, rootID, sourceID, cityPath := startWiringWorkflow(t, sc)
-	res := &wiringResult{store: store, rootID: rootID, sourceID: sourceID}
+	res := &wiringResult{store: store, rootID: rootID, sourceID: sourceID, workerAt: map[string]int{}}
 	workerSession := "worker"
 	for step := 0; step < 400; step++ {
 		if mustGetMemBead(t, store, rootID).Status == "closed" {
@@ -290,6 +297,9 @@ func runWiringWorkflow(t *testing.T, sc wiringScenario) *wiringResult {
 				break
 			}
 			class, fail := sc.failMembers[wiringFailKey(beadRef(bead))]
+			if !fail {
+				class, fail = sc.failRefs[strings.TrimPrefix(beadRef(bead), wiringFormula+".")]
+			}
 			if fail {
 				md := map[string]string{"gc.outcome": "fail", "gc.failure_reason": "wiring-test"}
 				if class != "" {
@@ -304,6 +314,7 @@ func runWiringWorkflow(t *testing.T, sc wiringScenario) *wiringResult {
 			if err := store.Close(bead.ID); err != nil {
 				t.Fatal(err)
 			}
+			res.workerAt[bead.ID] = len(res.trace)
 			progressed = true
 			ready = memGraphReady(t, store)
 		}
@@ -839,12 +850,274 @@ func TestRalphFinalizeRecoveredAfterTwoFailedIterations(t *testing.T) {
 	ralphAssertOutcome(t, "iteration 3 m1", res.get(t, "loop.iteration.3.m1"), "pass")
 }
 
-// TestRalphFinalizeOuterExhaustsInnerPasses is skipped on purpose: a ralph with
-// children nested inside a ralph body does not run today. The compile stamps the
-// inner iteration scope and its members with the OUTER iteration's scope_ref,
-// ralph_step_id and attempt, so the inner member's scope check evaluates the
-// outer scope and answers "continue", the inner scope never closes, and the
-// workflow makes no progress.
+// TestRalphFinalizeOuterExhaustsInnerPasses: the outer check never passes (max
+// 2) while the nested inner check-with-children passes its iteration 1 in each
+// outer iteration. Outer iteration 2 is spawned with a seeded inner loop whose
+// scope and i1 pass, both inner controls pass, and the outer control exhausts:
+// it fails, and the root fails with the outer control as the source's failure
+// subject while the source stays open.
 func TestRalphFinalizeOuterExhaustsInnerPasses(t *testing.T) {
-	t.Skip("nested ralph-with-children deadlocks before the finalizer: the inner scope carries the outer iteration's identity")
+	res := runWiringWorkflow(t, wiringScenario{
+		formula:       wiringNestedCheckFormula(2, 2, true),
+		checkPassIter: map[string]int{"outer": 0, "inner": 1},
+	})
+	var seeded []beads.Bead
+	for _, b := range res.all {
+		if strings.HasSuffix(beadRef(b), "outer.iteration.2.inner") && b.Metadata["gc.kind"] == "ralph" {
+			seeded = append(seeded, b)
+		}
+	}
+	if len(seeded) != 1 {
+		t.Fatalf("seeded inner controls in outer iteration 2 = %d, want 1", len(seeded))
+	}
+	ralphAssertOutcome(t, "outer iteration 1 inner control", res.get(t, "outer.iteration.1.inner"), "pass")
+	ralphAssertOutcome(t, "outer iteration 2 inner control", seeded[0], "pass")
+	for _, suffix := range []string{"outer.iteration.2.inner.iteration.1", "outer.iteration.2.inner.iteration.1.i1"} {
+		var matched []beads.Bead
+		for _, b := range res.all {
+			if strings.HasSuffix(beadRef(b), suffix) {
+				matched = append(matched, b)
+			}
+		}
+		if len(matched) != 1 {
+			t.Fatalf("beads with step ref ending %s = %d, want 1", suffix, len(matched))
+		}
+		ralphAssertOutcome(t, "seeded "+suffix, matched[0], "pass")
+	}
+	outer := res.get(t, "outer")
+	ralphAssertOutcome(t, "outer control", outer, "fail")
+	ralphAssertOutcome(t, "workflow root", res.root(t), "fail")
+	if got := res.sourceSubjectRef(t); got != res.ref("outer") {
+		t.Errorf("source gc.failure_subject ref = %q, want the outer control %q", got, res.ref("outer"))
+	}
+	if st := res.source(t).Status; st == "closed" {
+		t.Errorf("source bead status = %q, want open", st)
+	}
+}
+
+// wiringNestedCheckFormula is a formula of one step, wiringNestedCheckStepTOML.
+func wiringNestedCheckFormula(outerMax, innerMax int, o1NeedsInner bool) string {
+	return wiringFormulaTOML(wiringNestedCheckStepTOML(outerMax, innerMax, o1NeedsInner, ""))
+}
+
+// wiringNestedCheckStepTOML is a check "outer" whose body is a check-with-children
+// "inner" (body: i1) and a plain step o1; o1 needs inner when o1NeedsInner. header
+// holds raw TOML keys of the outer step itself, such as needs ("" = none).
+func wiringNestedCheckStepTOML(outerMax, innerMax int, o1NeedsInner bool, header string) string {
+	var b strings.Builder
+	b.WriteString("[[steps]]\nid = \"outer\"\ntitle = \"outer\"\n")
+	b.WriteString(header)
+	b.WriteString("\n")
+	b.WriteString(wiringCheckTOML("outer", outerMax))
+	b.WriteString("[[steps.children]]\nid = \"inner\"\ntitle = \"inner\"\n\n")
+	b.WriteString(strings.ReplaceAll(wiringCheckTOML("inner", innerMax), "[steps.check", "[steps.children.check"))
+	b.WriteString("[[steps.children.children]]\nid = \"i1\"\ntitle = \"i1\"\n\n")
+	b.WriteString("[[steps.children]]\nid = \"o1\"\ntitle = \"o1\"\n")
+	if o1NeedsInner {
+		b.WriteString("needs = [\"inner\"]\n")
+	}
+	return b.String()
+}
+
+// assertWorkerAfterControlPass checks that the control's final result is "pass"
+// and that the worker closed the bead at suffix only after that result.
+func (r *wiringResult) assertWorkerAfterControlPass(t *testing.T, control beads.Bead, suffix string) {
+	t.Helper()
+	action, at := r.lastAction(control.ID)
+	if action != "pass" {
+		t.Errorf("%s final action = %q, want pass", beadRef(control), action)
+	}
+	worker := r.get(t, suffix)
+	workerAt, ok := r.workerAt[worker.ID]
+	if !ok {
+		t.Fatalf("%s was never run by the worker", beadRef(worker))
+	}
+	if at < 0 || workerAt <= at {
+		t.Errorf("%s ran at trace index %d, want after %s's pass at %d", beadRef(worker), workerAt, beadRef(control), at)
+	}
+}
+
+// TestRalphFinalizeNestedChecksPassFirstIteration: a check-with-children nested
+// in a check body runs when both checks pass their first iteration, with o1
+// needing inner and with o1 parallel to it. The inner iteration closes through
+// its own member's scope-check, the inner loop passes before o1 runs in the
+// sequential shape, and the workflow finalizes pass with nothing left open.
+func TestRalphFinalizeNestedChecksPassFirstIteration(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		o1NeedsInner bool
+	}{{"o1_needs_inner", true}, {"o1_parallel", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := runWiringWorkflow(t, wiringScenario{
+				formula:       wiringNestedCheckFormula(2, 2, tc.o1NeedsInner),
+				checkPassIter: map[string]int{"outer": 1, "inner": 1},
+			})
+			ralphAssertOutcome(t, "inner iteration scope", res.get(t, "outer.iteration.1.inner.iteration.1"), "pass")
+			inner := res.get(t, "outer.iteration.1.inner")
+			ralphAssertOutcome(t, "inner control", inner, "pass")
+			if tc.o1NeedsInner {
+				res.assertWorkerAfterControlPass(t, inner, "outer.iteration.1.o1")
+				i1Check := res.get(t, "outer.iteration.1.inner.iteration.1.i1-scope-check")
+				_, checkAt := res.lastAction(i1Check.ID)
+				if o1At := res.workerAt[res.get(t, "outer.iteration.1.o1").ID]; checkAt < 0 || o1At <= checkAt {
+					t.Errorf("o1 ran at trace index %d, want after the inner scope closed by i1-scope-check at %d", o1At, checkAt)
+				}
+			}
+			outer := res.get(t, "outer")
+			ralphAssertOutcome(t, "outer control", outer, "pass")
+			res.assertControlPassedBeforeFinalizer(t, outer)
+			ralphAssertOutcome(t, "workflow root", res.root(t), "pass")
+			for _, b := range res.all {
+				if b.Status != "closed" {
+					t.Errorf("%s (kind=%q) status = %q, want closed", beadRef(b), b.Metadata["gc.kind"], b.Status)
+				}
+			}
+		})
+	}
+}
+
+// TestRalphFinalizeNestedInnerCheckRejectsThenPasses: the inner check rejects
+// its iteration 1 and passes iteration 2 while the outer passes iteration 1. The
+// runtime spawns inner iteration 2 as the inner loop's own scope (no scope_ref)
+// with i1 scoped to it, the inner control passes before o1 runs, and the root
+// finalizes pass.
+func TestRalphFinalizeNestedInnerCheckRejectsThenPasses(t *testing.T) {
+	res := runWiringWorkflow(t, wiringScenario{
+		formula:       wiringNestedCheckFormula(2, 3, true),
+		checkPassIter: map[string]int{"outer": 1, "inner": 2},
+	})
+	var scope beads.Bead
+	var found bool
+	for _, b := range res.all {
+		if strings.HasSuffix(beadRef(b), "outer.iteration.1.inner.iteration.2") {
+			scope, found = b, true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("no bead with step ref ending outer.iteration.1.inner.iteration.2")
+	}
+	if got := scope.Metadata["gc.kind"]; got != "scope" {
+		t.Errorf("inner iteration 2 gc.kind = %q, want scope", got)
+	}
+	if got := scope.Metadata["gc.scope_ref"]; got != "" {
+		t.Errorf("inner iteration 2 gc.scope_ref = %q, want none", got)
+	}
+	ralphAssertOutcome(t, "inner iteration 2 scope", scope, "pass")
+	var members []string
+	for _, b := range res.all {
+		if b.Metadata["gc.scope_ref"] == beadRef(scope) {
+			members = append(members, beadRef(b))
+		}
+	}
+	if len(members) == 0 {
+		t.Errorf("no bead is scoped to inner iteration 2 (%s)", beadRef(scope))
+	}
+	var i1 beads.Bead
+	found = false
+	for _, b := range res.all {
+		if strings.HasSuffix(beadRef(b), "outer.iteration.1.inner.iteration.2.i1") {
+			i1, found = b, true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("no bead with step ref ending outer.iteration.1.inner.iteration.2.i1")
+	}
+	ralphAssertOutcome(t, "inner iteration 2 i1", i1, "pass")
+	if got := i1.Metadata["gc.scope_ref"]; got != beadRef(scope) {
+		t.Errorf("inner iteration 2 i1 gc.scope_ref = %q, want %q", got, beadRef(scope))
+	}
+	if got := i1.Metadata["gc.ralph_step_id"]; got != "inner" {
+		t.Errorf("inner iteration 2 i1 gc.ralph_step_id = %q, want inner", got)
+	}
+	inner := res.get(t, "outer.iteration.1.inner")
+	ralphAssertOutcome(t, "inner control", inner, "pass")
+	res.assertWorkerAfterControlPass(t, inner, "outer.iteration.1.o1")
+	ralphAssertOutcome(t, "outer control", res.get(t, "outer"), "pass")
+	ralphAssertOutcome(t, "workflow root", res.root(t), "pass")
+	res.assertSourceFailureKeysEmpty(t)
+	for _, b := range res.all {
+		if b.Status != "closed" {
+			t.Errorf("%s (kind=%q) status = %q, want closed", beadRef(b), b.Metadata["gc.kind"], b.Status)
+		}
+	}
+}
+
+// TestRalphFinalizeNestedOuterRecoversFromExhaustedInner: the inner loop (max
+// 1) exhausts on a failed i1 in one outer iteration, and the outer loop (max 3)
+// passes the next one. Aborting the failed outer iteration must leave the next
+// iteration's seeded inner loop alone: its i1 is run by the worker and passes.
+// The failure inside the superseded outer iteration must not fail the
+// workflow: the root passes and the source bead carries no failure keys. Each
+// row fails i1 in one outer iteration, with no failure class and with a
+// transient one.
+func TestRalphFinalizeNestedOuterRecoversFromExhaustedInner(t *testing.T) {
+	for _, row := range []struct {
+		name   string
+		failed int // the outer iteration whose inner i1 fails
+	}{{"outer_iteration_1", 1}, {"outer_iteration_2", 2}} {
+		for _, class := range []struct{ name, value string }{{"no_class", ""}, {"transient", beadmeta.FailureClassTransient}} {
+			t.Run(row.name+"/"+class.name, func(t *testing.T) {
+				failed := fmt.Sprintf("outer.iteration.%d.inner", row.failed)
+				next := fmt.Sprintf("outer.iteration.%d.inner", row.failed+1)
+				res := runWiringWorkflow(t, wiringScenario{
+					formula:       wiringNestedCheckFormula(3, 1, true),
+					checkPassIter: map[string]int{"outer": row.failed + 1, "inner": 1},
+					failRefs:      map[string]string{failed + ".iteration.1.i1": class.value},
+				})
+				ralphAssertOutcome(t, "failed i1", res.get(t, failed+".iteration.1.i1"), "fail")
+				ralphAssertOutcome(t, "exhausted inner control", res.get(t, failed), "fail")
+				i1 := res.get(t, next+".iteration.1.i1")
+				if _, ran := res.workerAt[i1.ID]; !ran {
+					t.Errorf("%s was never run by the worker (close_reason %q)", beadRef(i1), i1.Metadata["close_reason"])
+				}
+				ralphAssertOutcome(t, "next outer iteration's i1", i1, "pass")
+				ralphAssertOutcome(t, "next outer iteration's inner control", res.get(t, next), "pass")
+				outer := res.get(t, "outer")
+				ralphAssertOutcome(t, "outer control", outer, "pass")
+				res.assertControlPassedBeforeFinalizer(t, outer)
+				ralphAssertOutcome(t, "workflow root", res.root(t), "pass")
+				res.assertSourceFailureKeysEmpty(t)
+			})
+		}
+	}
+}
+
+// TestRalphFinalizeEnclosingAbortSkipsNestedLoop: the nested check "outer" is a
+// member of a plain scope "body" with a teardown, and needs body's other
+// member s1, which fails. The abort of body must skip every open bead below
+// outer, the nested loop of outer's compiled iteration 1 included: its
+// iteration scope and i1 name the inner loop, not the outer one, and carry
+// the compile's short refs, so only the inner control reaches them. The worker
+// runs s1 and the teardown and nothing else, and the root fails.
+func TestRalphFinalizeEnclosingAbortSkipsNestedLoop(t *testing.T) {
+	res := runWiringWorkflow(t, wiringScenario{
+		formula: wiringFormulaTOML(
+			wiringPlainStepTOML("s1", nil, wiringScopeMetadata),
+			wiringNestedCheckStepTOML(3, 1, false, "needs = [\"s1\"]\nmetadata = "+wiringScopeMetadata+"\n"),
+			wiringPlainStepTOML("body", []string{"outer", "s1"}, `{ "gc.kind" = "scope", "gc.scope_name" = "worktree", "gc.scope_role" = "body" }`),
+			wiringPlainStepTOML("teardown", []string{"body"}, `{ "gc.kind" = "cleanup", "gc.scope_ref" = "body", "gc.scope_role" = "teardown" }`),
+		),
+		checkPassIter: map[string]int{"outer": 1, "inner": 1},
+		failRefs:      map[string]string{"s1": ""},
+	})
+	ran := make([]string, 0, len(res.workerAt))
+	for id := range res.workerAt {
+		ran = append(ran, strings.TrimPrefix(res.refOfID(t, id), wiringFormula+"."))
+	}
+	sort.Strings(ran)
+	if want := []string{"s1", "teardown"}; !reflect.DeepEqual(ran, want) {
+		t.Errorf("worker ran %v, want only %v", ran, want)
+	}
+	const skipReason = "scope member skipped: an earlier member of the same scope failed"
+	for _, suffix := range []string{"outer.iteration.1.inner.iteration.1", "outer.iteration.1.inner.iteration.1.i1"} {
+		b := res.get(t, suffix)
+		ralphAssertOutcome(t, suffix, b, "skipped")
+		if got := b.Metadata["close_reason"]; got != skipReason {
+			t.Errorf("%s close_reason = %q, want %q", suffix, got, skipReason)
+		}
+	}
+	ralphAssertOutcome(t, "enclosing scope body", res.get(t, "body"), "fail")
+	ralphAssertOutcome(t, "workflow root", res.root(t), "fail")
 }
