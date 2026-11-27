@@ -118,3 +118,48 @@ func TestFakeBdCreateKeepsParentAndEphemeral(t *testing.T) {
 		t.Fatalf("bd show did not answer the ephemeral bead: %v", err)
 	}
 }
+
+// TestFakeBdNarrowsToIDs pins the fake's id filters, bd list's --id and bd
+// query's OR of id clauses: a BdStore read by ids round-trips through both
+// tiers and answers just those beads, and bd list alone narrows as bd does.
+func TestFakeBdNarrowsToIDs(t *testing.T) {
+	fb := NewFakeBd()
+	store := fb.NewBdStore()
+	var issues, wisps []string
+	for i := 0; i < 3; i++ {
+		b, err := store.Create(beads.Bead{Title: "issue", Type: "task"})
+		if err != nil {
+			t.Fatalf("Create(issue): %v", err)
+		}
+		issues = append(issues, b.ID)
+		w, err := store.Create(beads.Bead{Title: "wisp", Type: "step", Ephemeral: true})
+		if err != nil {
+			t.Fatalf("Create(wisp): %v", err)
+		}
+		wisps = append(wisps, w.ID)
+	}
+	want := []string{issues[0], issues[2], wisps[0], wisps[1]}
+	got, err := store.List(beads.ListQuery{IDs: want, TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	gotIDs := map[string]bool{}
+	for _, b := range got {
+		gotIDs[b.ID] = true
+	}
+	if len(gotIDs) != len(want) {
+		t.Fatalf("List by ids = %v, want %v", gotIDs, want)
+	}
+	for _, id := range want {
+		if !gotIDs[id] {
+			t.Fatalf("List by ids = %v, missing %s", gotIDs, id)
+		}
+	}
+	out, err := fb.Run("", "bd", "list", "--json", "--id", issues[1]+", "+issues[2])
+	if err != nil {
+		t.Fatalf("bd list --id: %v", err)
+	}
+	if s := string(out); strings.Contains(s, issues[0]) || !strings.Contains(s, issues[1]) || !strings.Contains(s, issues[2]) {
+		t.Fatalf("bd list --id %s,%s = %s, want just those two", issues[1], issues[2], s)
+	}
+}

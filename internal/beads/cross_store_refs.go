@@ -80,9 +80,10 @@ const getManyFanOut = 8
 //     and a store stating it holds no row under a relocated class's reserved
 //     prefix (ErrBdSQLClassRelocated) read as absent.
 //
-// It never lists. Neither bd (`bd list` has no --id) nor the native store can
-// narrow a listing to ids, so a listing by id walks the whole ledger, both
-// tiers, closed rows included (#8360 review, iteration 2).
+// It never lists. The native store can't narrow a listing to ids, and bd's
+// wisp leg narrows one only after reading every row its other clauses select,
+// so a listing by id can walk the whole ledger, both tiers, closed rows
+// included (#8360 review, iteration 2).
 func GetMany(store StoreReader, ids []string) (map[string]Bead, error) {
 	out := make(map[string]Bead, len(ids))
 	if store == nil || len(ids) == 0 {
