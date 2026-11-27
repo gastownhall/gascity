@@ -1417,11 +1417,13 @@ func (c *client) startServer() error {
 	if alive {
 		return nil
 	}
-	// A prior server may have died leaving a stale socket inode; serverAlive
-	// just confirmed nothing live owns it, so clear it before launch or herdr
-	// cannot bind — the exact failure that stranded provider swaps (agent list
-	// → ECONNREFUSED → swap aborted → pool polecats stuck start-pending).
-	c.removeStaleSocket()
+	// A prior server may have died leaving a stale socket inode; clear it before
+	// launch or herdr cannot bind — the exact failure that stranded provider
+	// swaps (agent list → ECONNREFUSED → swap aborted → pool polecats stuck
+	// start-pending). Only a confirmed-dead server's socket is cleared.
+	if err := c.clearDeadSocket(context.Background()); err != nil {
+		return err
+	}
 	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	if err != nil {
 		return fmt.Errorf("herdr server: open devnull: %w", err)
@@ -1435,6 +1437,7 @@ func (c *client) startServer() error {
 	// stranded ephemeral pool spawns in $HOME (unprimed, re-prompted for trust).
 	// Empty cityRoot (city-less construction) leaves cwd inherited, as before.
 	cmd.Dir = c.cityRoot
+	cmd.Env = serverEnv(os.Environ())
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("herdr server start: %w", err)
 	}
@@ -1450,6 +1453,38 @@ func (c *client) startServer() error {
 		time.Sleep(250 * time.Millisecond)
 	}
 	return fmt.Errorf("herdr server for session %q did not become ready on %q", c.session, c.socketPath())
+}
+
+// serverIdentityEnv are the per-session and per-agent keys a process can carry
+// that must not reach the shared herdr server. Every pane inherits the server's
+// environment, and a pane herdr restores after a server restart gets nothing
+// else (its --env is not restored), so whichever process happens to start the
+// server would otherwise hand its own identity to other sessions' panes.
+// City-wide values (GC_CITY, GC_HOME, GC_BIN, ...) are the same for every pane
+// and stay.
+var serverIdentityEnv = map[string]bool{
+	"BEADS_ACTOR": true, "GC_AGENT": true, "GC_AGENT_SLICE": true, "GC_ALIAS": true,
+	"GC_CONTINUATION_EPOCH": true, "GC_INSTANCE_TOKEN": true, "GC_PROVIDER": true,
+	"GC_READY_PROMPT_PREFIX": true, "GC_RIG": true, "GC_RIG_ROOT": true,
+	"GC_RUNTIME_EPOCH": true, "GC_SESSION_ID": true, "GC_SESSION_NAME": true,
+	"GC_SESSION_ORIGIN": true, "GC_TEMPLATE": true, "GT_CREW": true,
+	"GT_PROCESS_NAMES": true, "GT_RIG": true, "GT_ROLE": true,
+}
+
+// serverEnv is environ without the caller's session identity and without its
+// HERDR_* values, which describe the caller's own pane and herdr session (gc
+// started from inside a herdr pane carries HERDR_PANE_ID, HERDR_SOCKET_PATH,
+// ...); herdr sets its own HERDR_* for each pane it creates.
+func serverEnv(environ []string) []string {
+	out := make([]string, 0, len(environ))
+	for _, kv := range environ {
+		key, _, _ := strings.Cut(kv, "=")
+		if serverIdentityEnv[key] || strings.HasPrefix(key, "HERDR_") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 // relativeSocketError is startServer's refusal of the relative socket path

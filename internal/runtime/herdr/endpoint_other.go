@@ -4,6 +4,9 @@ package herdr
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -42,6 +45,24 @@ func herdrJoin(base string, elem ...string) string {
 func dialUnix(ctx context.Context, path string) (net.Conn, error) {
 	var d net.Dialer
 	return d.DialContext(ctx, "unix", path)
+}
+
+// clearDeadSocket prepares the socket path for a new server, which must only
+// ever replace a dead one. One failed probe is not proof: under load a live
+// server can miss serverDialTimeout, and unlinking its socket would orphan it
+// and start a second server for the same session. herdr restores that
+// session's panes without the --env they were created with, so they would lose
+// their session identity. It leaves the socket and returns an error unless the
+// server is confirmed dead.
+func (c *client) clearDeadSocket(ctx context.Context) error {
+	if _, err := os.Lstat(c.socketPath()); errors.Is(err, fs.ErrNotExist) {
+		return nil // nothing at the path: no socket to orphan, and nothing to clear
+	}
+	if !c.serverConfirmedDead(ctx) {
+		return fmt.Errorf("herdr server for session %q is not answering on %q but is not confirmed dead; not starting a second server", c.session, c.socketPath())
+	}
+	c.removeStaleSocket()
+	return nil
 }
 
 // removeStaleSocket unlinks the socket inode when it exists but nothing live is
