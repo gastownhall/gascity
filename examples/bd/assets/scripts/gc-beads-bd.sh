@@ -2667,13 +2667,41 @@ launch_dolt_sql_server_detached() {
             BEADS_ACTOR CLAUDE_CODE_SESSION_ID; do
             unset "$key"
         done
+        launch_monitor_was_on=false
+        case $- in
+            *m*) launch_monitor_was_on=true ;;
+        esac
         if command -v setsid >/dev/null 2>&1; then
             # Without job control the background child is not a process
             # group leader, so setsid(1) calls setsid(2) in place and the
-            # PID below is the server's.
+            # PID below is the server's. A background job that already leads
+            # a process group (monitor mode on) makes setsid(1) fork to
+            # create the session, leaving the PID below naming the
+            # short-lived parent, so monitor mode is off for the launch.
+            if [ "$launch_monitor_was_on" = "true" ]; then
+                set +m
+            fi
             nohup setsid sh -c 'exec 9>&-; exec dolt sql-server --config "$1"' sh "$CONFIG_FILE" < /dev/null >> "$LOG_FILE" 2>&1 &
-        else
+            if [ "$launch_monitor_was_on" = "true" ]; then
+                set -m
+            fi
+        elif [ -n "${BASH_VERSION:-}" ]; then
+            # Job control puts the background job in its own process group
+            # (the harness-reap pattern, working under bash 3.2); the group
+            # leader PID is the server's after the exec chain. Monitor mode
+            # is restored to its prior setting straight after the launch;
+            # the group assignment persists.
             set -m
+            nohup sh -c 'exec 9>&-; exec dolt sql-server --config "$1"' sh "$CONFIG_FILE" < /dev/null >> "$LOG_FILE" 2>&1 &
+            if [ "$launch_monitor_was_on" = "false" ]; then
+                set +m
+            fi
+        else
+            # dash without setsid(1): without a tty job control cannot be
+            # enabled at all, and with a tty a background job would stop
+            # itself reading the terminal, so the server stays in this
+            # process group. Say so instead of pretending to detach.
+            echo "warning: dolt sql-server shares the caller's process group: no setsid(1) and no bash job control" >&2
             nohup sh -c 'exec 9>&-; exec dolt sql-server --config "$1"' sh "$CONFIG_FILE" < /dev/null >> "$LOG_FILE" 2>&1 &
         fi
         echo "$!"
@@ -5080,35 +5108,50 @@ else
     # temporary file without sibling assets. Keep the production helper as the
     # canonical copy, but preserve the same detector behavior for those harnesses.
     recovery_should_skip_due_to_enospc() {
+        ENOSPC_PROBE_DIR=""
+        ENOSPC_FREE_BYTES=""
+        ENOSPC_FLOOR_BYTES=""
         [ -n "${LOG_FILE:-}" ] && [ -r "$LOG_FILE" ] || return 1
+        # Scan the recent log tail rather than the whole file; an old transient
+        # ENOSPC error from a since-resolved disk-pressure event should not block
+        # recovery indefinitely.
         tail -n 1000 "$LOG_FILE" 2>/dev/null \
             | grep -qE 'no space left on device|copy_file_range:.*no space|ENOSPC' \
             || return 1
-        enospc_disk_has_headroom && return 1
-        return 0
-    }
-
-    enospc_disk_has_headroom() {
-        enospc_dir="${DATA_DIR:-}"
-        if [ -z "$enospc_dir" ] || [ ! -d "$enospc_dir" ]; then
-            enospc_dir=$(dirname "$LOG_FILE")
+        ENOSPC_PROBE_DIR="${DATA_DIR:-}"
+        [ -n "$ENOSPC_PROBE_DIR" ] || ENOSPC_PROBE_DIR=$(dirname "$LOG_FILE")
+        ENOSPC_FLOOR_BYTES="${GC_DOLT_WARN_FREE_BYTES:-}"
+        case "$ENOSPC_FLOOR_BYTES" in
+            ''|*[!0-9]*) ENOSPC_FLOOR_BYTES=2147483648 ;;
+        esac
+        ENOSPC_FLOOR_BYTES=$(printf '%s' "$ENOSPC_FLOOR_BYTES" | sed 's/^0*//')
+        [ -n "$ENOSPC_FLOOR_BYTES" ] || ENOSPC_FLOOR_BYTES=2147483648
+        if [ -d "$ENOSPC_PROBE_DIR" ] \
+            && ENOSPC_FREE_BYTES=$(df -Pk "$ENOSPC_PROBE_DIR" 2>/dev/null); then
+            # Available is the field before the first NN% field, so a filesystem
+            # name with spaces still parses; KiB become bytes in awk, not in shell
+            # arithmetic.
+            ENOSPC_FREE_BYTES=$(printf '%s\n' "$ENOSPC_FREE_BYTES" | awk '
+                NR > 1 {
+                    for (i = 2; i <= NF; i++) {
+                        if ($i ~ /^[0-9]+%$/ && $(i - 1) ~ /^-?[0-9]+$/) {
+                            kb = $(i - 1) + 0
+                            if (kb < 0) kb = 0
+                            printf "%.0f\n", kb * 1024
+                            exit
+                        }
+                    }
+                }')
+        else
+            ENOSPC_FREE_BYTES=""
         fi
-        enospc_floor="${GC_DOLT_WARN_FREE_BYTES:-2147483648}"
-        case "$enospc_floor" in
-            ''|*[!0-9]*) enospc_floor=2147483648 ;;
-        esac
-        # Read the floor as decimal: shell arithmetic takes a leading 0 as octal.
-        enospc_floor=$(printf '%s' "$enospc_floor" | sed 's/^0*//')
-        [ -n "$enospc_floor" ] || enospc_floor=0
-        # More than 18 digits can overflow shell arithmetic.
-        [ "${#enospc_floor}" -le 18 ] || enospc_floor=2147483648
-        # 0 means "no disk warning" to gc; it must not switch the skip off.
-        [ "$enospc_floor" -gt 0 ] || enospc_floor=2147483648
-        enospc_avail_kb=$(df -Pk "$enospc_dir" 2>/dev/null | awk 'NR == 2 { print $4 }')
-        case "$enospc_avail_kb" in
-            ''|*[!0-9]*) return 1 ;;
-        esac
-        [ "$enospc_avail_kb" -ge $(( (enospc_floor + 1023) / 1024 )) ]
+        if [ -z "$ENOSPC_FREE_BYTES" ]; then
+            echo "warning: cannot read free space on $ENOSPC_PROBE_DIR; treating the ENOSPC evidence in $LOG_FILE as current" >&2
+            return 0
+        fi
+        # Compare in awk: a floor of any length cannot overflow shell arithmetic.
+        awk -v free="$ENOSPC_FREE_BYTES" -v floor="$ENOSPC_FLOOR_BYTES" \
+            'BEGIN { exit !(free + 0 < floor + 0) }'
     }
 fi
 
@@ -5142,7 +5185,11 @@ op_recover() {
     # floor (see dolt-enospc.sh). See gastownhall/gascity#2158.
     if recovery_should_skip_due_to_enospc; then
         echo "skipping dolt recovery: recent dolt log shows ENOSPC — manual intervention required" >&2
-        echo "  free disk space, then re-run health checks" >&2
+        if [ -n "$ENOSPC_FREE_BYTES" ]; then
+            echo "  $ENOSPC_PROBE_DIR has $ENOSPC_FREE_BYTES bytes free, below the $ENOSPC_FLOOR_BYTES-byte floor (GC_DOLT_WARN_FREE_BYTES); recovery resumes on its own once free space reaches the floor" >&2
+        else
+            echo "  free space on $ENOSPC_PROBE_DIR could not be read; recovery resumes once it can be read and is at least $ENOSPC_FLOOR_BYTES bytes (GC_DOLT_WARN_FREE_BYTES)" >&2
+        fi
         die "dolt recovery skipped: ENOSPC detected"
     fi
 

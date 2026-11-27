@@ -92,7 +92,11 @@ fi
 if recovery_should_skip_due_to_enospc; then
   if [ "$force_restart" != "true" ]; then
     echo "gc dolt restart: recent Dolt log shows ENOSPC; refusing restart because it can amplify recovery writes" >&2
-    echo "  free disk space; the refusal lifts once the Dolt data dir has GC_DOLT_WARN_FREE_BYTES (default 2 GiB) free" >&2
+    if [ -n "$ENOSPC_FREE_BYTES" ]; then
+      echo "  $ENOSPC_PROBE_DIR has $ENOSPC_FREE_BYTES bytes free, below the $ENOSPC_FLOOR_BYTES-byte floor; the refusal lifts once free space reaches GC_DOLT_WARN_FREE_BYTES (default 2 GiB)" >&2
+    else
+      echo "  free space on $ENOSPC_PROBE_DIR could not be read; the refusal lifts once it can be read and is at least $ENOSPC_FLOOR_BYTES bytes (GC_DOLT_WARN_FREE_BYTES, default 2 GiB)" >&2
+    fi
     echo "  run gc dolt restart --force only if a restart is required before then" >&2
     exit 1
   fi

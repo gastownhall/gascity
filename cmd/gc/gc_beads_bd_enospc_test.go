@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -66,9 +67,9 @@ func TestENOSPCSkipHoldsOnlyWhileTheDiskIsShort(t *testing.T) {
 		// A leading 0 must read as decimal, not octal (0900 is no octal number).
 		{name: "ENOSPC with a zero-padded floor and disk short", log: "ENOSPC\n", availKB: strconv.Itoa(gib), floor: "02147483648", wantSkip: true},
 		{name: "ENOSPC with a zero-padded small floor", log: "ENOSPC\n", availKB: strconv.Itoa(gib), floor: "0900", wantSkip: false},
-		// More than 18 digits could overflow shell arithmetic; it means the default floor.
+		// A floor too large for shell arithmetic is still that many bytes.
 		{name: "ENOSPC with an oversized floor and disk short", log: "ENOSPC\n", availKB: strconv.Itoa(gib), floor: "9999999999999999999", wantSkip: true},
-		{name: "ENOSPC with an oversized floor and space back", log: "ENOSPC\n", availKB: strconv.Itoa(3 * gib), floor: "9999999999999999999", wantSkip: false},
+		{name: "ENOSPC with an oversized floor and 3 GiB free", log: "ENOSPC\n", availKB: strconv.Itoa(3 * gib), floor: "9999999999999999999", wantSkip: true},
 		// A floor that is not a whole KiB rounds up, so exactly 2 GiB is still short of 2 GiB + 1 byte.
 		{name: "ENOSPC with a floor just over a KiB boundary", log: "ENOSPC\n", availKB: strconv.Itoa(2 * gib), floor: "2147483649", wantSkip: true},
 	}
@@ -134,9 +135,105 @@ func TestENOSPCSkipMeasuresTheDataDir(t *testing.T) {
 	}
 }
 
+// floorEmpty makes runENOSPCDetector set GC_DOLT_WARN_FREE_BYTES to the empty
+// string rather than leave it unset.
+const floorEmpty = "<empty>"
+
+// TestENOSPCSkipFloorFromEnv pins how the detector reads its free-space floor
+// from GC_DOLT_WARN_FREE_BYTES: a positive decimal integer of any length is
+// that many bytes (leading zeros read as decimal), and anything else, 0
+// included, is the 2 GiB default.
+func TestENOSPCSkipFloorFromEnv(t *testing.T) {
+	const defaultFloor = "2147483648"
+	cases := []struct{ env, want string }{
+		{"", defaultFloor},
+		{floorEmpty, defaultFloor},
+		{"0", defaultFloor},
+		{"000", defaultFloor},
+		{"-5", defaultFloor},
+		{"1.5", defaultFloor},
+		{"abc", defaultFloor},
+		{"4294967296", "4294967296"},
+		{"0900", "900"},
+		{"9999999999999999999", "9999999999999999999"},
+		{"123456789012345678901234", "123456789012345678901234"},
+	}
+	for label, detector := range enospcDetectors(t) {
+		for _, tc := range cases {
+			t.Run(label+"/"+tc.env, func(t *testing.T) {
+				dir := t.TempDir()
+				dataDir := filepath.Join(dir, "data")
+				if err := os.MkdirAll(dataDir, 0o755); err != nil {
+					t.Fatalf("mkdir data: %v", err)
+				}
+				logFile := filepath.Join(dir, "dolt.log")
+				if err := os.WriteFile(logFile, []byte("ENOSPC\n"), 0o644); err != nil {
+					t.Fatalf("write log: %v", err)
+				}
+				stdout, stderr, _ := runENOSPCDetectorStreams(t, dir, detector, logFile, dataDir, "1", tc.env)
+				if !strings.Contains(stdout, "FLOOR="+tc.want+"\n") {
+					t.Fatalf("GC_DOLT_WARN_FREE_BYTES=%q: want floor %s\nstdout:\n%s\nstderr:\n%s", tc.env, tc.want, stdout, stderr)
+				}
+			})
+		}
+	}
+}
+
+// TestENOSPCSkipHoldsWhenFreeSpaceIsUnmeasurable pins the fail-closed side of
+// the free-space check (gastownhall/gascity#2158): when the probe directory's
+// free space cannot be read, the ENOSPC evidence still counts, and the
+// detector says once on stderr which directory it could not measure.
+func TestENOSPCSkipHoldsWhenFreeSpaceIsUnmeasurable(t *testing.T) {
+	const roomyKB = "3145728" // 3 GiB in df -Pk blocks, above the default floor
+	for label, detector := range enospcDetectors(t) {
+		for _, tc := range []struct {
+			name        string
+			availKB     string
+			missingData bool
+		}{
+			{name: "df fails", availKB: ""},
+			{name: "df prints no Available value", availKB: "garbage"},
+			{name: "df prints a non-numeric Available", availKB: "notanumber"},
+			{name: "data dir does not exist", availKB: roomyKB, missingData: true},
+		} {
+			t.Run(label+"/"+tc.name, func(t *testing.T) {
+				dir := t.TempDir()
+				dataDir := filepath.Join(dir, "data")
+				if !tc.missingData {
+					if err := os.MkdirAll(dataDir, 0o755); err != nil {
+						t.Fatalf("mkdir data: %v", err)
+					}
+				}
+				logFile := filepath.Join(dir, "dolt.log")
+				if err := os.WriteFile(logFile, []byte("fatal: no space left on device\n"), 0o644); err != nil {
+					t.Fatalf("write log: %v", err)
+				}
+				stdout, stderr, skipped := runENOSPCDetectorStreams(t, dir, detector, logFile, dataDir, tc.availKB, "")
+				if !skipped {
+					t.Fatalf("skip = false, want true (fail closed)\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+				}
+				lines := strings.Split(strings.TrimRight(stderr, "\n"), "\n")
+				if len(lines) != 1 || !strings.Contains(lines[0], dataDir) {
+					t.Fatalf("stderr = %q, want exactly one line naming %s", stderr, dataDir)
+				}
+			})
+		}
+	}
+}
+
 // runENOSPCDetector sources detector in /bin/sh with a fake df on PATH and
-// reports whether recovery_should_skip_due_to_enospc returned true.
+// reports whether recovery_should_skip_due_to_enospc returned true. availKB
+// is the fake df's Available column; "" makes df fail and "garbage" makes it
+// print output with no Available value.
 func runENOSPCDetector(t *testing.T, dir, detector, logFile, dataDir, availKB, floor string) (string, bool) {
+	t.Helper()
+	stdout, stderr, skipped := runENOSPCDetectorStreams(t, dir, detector, logFile, dataDir, availKB, floor)
+	return stdout + stderr, skipped
+}
+
+// runENOSPCDetectorStreams is runENOSPCDetector with stdout and stderr kept
+// apart.
+func runENOSPCDetectorStreams(t *testing.T, dir, detector, logFile, dataDir, availKB, floor string) (string, string, bool) {
 	t.Helper()
 	binDir := filepath.Join(dir, "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -145,16 +242,19 @@ func runENOSPCDetector(t *testing.T, dir, detector, logFile, dataDir, availKB, f
 	df := `#!/bin/sh
 printf '%s\n' "$*" > "` + filepath.Join(dir, "df.args") + `"
 `
-	if availKB == "" {
+	switch availKB {
+	case "":
 		df += "echo 'df: probe failed' >&2\nexit 1\n"
-	} else {
+	case "garbage":
+		df += "echo 'df: no file systems processed'\n"
+	default:
 		df += `echo 'Filesystem 1024-blocks Used Available Capacity Mounted on'
 echo "/dev/fake 999999999 1 ` + availKB + ` 1% /"
 `
 	}
 	writeExecutable(t, filepath.Join(binDir, "df"), df)
 	harness := filepath.Join(dir, "harness.sh")
-	writeExecutable(t, harness, "#!/bin/sh\n"+detector+"\nif recovery_should_skip_due_to_enospc; then echo SKIP; else echo RUN; fi\n")
+	writeExecutable(t, harness, "#!/bin/sh\n"+detector+"\nif recovery_should_skip_due_to_enospc; then echo SKIP; else echo RUN; fi\necho \"FLOOR=$ENOSPC_FLOOR_BYTES\"\n")
 	cmd := exec.Command("/bin/sh", harness)
 	env := os.Environ()
 	for _, key := range []string{"PATH", "LOG_FILE", "DATA_DIR", "GC_DOLT_DATA_DIR", "GC_DOLT_WARN_FREE_BYTES"} {
@@ -164,13 +264,120 @@ echo "/dev/fake 999999999 1 ` + availKB + ` 1% /"
 	if dataDir != "" {
 		env = append(env, "DATA_DIR="+dataDir)
 	}
-	if floor != "" {
+	switch floor {
+	case "":
+	case floorEmpty:
+		env = append(env, "GC_DOLT_WARN_FREE_BYTES=")
+	default:
 		env = append(env, "GC_DOLT_WARN_FREE_BYTES="+floor)
 	}
 	cmd.Env = env
-	out, err := cmd.CombinedOutput()
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("run detector: %v\n%s", err, out)
+		t.Fatalf("run detector: %v\nstdout:\n%s\nstderr:\n%s", err, out, stderr.String())
 	}
-	return string(out), strings.Contains(string(out), "SKIP")
+	return string(out), stderr.String(), strings.Contains(string(out), "SKIP")
+}
+
+// TestGCBeadsBdRecoverSkipExplainsProbeDirAndLiftsWithSpace pins op_recover's
+// side of the ENOSPC gate: with ENOSPC in the recent log and the data dir
+// short of space, recover dies with the ENOSPC-skip message without ever
+// consulting the gc helper, and the message names the probe directory, its
+// free bytes and the floor; once free space reaches the floor, recover
+// proceeds to the gc recover helper.
+func TestGCBeadsBdRecoverSkipExplainsProbeDirAndLiftsWithSpace(t *testing.T) {
+	const gib = 1 << 20 // in the 1024-byte blocks df -Pk reports
+	for _, tc := range []struct {
+		name       string
+		availKB    int
+		wantRefuse bool
+	}{
+		{name: "disk short refuses without consulting gc", availKB: gib, wantRefuse: true},
+		{name: "space back proceeds to the gc helper", availKB: 3 * gib, wantRefuse: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			materializeBuiltinPacksForTest(t, cityPath)
+			script := gcBeadsBdScriptPath(cityPath)
+
+			binDir := filepath.Join(t.TempDir(), "bin")
+			if err := os.MkdirAll(binDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			invocationFile := filepath.Join(t.TempDir(), "gc-invocation")
+			fakeGC := writeFakeManagedConfigWriterGC(t, binDir, invocationFile)
+
+			// The fake gc answers dolt-state runtime-layout, so the script
+			// takes its projected layout: the data dir is the city's
+			// .beads/dolt and the log lives under the projected pack state
+			// directory.
+			dataDir := filepath.Join(cityPath, ".beads", "dolt")
+			if err := os.MkdirAll(dataDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			logFile := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt-from-gc", "dolt.log")
+			if err := os.MkdirAll(filepath.Dir(logFile), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(logFile, []byte("fatal: no space left on device\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			dfDir := filepath.Join(t.TempDir(), "dfbin")
+			if err := os.MkdirAll(dfDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			dfArgsLog := filepath.Join(t.TempDir(), "df.args")
+			writeExecutable(t, filepath.Join(dfDir, "df"), fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %q
+echo 'Filesystem 1024-blocks Used Available Capacity Mounted on'
+echo "/dev/fake 999999999 1 %d 1%% /"
+`, dfArgsLog, tc.availKB))
+
+			env := sanitizedBaseEnv(
+				"GC_CITY_PATH="+cityPath,
+				"GC_BIN="+fakeGC,
+				"PATH="+strings.Join([]string{dfDir, binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+			)
+			stdout, stderr, runErr := runGCBeadsBdCommand(t, env, script, "recover")
+			out := stdout + stderr
+
+			if args := readFile(dfArgsLog); strings.TrimSpace(args) != "-Pk "+dataDir {
+				t.Fatalf("df measured %q, want the data dir %q\nrecover output:\n%s", args, "-Pk "+dataDir, out)
+			}
+
+			if tc.wantRefuse {
+				if runErr == nil {
+					t.Fatalf("recover proceeded despite a short data dir:\n%s", out)
+				}
+				for _, frag := range []string{
+					"dolt recovery skipped: ENOSPC detected",
+					dataDir,
+					strconv.Itoa(gib * 1024), // free bytes on the probe dir
+					strconv.Itoa(2147483648), // default floor
+				} {
+					if !strings.Contains(out, frag) {
+						t.Errorf("refusal message missing %q:\n%s", frag, out)
+					}
+				}
+				// Layout and port helpers run in the prelude; the recover
+				// helper itself must never be reached.
+				if invocation := readFile(invocationFile); strings.Contains(invocation, "recover-managed") {
+					t.Fatalf("recover consulted the gc recover helper despite the ENOSPC refusal:\n%s", invocation)
+				}
+				return
+			}
+			if runErr != nil {
+				t.Fatalf("recover with space back failed: %v\n%s", runErr, out)
+			}
+			if invocation := readFile(invocationFile); !strings.Contains(invocation, "recover-managed") {
+				t.Fatalf("recover with space back never reached the gc recover helper; invocation log:\n%s", invocation)
+			}
+		})
+	}
 }
