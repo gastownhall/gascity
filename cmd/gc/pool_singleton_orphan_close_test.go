@@ -354,3 +354,45 @@ func TestCanonicalSingletonOrphanRecoversRoutedDemand(t *testing.T) {
 		t.Fatalf("alias claim assignee = %q, want kept on %q", got.Assignee, identity)
 	}
 }
+
+// AC-5: a running canonical singleton seat working an in_progress claim under
+// its alias is left alone: no drain, no close, no release.
+func TestCanonicalSingletonRunningSeatKeepsItsInProgressClaim(t *testing.T) {
+	agent := singletonOrphanAgent()
+	agent.ScaleCheck = printCountCommand(0)
+	e := newSingletonOrphanEnv(t, agent)
+	identity := e.cfg.Agents[0].QualifiedName()
+	working := "in_progress"
+	if err := e.store.Update(e.claim.ID, beads.UpdateOpts{Status: &working}); err != nil {
+		t.Fatalf("set claim in_progress: %v", err)
+	}
+	name := e.seat.Metadata["session_name"]
+	if err := e.sp.Start(context.Background(), name, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("start seat runtime: %v", err)
+	}
+	if err := e.store.SetMetadataBatch(e.seat.ID, map[string]string{"state": "awake", "sleep_reason": "", "slept_at": ""}); err != nil {
+		t.Fatalf("mark seat awake: %v", err)
+	}
+	clk := &clock.Fake{Time: e.now}
+
+	for i := 1; i <= 3; i++ {
+		_, stderr := e.cityTick(t, clk)
+		seat := e.get(t, e.seat.ID)
+		if seat.Status == "closed" {
+			t.Fatalf("tick %d: running seat closed (close_reason=%q); stderr=%q", i, seat.Metadata["close_reason"], stderr)
+		}
+		if got := seat.Metadata["state"]; got != "awake" && got != "active" {
+			t.Fatalf("tick %d: running seat state = %q, want it kept awake; stderr=%q", i, got, stderr)
+		}
+		if !e.sp.IsRunning(name) {
+			t.Fatalf("tick %d: running seat's runtime stopped; stderr=%q", i, stderr)
+		}
+		if got := e.get(t, e.claim.ID); got.Assignee != identity || got.Status != working {
+			t.Fatalf("tick %d: claim assignee=%q status=%q, want kept on %q and %s", i, got.Assignee, got.Status, identity, working)
+		}
+		clk.Advance(time.Minute)
+	}
+	if starts := fakeStartNames(e.sp); len(starts) != 1 {
+		t.Fatalf("session starts = %v, want only the fixture's own start", starts)
+	}
+}
