@@ -948,7 +948,15 @@ func claimHookWorkProvisioning(city *hookCity, workQuery, workDir string, queryE
 	// whatever is left on the way out (a release, a reclaim, a claim that
 	// stopped on an error).
 	defer ops.announceBeadEvents()
-	run := hookRigLegRunner(city.path, city.cfg, stores, shellWorkQueryWithEnv)
+	// The invocation window opens here, before the first read, so each read's
+	// subprocess is killed at the invocation's read deadline as well as at its
+	// own hookWorkQueryTimeout, whichever comes first.
+	ops.applyDefaults()
+	readCtx, cancelReads := ops.claimReadContext()
+	defer cancelReads()
+	run := hookRigLegRunner(city.path, city.cfg, stores, func(command, dir string, env []string) (string, error) {
+		return shellWorkQueryWithEnvContext(readCtx, command, dir, env)
+	})
 	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, run, emitFailure, stdout, stderr)
 }
 
@@ -997,6 +1005,9 @@ func routedHookClaimOps(base hookClaimOps, opened *hookClaimClassRoute, err erro
 func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, ops hookClaimOps, run hookStoreRunner, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
 	ops.applyDefaults()
 	ops.ClassRoute.observeWorkLegs(stores)
+	// Every read below shares the invocation's read budget, so found work
+	// always leaves the CAS its reserve inside the claim window.
+	run = newHookClaimReadGuard(&ops, run).read
 	// primary is the agent's own store (the first entry). It is captured once
 	// here, before the loop shrinks remaining: only the primary's error is
 	// surfaced as itself and emitted as this session's work-query failure. Once
@@ -1345,8 +1356,16 @@ var hookWorkQueryTimeout = 150 * time.Second
 // a short bounded interval so startup hooks cannot strand sessions behind a
 // wedged data-plane command.
 func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
+	return shellWorkQueryWithEnvContext(context.Background(), command, dir, env)
+}
+
+// shellWorkQueryWithEnvContext is shellWorkQueryWithEnv under parent: the query
+// is bounded by hookWorkQueryTimeout and by any deadline parent carries (the
+// claim path's invocation read deadline, claimReadContext), whichever comes
+// first, and its timeout error names which of the two fired.
+func shellWorkQueryWithEnvContext(parent context.Context, command, dir string, env []string) (string, error) {
 	if generated := generatedProgram(command); generated != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), hookWorkQueryTimeout)
+		ctx, cancel := context.WithTimeout(parent, hookWorkQueryTimeout)
 		defer cancel()
 		var stderr bytes.Buffer
 		out, err := generated(ctx, dir, execenv.WithUsageMetricsDisabled(workQueryEnvForDir(env, dir)), &stderr)
@@ -1355,7 +1374,7 @@ func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
 	if reason := runtime.ShellCommandUnavailable(command); reason != "" {
 		return "", fmt.Errorf("work query refused: %s", reason)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), hookWorkQueryTimeout)
+	ctx, cancel := context.WithTimeout(parent, hookWorkQueryTimeout)
 	defer cancel()
 	cmd, err := runtime.ShellCommandContext(ctx, command)
 	if err != nil {
@@ -1376,8 +1395,13 @@ func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
 
 // workQueryResult turns a finished work query's output and error into
 // shellWorkQueryWithEnv's result. ctx is the query's own, bounded by
-// hookWorkQueryTimeout.
+// hookWorkQueryTimeout and by its parent's deadline.
 func workQueryResult(ctx context.Context, command string, out []byte, stderr *bytes.Buffer, err error) (string, error) {
+	if ctx.Err() == context.DeadlineExceeded && errors.Is(context.Cause(ctx), errHookClaimReadBudgetSpent) {
+		// The parent's read deadline fired before the query's own timeout:
+		// the invocation's claim read budget ran out mid-read.
+		return "", fmt.Errorf("running work query %q: timed out after the invocation's claim read deadline, before its own %s timeout: %w", command, hookWorkQueryTimeout, context.Cause(ctx))
+	}
 	if ctx.Err() == context.DeadlineExceeded {
 		// Wrap context.DeadlineExceeded so callers can classify the timeout as
 		// transient (dispatch.IsTransientControllerError / errors.Is). Without
