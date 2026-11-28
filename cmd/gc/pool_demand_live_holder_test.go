@@ -199,3 +199,44 @@ func TestBuildDesiredState_RigPoolHigherPriorityQueuedWorkDoesNotTakeTheBusyHold
 		t.Fatalf("riga/worker desired sessions = %v, want the holder's own session_name among them", names)
 	}
 }
+
+// A dormant holder — asleep, drained or suspended — does not claim a live
+// runtime, so its city-store claim stays dropped: sessionBeadClaimsLiveRuntime
+// is the gate that keeps the widened arm from resuming a sleeping rig seat,
+// the reachability rule TestBuildDesiredState_RigPoolIgnoresAssignedWorkInUnreachableStore
+// pins and TestPoolDemandFilterUnchangedOnASingleStoreCity mirrors for the
+// template-scoped arm.
+func TestPoolDemandFilterStillDropsADormantHoldersCityStoreClaim(t *testing.T) {
+	for _, state := range []string{"asleep", "drained", "suspended"} {
+		t.Run(state, func(t *testing.T) {
+			kept, _ := liveHolderRows(t, state, []beads.Bead{routedPoolWorkBead()}, []string{""})
+			if len(kept) != 0 {
+				t.Fatalf("filtered work = %#v, want the %s holder's city-store claim still dropped", kept, state)
+			}
+		})
+	}
+}
+
+// A closed session resolves no assignee at all, so a claim recorded under its
+// identity is dropped exactly as before the widening.
+func TestPoolDemandFilterStillDropsAClosedHoldersCityStoreClaim(t *testing.T) {
+	cfg, cityPath, _ := rigScopedPoolDemandFixtureWithHolderState(t, "active")
+	seedNoRoutes(t, cityPath)
+	closed := []beads.Bead{{
+		ID:     "gcs-1",
+		Status: "closed",
+		Type:   sessionBeadType,
+		Metadata: map[string]string{
+			"template":     "riga/worker",
+			"session_name": "test-city--worker-1",
+			"state":        "active",
+			"pool_managed": "true",
+		},
+	}}
+
+	kept, _ := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, beads.NewMemStore(), sessionInfosFromBeads(closed), []beads.Bead{routedPoolWorkBead()}, []string{""})
+
+	if len(kept) != 0 {
+		t.Fatalf("filtered work = %#v, want the closed session's claim dropped", kept)
+	}
+}
