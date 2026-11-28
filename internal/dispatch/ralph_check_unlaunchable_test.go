@@ -532,3 +532,20 @@ func TestClearRetryEphemeraDropsControlPendingBudget(t *testing.T) {
 		t.Errorf("gc.routed_to = %q, want preserved", meta["gc.routed_to"])
 	}
 }
+
+// TestClearRetryEphemeraScrubsScopeAbortedBy pins that a retry or ralph clone of
+// a scope body whose abort was deferred does not start already aborted.
+func TestClearRetryEphemeraScrubsScopeAbortedBy(t *testing.T) {
+	t.Parallel()
+	meta := map[string]string{
+		"gc.scope_aborted_by": "ga-failed-member",
+		"gc.scope_role":       "body",
+	}
+	clearRetryEphemera(meta)
+	if v, ok := meta["gc.scope_aborted_by"]; ok {
+		t.Errorf("gc.scope_aborted_by = %q survived clearRetryEphemera", v)
+	}
+	if meta["gc.scope_role"] != "body" {
+		t.Errorf("gc.scope_role = %q, want preserved", meta["gc.scope_role"])
+	}
+}

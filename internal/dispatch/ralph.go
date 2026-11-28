@@ -1518,6 +1518,9 @@ func clearRetryEphemera(meta map[string]string) {
 		// of the stamp: a binding restore would look for it in the store the
 		// row came from, which never held it, and refuse.
 		beadmeta.InfraMigratedFromMetadataKey,
+		// A deferred scope abort belongs to the body it decided; a clone of
+		// that body is a fresh iteration and must not start already aborted.
+		beadmeta.ScopeAbortedByMetadataKey,
 		"review.verdict",
 		"design_review.verdict",
 		"code_review.verdict",
