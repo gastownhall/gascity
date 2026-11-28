@@ -141,9 +141,14 @@ func assignedWorkIndexReachableFromAgent(cityPath string, cfg *config.City, agen
 // symptom is a session that dies holding a claim and is never replaced.
 //
 // claimRefs must come from assignedWorkRelocatedClaimRefs, which answers empty
-// for a city that relocates nothing: the widening covers relocated class
-// bindings only, never another rig's ref, so rig isolation and every
-// single-store city are exactly what they were.
+// for a city that relocates nothing: the widening this test expresses covers
+// relocated class bindings only, never another rig's ref. A live
+// exact-assignee holder's own claim is the one widening that goes further —
+// over the full claim-ref set (assignedWorkClaimRefs), the demand-side twin
+// of the wake filter's ownership arm — and it lives in
+// filterAssignedWorkBeadsForPoolDemandAt, gated on the holder's own identity
+// and a live runtime, because a template-scoped reach test cannot express it
+// without making rig isolation vacuous.
 func assignedWorkIndexReachableFromAgentOnClaimRefs(
 	cityPath string,
 	cfg *config.City,
@@ -187,13 +192,14 @@ func filterAssignedWorkBeadsForPoolDemand(
 		return assignedWorkBeads, assignedWorkStoreRefs
 	}
 	claimRefs := assignedWorkRelocatedClaimRefs(cityPath, cfg, leading)
-	return filterAssignedWorkBeadsForPoolDemandAt(cfg, cityPath, claimRefs, sessionInfos, assignedWorkBeads, assignedWorkStoreRefs, time.Now().UTC())
+	holderClaimRefs := assignedWorkClaimRefs(cityPath, cfg, leading)
+	return filterAssignedWorkBeadsForPoolDemandAt(cfg, cityPath, claimRefs, holderClaimRefs, sessionInfos, assignedWorkBeads, assignedWorkStoreRefs, time.Now().UTC())
 }
 
 // filterAssignedWorkBeadsForPoolDemandAt is filterAssignedWorkBeadsForPoolDemand
-// with the claim refs (assignedWorkRelocatedClaimRefs) resolved and the clock
-// read by the caller, so it does no I/O: the v2 allocator calls it inside its
-// pure pass.
+// with the claim refs (assignedWorkRelocatedClaimRefs and
+// assignedWorkClaimRefs) resolved and the clock read by the caller, so it does
+// no I/O: the v2 allocator calls it inside its pure pass.
 //
 // It returns the kept beads plus their store refs, index-aligned, so the
 // caller can resolve store-scoped wake-demand readiness
@@ -204,6 +210,7 @@ func filterAssignedWorkBeadsForPoolDemandAt(
 	cfg *config.City,
 	cityPath string,
 	claimRefs []string,
+	holderClaimRefs []string,
 	sessionInfos []sessionpkg.Info,
 	assignedWorkBeads []beads.Bead,
 	assignedWorkStoreRefs []string,
@@ -215,9 +222,9 @@ func filterAssignedWorkBeadsForPoolDemandAt(
 	if cfg == nil {
 		return assignedWorkBeads, assignedWorkStoreRefs
 	}
-	assigneeToSessionBeadID := make(map[string]string)
+	assigneeToSessionIndex := make(map[string]int)
 	sessionBeadTemplate := make(map[string]string)
-	for _, sb := range sessionInfos {
+	for idx, sb := range sessionInfos {
 		if sb.Closed {
 			continue
 		}
@@ -229,8 +236,16 @@ func filterAssignedWorkBeadsForPoolDemandAt(
 			sessionBeadTemplate[sb.ID] = template
 		}
 		for _, id := range sessionBeadAssigneeIdentitiesInfo(sb) {
-			assigneeToSessionBeadID[id] = sb.ID
+			assigneeToSessionIndex[id] = idx
 		}
+	}
+	holderOwnsRef := func(ref string) bool {
+		for _, holderRef := range holderClaimRefs {
+			if ref == holderRef {
+				return true
+			}
+		}
+		return false
 	}
 	filtered := make([]beads.Bead, 0, len(assignedWorkBeads))
 	filteredRefs := make([]string, 0, len(assignedWorkStoreRefs))
@@ -252,8 +267,8 @@ func filterAssignedWorkBeadsForPoolDemandAt(
 		}
 		template := routedToOrLegacyWorkflowTarget(wb)
 		if template == "" {
-			if sessionBeadID := assigneeToSessionBeadID[strings.TrimSpace(wb.Assignee)]; sessionBeadID != "" {
-				template = sessionBeadTemplate[sessionBeadID]
+			if idx, ok := assigneeToSessionIndex[strings.TrimSpace(wb.Assignee)]; ok {
+				template = sessionBeadTemplate[sessionInfos[idx].ID]
 				if template == "" && len(cfg.Agents) == 1 {
 					template = cfg.Agents[0].QualifiedName()
 				}
@@ -272,6 +287,44 @@ func filterAssignedWorkBeadsForPoolDemandAt(
 		if assignedWorkIndexReachableFromAgentOnClaimRefs(cityPath, cfg, agentCfg, assignedWorkStoreRefs, i, claimRefs) {
 			filtered = append(filtered, wb)
 			filteredRefs = append(filteredRefs, assignedWorkStoreRefs[i])
+			continue
+		}
+		// A LIVE holder's own claim stays demand wherever the wake filter
+		// accepts it for that holder (ga-6ab279). The reach test above widens
+		// only over relocated bindings, so on a city that relocates nothing it
+		// drops a rig-pool session's in-progress claim on a city-store bead —
+		// while the wake filter accepts the same claim through the same
+		// assignee identity, the holder counts as idle, and the queued bead's
+		// tier=new request is realized onto the busy session. The checks are
+		// ordered cheap-first and each is load-bearing:
+		//
+		//   - the row's ref must be one a claim held by one identity can be
+		//     recorded under (holderClaimRefs): another rig's ref never
+		//     qualifies, so rig isolation is untouched;
+		//   - the assignee must resolve to an open session's own exact
+		//     identity, never the template key, so unassigned work and
+		//     template-identity assignments grant nothing;
+		//   - that session's template must be the template the bead routes to
+		//     (the same test the resume tier applies), so a kept row always
+		//     yields a resume request instead of being kept and then skipped;
+		//   - the session must claim a live runtime, so an asleep holder is
+		//     still not resumed by city-store work.
+		//
+		// The liveness projection runs only for a row that already passed the
+		// first two, keeping the common path allocation-free. A row beyond the
+		// ref slice has no ref of its own and stays dropped, as the reach test
+		// already ruled.
+		if i < len(assignedWorkStoreRefs) && holderOwnsRef(assignedWorkStoreRefs[i]) {
+			if idx, ok := assigneeToSessionIndex[strings.TrimSpace(wb.Assignee)]; ok {
+				sessionTemplate := sessionBeadTemplate[sessionInfos[idx].ID]
+				if sessionTemplate != "" && !agentTemplateIdentitiesEquivalent(cfg, agentCfg.QualifiedName(), sessionTemplate) {
+					continue
+				}
+				if sessionBeadClaimsLiveRuntime(sessionInfos[idx]) {
+					filtered = append(filtered, wb)
+					filteredRefs = append(filteredRefs, assignedWorkStoreRefs[i])
+				}
+			}
 		}
 	}
 	return filtered, filteredRefs

@@ -91,11 +91,16 @@ func assignedWorkClaimRefs(cityPath string, cfg *config.City, leading beads.Stor
 //
 // The wake filter can take the unconditional set because it matches a session's
 // own exact assignee identity, so a wider ref set still admits only that
-// session's own claims. Pool demand matches a routed TEMPLATE, so the same set
-// would make city-store work resume a rig-scoped pool session on a city that
+// session's own claims. Pool demand matches a routed TEMPLATE, so the
+// template-scoped reach test takes only this narrowed set: through it,
+// city-store work still does not reach a rig-scoped pool on a city that
 // relocates nothing — the reachability rule
-// TestBuildDesiredState_RigPoolIgnoresAssignedWorkInUnreachableStore pins, and
-// the reason this is a second function rather than a second caller of the first.
+// TestBuildDesiredState_RigPoolIgnoresAssignedWorkInUnreachableStore pins,
+// and the reason this is a second function rather than a second caller of the
+// first. A live holder's OWN exact-assignee claim is the one demand-side row
+// that may cross that line (ga-6ab279): the pool-demand filter widens it over
+// assignedWorkClaimRefs, gated on the holder's identity and a live runtime,
+// so a dormant holder and every template-matched row stay behind it.
 //
 // On a city that DOES relocate, the collapse inside ClaimRefs is what makes the
 // answer right on both planes: a leading arm that is itself the binding reports

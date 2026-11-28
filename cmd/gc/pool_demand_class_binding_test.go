@@ -32,6 +32,13 @@ import (
 // matches.
 
 func rigScopedPoolDemandFixture(t *testing.T) (*config.City, string, []sessionpkg.Info) {
+	return rigScopedPoolDemandFixtureWithHolderState(t, "asleep")
+}
+
+// rigScopedPoolDemandFixtureWithHolderState is the same city with the holder
+// row's state set, so the live-holder rows can reach the arm the asleep
+// default cannot.
+func rigScopedPoolDemandFixtureWithHolderState(t *testing.T, holderState string) (*config.City, string, []sessionpkg.Info) {
 	t.Helper()
 	cityPath := t.TempDir()
 	cfg := &config.City{
@@ -52,7 +59,7 @@ func rigScopedPoolDemandFixture(t *testing.T) (*config.City, string, []sessionpk
 		Metadata: map[string]string{
 			"template":     "riga/worker",
 			"session_name": "test-city--worker-1",
-			"state":        "asleep",
+			"state":        holderState,
 			"pool_managed": "true",
 		},
 	}}

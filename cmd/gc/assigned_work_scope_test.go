@@ -1103,7 +1103,7 @@ func TestFilterAssignedWorkBeadsForPoolDemandReturnsAlignedStoreRefs(t *testing.
 	t.Run("interleaved kept and dropped rows", func(t *testing.T) {
 		work := []beads.Bead{routed("a"), deferred, routed("b"), unroutable, routed("c")}
 		refs := []string{"", "riga", "riga", "rigb", "rigb"}
-		got, gotRefs := filterAssignedWorkBeadsForPoolDemandAt(cfg, "", nil, nil, work, refs, now)
+		got, gotRefs := filterAssignedWorkBeadsForPoolDemandAt(cfg, "", nil, nil, nil, work, refs, now)
 		if ids := beadIDs(got); !slices.Equal(ids, []string{"a", "b", "c"}) {
 			t.Fatalf("kept IDs = %v, want [a b c]", ids)
 		}
@@ -1112,14 +1112,14 @@ func TestFilterAssignedWorkBeadsForPoolDemandReturnsAlignedStoreRefs(t *testing.
 		}
 	})
 	t.Run("short refs drop the uncovered row", func(t *testing.T) {
-		got, gotRefs := filterAssignedWorkBeadsForPoolDemandAt(cfg, "", nil, nil, []beads.Bead{routed("a"), routed("b")}, []string{"riga"}, now)
+		got, gotRefs := filterAssignedWorkBeadsForPoolDemandAt(cfg, "", nil, nil, nil, []beads.Bead{routed("a"), routed("b")}, []string{"riga"}, now)
 		if ids := beadIDs(got); !slices.Equal(ids, []string{"a"}) || !slices.Equal(gotRefs, []string{"riga"}) {
 			t.Fatalf("kept = %v refs %q, want [a] [riga]", ids, gotRefs)
 		}
 	})
 	t.Run("no refs pass rows through unresolved", func(t *testing.T) {
 		work := []beads.Bead{routed("a")}
-		got, gotRefs := filterAssignedWorkBeadsForPoolDemandAt(cfg, "", nil, nil, work, nil, now)
+		got, gotRefs := filterAssignedWorkBeadsForPoolDemandAt(cfg, "", nil, nil, nil, work, nil, now)
 		if len(got) != 1 || len(gotRefs) != 0 {
 			t.Fatalf("kept = %v refs %q, want the row with no refs", beadIDs(got), gotRefs)
 		}
@@ -1183,7 +1183,7 @@ func TestFreshWakeDemandUsesEachRowsOwnStoreReadiness(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			readyAssigned := map[storeScopedBeadKey]bool{{StoreRef: tc.readyRef, ID: "step-1"}: true}
-			kept, keptRefs := filterAssignedWorkBeadsForPoolDemandAt(cfg, "", nil, sessions, tc.work, tc.refs, now)
+			kept, keptRefs := filterAssignedWorkBeadsForPoolDemandAt(cfg, "", nil, nil, sessions, tc.work, tc.refs, now)
 			flags := readyAssignedFlagsForBeads(readyAssigned, kept, keptRefs)
 			if !slices.Equal(flags, tc.wantFlags) {
 				t.Fatalf("flags = %v, want %v", flags, tc.wantFlags)

@@ -266,7 +266,7 @@ func (p *decidePass) computePoolDesired() {
 		rows = append(slices.Clip(p.decidable), standIns...)
 	}
 	var poolWorkRefs []string
-	p.poolWork, poolWorkRefs = filterAssignedWorkBeadsForPoolDemandAt(p.cfg, p.in.CityPath, p.in.Demand.RelocatedClaimRefs,
+	p.poolWork, poolWorkRefs = filterAssignedWorkBeadsForPoolDemandAt(p.cfg, p.in.CityPath, p.in.Demand.RelocatedClaimRefs, nil,
 		rows, p.in.Demand.AssignedWork, p.in.Demand.AssignedStoreRefs, p.in.Now.UTC())
 	poolWorkReady := readyAssignedFlagsForBeads(p.in.Demand.ReadyAssigned, p.poolWork, poolWorkRefs)
 	poolCfg := p.cfg
