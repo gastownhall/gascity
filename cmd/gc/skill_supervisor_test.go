@@ -1250,3 +1250,132 @@ func TestRunStage1CleansRemovedSkills(t *testing.T) {
 		t.Errorf("code-review symlink should remain: %v", err)
 	}
 }
+
+// workDirWriterCity is a city whose city-root claude sink has two
+// writers: city agent m (scope root = the city, agent-local notes) and rig
+// agent r of rig fe with work_dir = "{{.CityRoot}}" (agent-local
+// rig-notes, plus rig fe's shared skill rp.rig-plan). Both write
+// <city>/.claude/skills: m through stage 1, r through its session's
+// stage 2.
+type workDirWriterCity struct {
+	cityPath, rigPath string
+	mNotes, rNotes    string
+	cfg               *config.City
+}
+
+func newWorkDirWriterCity(t *testing.T) workDirWriterCity {
+	t.Helper()
+	clearGCEnv(t)
+	cityPath := t.TempDir()
+	t.Setenv("GC_HOME", t.TempDir())
+	rigPath := filepath.Join(cityPath, "rigs", "fe")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeSkillSource(t, filepath.Join(cityPath, "skills", "plan"))
+	rigPackSkills := filepath.Join(cityPath, "assets", "rp", "skills")
+	writeSkillSource(t, filepath.Join(rigPackSkills, "rig-plan"))
+	mSkills := filepath.Join(cityPath, "agents", "m", "skills")
+	writeSkillSource(t, filepath.Join(mSkills, "notes"))
+	rSkills := filepath.Join(cityPath, "agents", "r", "skills")
+	writeSkillSource(t, filepath.Join(rSkills, "rig-notes"))
+	workDir := "{{.CityRoot}}"
+	return workDirWriterCity{
+		cityPath: cityPath,
+		rigPath:  rigPath,
+		mNotes:   filepath.Join(mSkills, "notes"),
+		rNotes:   filepath.Join(rSkills, "rig-notes"),
+		cfg: &config.City{
+			Workspace:     config.Workspace{Name: "test-city"},
+			PackSkillsDir: filepath.Join(cityPath, "skills"),
+			RigPackSkills: map[string][]config.DiscoveredSkillCatalog{
+				"fe": {{SourceDir: rigPackSkills, PackName: "rp", BindingName: "rp"}},
+			},
+			Session: config.SessionConfig{Provider: "tmux"},
+			Rigs:    []config.Rig{{Name: "fe", Path: rigPath}},
+			Agents: []config.Agent{
+				{Name: "m", Scope: "city", Provider: "claude", SkillsDir: mSkills},
+				{Name: "r", Scope: "rig", Dir: "fe", Provider: "claude", SkillsDir: rSkills, WorkDir: workDir},
+			},
+		},
+	}
+}
+
+func (c workDirWriterCity) agent(t *testing.T, name string) *config.Agent {
+	t.Helper()
+	for i := range c.cfg.Agents {
+		if c.cfg.Agents[i].Name == name {
+			return &c.cfg.Agents[i]
+		}
+	}
+	t.Fatalf("agent %q not configured", name)
+	return nil
+}
+
+func (c workDirWriterCity) citySink() string {
+	return filepath.Join(c.cityPath, ".claude", "skills")
+}
+
+// stage2 runs agent name's per-session pass into workdir, as its PreStart
+// does.
+func (c workDirWriterCity) stage2(t *testing.T, name, workdir string) {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	if err := materializeSkillsIntoWorkdir(c.cfg, c.agent(t, name), c.cityPath, workdir, nil, &stdout, &stderr); err != nil {
+		t.Fatalf("stage 2 for %s into %s: %v; stderr=%q", name, workdir, err, stderr.String())
+	}
+}
+
+func requireSinkLinks(t *testing.T, sink, when string, present, absent []string) {
+	t.Helper()
+	for _, name := range present {
+		if _, err := os.Lstat(filepath.Join(sink, name)); err != nil {
+			t.Errorf("%s: %s missing from %s: %v", when, name, sink, err)
+		}
+	}
+	for _, name := range absent {
+		if _, err := os.Lstat(filepath.Join(sink, name)); !os.IsNotExist(err) {
+			t.Errorf("%s: %s still in %s (lstat err=%v)", when, name, sink, err)
+		}
+	}
+}
+
+// TestStage1KeepsWorkDirWriterSkillsInScopeRootSink: r's session writes
+// its skills into the city root's sink through stage 2, and the city
+// root's next stage-1 pass must count r as one of that sink's writers
+// rather than prune r's links through the ownership manifest.
+func TestStage1KeepsWorkDirWriterSkillsInScopeRootSink(t *testing.T) {
+	c := newWorkDirWriterCity(t)
+	c.stage2(t, "r", c.cityPath)
+	requireSinkLinks(t, c.citySink(), "after r's stage 2", []string{"rig-notes", "rp.rig-plan", "plan"}, nil)
+
+	var stderr bytes.Buffer
+	if err := runStage1SkillMaterialization(c.cityPath, c.cfg, &stderr); err != nil {
+		t.Fatalf("stage 1: %v", err)
+	}
+	requireSinkLinks(t, c.citySink(), "after stage 1", []string{"rig-notes", "rp.rig-plan", "notes", "plan"}, nil)
+	if t.Failed() {
+		t.Logf("stage-1 stderr: %s", stderr.String())
+	}
+}
+
+// TestStage1PrunesDepartedWorkDirWriterLinks: once r's work_dir moves to
+// its rig root, r no longer writes the city root's sink, so the city
+// root's stage-1 pass prunes r's links there and keeps m's.
+func TestStage1PrunesDepartedWorkDirWriterLinks(t *testing.T) {
+	c := newWorkDirWriterCity(t)
+	c.stage2(t, "r", c.cityPath)
+	var stderr bytes.Buffer
+	if err := runStage1SkillMaterialization(c.cityPath, c.cfg, &stderr); err != nil {
+		t.Fatalf("stage 1: %v", err)
+	}
+	requireSinkLinks(t, c.citySink(), "before the move", []string{"rig-notes", "rp.rig-plan", "notes", "plan"}, nil)
+
+	rigRoot := "{{.RigRoot}}"
+	c.agent(t, "r").WorkDir = rigRoot
+	if err := runStage1SkillMaterialization(c.cityPath, c.cfg, &stderr); err != nil {
+		t.Fatalf("stage 1 after the move: %v", err)
+	}
+	requireSinkLinks(t, c.citySink(), "after r moved to its rig root", []string{"notes", "plan"}, []string{"rig-notes", "rp.rig-plan"})
+	requireSinkLinks(t, filepath.Join(c.rigPath, ".claude", "skills"), "r's own sink", []string{"rig-notes", "rp.rig-plan"}, nil)
+}
