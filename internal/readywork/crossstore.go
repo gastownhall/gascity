@@ -380,12 +380,18 @@ func judgeEdge(leg Leg, stranding, stranded bool, id string, dep beads.Dep) (str
 	}
 }
 
-// OwnVerdictStands reports whether the cross-store rule settles row id of leg,
-// whose edges are deps, by leg's own ready verdict alone: leg is a class
-// binding whose store strands absent targets, and every blocking edge names a
-// target in its own reserved namespace, which no other store holds. The gate
-// (LegGate.Gate) then verifies nothing for the row and serves it exactly when
-// leg's own Ready does.
+// OwnVerdictStands reports whether the gate settles row of leg, whose edges
+// are deps, by leg's own ready verdict alone. The cross-store rule settles it
+// so when leg is a class binding whose store strands absent targets and every
+// blocking edge names a target in its own reserved namespace, which no other
+// store holds. Input admission settles it so when judging the row reads no
+// input (inputadmission.ReadsInput): the row is not subject to it, or its
+// workflow root, which root finds by id in leg's store, names no input convoy.
+// A root that names one keeps the row with the federation, because the
+// convoy and its members live in whichever store the input does (on a split
+// city, the work store, not the binding), and so does a root root cannot
+// find (#8832). The gate (LegGate.Gate) then verifies nothing for the row and
+// serves it exactly when leg's own Ready does.
 //
 // held says which targets the caller's verdict judged. A reader standing in
 // for leg's Ready (a cache, whose readiness reads a target it does not hold
@@ -394,10 +400,14 @@ func judgeEdge(leg Leg, stranding, stranded bool, id string, dep beads.Dep) (str
 // the store's own verdict, which judged every target. A capability-ref edge
 // keeps the row with the federation too: the store strands the row behind it
 // and the gate serves the row from its absent-blocker listing.
-func OwnVerdictStands(leg Leg, id string, deps []beads.Dep, held func(id string) bool) bool {
+func OwnVerdictStands(leg Leg, row beads.Bead, deps []beads.Dep, held func(id string) bool, root func(id string) (beads.Bead, bool)) bool {
 	if !leg.ClassBinding || leg.Store == nil || !strands(leg) {
 		return false
 	}
+	if inputadmission.ReadsInput(row, root) {
+		return false
+	}
+	id := row.ID
 	for _, dep := range deps {
 		target, need := judgeEdge(leg, true, false, id, dep)
 		switch need {
@@ -610,10 +620,11 @@ func blockerStatuses(ctx context.Context, cs *crossStore, legs []Leg, own int, t
 }
 
 // LegGate applies the ready reader's row gate to ready rows read one leg at a
-// time (pool demand, the API's cached ready read). On a split city, to the rows
-// one leg served from its own Ready it adds the rows that leg strands behind an
-// absent blocker (its query selects them as Ready would), and it drops every
-// row a blocker holds. On every city it drops every row native input admission
+// time (pool demand on every city, and the API's cached ready read, which
+// applies it on a split city only). On a split city, to the rows one leg
+// served from its own Ready it adds the rows that leg strands behind an absent
+// blocker (its query selects them as Ready would), and it drops every row a
+// blocker holds. On every city it drops every row native input admission
 // withholds (internal/inputadmission). A nil *LegGate returns every row as
 // read.
 //
@@ -674,17 +685,6 @@ func (g *LegGate) Gate(ctx context.Context, own int, rows []beads.Bead) ([]beads
 		items = g.cs.mergeStranded(own, listed.rows, items, owners)
 	}
 	return g.rows.gate(ctx, owners, items, 0)
-}
-
-// Withheld returns the rows input admission has withheld in this gate's
-// judgments so far, keyed by row id: the recording a demand pass keeps beside
-// its gated reads, so its wake and keep-awake counting refuse the same rows
-// the reader did.
-func (g *LegGate) Withheld() map[string]inputadmission.Withhold {
-	if g == nil {
-		return nil
-	}
-	return g.rows.withheldRows()
 }
 
 // listing reads legs[own]'s absent-blocker listing, once for the gate's life.

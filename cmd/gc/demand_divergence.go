@@ -145,14 +145,16 @@ func classifyDemandTrigger(triggerID, dir string, opts hookClaimOptions, ops hoo
 	// #8832: a withheld trigger is the same proof a held row is — the hook
 	// refuses it on every path — judged through the claim path's own seam. A
 	// failed judgment is a failed read of the trigger: it classifies unknown
-	// rather than manufacturing either verdict.
+	// rather than manufacturing either verdict. A trigger the seam leaves
+	// unresolved is not withheld: the hook takes the federated reader's
+	// verdict on it, the one the controller counted it by.
 	withheld := false
 	if ops.InputAdmission != nil {
 		verdicts, err := ops.InputAdmission(ctx, dir, opts.Env, []beads.Bead{bead})
 		if err != nil {
 			return demandTriggerUnreadable, events.DemandClaimUnknown
 		}
-		_, withheld = verdicts[triggerID]
+		_, withheld = verdicts.Withheld[triggerID]
 	}
 	switch classifyDemandRowClaimability(bead, ops.nowOrWallClock(), withheld) {
 	case demandRowClaimable:

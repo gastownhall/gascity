@@ -2,8 +2,6 @@ package readywork
 
 import (
 	"context"
-	"maps"
-	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -18,30 +16,15 @@ type rowGate struct {
 	legs  []Leg
 	cs    *crossStore
 	judge *inputadmission.Judge
-
-	// withheld records every row input admission withheld over the gate's
-	// life, with its verdict, for the demand pass that reports them
-	// (LegGate.Withheld).
-	mu       sync.Mutex
-	withheld map[string]inputadmission.Withhold
 }
 
 // newRowGate returns the gate for one read over legs, judging deferral at now.
 func newRowGate(legs []Leg, cs *crossStore, now time.Time) *rowGate {
 	return &rowGate{
-		legs:     legs,
-		cs:       cs,
-		judge:    inputadmission.New(admissionSources(legs), now),
-		withheld: make(map[string]inputadmission.Withhold),
+		legs:  legs,
+		cs:    cs,
+		judge: inputadmission.New(admissionSources(legs), now),
 	}
-}
-
-// withheldRows returns a copy of every row input admission has withheld over
-// the gate's life, keyed by row id.
-func (g *rowGate) withheldRows() map[string]inputadmission.Withhold {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return maps.Clone(g.withheld)
 }
 
 // legIndex returns the index of the leg serving store, or -1.
@@ -79,12 +62,9 @@ func (g *rowGate) heldRows(ctx context.Context, own int, rows []beads.Bead) (map
 	if err != nil {
 		return nil, err
 	}
-	g.mu.Lock()
-	for id, w := range withheld {
+	for id := range withheld {
 		held[id] = true
-		g.withheld[id] = w
 	}
-	g.mu.Unlock()
 	return held, nil
 }
 
@@ -138,33 +118,57 @@ func (g *rowGate) gate(ctx context.Context, owners map[string]int, items []beads
 	return kept, nil
 }
 
-// InputWithheld judges rows, one leg's assigned rows read live by a controller
-// probe, for input admission over that leg's store alone, and returns the
-// withheld row ids (#8832). The hook's claim path refuses a withheld row, so a
-// wake, keep-awake, park or ladder probe that counts it as work holds a session
-// for work it cannot claim. The verdict is the rule the ready reader applies,
-// read live.
+// InputJudge judges rows a reader holds outside a gated read — a controller
+// probe's live read of one seat's work — for input admission over legs, the
+// stores the city's ready reader federates (#8832): the rule `gc ready` and
+// the demand gate apply, over the same stores. A probe that judged over the
+// store it read the row from alone would miss a split city's relation (the
+// root and its steps in the binding, the input convoy and its members in the
+// work store) and count as work a step the hook refuses.
 //
-// A leg with a nil store, no rows, or a judgment that fails withholds nothing:
-// the probe keeps its ungated answer rather than failing a seat decision from a
-// read hiccup, the never-under-count rule the demand pass's gate applies
-// (PartialResultError there, a conservative answer here).
-func InputWithheld(leg Leg, rows []beads.Bead) map[string]bool {
-	if leg.Store == nil || len(rows) == 0 {
-		return nil
+// An InputJudge memoizes every root, convoy and stopped-workflow verdict it
+// reads for its life: build one per controller pass and never keep it across
+// passes. It is safe for concurrent use.
+type InputJudge struct {
+	legs  []Leg
+	judge *inputadmission.Judge
+}
+
+// NewInputJudge returns a judge over legs, judging deferral at now. Nil legs
+// (a topology that could not be planned) judge nothing.
+func NewInputJudge(legs []Leg, now time.Time) *InputJudge {
+	return &InputJudge{legs: legs, judge: inputadmission.New(admissionSources(legs), now)}
+}
+
+// Withheld returns which of rows, read from store, input admission withholds,
+// keyed by row id with each verdict. A workflow root is looked up first in the
+// leg over the same store (beads.SameStore, which sees through class handles);
+// a store that is none of the legs, or nil, is read through the legs alone.
+// A read that fails fails the call, naming the bead and the store, and a nil
+// judge withholds nothing.
+func (j *InputJudge) Withheld(ctx context.Context, store beads.StoreReader, rows []beads.Bead) (map[string]inputadmission.Withhold, error) {
+	if j == nil || len(rows) == 0 {
+		return nil, nil
 	}
-	label := leg.Label
-	if label == "" {
-		label = "assigned"
+	own := -1
+	for i, leg := range j.legs {
+		if leg.Store != nil && store != nil && beads.SameStore(leg.Store, store) {
+			own = i
+			break
+		}
 	}
-	judge := inputadmission.New([]inputadmission.Source{{Label: label, Reader: leg.Store}}, time.Now())
-	verdicts, err := judge.Judge(context.Background(), 0, rows)
-	if err != nil || len(verdicts) == 0 {
-		return nil
+	return j.judge.Judge(ctx, own, rows)
+}
+
+// JudgeInput judges rows, which legs[own] holds, for input admission with the
+// gate's own judge, so a reader that needs verdicts on rows beyond the ready
+// ones it gated (the controller's assigned open rows) reads each root, convoy
+// and stopped workflow once for the gate's life. It returns the withheld rows
+// keyed by id with each verdict; a failed read fails the call, naming the bead
+// and the store. An own outside the legs withholds nothing.
+func (g *LegGate) JudgeInput(ctx context.Context, own int, rows []beads.Bead) (map[string]inputadmission.Withhold, error) {
+	if g == nil || own < 0 || own >= len(g.legs) || len(rows) == 0 {
+		return nil, nil
 	}
-	withheld := make(map[string]bool, len(verdicts))
-	for id := range verdicts {
-		withheld[id] = true
-	}
-	return withheld
+	return g.rows.judge.Judge(ctx, own, rows)
 }

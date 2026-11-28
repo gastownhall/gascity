@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "inputadmission",
@@ -42,4 +42,17 @@ filegroup(
         allow_empty = True,
     ),
     visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "inputadmission_test",
+    srcs = [
+        "inputadmission_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":inputadmission"],
+    deps = [
+        "//internal/beads",
+        "//internal/testenv",
+    ],
 )

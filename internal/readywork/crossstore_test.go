@@ -1095,28 +1095,50 @@ func TestOwnVerdictStandsExactlyWhereTheGateKeepsTheBindingsVerdict(t *testing.T
 	dep := func(to, depType string) beads.Dep {
 		return beads.Dep{IssueID: "gcg-1", DependsOnID: to, Type: depType}
 	}
+	step := beads.Bead{ID: "gcg-1", Status: "open", Metadata: map[string]string{"gc.root_bead_id": "gcg-9"}}
+	inputRoot := map[string]beads.Bead{"gcg-9": {ID: "gcg-9", Status: "open", Metadata: map[string]string{"gc.input_convoy_id": "gc-7"}}}
+	plainRoot := map[string]beads.Bead{"gcg-9": {ID: "gcg-9", Status: "open"}}
 	for _, tc := range []struct {
-		name string
-		leg  Leg
-		deps []beads.Dep
-		held func(string) bool
-		want bool
+		name  string
+		leg   Leg
+		deps  []beads.Dep
+		held  func(string) bool
+		want  bool
+		row   beads.Bead
+		roots map[string]beads.Bead
 	}{
-		{"no edges", graph, nil, held(), true},
-		{"in-namespace target the verdict judged", graph, []beads.Dep{dep("gcg-2", "blocks")}, held("gcg-2"), true},
-		{"in-namespace waits-for and conditional-blocks", graph, []beads.Dep{dep("gcg-2", "waits-for"), dep("gcg-3", "conditional-blocks")}, held("gcg-2", "gcg-3"), true},
-		{"the store's own verdict, which judged every target", graph, []beads.Dep{dep("gcg-2", "blocks")}, nil, true},
-		{"self edge", graph, []beads.Dep{dep("gcg-1", "blocks")}, held(), true},
-		{"non-blocking edges to foreign targets", graph, []beads.Dep{dep("gc-1", "parent-child"), dep("gc-2", "relates-to")}, held(), true},
-		{"in-namespace target the verdict did not judge", graph, []beads.Dep{dep("gcg-2", "blocks")}, held(), false},
-		{"foreign target", graph, []beads.Dep{dep("gc-1", "blocks")}, held("gc-1"), false},
-		{"external: ref to an in-namespace bead", graph, []beads.Dep{dep("external:gcg-2", "blocks")}, held("gcg-2"), false},
-		{"capability ref", graph, []beads.Dep{dep("external:rig:capability", "blocks")}, held(), false},
-		{"one foreign target among in-namespace ones", graph, []beads.Dep{dep("gcg-2", "blocks"), dep("gc-1", "waits-for")}, held("gcg-2", "gc-1"), false},
-		{"a work leg", legs[0], nil, held(), false},
-		{"a binding whose store strands nothing", Leg{Label: "graph", Store: strandsNothing{binding}, ClassBinding: true, ReservedPrefixes: []string{"gcg"}}, nil, held(), false},
+		{"no edges", graph, nil, held(), true, beads.Bead{}, nil},
+		{"in-namespace target the verdict judged", graph, []beads.Dep{dep("gcg-2", "blocks")}, held("gcg-2"), true, beads.Bead{}, nil},
+		{"in-namespace waits-for and conditional-blocks", graph, []beads.Dep{dep("gcg-2", "waits-for"), dep("gcg-3", "conditional-blocks")}, held("gcg-2", "gcg-3"), true, beads.Bead{}, nil},
+		{"the store's own verdict, which judged every target", graph, []beads.Dep{dep("gcg-2", "blocks")}, nil, true, beads.Bead{}, nil},
+		{"self edge", graph, []beads.Dep{dep("gcg-1", "blocks")}, held(), true, beads.Bead{}, nil},
+		{"non-blocking edges to foreign targets", graph, []beads.Dep{dep("gc-1", "parent-child"), dep("gc-2", "relates-to")}, held(), true, beads.Bead{}, nil},
+		{"in-namespace target the verdict did not judge", graph, []beads.Dep{dep("gcg-2", "blocks")}, held(), false, beads.Bead{}, nil},
+		{"foreign target", graph, []beads.Dep{dep("gc-1", "blocks")}, held("gc-1"), false, beads.Bead{}, nil},
+		{"external: ref to an in-namespace bead", graph, []beads.Dep{dep("external:gcg-2", "blocks")}, held("gcg-2"), false, beads.Bead{}, nil},
+		{"capability ref", graph, []beads.Dep{dep("external:rig:capability", "blocks")}, held(), false, beads.Bead{}, nil},
+		{"one foreign target among in-namespace ones", graph, []beads.Dep{dep("gcg-2", "blocks"), dep("gc-1", "waits-for")}, held("gcg-2", "gc-1"), false, beads.Bead{}, nil},
+		{"a work leg", legs[0], nil, held(), false, beads.Bead{}, nil},
+		{"a binding whose store strands nothing", Leg{Label: "graph", Store: strandsNothing{binding}, ClassBinding: true, ReservedPrefixes: []string{"gcg"}}, nil, held(), false, beads.Bead{}, nil},
+		// Input admission (#8832): the input's convoy and members live where
+		// the input does, so only the federation can judge a step whose
+		// workflow names one.
+		{"a step whose root names no input convoy", graph, nil, held(), true, step, plainRoot},
+		{"a step whose root names an input convoy", graph, nil, held(), false, step, inputRoot},
+		{"a step whose root the reader cannot find", graph, nil, held(), false, step, nil},
+		{"a root that names its own input convoy", graph, nil, held(), false, beads.Bead{ID: "gcg-1", Status: "open", Metadata: map[string]string{"gc.input_convoy_id": "gc-7"}}, nil},
+		{"an in_progress step, which input admission never judges", graph, nil, held(), true, beads.Bead{ID: "gcg-1", Status: "in_progress", Metadata: step.Metadata}, inputRoot},
+		{"a control step, which input admission never judges", graph, nil, held(), true, beads.Bead{ID: "gcg-1", Status: "open", Metadata: map[string]string{"gc.root_bead_id": "gcg-9", "gc.kind": "check"}}, inputRoot},
 	} {
-		if got := OwnVerdictStands(tc.leg, "gcg-1", tc.deps, tc.held); got != tc.want {
+		row := tc.row
+		if row.ID == "" {
+			row = beads.Bead{ID: "gcg-1", Status: "open"}
+		}
+		root := func(id string) (beads.Bead, bool) {
+			b, ok := tc.roots[id]
+			return b, ok
+		}
+		if got := OwnVerdictStands(tc.leg, row, tc.deps, tc.held, root); got != tc.want {
 			t.Errorf("%s: OwnVerdictStands = %t, want %t", tc.name, got, tc.want)
 		}
 	}
@@ -1124,11 +1146,24 @@ func TestOwnVerdictStandsExactlyWhereTheGateKeepsTheBindingsVerdict(t *testing.T
 
 // TestLegGateKeepsEveryRowWhoseOwnVerdictStands ties OwnVerdictStands to the
 // gate's own judgment (ga-ylpbsy.67): over random graphs whose edges mix
-// in-namespace, foreign, external:, capability and absent targets, every row
-// the binding's own Ready serves whose own verdict stands is a row LegGate
-// keeps. Kills: the gate and the exported rule drifting apart, so a reader
-// trusting the rule serves a row the gate re-judges and holds.
+// in-namespace, foreign, external:, capability and absent targets, and whose
+// rows name workflow roots in the binding with and without an input convoy in
+// the work store, its input held, blocked, deferred, waiting on a
+// prerequisite or admissible (#8832), every row the binding's own Ready serves
+// whose own verdict stands is a row LegGate keeps. Kills: the gate and the
+// exported rule drifting apart, so a reader trusting the rule serves a row the
+// gate re-judges and holds — the v2 pass's own-verdict merge restoring a step
+// whose input withholds it.
 func TestLegGateKeepsEveryRowWhoseOwnVerdictStands(t *testing.T) {
+	future := time.Now().Add(24 * time.Hour)
+	inputFacts := []beads.Bead{
+		{Title: "admissible input", Type: "task"},
+		{Title: "held input", Type: "task", Labels: []string{"hold:external"}},
+		{Title: "deferred input", Type: "task", DeferUntil: &future},
+		{Title: "blocked input", Type: "task"},
+		{Title: "input with a prerequisite", Type: "task"},
+	}
+	inputOnly := 0
 	for seed := int64(1); seed <= 25; seed++ {
 		rng := rand.New(rand.NewSource(seed))
 		binding := sqliteBinding(t)
@@ -1142,8 +1177,40 @@ func TestLegGateKeepsEveryRowWhoseOwnVerdictStands(t *testing.T) {
 			}
 			workIDs = append(workIDs, b.ID)
 		}
+		// Workflow roots in the binding: one naming no input, and one per
+		// input fact, its convoy and input in the work store.
+		roots := []string{createRoot(t, binding, "")}
+		for i, fact := range inputFacts {
+			in, err := work.Create(fact)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch i {
+			case 3:
+				blocked := "blocked"
+				if err := work.Update(in.ID, beads.UpdateOpts{Status: &blocked}); err != nil {
+					t.Fatal(err)
+				}
+			case 4:
+				if err := work.DepAdd(in.ID, workIDs[0], "blocks"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			conv, err := work.Create(beads.Bead{Title: "input convoy", Type: "convoy"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := work.DepAdd(conv.ID, in.ID, "tracks"); err != nil {
+				t.Fatal(err)
+			}
+			roots = append(roots, createRoot(t, binding, conv.ID))
+		}
 		for i := 0; i < 10; i++ {
-			b, err := binding.Create(beads.Bead{Title: "graph", Type: "task"})
+			row := beads.Bead{Title: "graph", Type: "task"}
+			if n := rng.Intn(len(roots) + 1); n < len(roots) {
+				row.Metadata = map[string]string{"gc.root_bead_id": roots[n]}
+			}
+			b, err := binding.Create(row)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1178,7 +1245,8 @@ func TestLegGateKeepsEveryRowWhoseOwnVerdictStands(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		gated, err := NewLegGate(legs, q).Gate(context.Background(), 1, own)
+		gate := NewLegGate(legs, q)
+		gated, err := gate.Gate(context.Background(), 1, own)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1186,14 +1254,45 @@ func TestLegGateKeepsEveryRowWhoseOwnVerdictStands(t *testing.T) {
 		for _, b := range gated {
 			kept[b.ID] = true
 		}
+		root := func(id string) (beads.Bead, bool) {
+			b, err := binding.Get(id)
+			return b, err == nil
+		}
+		withheld, err := gate.JudgeInput(context.Background(), 1, own)
+		if err != nil {
+			t.Fatal(err)
+		}
 		for _, b := range own {
 			deps, err := binding.DepList(b.ID, "down")
 			if err != nil {
 				t.Fatal(err)
 			}
-			if OwnVerdictStands(legs[1], b.ID, deps, nil) && !kept[b.ID] {
-				t.Errorf("seed %d: %s's own verdict stands (edges %v), but the gate holds it", seed, b.ID, deps)
+			if OwnVerdictStands(legs[1], b, deps, nil, root) && !kept[b.ID] {
+				t.Errorf("seed %d: %s's own verdict stands (edges %v, metadata %v), but the gate holds it", seed, b.ID, deps, b.Metadata)
+			}
+			// A row only its input holds back: the rule must leave it to the
+			// federation even though every edge is the binding's own.
+			if _, inputHeld := withheld[b.ID]; inputHeld && OwnVerdictStands(legs[1], beads.Bead{ID: b.ID}, deps, nil, nil) {
+				inputOnly++
 			}
 		}
 	}
+	if inputOnly == 0 {
+		t.Fatal("no seed built a row whose cross-store verdict stands but whose input withholds it; the fixture does not exercise input admission")
+	}
+}
+
+// createRoot creates a graph.v2 workflow root in store naming input convoy
+// convoyID ("" for a workflow with no input) and returns its id.
+func createRoot(t *testing.T, store beads.Store, convoyID string) string {
+	t.Helper()
+	root := beads.Bead{Title: "workflow root", Type: "molecule"}
+	if convoyID != "" {
+		root.Metadata = map[string]string{"gc.input_convoy_id": convoyID}
+	}
+	b, err := store.Create(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b.ID
 }

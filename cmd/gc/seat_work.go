@@ -54,6 +54,11 @@ type SeatWork struct {
 
 	once sync.Once
 	read []seatWorkLeg
+
+	// admission is the input-admission probe of this read's legs
+	// (inputAdmission), built on first use.
+	admissionOnce sync.Once
+	admission     *inputAdmissionProbe
 }
 
 type seatWorkLeg struct {
@@ -126,6 +131,18 @@ func (sw *SeatWork) closeRefusals() *closeRefusalLog {
 		return nil
 	}
 	return sw.refusals
+}
+
+// inputAdmission is the input-admission probe of sw's read: one judge over
+// the planned ready legs of sw's leg set, memoized for sw's life, which the
+// probes sw serves (keep-awake, the drain-ack strand proof, park) share
+// (#8832). A nil SeatWork judges nothing.
+func (sw *SeatWork) inputAdmission() *inputAdmissionProbe {
+	if sw == nil {
+		return nil
+	}
+	sw.admissionOnce.Do(func() { sw.admission = newInputAdmissionProbe(sw.legs) })
+	return sw.admission
 }
 
 // Legs is the leg set sw reads. A nil SeatWork reads the zero WorkLegs,

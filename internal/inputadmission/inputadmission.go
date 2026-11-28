@@ -7,7 +7,16 @@
 // parked, blocked or deferred. This package reads the root -> input convoy ->
 // members relation live and returns one typed verdict per row, which every
 // admission surface (the ready reader and its demand gate, hook claims, the
-// controller's wake and nudge predicates) consults so they cannot disagree.
+// controller's wake and nudge predicates) consults.
+//
+// A Judge sees only its sources. The ready reader, demand and the controller's
+// probes judge over every store the city's ready reader federates, so they
+// agree. The hook judges over the store it claims from (and the binding on a
+// split city), so a prerequisite only another store holds is beyond it:
+// Verdicts reports such a row Unresolved, and the hook takes the federated
+// reader's verdict on it rather than deciding it on fewer stores. A custom
+// work_query reads through no federated reader, so it has no such verdict to
+// take, and the hook says so when it serves such a row.
 //
 // Nothing here is copied into the workflow: each Judge reads current facts and
 // memoizes them only for its own life, one read or one controller pass.
@@ -39,7 +48,9 @@ const (
 	// ReasonDeferred is an input that is deferred (beads.IsDeferred).
 	ReasonDeferred Reason = "deferred"
 	// ReasonPrerequisite is an input with a ready-blocking dependency
-	// (beads.IsReadyBlockingDependencyType) that no store holds satisfied.
+	// (beads.IsReadyBlockingDependencyType) whose target a judged store
+	// holds unsatisfied. A target no judged store holds does not withhold:
+	// the row is Unresolved (prerequisiteFact).
 	ReasonPrerequisite Reason = "prerequisite"
 )
 
@@ -68,6 +79,41 @@ func (w Withhold) String() string {
 	return s
 }
 
+// Unresolved is the outcome a Judge cannot decide from its sources: nothing
+// it read withholds the step, but its input has a ready-blocking prerequisite
+// whose target none of its sources holds. Over every store of the city (the
+// ready reader's sources) that is a dangling edge, and the step is admitted,
+// as bd admits it. A judge over fewer stores (the hook's) cannot tell a
+// dangling edge from a prerequisite another store holds open, so its caller
+// leaves the step to the federated reader's verdict.
+type Unresolved struct {
+	// RootID is the step's workflow root.
+	RootID string
+	// ConvoyID is the root's input convoy (gc.input_convoy_id).
+	ConvoyID string
+	// InputID is the convoy member whose prerequisite is unresolved.
+	InputID string
+	// TargetID is the prerequisite no source holds.
+	TargetID string
+}
+
+// String describes the outcome for a log line.
+func (u Unresolved) String() string {
+	return fmt.Sprintf("input %s of convoy %s (workflow root %s) waits on prerequisite %s, which no store this judge reads holds", u.InputID, u.ConvoyID, u.RootID, u.TargetID)
+}
+
+// Verdicts is one judgment of rows: those that must not start, and those
+// whose admission rests on a prerequisite no source holds. A row in neither
+// map is admitted.
+type Verdicts struct {
+	// Withheld is the rows that must not start, keyed by id, with each
+	// one's verdict.
+	Withheld map[string]Withhold
+	// Unresolved is the rows nothing read withholds but a prerequisite no
+	// source holds leaves undecided, keyed by id.
+	Unresolved map[string]Unresolved
+}
+
 // Source is one store a Judge reads, named for the errors that cite it.
 type Source struct {
 	Label  string
@@ -83,6 +129,29 @@ func Subject(row beads.Bead) bool {
 	return row.Status == "open" &&
 		!beadmeta.IsControlKind(strings.TrimSpace(row.Metadata[beadmeta.KindMetadataKey])) &&
 		rootIDOf(row) != ""
+}
+
+// ReadsInput reports whether judging row needs its workflow input's facts:
+// row is subject to input admission (Subject), and its workflow root — row
+// itself when it carries gc.input_convoy_id, else the bead root finds by id —
+// names an input convoy, or is a bead root cannot find. A row it reports false
+// for is admitted without reading any input, so a reader that judges rows from
+// one store alone may serve it on that store's own verdict; a row it reports
+// true for needs a judgment that reads the input (Judge), wherever the input
+// lives. A nil root finds nothing.
+func ReadsInput(row beads.Bead, root func(id string) (beads.Bead, bool)) bool {
+	if !Subject(row) {
+		return false
+	}
+	rootID := rootIDOf(row)
+	if rootID == row.ID {
+		return true
+	}
+	if root == nil {
+		return true
+	}
+	b, found := root(rootID)
+	return !found || strings.TrimSpace(b.Metadata[beadmeta.InputConvoyIDMetadataKey]) != ""
 }
 
 // rootIDOf is the workflow root row belongs to: its gc.root_bead_id when that
@@ -131,9 +200,14 @@ type rootFact struct {
 	found bool
 }
 
+// convoyFact is one input convoy's verdict: withheld (withhold), else
+// unresolved (unknown) when a prerequisite target is in no source, else
+// admitted.
 type convoyFact struct {
-	withhold Withhold
-	withheld bool
+	withhold   Withhold
+	withheld   bool
+	unknown    Unresolved
+	unresolved bool
 }
 
 // New returns a Judge over sources, judging deferral at now.
@@ -148,18 +222,57 @@ func New(sources []Source, now time.Time) *Judge {
 }
 
 // Judge returns the rows that must not start, keyed by id, with each one's
-// verdict. own is the index of the source that served rows (-1 when unknown);
-// a root is read from it first. A row whose root no source holds, whose root
-// names no input convoy, or whose convoy has no member carrying a withholding
-// fact is admitted. A failed read fails the whole call, naming the bead and
-// the source: a row that could not be judged is never admitted silently.
+// verdict: the Withheld half of Verdicts. A row Verdicts reports Unresolved is
+// admitted here, which is the answer for a judge over every store of the city
+// (a dangling edge), the ready reader's.
 func (j *Judge) Judge(ctx context.Context, own int, rows []beads.Bead) (map[string]Withhold, error) {
-	out := make(map[string]Withhold)
+	v, err := j.judge(ctx, own, rows, false)
+	if err != nil {
+		return nil, err
+	}
+	return v.Withheld, nil
+}
+
+// Verdicts judges rows as Judge does and also reports the rows it admitted
+// although a ready-blocking prerequisite of their input names a target none
+// of its sources holds (Unresolved): a judge over fewer stores than the city's
+// ready reader federates asks for them, to leave those rows to that reader.
+func (j *Judge) Verdicts(ctx context.Context, own int, rows []beads.Bead) (Verdicts, error) {
+	return j.judge(ctx, own, rows, true)
+}
+
+// judge is Judge and Verdicts; unresolved asks for the Unresolved rows. own is
+// the index of the source that served rows (-1 when unknown); a root is read
+// from it first. A row whose root no source holds, whose root names no input
+// convoy, whose convoy has no member carrying a withholding fact, or whose
+// workflow has stopped is admitted. A failed read fails the whole call, naming
+// the bead and the source: a row that could not be judged is never admitted
+// silently. The one exception is a failed input read for a workflow its
+// ancestry proves stopped, whose rows are admitted whatever the input says.
+func (j *Judge) judge(ctx context.Context, own int, rows []beads.Bead, unresolved bool) (Verdicts, error) {
+	out := Verdicts{Withheld: make(map[string]Withhold)}
+	if unresolved {
+		out.Unresolved = make(map[string]Unresolved)
+	}
 	if j == nil {
 		return out, nil
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	if err := j.loadRoots(ctx, own, j.unreadRoots(rows)); err != nil {
+		return Verdicts{}, err
+	}
+	for _, row := range rows {
+		if err := j.judgeRow(ctx, own, row, out); err != nil {
+			return Verdicts{}, err
+		}
+	}
+	return out, nil
+}
+
+// unreadRoots is the workflow roots of rows' subjects this Judge has not read
+// yet; a row that is its own root needs none.
+func (j *Judge) unreadRoots(rows []beads.Bead) []string {
 	var need []string
 	for _, row := range rows {
 		if !Subject(row) {
@@ -171,44 +284,59 @@ func (j *Judge) Judge(ctx context.Context, own int, rows []beads.Bead) (map[stri
 			}
 		}
 	}
-	if err := j.loadRoots(ctx, own, need); err != nil {
-		return nil, err
+	return need
+}
+
+// judgeRow records row's verdict in out: withheld, unresolved when out
+// collects those (a non-nil Unresolved), or nothing for an admitted row. A
+// stopped workflow's rows are admitted however its input stands, so an input
+// read that fails withholds nothing from them: the stop is checked then, and
+// only a live workflow's row, or one whose ancestry cannot be read, fails.
+// Once ctx has ended no ancestry read starts, and the input read's error
+// fails the row.
+func (j *Judge) judgeRow(ctx context.Context, own int, row beads.Bead, out Verdicts) error {
+	if !Subject(row) {
+		return nil
 	}
-	for _, row := range rows {
-		if !Subject(row) {
-			continue
+	rootID := rootIDOf(row)
+	root := rootFact{bead: row, found: true}
+	if rootID != row.ID {
+		root = j.roots[rootID]
+	}
+	convoyID := strings.TrimSpace(root.bead.Metadata[beadmeta.InputConvoyIDMetadataKey])
+	if !root.found || convoyID == "" {
+		return nil
+	}
+	fact, err := j.convoyVerdict(ctx, convoyID)
+	if err != nil {
+		if ctx.Err() == nil {
+			stopped, stopErr := j.workflowStopped(own, rootID, row)
+			if stopErr == nil && stopped {
+				return nil
+			}
+			err = errors.Join(err, stopErr)
 		}
-		rootID := rootIDOf(row)
-		root := rootFact{bead: row, found: true}
-		if rootID != row.ID {
-			root = j.roots[rootID]
-		}
-		if !root.found {
-			continue
-		}
-		convoyID := strings.TrimSpace(root.bead.Metadata[beadmeta.InputConvoyIDMetadataKey])
-		if convoyID == "" {
-			continue
-		}
-		verdict, err := j.convoyVerdict(ctx, convoyID)
-		if err != nil {
-			return nil, fmt.Errorf("judging input admission of %s (workflow root %s): %w", row.ID, rootID, err)
-		}
-		if !verdict.withheld {
-			continue
-		}
-		stopped, err := j.workflowStopped(own, rootID, row)
-		if err != nil {
-			return nil, fmt.Errorf("judging input admission of %s (workflow root %s): %w", row.ID, rootID, err)
-		}
-		if stopped {
-			continue
-		}
-		w := verdict.withhold
+		return fmt.Errorf("judging input admission of %s (workflow root %s): %w", row.ID, rootID, err)
+	}
+	if !fact.withheld && (!fact.unresolved || out.Unresolved == nil) {
+		return nil
+	}
+	stopped, err := j.workflowStopped(own, rootID, row)
+	if err != nil {
+		return fmt.Errorf("judging input admission of %s (workflow root %s): %w", row.ID, rootID, err)
+	}
+	switch {
+	case stopped:
+	case fact.withheld:
+		w := fact.withhold
 		w.RootID = rootID
-		out[row.ID] = w
+		out.Withheld[row.ID] = w
+	default:
+		u := fact.unknown
+		u.RootID = rootID
+		out.Unresolved[row.ID] = u
 	}
-	return out, nil
+	return nil
 }
 
 // workflowStopped reports, once per root, whether row's workflow has stopped
@@ -267,9 +395,33 @@ func (j *Judge) order(own int) []int {
 	return idx
 }
 
-// loadRoots reads ids, the workflow roots not yet memoized, from the sources
-// in lookup order until each is found, and memoizes every one, found or not.
+// idRead reads the beads ids name from one store: beads.GetMany, one batched
+// read where the store has one, or beads.GetEach, one read per id.
+type idRead func(store beads.StoreReader, ids []string) (map[string]beads.Bead, error)
+
+// loadRoots reads ids, the workflow roots not yet memoized, and memoizes every
+// one, found or not. The sources are read in lookup order until each id is
+// found: first with one batched read each (beads.GetMany), then, for the ids no
+// batch answered, by id (beads.GetEach). A batch read can miss the wisp tier
+// (bd's is `bd show`), and a root read as absent admits its rows unjudged, so
+// a root is absent only once no source holds it in either tier.
 func (j *Judge) loadRoots(ctx context.Context, own int, ids []string) error {
+	pending, err := j.findRoots(ctx, own, ids, beads.GetMany)
+	if err == nil {
+		pending, err = j.findRoots(ctx, own, pending, beads.GetEach)
+	}
+	if err != nil {
+		return err
+	}
+	for _, id := range pending {
+		j.roots[id] = rootFact{}
+	}
+	return nil
+}
+
+// findRoots reads ids from the sources in lookup order with read until each is
+// found, memoizes each one found, and returns the ids no source answered.
+func (j *Judge) findRoots(ctx context.Context, own int, ids []string, read idRead) ([]string, error) {
 	pending := ids
 	for _, i := range j.order(own) {
 		if len(pending) == 0 {
@@ -280,11 +432,11 @@ func (j *Judge) loadRoots(ctx context.Context, own int, ids []string) error {
 			continue
 		}
 		if err := ctx.Err(); err != nil {
-			return err
+			return nil, err
 		}
-		found, err := beads.GetMany(src.Reader, pending)
+		found, err := read(src.Reader, pending)
 		if err != nil {
-			return fmt.Errorf("%s store: reading workflow roots %s: %w", src.Label, strings.Join(pending, ", "), err)
+			return nil, fmt.Errorf("%s store: reading workflow roots %s: %w", src.Label, strings.Join(pending, ", "), err)
 		}
 		var still []string
 		for _, id := range pending {
@@ -296,10 +448,7 @@ func (j *Judge) loadRoots(ctx context.Context, own int, ids []string) error {
 		}
 		pending = still
 	}
-	for _, id := range pending {
-		j.roots[id] = rootFact{}
-	}
-	return nil
+	return pending, nil
 }
 
 // convoyVerdict judges convoyID's current members, once per Judge.
@@ -332,26 +481,61 @@ func (j *Judge) convoyVerdict(ctx context.Context, convoyID string) (convoyFact,
 		}
 		live = append(live, m)
 	}
-	inputID, blockerID, err := j.unsatisfiedPrerequisite(ctx, live)
+	v, err := j.prerequisiteFact(ctx, convoyID, live)
 	if err != nil {
 		return convoyFact{}, fmt.Errorf("reading prerequisites of input convoy %s: %w", convoyID, err)
-	}
-	v := convoyFact{}
-	if inputID != "" {
-		v = convoyFact{withheld: true, withhold: Withhold{Reason: ReasonPrerequisite, ConvoyID: convoyID, InputID: inputID, BlockerID: blockerID}}
 	}
 	j.convoys[convoyID] = v
 	return v, nil
 }
 
-// unsatisfiedPrerequisite returns the first of members, in their order, with a
-// ready-blocking dependency that is not satisfied, and that dependency's
-// target. Each member's edges are read from the store that holds it, live,
-// when the convoy is judged, so a prerequisite added after the workflow was
-// materialized counts. A target is judged from every copy the sources hold
-// (beads.DependencySatisfiedByCopies): "external:<id>" names the bead <id>, a
-// capability ref never withholds, and a target no source holds withholds.
-func (j *Judge) unsatisfiedPrerequisite(ctx context.Context, members []convoy.HeldMember) (inputID, blockerID string, err error) {
+// prerequisiteFact judges members' ready-blocking prerequisites. Each member's
+// edges are read from the store that holds it, live, when the convoy is
+// judged, so a prerequisite added after the workflow was materialized counts.
+// A target is judged from every copy the sources hold
+// (beads.DependencySatisfiedByCopies): "external:<id>" names the bead <id>,
+// and a capability ref never withholds. The first member, in their order,
+// with a target the sources hold unsatisfied withholds the convoy.
+//
+// A target no source holds does not withhold. Absent anything that
+// withholds, the first member with one leaves the convoy unresolved
+// (Unresolved). A judge reads only its sources — the hook's reads the store
+// it claims from, the ready reader's every store of the city — so absence
+// from them cannot tell a prerequisite another store holds from a dangling
+// edge. Over every store it is a dangling edge, and the step is admitted,
+// bd's answer for an absent target: withholding would strand the workflow for
+// good on a deleted target. Over fewer stores it is a question for the
+// federated reader, which judges every target any store holds: such a judge
+// reports the step Unresolved rather than deciding it on its own read, and
+// its caller takes that reader's verdict.
+func (j *Judge) prerequisiteFact(ctx context.Context, convoyID string, members []convoy.HeldMember) (convoyFact, error) {
+	targetsOf, targets, err := j.prerequisiteTargets(ctx, members)
+	if err != nil || len(targets) == 0 {
+		return convoyFact{}, err
+	}
+	copies, err := j.copiesOf(ctx, targets)
+	if err != nil {
+		return convoyFact{}, err
+	}
+	var fact convoyFact
+	for _, m := range members {
+		for _, target := range targetsOf[m.ID] {
+			held := copies[target]
+			switch {
+			case len(held) > 0 && !beads.DependencySatisfiedByCopies(held):
+				return convoyFact{withheld: true, withhold: Withhold{Reason: ReasonPrerequisite, ConvoyID: convoyID, InputID: m.ID, BlockerID: target}}, nil
+			case len(held) == 0 && !fact.unresolved:
+				fact = convoyFact{unresolved: true, unknown: Unresolved{ConvoyID: convoyID, InputID: m.ID, TargetID: target}}
+			}
+		}
+	}
+	return fact, nil
+}
+
+// prerequisiteTargets reads members' down edges, each from the store that
+// holds the member, and returns the targets of each member's ready-blocking
+// prerequisites, keyed by member id, and all of them together.
+func (j *Judge) prerequisiteTargets(ctx context.Context, members []convoy.HeldMember) (map[string][]string, []string, error) {
 	byReader := make(map[int][]string)
 	for _, m := range members {
 		byReader[m.Reader] = append(byReader[m.Reader], m.ID)
@@ -360,7 +544,7 @@ func (j *Judge) unsatisfiedPrerequisite(ctx context.Context, members []convoy.He
 	for i, ids := range byReader {
 		deps, err := j.depsFrom(ctx, i, ids)
 		if err != nil {
-			return "", "", err
+			return nil, nil, err
 		}
 		for id, d := range deps {
 			edges[id] = d
@@ -381,33 +565,54 @@ func (j *Judge) unsatisfiedPrerequisite(ctx context.Context, members []convoy.He
 			targets = append(targets, target)
 		}
 	}
-	if len(targets) == 0 {
-		return "", "", nil
-	}
+	return targetsOf, targets, nil
+}
+
+// copiesOf reads every copy of targets the sources hold, keyed by id: one
+// batched read per source (beads.GetMany), then, for each target no batch
+// answered, one read by id per source (beads.GetEach). A batch read can miss
+// the wisp tier (bd's is `bd show`), and a target read as absent leaves its
+// row unresolved rather than withheld, so a target is absent only once no
+// source holds it in either tier.
+func (j *Judge) copiesOf(ctx context.Context, targets []string) (map[string][]beads.Bead, error) {
 	copies := make(map[string][]beads.Bead, len(targets))
+	if err := j.readCopies(ctx, targets, beads.GetMany, copies); err != nil {
+		return nil, err
+	}
+	var unanswered []string
+	for _, id := range targets {
+		if len(copies[id]) == 0 {
+			unanswered = append(unanswered, id)
+		}
+	}
+	if err := j.readCopies(ctx, unanswered, beads.GetEach, copies); err != nil {
+		return nil, err
+	}
+	return copies, nil
+}
+
+// readCopies reads ids from every source with read and adds each copy found to
+// copies.
+func (j *Judge) readCopies(ctx context.Context, ids []string, read idRead, copies map[string][]beads.Bead) error {
+	if len(ids) == 0 {
+		return nil
+	}
 	for _, src := range j.sources {
 		if src.Reader == nil {
 			continue
 		}
 		if err := ctx.Err(); err != nil {
-			return "", "", err
+			return err
 		}
-		found, err := beads.GetMany(src.Reader, targets)
+		found, err := read(src.Reader, ids)
 		if err != nil {
-			return "", "", fmt.Errorf("%s store: reading prerequisites %s: %w", src.Label, strings.Join(targets, ", "), err)
+			return fmt.Errorf("%s store: reading prerequisites %s: %w", src.Label, strings.Join(ids, ", "), err)
 		}
 		for id, b := range found {
 			copies[id] = append(copies[id], b)
 		}
 	}
-	for _, m := range members {
-		for _, target := range targetsOf[m.ID] {
-			if !beads.DependencySatisfiedByCopies(copies[target]) {
-				return m.ID, target, nil
-			}
-		}
-	}
-	return "", "", nil
+	return nil
 }
 
 // depsFrom reads the down edges of ids from sources[i]: one batched read where

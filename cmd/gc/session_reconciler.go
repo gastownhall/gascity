@@ -30,7 +30,6 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
-	"github.com/gastownhall/gascity/internal/readywork"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -5697,7 +5696,7 @@ func sessionHasAwakeAssignedWorkForReachableStore(sw *SeatWork, info sessionpkg.
 		// holds no awake work), and each identity and tier is probed live.
 		legs, unknown := sw.stores(seatWorkQuery{scope: scope, statuses: seatWorkStatuses})
 		for _, s := range legs {
-			if has, err := sessionHasAwakeAssignedWorkInStoreByIdentifiers(s, scope.scopeIDs()); err != nil || has {
+			if has, err := sessionHasAwakeAssignedWorkInStoreByIdentifiers(s, scope.scopeIDs(), sw.inputAdmission()); err != nil || has {
 				return has, err
 			}
 		}
@@ -5714,14 +5713,15 @@ func sessionHasAwakeAssignedWorkForReachableStore(sw *SeatWork, info sessionpkg.
 		return len(hits) > 0, err
 	}
 	open, unknown := sw.snapshot(seatWorkQuery{scope: scope, statuses: []string{"open"}}, false)
-	return readyAssignedWorkIn(open, unknown)
+	return readyAssignedWorkIn(open, unknown, sw.inputAdmission())
 }
 
 // readyAssignedWorkIn reports whether the ready query, run once per (leg,
 // assignee) that holds an open row in open, concurrently and on both tiers,
-// finds unheld non-session work; unknown is the seat read's incomplete
-// legs, which fail the answer closed when nothing is found.
-func readyAssignedWorkIn(open []seatWorkHit, unknown error) (bool, error) {
+// finds unheld non-session work that input admission does not withhold
+// (admit); unknown is the seat read's incomplete legs, which fail the answer
+// closed when nothing is found.
+func readyAssignedWorkIn(open []seatWorkHit, unknown error, admit *inputAdmissionProbe) (bool, error) {
 	type probe struct {
 		store    beads.Store
 		assignee string
@@ -5748,7 +5748,7 @@ func readyAssignedWorkIn(open []seatWorkHit, unknown error) (bool, error) {
 				defer wg.Done()
 				has, err := func() (has bool, err error) {
 					defer recoverLeg(&err, "ready assigned work", log.Writer()) // a panic counts as work
-					return sessionHasReadyAssignedWorkForTier(p.store, p.assignee, tier)
+					return sessionHasReadyAssignedWorkForTier(p.store, p.assignee, tier, admit)
 				}()
 				mu.Lock()
 				defer mu.Unlock()
@@ -5780,11 +5780,12 @@ func firstOpenClaimableAssignedWorkBeadForReachableStore(sw *SeatWork, info sess
 	if now.IsZero() {
 		now = time.Now()
 	}
+	admit := sw.inputAdmission()
 	q := seatWorkQuery{scope: releaseScope(info, sw.Legs().cfg), statuses: []string{"open"}, keep: func(s beads.Store, b beads.Bead) (bool, error) {
 		if isSessionOwnDrainStepBead(s, b) {
 			return false, nil
 		}
-		suppress, err := openAssignedRowProvablyNonClaimable(s, b, now)
+		suppress, err := openAssignedRowProvablyNonClaimable(s, b, now, admit)
 		return !suppress, err
 	}}
 	return sw.first(q)
@@ -5820,9 +5821,11 @@ func firstOpenClaimableAssignedWorkBeadForReachableStore(sw *SeatWork, info sess
 //     bead-local excludes the row; it fires.
 //   - input_withheld — input admission withholds the row (#8832): its
 //     workflow's input is held, blocked, deferred or waiting on an
-//     unsatisfied prerequisite, judged live from this store. The hook refuses
-//     the row on every path, so this is proof like a hold: draining past it
-//     was correct pull.
+//     unsatisfied prerequisite, judged live by admit over the city's planned
+//     ready legs (inputAdmissionProbe), the stores the hook's claim reads. The
+//     hook refuses the row on every path, so this is proof like a hold:
+//     draining past it was correct pull. A judgment admit cannot make
+//     withholds nothing.
 //
 // Fails CLOSED on a dep-read error: the error is returned rather than read as "no
 // blocker", so the caller surfaces it instead of manufacturing the alarm from an
@@ -5842,8 +5845,8 @@ func firstOpenClaimableAssignedWorkBeadForReachableStore(sw *SeatWork, info sess
 // in_progress arm is probed first and consults no dependencies), and the
 // polarity is pinned by
 // TestReconcileSessionBeads_DrainAckDepConfirmReadErrorNoFireAndLogsError.
-func openAssignedRowProvablyNonClaimable(store beads.Store, item beads.Bead, now time.Time) (bool, error) {
-	switch classifyDemandRowClaimability(item, now, readywork.InputWithheld(readywork.Leg{Store: store}, []beads.Bead{item})[item.ID]) {
+func openAssignedRowProvablyNonClaimable(store beads.Store, item beads.Bead, now time.Time, admit *inputAdmissionProbe) (bool, error) {
+	switch classifyDemandRowClaimability(item, now, admit.withheld(store, []beads.Bead{item})[item.ID]) {
 	case demandRowDeferred, demandRowHeld, demandRowStatusBlocked, demandRowInputWithheld:
 		return true, nil
 	case demandRowBlockednessUnproven:
@@ -6371,7 +6374,11 @@ func sessionHasAssignedWorkInStoresForStatuses(sw *SeatWork, scope workScope, st
 	return sw.has(seatWorkQuery{scope: scope, statuses: statuses})
 }
 
-func sessionHasAwakeAssignedWorkInStoreByIdentifiers(store beads.Store, identifiers []string) (bool, error) {
+// sessionHasAwakeAssignedWorkInStoreByIdentifiers reports whether store holds
+// work assigned to any of identifiers that keeps its session awake: in
+// progress, or ready and neither held nor withheld by input admission (admit,
+// #8832; nil judges nothing).
+func sessionHasAwakeAssignedWorkInStoreByIdentifiers(store beads.Store, identifiers []string, admit *inputAdmissionProbe) (bool, error) {
 	if store == nil {
 		return false, nil
 	}
@@ -6388,7 +6395,7 @@ func sessionHasAwakeAssignedWorkInStoreByIdentifiers(store beads.Store, identifi
 			if has, err := sessionHasInProgressAssignedWorkForTier(store, assignee, tierMode); err != nil || has {
 				return has, err
 			}
-			if has, err := sessionHasReadyAssignedWorkForTier(store, assignee, tierMode); err != nil || has {
+			if has, err := sessionHasReadyAssignedWorkForTier(store, assignee, tierMode, admit); err != nil || has {
 				return has, err
 			}
 		}
@@ -6416,7 +6423,11 @@ func sessionHasOpenAssignedWispWork(store beads.Store, assignee, status string) 
 	return sessionHasOpenAssignedWorkForTier(store, assignee, status, beads.TierWisps, true)
 }
 
-func sessionHasReadyAssignedWorkForTier(store beads.Store, assignee string, tierMode beads.TierMode) (bool, error) {
+// sessionHasReadyAssignedWorkForTier reports whether store's ready query finds
+// non-session work assigned to assignee on tierMode that the session's hook
+// would serve: not held, and not withheld by input admission (admit, #8832;
+// nil judges nothing).
+func sessionHasReadyAssignedWorkForTier(store beads.Store, assignee string, tierMode beads.TierMode, admit *inputAdmissionProbe) (bool, error) {
 	wa := workAssignmentForStore(beads.WorkStore{Store: store})
 	items, err := wa.ReadyAssignedTo(assignee, tierMode)
 	if err != nil {
@@ -6426,8 +6437,10 @@ func sessionHasReadyAssignedWorkForTier(store beads.Store, assignee string, tier
 	// work, and open work input admission withholds (#8832), cannot be served
 	// to this session, so it does not keep it awake
 	// (assignedOpenWorkWithheld, the same gate desired-state wake demand
-	// applies in markReadyAssigned).
-	inputWithheld := readywork.InputWithheld(readywork.Leg{Store: store}, items)
+	// applies in markReadyAssigned). admit judges over the city's planned
+	// ready legs, the stores the hook's claim reads: a split city's root and
+	// steps live in the binding and its input in the work store.
+	inputWithheld := admit.withheld(store, items)
 	unheld := items[:0:0]
 	for _, item := range items {
 		if !assignedOpenWorkWithheld(item, inputWithheld) {

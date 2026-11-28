@@ -199,3 +199,94 @@ func TestGetManyOverACachedNativeLegIsKeyed(t *testing.T) {
 		t.Errorf("GetMany = %+v, want %s open and %s closed, gc-absent absent", found, open.ID, closed.ID)
 	}
 }
+
+// tieredBdRunner is a bd CLI over the two tiers bd keeps: `bd show --json`
+// reads only the issue tier (one id it does not hold fails "no issue found",
+// several answer the rows it holds), and `bd query --json "ephemeral=true AND
+// id=<id>"` reads the wisp tier. It refuses every other command.
+type tieredBdRunner struct {
+	issues, wisps map[string]string
+}
+
+func (r *tieredBdRunner) run(_, name string, args ...string) ([]byte, error) {
+	switch {
+	case name == "bd" && len(args) > 2 && args[0] == "show" && args[1] == "--json":
+		var found []string
+		for _, id := range args[2:] {
+			if row, ok := r.issues[id]; ok {
+				found = append(found, row)
+			}
+		}
+		if len(found) == 0 && len(args) == 3 {
+			return nil, fmt.Errorf("Error: no issue found matching %q", args[2])
+		}
+		return []byte("[" + strings.Join(found, ",") + "]"), nil
+	case name == "bd" && len(args) > 2 && args[0] == "query" && args[1] == "--json":
+		if id, ok := strings.CutPrefix(args[2], "ephemeral=true AND id="); ok {
+			if row, held := r.wisps[id]; held {
+				return []byte("[" + row + "]"), nil
+			}
+			return []byte("[]"), nil
+		}
+	}
+	return nil, fmt.Errorf("unexpected command: %s %s", name, strings.Join(args, " "))
+}
+
+// TestGetEachFindsTheWispABdBatchReadMisses: bd's batch read is `bd show`,
+// which reads only the issue tier, so GetMany reads a wisp a bd ledger holds
+// as absent. GetEach reads each id with Get, which falls back to the wisp
+// tier, so a caller that reads again the ids the batch did not find finds the
+// wisp, and an id the ledger holds in neither tier still reads as absent.
+func TestGetEachFindsTheWispABdBatchReadMisses(t *testing.T) {
+	runner := &tieredBdRunner{
+		issues: map[string]string{"gc-1": `{"id":"gc-1","title":"issue","status":"open","issue_type":"task"}`},
+		wisps:  map[string]string{"gc-wisp-2": `{"id":"gc-wisp-2","title":"wisp","status":"open","issue_type":"task"}`},
+	}
+	bd := beads.NewBdStore("/city", runner.run)
+	found, err := beads.GetMany(bd, []string{"gc-1", "gc-wisp-2", "gc-3"})
+	if err != nil {
+		t.Fatalf("GetMany: %v", err)
+	}
+	if _, ok := found["gc-1"]; !ok || len(found) != 1 {
+		t.Fatalf("precondition: GetMany = %+v, want only gc-1: bd's batch read misses the wisp tier", found)
+	}
+	read, err := beads.GetEach(bd, []string{"gc-wisp-2", "gc-3", "gc-wisp-2"})
+	if err != nil {
+		t.Fatalf("GetEach: %v", err)
+	}
+	if wisp, ok := read["gc-wisp-2"]; !ok || !wisp.Ephemeral || len(read) != 1 {
+		t.Fatalf("GetEach = %+v, want the wisp gc-wisp-2 and gc-3 absent", read)
+	}
+}
+
+// TestGetEachKeepsExactIDsAndFailsOnAFailedRead: GetEach reads each distinct
+// id once, keeps only beads answered under their exact id, and fails on a
+// read that failed rather than reading the bead as absent.
+func TestGetEachKeepsExactIDsAndFailsOnAFailedRead(t *testing.T) {
+	mem := beads.NewMemStore()
+	held, err := mem.Create(beads.Bead{Title: "held", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	broken := errors.New("dial tcp 127.0.0.1:1: connection refused")
+	store := &getOnlyStore{
+		Store: mem,
+		fail:  map[string]error{"gc-broken": broken},
+		alias: map[string]string{"gc-short": held.ID},
+	}
+	found, err := beads.GetEach(store, []string{held.ID, "gc-short", "gc-missing", held.ID})
+	if err != nil {
+		t.Fatalf("GetEach: %v", err)
+	}
+	if len(found) != 1 || found[held.ID].ID != held.ID {
+		t.Fatalf("GetEach = %+v, want only %s", found, held.ID)
+	}
+	got := slices.Sorted(slices.Values(store.gets))
+	want := slices.Sorted(slices.Values([]string{held.ID, "gc-short", "gc-missing"}))
+	if !slices.Equal(got, want) {
+		t.Fatalf("GetEach read %v, want each distinct id once: %v", got, want)
+	}
+	if _, err := beads.GetEach(store, []string{held.ID, "gc-broken"}); !errors.Is(err, broken) {
+		t.Fatalf("GetEach over a failing Get = %v, want the read's own error", err)
+	}
+}

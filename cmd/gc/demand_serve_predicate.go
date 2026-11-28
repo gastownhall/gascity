@@ -182,7 +182,7 @@ const (
 	// demandRowInputWithheld: input admission withholds the row (#8832) — its
 	// workflow's input is held, blocked, deferred or waiting on an unsatisfied
 	// prerequisite. The verdict is not bead-local, so the caller judges it from
-	// the stores it reads (readywork.InputWithheld, the hook's claim seam) and
+	// the stores it reads (inputAdmissionProbe, the hook's claim seam) and
 	// passes it in as inputWithheld. The hook refuses the row on every path,
 	// like a hold, so this is PROOF of non-claimability.
 	demandRowInputWithheld demandRowClaimability = "input_withheld"

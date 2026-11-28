@@ -8,6 +8,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/inputadmission"
 	"github.com/gastownhall/gascity/internal/readywork"
 )
 
@@ -108,6 +109,59 @@ func gateReadyRows(gate *readywork.LegGate, own int, rows []beads.Bead, readErr 
 	}
 	return rows, &beads.PartialResultError{Op: "controller ready demand cross-store gate", Err: gateErr}
 }
+
+// inputVerdicts is input admission's judgment of a set of rows (#8832): every
+// row it judged (Judged), the ones it withheld with their verdicts (Withheld),
+// and the judgment's own failure (Err), which judged none of them. A row
+// outside Judged has no verdict, which a reader must not read as admitted.
+type inputVerdicts struct {
+	Judged   map[string]bool
+	Withheld map[string]inputadmission.Withhold
+	Err      error
+}
+
+// judgeInputVerdicts judges rows, which legs[own] holds, for input admission
+// with gate's own judge (readywork.LegGate.JudgeInput), waiting at most
+// deadline, as gateReadyRows waits for the same gate. A judgment that fails
+// or outlives deadline is recorded as its failure and judges no row; so does
+// an own outside the gate's legs, which no judge covers. No rows record
+// nothing.
+func judgeInputVerdicts(gate *readywork.LegGate, own int, rows []beads.Bead, deadline time.Duration) inputVerdicts {
+	if len(rows) == 0 {
+		return inputVerdicts{}
+	}
+	if gate == nil || own < 0 {
+		return inputVerdicts{Err: errInputAdmissionUngated}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), deadline)
+	defer cancel()
+	type judged struct {
+		withheld map[string]inputadmission.Withhold
+		err      error
+	}
+	done := make(chan judged, 1)
+	go func() {
+		withheld, err := guardedRead(func() (map[string]inputadmission.Withhold, error) { return gate.JudgeInput(ctx, own, rows) })
+		done <- judged{withheld, err}
+	}()
+	select {
+	case j := <-done:
+		if j.err != nil {
+			return inputVerdicts{Err: j.err}
+		}
+		v := inputVerdicts{Judged: make(map[string]bool, len(rows)), Withheld: j.withheld}
+		for _, row := range rows {
+			v.Judged[row.ID] = true
+		}
+		return v
+	case <-ctx.Done():
+		return inputVerdicts{Err: fmt.Errorf("%w (%s)", errCrossStoreGateDeadline, deadline)}
+	}
+}
+
+// errInputAdmissionUngated: rows that need an input-admission verdict on a leg
+// no gate covers.
+var errInputAdmissionUngated = errors.New("no ready gate covers the leg, so input admission judged none of its rows")
 
 // joinGateErr adds a gate failure to a snapshot read's own error, keeping the
 // read's error as it is when the gate did not fail.

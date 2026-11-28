@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/inputadmission"
 	"github.com/gastownhall/gascity/internal/readywork"
 )
 
@@ -396,12 +397,22 @@ func (c *gateLegCity) served(rec *externalReadsRecording) ([]beads.Bead, int64) 
 	return rows, c.engine.reads.Load() - before
 }
 
-// ownVerdict reports whether every blocking edge of the binding row id, as its
-// engine holds them, names a plain target in the binding's reserved namespace
-// that the binding's cache holds: the rows whose readiness needs no other
-// store.
+// ownVerdict reports whether the binding row id's readiness needs no other
+// store: its workflow names no input convoy, which lives in the work store
+// (#8832), and every blocking edge, as its engine holds them, names a plain
+// target in the binding's reserved namespace that the binding's cache holds.
 func (c *gateLegCity) ownVerdict(id string) bool {
 	c.t.Helper()
+	row, err := c.engine.SQLiteStore.Get(id)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	if inputadmission.ReadsInput(row, func(rootID string) (beads.Bead, bool) {
+		root, err := c.engine.SQLiteStore.Get(rootID)
+		return root, err == nil
+	}) {
+		return false
+	}
 	deps, err := c.engine.SQLiteStore.DepList(id, "down")
 	if err != nil {
 		c.t.Fatal(err)
@@ -420,6 +431,21 @@ func (c *gateLegCity) ownVerdict(id string) bool {
 		}
 	}
 	return true
+}
+
+// createRoot creates a graph.v2 workflow root in the binding's engine naming
+// input convoy convoyID ("" for a workflow with no input), and returns its id.
+func (c *gateLegCity) createRoot(convoyID string) string {
+	c.t.Helper()
+	meta := map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}
+	if convoyID != "" {
+		meta[beadmeta.InputConvoyIDMetadataKey] = convoyID
+	}
+	root, err := c.engine.Create(beads.Bead{Title: "workflow root", Type: "molecule", Metadata: meta})
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	return root.ID
 }
 
 // closeOutside closes id in the binding's engine, as another process does,
@@ -583,9 +609,14 @@ func TestV2GateLegWithdrawsARecordedStepWhoseBlockerReopened(t *testing.T) {
 //     serves now, and every such row the cache's own Ready serves, is
 //     served, wherever the cache vouches for it.
 //
+// The graph rows name workflow roots with and without an input convoy, whose
+// input in the work store is held, blocked, waiting on a prerequisite or
+// admissible (#8832), and a work-side change may release or withhold one.
+//
 // Kills: a row served past an open or absent blocker, a row whose readiness
-// needs another store read off the cache, a recorded row kept over the cache's
-// newer verdict, and an own-verdict row that waits for the lane.
+// needs another store read off the cache, a step served off the cache while
+// its input withholds it, a recorded row kept over the cache's newer verdict,
+// and an own-verdict row that waits for the lane.
 func TestV2GateLegReadyAgreesWithTheFederatedGate(t *testing.T) {
 	for seed := int64(1); seed <= 40; seed++ {
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
@@ -599,8 +630,48 @@ func TestV2GateLegReadyAgreesWithTheFederatedGate(t *testing.T) {
 				}
 				work = append(work, b.ID)
 			}
+			// Workflow roots in the binding (#8832): one naming no input, and
+			// one per input fact — held, blocked, waiting on a work
+			// prerequisite, admissible — its convoy and input in the work
+			// store. A graph row may name one as its root.
+			roots := []string{c.createRoot("")}
+			for _, input := range []beads.Bead{
+				{Title: "held input", Type: "task", Labels: []string{"hold:external"}},
+				{Title: "blocked input", Type: "task"},
+				{Title: "input with a prerequisite", Type: "task"},
+				{Title: "admissible input", Type: "task"},
+			} {
+				in, err := c.work.Create(input)
+				if err != nil {
+					t.Fatal(err)
+				}
+				switch input.Title {
+				case "blocked input":
+					blocked := "blocked"
+					if err := c.work.Update(in.ID, beads.UpdateOpts{Status: &blocked}); err != nil {
+						t.Fatal(err)
+					}
+				case "input with a prerequisite":
+					if err := c.work.DepAdd(in.ID, work[0], "blocks"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				work = append(work, in.ID)
+				conv, err := c.work.Create(beads.Bead{Title: "input convoy", Type: "convoy"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := c.work.DepAdd(conv.ID, in.ID, "tracks"); err != nil {
+					t.Fatal(err)
+				}
+				roots = append(roots, c.createRoot(conv.ID))
+			}
 			newGraph := func(store beads.Store, title string) string {
-				b, err := store.Create(beads.Bead{Title: title, Type: "task"})
+				row := beads.Bead{Title: title, Type: "task"}
+				if n := rng.Intn(len(roots) + 1); n < len(roots) {
+					row.Metadata = map[string]string{beadmeta.RootBeadIDMetadataKey: roots[n]}
+				}
+				b, err := store.Create(row)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -735,6 +806,61 @@ func TestV2GateLegReadyAgreesWithTheFederatedGate(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestV2GateLegNeverServesAnInputWithheldStepFromItsCache pins the #8832
+// review's blocker on the production shape (a split v2 city): a routed step in
+// the binding with no edges of its own, whose root names an input convoy that
+// lives with a held input in the work store, is withheld by the lane's gated
+// recording. The v2 pass must not restore it from the binding's cache, whose
+// verdict sees the step's edges but not its input, and must serve it again
+// once a recording admits it. Kills: the own-verdict merge reading a row's
+// own edges as its whole readiness.
+func TestV2GateLegNeverServesAnInputWithheldStepFromItsCache(t *testing.T) {
+	c := newGateLegCity(t)
+	input, err := c.work.Create(beads.Bead{Title: "input", Type: "task", Labels: []string{"hold:external"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conv, err := c.work.Create(beads.Bead{Title: "input convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.work.DepAdd(conv.ID, input.ID, "tracks"); err != nil {
+		t.Fatal(err)
+	}
+	root := c.createRoot(conv.ID)
+	step, err := c.engine.Create(beads.Bead{Title: "graph-step", Type: "task", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: root,
+		beadmeta.RoutedToMetadataKey:   "gascity/pool",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.prime()
+
+	gated := c.gated()
+	if idSet(gated)[step.ID] {
+		t.Fatalf("fixture: the federated gate serves step %s, whose input %s is held", step.ID, input.ID)
+	}
+	served, reads := c.served(c.recording(gated))
+	if reads != 0 {
+		t.Fatalf("the pass sent the binding's engine %d reads", reads)
+	}
+	if idSet(served)[step.ID] {
+		t.Fatalf("v2 Ready of the binding = %v serves step %s, which the recording withheld for its held input %s", beadIDsOf(served), step.ID, input.ID)
+	}
+
+	if err := c.work.Update(input.ID, beads.UpdateOpts{RemoveLabels: []string{"hold:external"}}); err != nil {
+		t.Fatal(err)
+	}
+	gated = c.gated()
+	if !idSet(gated)[step.ID] {
+		t.Fatalf("fixture: the federated gate withholds step %s after its input's hold was released", step.ID)
+	}
+	if served, _ := c.served(c.recording(gated)); !idSet(served)[step.ID] {
+		t.Fatalf("v2 Ready of the binding = %v lacks step %s, which the recording admits", beadIDsOf(served), step.ID)
 	}
 }
 

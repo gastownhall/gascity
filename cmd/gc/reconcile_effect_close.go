@@ -227,10 +227,11 @@ func strandedProbe(ctx context.Context, r effectReads, v txView) (strandedWork, 
 		!unmarked && !c.ParkEligible || v.World.Env == nil {
 		return strandedWork{}, nil
 	}
-	work, err := collectSessionAssignedWorkInfo(seatWorkFor(r.legs, releaseScope(v.Row, v.World.Env.Cfg)), v.Row)
+	sw := seatWorkFor(r.legs, releaseScope(v.Row, v.World.Env.Cfg))
+	work, err := collectSessionAssignedWorkInfo(sw, v.Row)
 	var out strandedWork
 	if c.ParkEligible {
-		out.parked, out.parkErr = liveParkedWork(work, err, releaseSeatOfInfo(v.Row), v.World.Now)
+		out.parked, out.parkErr = liveParkedWork(work, err, releaseSeatOfInfo(v.Row), v.World.Now, sw.inputAdmission())
 		if out.parked || out.parkErr != nil || !unmarked {
 			return out, nil
 		}

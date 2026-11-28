@@ -521,8 +521,9 @@ func assignedOpenWorkHeld(b beads.Bead) bool {
 // or withheld by input admission (#8832) — its workflow's input is held,
 // blocked, deferred or waiting on an unsatisfied prerequisite, the same live
 // verdict the ready reader and the claim path share. inputWithheld is the row
-// ids input admission withheld for this probe's own rows
-// (readywork.InputWithheld); nil withholds nothing. Like
+// ids input admission withheld among the caller's own rows (a probe's
+// inputAdmissionProbe, the open arm's readyDemandCache.openInputWithheld);
+// nil withholds nothing. Like
 // assignedOpenWorkHeld, only OPEN rows qualify: an in_progress row is a
 // claimed ownership fact and stays transparent to the verdict.
 func assignedOpenWorkWithheld(b beads.Bead, inputWithheld map[string]bool) bool {

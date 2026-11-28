@@ -836,14 +836,16 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 
 	// Input admission reads a graph.v2 root and its steps from the binding and
 	// the input convoy and its members from the work store, so one judge
-	// reads both, the work store first. Ops that judge nothing stay so.
+	// reads both, the work store first. A prerequisite only another store
+	// holds is unresolved here, as in the base seam. Ops that judge nothing
+	// stay so.
 	if base.InputAdmission != nil {
-		ops.InputAdmission = func(ctx context.Context, dir string, env []string, candidates []beads.Bead) (map[string]inputadmission.Withhold, error) {
+		ops.InputAdmission = func(ctx context.Context, dir string, env []string, candidates []beads.Bead) (inputadmission.Verdicts, error) {
 			sources := []inputadmission.Source{
 				{Label: "bd store at " + dir, Reader: base.WorkflowStore(ctx, dir, env, "", "")},
 				{Label: "coordination-class binding", Reader: route.class},
 			}
-			return inputadmission.New(sources, time.Now()).Judge(ctx, 0, candidates)
+			return inputadmission.New(sources, time.Now()).Verdicts(ctx, 0, candidates)
 		}
 	}
 

@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "workflowstop",
@@ -40,4 +40,18 @@ filegroup(
         allow_empty = True,
     ),
     visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "workflowstop_test",
+    srcs = [
+        "testenv_import_test.go",
+        "workflowstop_test.go",
+    ],
+    embed = [":workflowstop"],
+    deps = [
+        "//internal/beadmeta",
+        "//internal/beads",
+        "//internal/testenv",
+    ],
 )

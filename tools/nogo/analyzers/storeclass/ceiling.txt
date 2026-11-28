@@ -30,7 +30,6 @@ internal/orders	raw-result	1
 internal/orders	read-marker	1
 internal/orders	unwrap	6
 internal/readywork	raw-field	1
-internal/readywork	raw-param	1
 internal/runtime/t3bridge	raw-param	1
 internal/runtime/t3bridge	raw-result	1
 internal/session/sessiontest	mint	1

@@ -48,7 +48,6 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/opjournal"
-	"github.com/gastownhall/gascity/internal/readywork"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/workladder"
@@ -119,6 +118,10 @@ type ladderPass struct {
 	// show the wait yet (unlessAsked): such a seat is not restarted fresh,
 	// as one whose work shows the wait is not (seatAwaitsHuman).
 	humanWaits map[string]bool
+	// admit judges the allocation's assigned work for input admission over
+	// the city's planned ready legs, once per pass (outstanding, #8832). A
+	// live re-check judges afresh (admitLive).
+	admit *inputAdmissionProbe
 }
 
 // runWorkLadder is the step's body over the planner's last allocation s.
@@ -131,6 +134,7 @@ func (l *externalReadsLane) runWorkLadder(ctx context.Context, env externalReads
 	p := &ladderPass{
 		l: l, env: env, cfg: env.Cfg, now: l.now(), front: sessionFrontDoor(env.CityStore),
 		health: loadProviderHealthSnapshot(env.CityPath), partial: s.Partial, ctx: ctx,
+		admit: newInputAdmissionProbe(env.WorkLegs),
 	}
 	if l.turnReaderFor != nil {
 		p.turnReader = l.turnReaderFor(env)
@@ -258,18 +262,10 @@ func (p *ladderPass) standDownSeat(row beads.Bead, off workladder.Gate) {
 // for good.
 func (p *ladderPass) outstanding(s *allocSummary, raw []beads.Bead) map[string][]ladderTarget {
 	out := make(map[string][]ladderTarget)
-	held := make(map[string]bool)
-	for i, b := range s.AssignedWork {
-		// A row input admission withholds (#8832) is held too: the hook will
-		// not serve it, so it is not the ladder's until its input is
-		// admissible. Judged from the store the snapshot read it in
-		// (index-aligned AssignedStores).
-		withheld := i < len(s.AssignedStores) && readywork.InputWithheld(readywork.Leg{Store: s.AssignedStores[i]}, []beads.Bead{b})[b.ID]
-		if beadmeta.HasDispatchHold(b.Labels) || withheld {
-			held[b.ID] = true
-		}
-	}
-	for _, b := range s.ReadyRouted {
+	// A row input admission withholds (#8832) is held too: the hook will not
+	// serve it, so it is not the ladder's until its input is admissible.
+	held := p.assignedInputWithheld(s)
+	for _, b := range slices.Concat(s.AssignedWork, s.ReadyRouted) {
 		if beadmeta.HasDispatchHold(b.Labels) {
 			held[b.ID] = true
 		}
@@ -302,7 +298,7 @@ func (p *ladderPass) outstanding(s *allocSummary, raw []beads.Bead) map[string][
 				work: workladder.Work{Key: workladder.ClaimKey{Store: claimStoreRef(c.StoreRef), Bead: c.WorkBeadID}, Kind: workladder.KindContinuation},
 				recheck: func() backstopResolution {
 					res, b := revalidateContinuation(target)
-					return unlessHeld(res, b, readywork.Leg{Store: target.Store})
+					return p.unlessHeld(res, b, target.Store)
 				},
 			})
 		}
@@ -331,7 +327,7 @@ func (p *ladderPass) claimTarget(c executionClaim, seat string) ladderTarget {
 		claimSession: c.SessionID != "" && c.SessionID == strings.TrimSpace(seat),
 		recheck: func() backstopResolution {
 			res, b := revalidateExecutionClaim(target)
-			return p.unlessAsked(unlessHeld(res, b, readywork.Leg{Store: target.Store}), b, seat, waiting)
+			return p.unlessAsked(p.unlessHeld(res, b, target.Store), b, seat, waiting)
 		},
 	}
 }
@@ -373,22 +369,63 @@ func (p *ladderPass) triggerRecheck(id string) func() backstopResolution {
 		}
 		// Input admission, re-judged live before the nudge (#8832): a withheld
 		// trigger is not the ladder's until its input is admissible, exactly as
-		// a held one is not while the hold stands.
-		if readywork.InputWithheld(p.env.WorkLegs.admissionLeg(), []beads.Bead{b})[b.ID] {
+		// a held one is not while the hold stands. The planned legs hold the
+		// store that owns the trigger, and the work store its input lives in.
+		if p.admitLive().withheld(nil, []beads.Bead{b})[b.ID] {
 			return backstopResolutionClear
 		}
 		return backstopResolutionOutstanding
 	}
 }
 
+// assignedInputWithheld is the ids of the allocation's assigned work that
+// input admission withholds (#8832), each row judged from the store the
+// snapshot read it in (index-aligned AssignedStores), over the city's planned
+// ready legs.
+func (p *ladderPass) assignedInputWithheld(s *allocSummary) map[string]bool {
+	type storeRows struct {
+		store beads.StoreReader
+		rows  []beads.Bead
+	}
+	byStore := make(map[string]*storeRows)
+	var order []*storeRows
+	for i, b := range s.AssignedWork {
+		if i >= len(s.AssignedStores) || beads.IsNilStore(s.AssignedStores[i]) {
+			continue
+		}
+		key := beads.PhysicalStoreKey(s.AssignedStores[i])
+		group := byStore[key]
+		if group == nil {
+			group = &storeRows{store: s.AssignedStores[i]}
+			byStore[key] = group
+			order = append(order, group)
+		}
+		group.rows = append(group.rows, b)
+	}
+	held := make(map[string]bool)
+	for _, group := range order {
+		for id := range p.admit.withheld(group.store, group.rows) {
+			held[id] = true
+		}
+	}
+	return held
+}
+
+// admitLive is a fresh input-admission probe over the city's planned ready
+// legs, for a live re-check before the ladder acts: it reads every input fact
+// anew instead of the pass's memoized verdicts.
+func (p *ladderPass) admitLive() *inputAdmissionProbe {
+	return newInputAdmissionProbe(p.env.WorkLegs)
+}
+
 // unlessHeld is res, a live re-read's verdict, except that work a dispatch
 // hold parks, or input admission withholds (#8832), is clear: not the
 // ladder's while the hold stands or the input is not admissible. b is the
-// bead the read found, leg the store it was read from as a ready leg — the
-// re-judge reads the input's facts live, exactly as the pre-nudge re-read
-// does.
-func unlessHeld(res backstopResolution, b beads.Bead, leg readywork.Leg) backstopResolution {
-	if res == backstopResolutionOutstanding && (beadmeta.HasDispatchHold(b.Labels) || readywork.InputWithheld(leg, []beads.Bead{b})[b.ID]) {
+// bead the read found in store; the re-judge reads the input's facts live
+// over the city's planned ready legs (admitLive), exactly as the pre-nudge
+// re-read does.
+func (p *ladderPass) unlessHeld(res backstopResolution, b beads.Bead, store beads.StoreReader) backstopResolution {
+	if res == backstopResolutionOutstanding && (beadmeta.HasDispatchHold(b.Labels) || p.admitLive().withheld(store, []beads.Bead{b})[b.ID]) {
 		return backstopResolutionClear
 	}
 	return res

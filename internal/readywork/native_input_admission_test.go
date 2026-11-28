@@ -381,9 +381,9 @@ func TestNativeInputAdmissionReadErrorNamesBeadAndStore(t *testing.T) {
 // TestNativeInputAdmissionReadyAndDemand is the #8832 report's two-door
 // reproduction: on a unified city and on split work/graph stores, a native
 // step whose input is held is neither returned by the ready read nor kept by
-// the leg gate the controller's demand pass applies — which records the
-// withheld verdict for the lane to read — while a sibling workflow whose input
-// is clean is served by both.
+// the leg gate the controller's demand pass applies — whose judge gives the
+// external-reads lane the withheld verdict it records (LegGate.JudgeInput) —
+// while a sibling workflow whose input is clean is served by both.
 func TestNativeInputAdmissionReadyAndDemand(t *testing.T) {
 	for city, open := range openCities {
 		t.Run(city, func(t *testing.T) {
@@ -413,12 +413,16 @@ func TestNativeInputAdmissionReadyAndDemand(t *testing.T) {
 			if slices.Contains(kept, held.step.ID) || !slices.Contains(kept, free.step.ID) {
 				t.Fatalf("Gate = %v, want %s (clean input) and not %s (input %s held)", kept, free.step.ID, held.step.ID, held.input.ID)
 			}
-			verdict, ok := gate.Withheld()[held.step.ID]
-			if !ok || verdict.InputID != held.input.ID || verdict.RootID != held.root.ID || verdict.ConvoyID != held.convoy.ID {
-				t.Fatalf("Withheld()[%s] = %+v (recorded %v), want input %s, root %s, convoy %s", held.step.ID, verdict, ok, held.input.ID, held.root.ID, held.convoy.ID)
+			withheld, err := gate.JudgeInput(context.Background(), own, rows)
+			if err != nil {
+				t.Fatalf("JudgeInput: %v", err)
 			}
-			if _, ok := gate.Withheld()[free.step.ID]; ok {
-				t.Fatalf("Withheld() records %s, whose input is clean", free.step.ID)
+			verdict, ok := withheld[held.step.ID]
+			if !ok || verdict.InputID != held.input.ID || verdict.RootID != held.root.ID || verdict.ConvoyID != held.convoy.ID {
+				t.Fatalf("JudgeInput()[%s] = %+v (withheld %v), want input %s, root %s, convoy %s", held.step.ID, verdict, ok, held.input.ID, held.root.ID, held.convoy.ID)
+			}
+			if _, ok := withheld[free.step.ID]; ok {
+				t.Fatalf("JudgeInput() withholds %s, whose input is clean", free.step.ID)
 			}
 		})
 	}
@@ -451,6 +455,52 @@ func TestNativeInputAdmissionBeforeReadyLimit(t *testing.T) {
 			q.Limit = limit
 			if got := readyIDs(t, legs, q); !slices.Equal(got, []string{free.step.ID}) {
 				t.Fatalf("Ready(limit=%d) = %v, want [%s]: the %d steps ahead of it are withheld by held input %s", limit, got, free.step.ID, limit+boundedSlack+1, held.input.ID)
+			}
+		})
+	}
+}
+
+// TestNativeInputAdmissionCrossLegPrerequisite pins the prerequisite rule
+// across a unified city's legs (#8832 review): an input in a rig's store whose
+// "blocks" prerequisite lives in the city store, plain or "external:", is
+// judged from the city store's copy — withheld while it is open, served once
+// it closes — and a prerequisite no leg holds is unknown and does not
+// withhold. Kills: a deleted or never-created target stranding the workflow
+// for good, and a reader judging a prerequisite from fewer legs than it
+// federates.
+func TestNativeInputAdmissionCrossLegPrerequisite(t *testing.T) {
+	for _, form := range []string{"plain", "external:"} {
+		t.Run(form, func(t *testing.T) {
+			city := beads.NewMemStore()
+			city.IDPrefix = "mc"
+			rig := beads.NewMemStore()
+			rig.IDPrefix = "ga"
+			legs := []Leg{testLeg("city", city), testLeg("rig:gascity", rig)}
+			wf := newNativeWorkflow(t, rig, rig, beads.Bead{})
+			ref := func(id string) string {
+				if form == "external:" {
+					return "external:" + id
+				}
+				return id
+			}
+
+			if err := rig.DepAdd(wf.input.ID, ref("mc-404"), "blocks"); err != nil {
+				t.Fatalf("DepAdd dangling: %v", err)
+			}
+			if ids := readyIDs(t, legs, poolQuery); !slices.Contains(ids, wf.step.ID) {
+				t.Fatalf("Ready = %v lacks step %s whose input's only prerequisite no leg holds; want it served", ids, wf.step.ID)
+			}
+
+			prereq := mustCreate(t, city, beads.Bead{Title: "city prerequisite", Type: "task"})
+			if err := rig.DepAdd(wf.input.ID, ref(prereq.ID), "blocks"); err != nil {
+				t.Fatalf("DepAdd cross-leg: %v", err)
+			}
+			if ids := readyIDs(t, legs, poolQuery); slices.Contains(ids, wf.step.ID) {
+				t.Fatalf("Ready = %v contains step %s whose input waits on open city prerequisite %s; want it withheld", ids, wf.step.ID, prereq.ID)
+			}
+			closeBead(t, city, prereq.ID)
+			if ids := readyIDs(t, legs, poolQuery); !slices.Contains(ids, wf.step.ID) {
+				t.Fatalf("Ready = %v lacks step %s after city prerequisite %s closed; want it served", ids, wf.step.ID, prereq.ID)
 			}
 		})
 	}

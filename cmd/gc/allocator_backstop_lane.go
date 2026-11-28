@@ -15,7 +15,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
-	"github.com/gastownhall/gascity/internal/inputadmission"
 	"github.com/gastownhall/gascity/internal/readywork"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -183,12 +182,13 @@ type legRecording struct {
 	// keeps ReadyAll ungated and partial; it is not a failed read of the leg.
 	ReadyGated   bool
 	ReadyGateErr error
-	// InputWithheld is the input-admission half of the same gate's verdict:
-	// the rows it withheld from this leg's ReadyAll, keyed by row id, with the
-	// verdict's reason (#8832). The pass's consumers read this record instead
-	// of re-judging, so wake and keep-awake refuse exactly the rows the
-	// gated read refused.
-	InputWithheld map[string]inputadmission.Withhold
+	// OpenInput is input admission's verdict on the leg's open-arm subjects
+	// (openArmAdmissionSubject): the open assigned molecule work the pass may
+	// count as wake demand, which ReadyAll does not carry, judged by the same
+	// gate as ReadyAll (#8832). The pass reads it and never judges a row
+	// itself (CONTRACT v5 R4): a subject it does not cover carries no wake
+	// readiness and leaves the leg partial (readyDemandCache.openInputWithheld).
+	OpenInput inputVerdicts
 	// Claimed is the leg's live in_progress rows, read by the same source as
 	// its gated ReadyAll (#8832). A claim written straight to the backing —
 	// another host's hook — is invisible to the cache until its next
@@ -209,26 +209,24 @@ func (r *legRecording) gateReady(gate *readywork.LegGate, own int) {
 	if gate == nil || own < 0 {
 		return
 	}
-	passed := r.ReadyAll
 	r.ReadyAll, r.ReadyGateErr = gateReadyRows(gate, own, r.ReadyAll, r.ReadyAllErr, crossStoreGateDeadline)
 	r.ReadyGated = true
-	r.InputWithheld = inputWithheldAmong(gate.Withheld(), passed)
 }
 
-// inputWithheldAmong narrows the gate's withheld record to the rows the gate
-// judged in this leg's ReadyAll snapshot, so a recording reports only its own
-// leg's verdicts.
-func inputWithheldAmong(withheld map[string]inputadmission.Withhold, rows []beads.Bead) map[string]inputadmission.Withhold {
-	if len(withheld) == 0 || len(rows) == 0 {
-		return nil
-	}
-	out := make(map[string]inputadmission.Withhold, len(rows))
-	for _, row := range rows {
-		if w, ok := withheld[row.ID]; ok {
-			out[row.ID] = w
+// judgeOpenInput records input admission's verdict on the open-arm subjects
+// (openArmAdmissionSubject) among open, the leg's open rows as the pass reads
+// them: a lane-fed leg's recorded RawOpen, an exact leg's cache. It judges with
+// gate, the one that gated ReadyAll, so a root or convoy both read is read
+// once, inside crossStoreGateDeadline. A leg no gate covers records the
+// subjects unjudged (judgeInputVerdicts).
+func (r *legRecording) judgeOpenInput(gate *readywork.LegGate, own int, open []beads.Bead) {
+	var subjects []beads.Bead
+	for _, row := range open {
+		if openArmAdmissionSubject(row) {
+			subjects = append(subjects, row)
 		}
 	}
-	return out
+	r.OpenInput = judgeInputVerdicts(gate, own, subjects, crossStoreGateDeadline)
 }
 
 // gatedReady is the Ready a gate leg's recording serves: its rows, and its
@@ -770,9 +768,11 @@ func (l *externalReadsLane) scaleCheckOf(key sourceKey, res sourceResult, ok boo
 // own, since the pass reads an exact leg's other demand from its cache but
 // cannot judge its rows without reading other stores. That source also
 // records the leg's live in_progress rows, the claims the cache may not have
-// converged yet (legRecording.Claimed). One gate serves the pass, so a
-// blocker or an input's facts are read once however many legs hold them
-// back.
+// converged yet (legRecording.Claimed). Every gate leg's open assigned
+// molecule work, which the pass may count as wake demand outside ReadyAll, is
+// judged for input admission here too (legRecording.OpenInput). One gate
+// serves the pass, so a blocker or an input's facts are read once however
+// many legs hold them back.
 func (l *externalReadsLane) sources(env externalReadsEnv) []externalSource {
 	var out []externalSource
 	add := func(key sourceKey, read func() (sourcePayload, error)) {
@@ -794,6 +794,7 @@ func (l *externalReadsLane) sources(env externalReadsEnv) []externalSource {
 			r.RawOpen, r.RawOpenErr = guardedRead(func() ([]beads.Bead, error) { return reads.RawOpen(leg.store) })
 			r.ReadyAll, r.ReadyAllErr = guardedRead(func() ([]beads.Bead, error) { return reads.ReadyAll(leg.store) })
 			r.gateReady(gate, own)
+			r.judgeOpenInput(gate, own, r.RawOpen)
 			return sourcePayload{Leg: r}, nil
 		})
 	}
@@ -812,6 +813,19 @@ func (l *externalReadsLane) sources(env externalReadsEnv) []externalSource {
 				return beads.HandlesFor(leg.Store).Live.List(beads.ListQuery{Status: "in_progress"})
 			})
 			r.gateReady(gate, own)
+			// The pass reads an exact leg's open rows from its cache
+			// (v2DemandReads.RawOpen), so the open-arm subjects are judged
+			// from the same read here, off the pass (#8832).
+			open, err := guardedRead(func() ([]beads.Bead, error) {
+				cache, _ := demandLegCache(leg.Store)
+				rows, err := cache.List(exactLegRawOpenQuery)
+				return exactLegRawOpen(rows, l.now()), err
+			})
+			if err != nil {
+				r.OpenInput = inputVerdicts{Err: fmt.Errorf("reading the leg's open rows: %w", err)}
+			} else {
+				r.judgeOpenInput(gate, own, open)
+			}
 			return sourcePayload{Leg: r}, nil
 		})
 	}

@@ -12,7 +12,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/inputadmission"
 	"github.com/gastownhall/gascity/internal/readywork"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -61,13 +60,14 @@ type demandReads interface {
 	// ClosedNamedIndex is the city store's closed named-session index
 	// (readyAssignedWorkAssignees). It reads closed history.
 	ClosedNamedIndex(store beads.Store) (session.ClosedNamedSessionBeadIndex, error)
-	// InputWithheldFor returns the rows input admission withheld in the
-	// pass's own gated read of leg, keyed by row id with the
-	// verdict (#8832): the recording's verdicts for a v2 pass, judged over
-	// every leg at once by the lane's one gate, and none for legacy, whose
-	// arms judge live. A leg with no gated recording withholds nothing —
-	// its reads are partial anyway.
-	InputWithheldFor(leg readywork.Leg) map[string]inputadmission.Withhold
+	// OpenInput is input admission's verdict on leg's open-arm subjects
+	// (openArmAdmissionSubject), when the reads hold one (#8832): a v2
+	// pass's recording, judged off the pass by the external-reads lane's one
+	// gate (legRecording.OpenInput); a missing, stale or failed recording is
+	// a verdict that judged nothing, with the reason. recorded is false for
+	// legacy, whose pass judges with its own gate
+	// (readyDemandCache.openInputWithheld).
+	OpenInput(leg readywork.Leg) (verdicts inputVerdicts, recorded bool)
 }
 
 // demandReadsOrLegacy treats a nil reads as legacy.
@@ -121,10 +121,10 @@ func (legacyDemandReads) ClosedNamedIndex(store beads.Store) (session.ClosedName
 	return session.BuildClosedNamedSessionBeadIndex(beads.SessionStore{Store: store})
 }
 
-// InputWithheldFor is none for legacy: its pass judges its arms' rows live
-// (readywork.InputWithheld), inside its gate deadline.
-func (legacyDemandReads) InputWithheldFor(readywork.Leg) map[string]inputadmission.Withhold {
-	return nil
+// OpenInput records nothing for legacy: its pass judges the open arm with its
+// own gate, inside crossStoreGateDeadline (readyDemandCache.openInputWithheld).
+func (legacyDemandReads) OpenInput(readywork.Leg) (inputVerdicts, bool) {
+	return inputVerdicts{}, false
 }
 
 // demandLegCache classifies a demand leg: its CachingStore, behind the
@@ -153,12 +153,17 @@ func demandLegCache(store beads.Store) (cache *beads.CachingStore, exact bool) {
 //     mark the leg's templates partial (retain, block create) instead of
 //     reading zero demand. A bd leg's cache folds blocked work into "open"
 //     (EB-42o8), so it is never read for these.
-//   - ReadyAll on a split city's gate leg (crossStoreGateLegs), exact or not:
-//     the recording's Ready as the lane gated it (legRecording.gatedReady),
-//     because judging a row's cross-store blockers reads other stores. One
-//     the lane did not gate is a PartialResultError with no rows. On an
-//     exact gate leg, the rows the cross-store rule settles by the leg's own
-//     verdict are judged from its cache instead (ReadyAll).
+//   - ReadyAll on a gate leg (crossStoreGateLegs: every leg of a city whose
+//     topology plans), exact or not: the recording's Ready as the lane gated
+//     it (legRecording.gatedReady), because judging a row's cross-store
+//     blockers and its workflow's input reads other stores (#8832). One the
+//     lane did not gate is a PartialResultError with no rows. On an exact
+//     gate leg, the rows the gate settles by the leg's own verdict
+//     (readywork.OwnVerdictStands) are judged from its cache instead
+//     (ReadyAll).
+//   - OpenInput: the recording's input-admission verdicts on the leg's open
+//     assigned molecule work (legRecording.OpenInput), never a judgment of
+//     its own.
 //   - Cached: the cache's List on an exact leg; the strict cached List on
 //     any other, with no live fallback. On an exact gate leg the in_progress
 //     view is the cache's rows widened with the claims the lane's source
@@ -179,8 +184,9 @@ func demandLegCache(store beads.Store) (cache *beads.CachingStore, exact bool) {
 type v2DemandReads struct {
 	now time.Time
 	rec *externalReadsRecording
-	// gateLegs are a split city's cross-store gate legs, set by gatherDemand
-	// before the first read; nil on a city that relocates nothing.
+	// gateLegs are the city's ready gate legs (crossStoreGateLegs), set by
+	// gatherDemand before the first read; nil when the city's topology cannot
+	// be planned.
 	gateLegs []readywork.Leg
 
 	mu   sync.Mutex
@@ -211,10 +217,16 @@ func (r *v2DemandReads) RawOpen(store beads.Store) ([]beads.Bead, error) {
 		return r.recorded(store, "raw_open", func(l legRecording) ([]beads.Bead, error) { return l.RawOpen, l.RawOpenErr })
 	}
 	return r.once(demandLegRead{leg: cache, shape: "raw_open"}, func() ([]beads.Bead, error) {
-		rows, err := cache.List(beads.ListQuery{Status: "open", AllowScan: true, TierMode: beads.TierBoth})
+		rows, err := cache.List(exactLegRawOpenQuery)
 		return exactLegRawOpen(rows, r.now), err
 	})
 }
+
+// exactLegRawOpenQuery is the cache List an exact leg's raw open is read
+// from: by the pass (v2DemandReads.RawOpen), and by the external-reads lane
+// to judge the same rows' input admission off the pass
+// (legRecording.OpenInput).
+var exactLegRawOpenQuery = beads.ListQuery{Status: "open", AllowScan: true, TierMode: beads.TierBoth}
 
 // exactLegRawOpen is an exact leg's raw open from its cache's open rows: those
 // rows less the ones the backing's own Live "open" leaves out
@@ -290,13 +302,18 @@ func unionClaimedRows(rec legRecording, rows []beads.Bead) []beads.Bead {
 	return append(slices.Clone(rows), extra...)
 }
 
-// ReadyAll on a split city's gate leg is the external-reads lane's gated
-// recording, except for the rows the cross-store rule settles by the leg's own
-// verdict (readywork.OwnVerdictStands), which an exact leg's cache judges in
-// the pass (withOwnVerdictRows). Those rows need no other store, so the pass
-// reads them as it reads an unsplit city's exact leg, and a row whose
-// in-namespace blocker just closed is served on the next pass rather than
-// after the lane's next recording.
+// ReadyAll on a gate leg is the external-reads lane's gated recording, except
+// for the rows the gate settles by the leg's own verdict
+// (readywork.OwnVerdictStands), which an exact leg's cache judges in the pass
+// (withOwnVerdictRows). Those rows need no other store, so the pass reads them
+// as it reads the leg's cache alone, and a row whose in-namespace blocker just
+// closed is served on the next pass rather than after the lane's next
+// recording. A row whose workflow names an input convoy is never one of them
+// (#8832): its input lives in another store (on a split city, the work store,
+// not the binding), so only the recording, which the lane's gate judged for
+// input admission, serves it, and the merge never restores a row the gate
+// withheld. Its workflow root is read from the leg's cache alone, which holds
+// the root beside its steps.
 //
 // A recording that is missing, stale, ungated or failed is served exactly as
 // before, rows and error alike: the partial leg retains its templates and
@@ -316,8 +333,16 @@ func (r *v2DemandReads) ReadyAll(store beads.Store) ([]beads.Bead, error) {
 			if err != nil {
 				return recorded, nil
 			}
-			return withOwnVerdictRows(recorded, judged, func(id string, deps []beads.Dep) bool {
-				return readywork.OwnVerdictStands(leg, id, deps, judged.Holds)
+			// The root is read from the cache alone, as the judgment was: a
+			// root it does not hold, or one it cannot vouch for, leaves the
+			// row with the recording.
+			cached := beads.HandlesFor(cache).Cached
+			root := func(id string) (beads.Bead, bool) {
+				b, err := cached.Get(id)
+				return b, err == nil
+			}
+			return withOwnVerdictRows(recorded, judged, func(row beads.Bead, deps []beads.Dep) bool {
+				return readywork.OwnVerdictStands(leg, row, deps, judged.Holds, root)
 			}), nil
 		})
 	}
@@ -339,19 +364,21 @@ func (r *v2DemandReads) ReadyAll(store beads.Store) ([]beads.Bead, error) {
 // withOwnVerdictRows merges a gate leg's Ready: a row the cache judged whose
 // own verdict stands comes from the cache, served exactly when the cache
 // finds it ready; every other row comes from the recording, as recorded.
-func withOwnVerdictRows(recorded []beads.Bead, judged beads.ReadyJudgment, ownVerdict func(id string, deps []beads.Dep) bool) []beads.Bead {
-	settled := func(id string) bool {
-		deps, vouched := judged.Deps[id]
-		return vouched && ownVerdict(id, deps)
+// ownVerdict judges a row as the copy in hand holds it: the recording's for
+// a recorded row, the cache's for a row the cache finds ready.
+func withOwnVerdictRows(recorded []beads.Bead, judged beads.ReadyJudgment, ownVerdict func(row beads.Bead, deps []beads.Dep) bool) []beads.Bead {
+	settled := func(row beads.Bead) bool {
+		deps, vouched := judged.Deps[row.ID]
+		return vouched && ownVerdict(row, deps)
 	}
 	rows := make([]beads.Bead, 0, len(recorded)+len(judged.Rows))
 	for _, b := range recorded {
-		if !settled(b.ID) {
+		if !settled(b) {
 			rows = append(rows, b)
 		}
 	}
 	for _, b := range judged.Rows {
-		if settled(b.ID) {
+		if settled(b) {
 			rows = append(rows, b)
 		}
 	}
@@ -374,20 +401,22 @@ func (r *v2DemandReads) ClosedNamedIndex(store beads.Store) (session.ClosedNamed
 	return s.ClosedNamed, s.Err
 }
 
-// InputWithheldFor is the recording's own verdicts for the leg: what the
-// lane's one gate withheld from this leg's gated snapshot, judged over every
-// leg at once (#8832). A missing, stale or failed recording withholds
-// nothing — its reads are partial, and the pass retains instead of counting
-// a half it cannot see.
-func (r *v2DemandReads) InputWithheldFor(leg readywork.Leg) map[string]inputadmission.Withhold {
+// OpenInput is the recording's input-admission verdicts on the leg's open
+// assigned molecule work, which the lane's one gate judged off the pass
+// (#8832). A missing, stale or failed recording judged nothing: the verdict
+// carries why, and the pass reads the leg's subjects as unjudged.
+func (r *v2DemandReads) OpenInput(leg readywork.Leg) (inputVerdicts, bool) {
 	if leg.Store == nil {
-		return nil
+		return inputVerdicts{Err: errInputAdmissionUngated}, true
 	}
 	s, err := r.rec.lookup(sourceDemand, leg.Store, r.now)
-	if err != nil || s.Err != nil {
-		return nil
+	if err != nil {
+		return inputVerdicts{Err: err}, true
 	}
-	return s.Leg.InputWithheld
+	if s.Err != nil {
+		return inputVerdicts{Err: s.Err}, true
+	}
+	return s.Leg.OpenInput, true
 }
 
 // recorded serves a lane-fed leg's live read from the external-reads
