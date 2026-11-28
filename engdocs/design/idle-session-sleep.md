@@ -1006,6 +1006,21 @@ A session cannot auto-sleep while any of these are true:
 
 The controller should surface the blockers as data, not just logs.
 
+The list governs the controller's idle auto-sleep. An explicit
+`gc session wait --sleep` park is a deliberate sleep, and it is allowed
+while the session holds claimed work: "assigned work that should wake it
+now" means ready work, not a step the session claimed and then gated on its
+wait. A pool seat parked that way keeps its session bead, its pool slot and
+its claim. Its drain completes as an idle sleep that keeps the wait
+(`wait_hold`), and the pool-slot gate refuses an idle seat under a standing
+wait, so neither the stranded repair nor the pool-slot close takes it. The
+park ends when the wait turns ready, which wakes the same session bead
+(`wait-ready`) with its context, or when the wait ends without a wake
+(cancel or expiry), after which the seat is handled as any unheld idle seat
+holding work. A pool seat parks in place only while it holds its claim: a
+seat that released its claim before parking drains with no work and is
+retired, and its wait is cancelled with it.
+
 ### Attach Behavior
 
 Attaching to an idle-asleep interactive session is an explicit hard-wake
