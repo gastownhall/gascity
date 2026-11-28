@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -14,107 +16,145 @@ import (
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
-// A rig-scoped pool whose work sits in the CITY store (station beads filed in
-// the city store, routed to a rig pool). The pool-demand filter gates a rig
-// agent's work to its own rig's store, so a LIVE pool session's city-store
-// claim was dropped: it produced no resume request, the next unclaimed bead's
-// new demand was realized onto that busy session, and the pool never ran a
-// second session beside it.
-//
-// The holder's own claim is admitted under the refs the wake filter accepts
-// for that holder (assignedWorkClaimRefs), and only while the holder claims a
-// live runtime. Unassigned city-store work, work held by an asleep session
-// (TestBuildDesiredState_RigPoolIgnoresAssignedWorkInUnreachableStore), work
-// held by another template's session, and work in another rig's store stay
-// dropped.
+// A rig-scoped pool whose work is filed in the CITY store: on a city that
+// relocates nothing, the template-scoped reach test rejects every city-store
+// row for a rig agent. The wake filter still accepts a holder's own claim on
+// such a row (its exact assignee identity under assignedWorkClaimRefs), so pool
+// demand has to as well. Otherwise the busy holder gets no resume request,
+// looks reusable, and the next queued bead's new-tier request is realized onto
+// it: one session, no create.
 
-func liveHolderPoolDemandFixture(t *testing.T, state string) (*config.City, string, []sessionpkg.Info) {
+// liveHolderSessionName is the holder's exact assignee identity in the filter
+// rows below.
+const liveHolderSessionName = "test-city--worker-1"
+
+// liveHolderFilterFixture is the single-store rig pool fixture with its one
+// open riga/worker session in state.
+func liveHolderFilterFixture(t *testing.T, state string) (*config.City, string, []sessionpkg.Info) {
 	t.Helper()
 	cfg, cityPath, _ := rigScopedPoolDemandFixture(t)
-	seedNoRoutes(t, cityPath)
-	sessions := []beads.Bead{{
+	infos := sessionInfosFromBeads([]beads.Bead{{
 		ID:     "gcs-1",
 		Status: "open",
 		Type:   sessionBeadType,
 		Metadata: map[string]string{
 			"template":     "riga/worker",
-			"session_name": "test-city--worker-1",
+			"session_name": liveHolderSessionName,
 			"state":        state,
 			"pool_managed": "true",
 		},
-	}}
-	return cfg, cityPath, sessionInfosFromBeads(sessions)
+	}})
+	seedNoRoutes(t, cityPath)
+	return cfg, cityPath, infos
+}
+
+// liveHolderWork is an in-progress claim by assignee routed to riga/worker.
+func liveHolderWork(id, assignee string) beads.Bead {
+	return beads.Bead{
+		ID:       id,
+		Status:   "in_progress",
+		Assignee: assignee,
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "riga/worker"},
+	}
 }
 
 func TestPoolDemandFilterKeepsALiveHoldersCityStoreClaim(t *testing.T) {
-	cfg, cityPath, infos := liveHolderPoolDemandFixture(t, "active")
-	workBeads := []beads.Bead{routedPoolWorkBead()}
+	for _, state := range []string{"active", "awake", "creating", "draining"} {
+		t.Run(state, func(t *testing.T) {
+			cfg, cityPath, infos := liveHolderFilterFixture(t, state)
+			work := []beads.Bead{liveHolderWork("gcg-1", liveHolderSessionName)}
 
-	kept, _ := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, beads.NewMemStore(), infos, workBeads, []string{""})
-	if len(kept) != 1 || kept[0].ID != "gcg-1" {
-		t.Fatalf("filtered work = %#v, want the live holder's city-store claim kept so it resumes its holder", kept)
+			kept, keptRefs := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, beads.NewMemStore(), infos, work, []string{""})
+
+			if ids := beadIDs(kept); !slices.Equal(ids, []string{"gcg-1"}) || !slices.Equal(keptRefs, []string{""}) {
+				t.Fatalf("kept = %v refs %q, want [gcg-1] [\"\"]: a live holder's own city-store claim is pool demand", ids, keptRefs)
+			}
+		})
 	}
 }
 
-func TestPoolDemandFilterDropsAnAsleepHoldersCityStoreClaim(t *testing.T) {
-	cfg, cityPath, infos := liveHolderPoolDemandFixture(t, "asleep")
-	workBeads := []beads.Bead{routedPoolWorkBead()}
+func TestPoolDemandFilterKeepsALiveHoldersClaimAlignedInAMixedSlice(t *testing.T) {
+	cfg, cityPath, infos := liveHolderFilterFixture(t, "active")
+	work := []beads.Bead{
+		liveHolderWork("gcg-rig", ""),
+		liveHolderWork("gcg-unassigned", ""),
+		liveHolderWork("gcg-held", liveHolderSessionName),
+	}
+	work[0].Status = "open"
+	work[1].Status = "open"
 
-	kept, _ := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, beads.NewMemStore(), infos, workBeads, []string{""})
-	if len(kept) != 0 {
-		t.Fatalf("filtered work = %#v, want an asleep holder's city-store claim still dropped", kept)
+	kept, keptRefs := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, beads.NewMemStore(), infos, work, []string{"riga", "", ""})
+
+	if ids := beadIDs(kept); !slices.Equal(ids, []string{"gcg-rig", "gcg-held"}) {
+		t.Fatalf("kept IDs = %v, want [gcg-rig gcg-held]", ids)
+	}
+	if !slices.Equal(keptRefs, []string{"riga", ""}) {
+		t.Fatalf("kept refs = %q, want [riga \"\"] aligned with the kept rows", keptRefs)
 	}
 }
 
-func TestPoolDemandFilterDropsALiveHoldersClaimInAnotherRigsStore(t *testing.T) {
-	cfg, cityPath, infos := liveHolderPoolDemandFixture(t, "active")
-	workBeads := []beads.Bead{routedPoolWorkBead()}
+func TestPoolDemandFilterDropsANonLiveHoldersCityStoreClaim(t *testing.T) {
+	for _, tc := range []struct {
+		state  string
+		closed bool
+	}{
+		{state: "asleep"},
+		{state: "drained"},
+		{state: "suspended"},
+		{state: "active", closed: true},
+	} {
+		name := tc.state
+		if tc.closed {
+			name = "closed"
+		}
+		t.Run(name, func(t *testing.T) {
+			cfg, cityPath, infos := liveHolderFilterFixture(t, tc.state)
+			infos[0].Closed = tc.closed
+			work := []beads.Bead{liveHolderWork("gcg-1", liveHolderSessionName)}
 
-	kept, _ := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, beads.NewMemStore(), infos, workBeads, []string{"rigb"})
-	if len(kept) != 0 {
-		t.Fatalf("filtered work = %#v, want work in another rig's store still dropped", kept)
+			kept, keptRefs := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, beads.NewMemStore(), infos, work, []string{""})
+
+			if len(kept) != 0 || len(keptRefs) != 0 {
+				t.Fatalf("kept = %v refs %q, want the claim dropped: only a live holder's city-store claim reaches a rig pool", beadIDs(kept), keptRefs)
+			}
+		})
 	}
 }
 
-func TestPoolDemandFilterDropsCityStoreWorkHeldByAnotherTemplate(t *testing.T) {
-	cfg, cityPath, infos := liveHolderPoolDemandFixture(t, "active")
-	wb := routedPoolWorkBead()
-	wb.Metadata = map[string]string{beadmeta.RoutedToMetadataKey: "rigb/worker"}
+func TestPoolDemandFilterLiveHolderWideningStaysExact(t *testing.T) {
+	routedElsewhere := liveHolderWork("gcg-1", liveHolderSessionName)
+	routedElsewhere.Metadata[beadmeta.RoutedToMetadataKey] = "rigb/worker"
+	for _, tc := range []struct {
+		name string
+		work beads.Bead
+		ref  string
+	}{
+		{name: "routed to another template", work: routedElsewhere, ref: ""},
+		{name: "resident in another rig's store", work: liveHolderWork("gcg-1", liveHolderSessionName), ref: "rigb"},
+		{name: "unassigned", work: liveHolderWork("gcg-1", ""), ref: ""},
+		{name: "assigned to the template identity", work: liveHolderWork("gcg-1", "riga/worker"), ref: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, cityPath, infos := liveHolderFilterFixture(t, "active")
 
-	kept, _ := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, beads.NewMemStore(), infos, []beads.Bead{wb}, []string{""})
-	if len(kept) != 0 {
-		t.Fatalf("filtered work = %#v, want city-store work routed to another template dropped though its assignee is live", kept)
+			kept, keptRefs := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, beads.NewMemStore(), infos, []beads.Bead{tc.work}, []string{tc.ref})
+
+			if len(kept) != 0 || len(keptRefs) != 0 {
+				t.Fatalf("kept = %v refs %q, want the row dropped exactly as before", beadIDs(kept), keptRefs)
+			}
+		})
 	}
 }
 
-func TestPoolDemandFilterDropsUnassignedCityStoreWork(t *testing.T) {
-	cfg, cityPath, infos := liveHolderPoolDemandFixture(t, "active")
-	wb := routedPoolWorkBead()
-	wb.Status, wb.Assignee = "open", ""
+// liveHolderDesiredName is the busy holder's session name in the
+// desired-state scenarios.
+const liveHolderDesiredName = "worker-gc-1"
 
-	kept, _ := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, beads.NewMemStore(), infos, []beads.Bead{wb}, []string{""})
-	if len(kept) != 0 {
-		t.Fatalf("filtered work = %#v, want unassigned city-store work still dropped for a rig pool", kept)
-	}
-}
-
-// The reported shape end to end: a working session holds a city-store claim and
-// a second city-store bead is queued for the same rig pool. The working
-// session must be resumed and the queued bead must get a fresh session, not be
-// realized onto the busy one.
-func TestBuildDesiredState_RigPoolLiveHolderOfCityStoreWorkGetsASecondSession(t *testing.T) {
-	assertLiveHolderGetsASecondSession(t, nil, nil)
-}
-
-// The queued bead outranks the held one, so its new request sorts ahead of the
-// holder's resume request. It must still get a fresh session rather than take
-// the busy holder.
-func TestBuildDesiredState_RigPoolHigherPriorityQueuedWorkDoesNotTakeTheBusyHolder(t *testing.T) {
-	p0, p4 := 0, 4
-	assertLiveHolderGetsASecondSession(t, &p4, &p0)
-}
-
-func assertLiveHolderGetsASecondSession(t *testing.T, claimedPriority, queuedPriority *int) {
+// rigPoolLiveHolderDesired builds desired state for the reported shape: a
+// single-store city whose rig pool riga/worker (max 5, scale_check 1) has one
+// active session holding in-progress city-store bead A, beside open unassigned
+// city-store bead B. It returns the riga/worker desired session names, sorted.
+func rigPoolLiveHolderDesired(t *testing.T, heldPriority, queuedPriority int) []string {
 	t.Helper()
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "riga")
@@ -122,45 +162,47 @@ func assertLiveHolderGetsASecondSession(t *testing.T, claimedPriority, queuedPri
 		t.Fatalf("create rig dir: %v", err)
 	}
 	cityStore := beads.NewMemStore()
-	rigStore := beads.NewMemStore()
-	holder, err := cityStore.Create(beads.Bead{
+	if _, err := cityStore.Create(beads.Bead{
 		Title:  "working rig worker",
 		Type:   sessionBeadType,
 		Labels: []string{sessionBeadLabel, "template:riga/worker"},
 		Metadata: map[string]string{
 			"template":     "riga/worker",
-			"session_name": "worker-gc-1",
+			"session_name": liveHolderDesiredName,
 			"state":        "active",
 			"pool_managed": "true",
 		},
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatalf("create session bead: %v", err)
 	}
-	claimed, err := cityStore.Create(beads.Bead{
-		Title:    "station run in progress",
+	held, err := cityStore.Create(beads.Bead{
+		Title:    "held city work",
 		Type:     "task",
-		Priority: claimedPriority,
-		Assignee: holder.ID,
+		Priority: intPtr(heldPriority),
+		Assignee: liveHolderDesiredName,
 		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "riga/worker"},
 	})
 	if err != nil {
-		t.Fatalf("create claimed work: %v", err)
+		t.Fatalf("create held bead: %v", err)
 	}
-	if err := cityStore.Update(claimed.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
-		t.Fatalf("set claimed work in_progress: %v", err)
+	if err := cityStore.Update(held.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("set held in_progress: %v", err)
 	}
 	if _, err := cityStore.Create(beads.Bead{
-		Title:    "station run queued",
+		Title:    "queued city work",
 		Type:     "task",
-		Priority: queuedPriority,
+		Priority: intPtr(queuedPriority),
 		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "riga/worker"},
 	}); err != nil {
-		t.Fatalf("create queued work: %v", err)
+		t.Fatalf("create queued bead: %v", err)
 	}
 	sessionSnapshot, err := loadSessionBeadSnapshot(cityStore)
 	if err != nil {
 		t.Fatalf("load session snapshot: %v", err)
+	}
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), liveHolderDesiredName, runtime.Config{}); err != nil {
+		t.Fatalf("start fake holder: %v", err)
 	}
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
@@ -169,14 +211,14 @@ func assertLiveHolderGetsASecondSession(t *testing.T, claimedPriority, queuedPri
 			Name:              "worker",
 			Dir:               "riga",
 			StartCommand:      "true",
-			MaxActiveSessions: intPtr(6),
-			ScaleCheck:        "printf 1",
+			MaxActiveSessions: intPtr(5),
+			ScaleCheck:        printCountCommand(1),
 		}},
 	}
 
 	dsResult := buildDesiredStateWithSessionBeads(
-		"test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(),
-		cityStore, map[string]beads.Store{"riga": rigStore}, sessionSnapshot, nil, io.Discard,
+		"test-city", cityPath, time.Now().UTC(), cfg, sp,
+		cityStore, map[string]beads.Store{"riga": beads.NewMemStore()}, sessionSnapshot, nil, io.Discard,
 	)
 	var names []string
 	for name, tp := range dsResult.State {
@@ -184,10 +226,51 @@ func assertLiveHolderGetsASecondSession(t *testing.T, claimedPriority, queuedPri
 			names = append(names, name)
 		}
 	}
-	if len(names) != 2 {
-		t.Fatalf("riga/worker desired sessions = %v, want 2: the live holder resumed plus a fresh session for the queued bead", names)
+	slices.Sort(names)
+	return names
+}
+
+func TestBuildDesiredState_RigPoolCountsALiveHoldersCityStoreClaim(t *testing.T) {
+	names := rigPoolLiveHolderDesired(t, 2, 2)
+
+	if len(names) != 2 || !slices.Contains(names, liveHolderDesiredName) {
+		t.Fatalf("riga/worker desired sessions = %v, want 2: the busy holder %q plus a fresh session for the queued bead", names, liveHolderDesiredName)
 	}
-	if _, ok := dsResult.State["worker-gc-1"]; !ok {
-		t.Fatalf("riga/worker desired sessions = %v, want the live holder worker-gc-1 among them", names)
+}
+
+func TestBuildDesiredState_RigPoolHigherPriorityQueuedWorkDoesNotTakeTheBusyHolder(t *testing.T) {
+	names := rigPoolLiveHolderDesired(t, 4, 0)
+
+	if len(names) != 2 || !slices.Contains(names, liveHolderDesiredName) {
+		t.Fatalf("riga/worker desired sessions = %v, want 2: the P0 queued bead must get a fresh session, not the busy holder %q holding P4 work", names, liveHolderDesiredName)
+	}
+}
+
+// liveRigHolderDiffCity is the reported shape for the allocation differential:
+// a rig-scoped custom-count pool on a single-store city, one active row holding
+// an in-progress city-store claim, and scale_check reporting one more.
+func liveRigHolderDiffCity(t *testing.T) diffCity {
+	t.Helper()
+	worker := customPool("worker", "echo 1", 4)
+	worker.Dir = "riga"
+	cfg := diffConfig(worker)
+	cfg.Rigs = []config.Rig{{Name: "riga", Path: t.TempDir()}}
+	return diffCity{
+		name: "a live rig-pool holder's city-store claim is demand beside a custom count",
+		cfg:  cfg,
+		beads: []beads.Bead{
+			poolRow("dr-1", "riga/worker", 1, "active"),
+			{ID: "dw-1", Title: "dw-1", Type: "task", Status: "in_progress", Assignee: "s-dr-1", CreatedAt: diffNow.Add(-time.Hour), Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "riga/worker"}},
+		},
+		alive:      []string{"s-dr-1"},
+		scaleCheck: true,
+	}
+}
+
+func TestV2AllocationCountsALiveRigHoldersCityStoreClaim(t *testing.T) {
+	out := v2Allocation(t, liveRigHolderDiffCity(t))
+
+	if got := out.accepted["riga/worker"]; got != 2 {
+		t.Fatalf("v2 accepted riga/worker = %d, want 2: the holder's resume plus the scale_check's new request (accepted %v)", got, out.accepted)
 	}
 }
