@@ -36,8 +36,9 @@ const (
 )
 
 // reconcileScopeForTerminalMember drives a scope after one of its members
-// reached a terminal state: a failed member aborts the scope; a passed member
-// that leaves no other member open closes the scope as passed.
+// reached a terminal state: a failed member, or any member of a scope whose
+// abort is already decided, aborts the scope; a passed member that leaves no
+// other member open closes the scope as passed.
 //
 // For a closing member (scopeMemberClosing) the member is still open in the
 // store, so it is ignored when counting open members and its terminal copy
@@ -90,7 +91,7 @@ func reconcileScopeForTerminalMember(store beads.GraphStore, bead beads.Bead, op
 		return snapshot, nil
 	}
 
-	if beadOutcomeFailed(bead) {
+	if scopeAbortTriggered(bead, body) {
 		// The abort writes skip outcomes onto the members it finds open, so it
 		// reads them live rather than from the invocation's root view: a
 		// member a worker closed since the view must not be stamped skipped.
@@ -98,7 +99,7 @@ func reconcileScopeForTerminalMember(store beads.GraphStore, bead beads.Bead, op
 		if err != nil {
 			return ControlResult{}, err
 		}
-		skipped, err := abortScopeWith(store, snapshot, opts, bead.ID, closeBody)
+		skipped, err := abortScopeWith(store, snapshot, opts, bead.ID, bead.ID, closeBody)
 		if err != nil {
 			return ControlResult{}, err
 		}

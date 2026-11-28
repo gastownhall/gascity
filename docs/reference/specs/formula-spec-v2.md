@@ -1090,7 +1090,26 @@ onto the scope body (so diagnostics survive), and closes the body with
 `gc.outcome = fail`. When the failing member closed with
 `gc.failure_class = hard`, the body also keeps that failure record:
 `gc.failure_class = hard`, the member's `gc.failure_reason`, and
-`gc.failure_subject` naming the member. The worker-result contract for `abort_scope` members
+`gc.failure_subject` naming the member. The abort never skips or closes a
+bead a worker has already claimed. A claimed bead whose own `gc.scope_ref`
+names the scope, and that has its own scope-check, also defers the body
+close: that scope-check stays open, the body stays open, marked
+`gc.scope_aborted_by` with the failed member's ID, and the scope-check
+closes it `gc.outcome = fail` once the claimed bead closes, whatever its
+own outcome. Only such a bead defers the abort. For any other claimed bead
+under the scope, the abort skips its managing control and that control's
+scope-check and closes the body at once, so `workflow-finalize` can run,
+and close the claimed bead `skipped`, while its worker still holds it. The
+children of a ralph iteration, a ralph nested in the iteration included,
+name the iteration, so they defer its abort but not the abort of a scope
+around the ralph. A retry's first attempt carries none of the retry step's
+scope keys, or the iteration's inside a ralph iteration, while each later
+attempt, which the orchestrator spawns at run time, copies the retry step's
+declared `gc.scope_ref` and gets a scope-check for it. So at top level a
+claimed later attempt defers the declared scope's abort and a claimed first
+attempt does not, and inside a ralph iteration a claimed first attempt
+defers the iteration's abort and a later attempt does not. The
+worker-result contract for `abort_scope` members
 is **fail-closed**: a member that closes with `gc.outcome = fail` counts
 as failed, and so does a member that declared `abort_scope` and closed
 with a missing or unknown `gc.outcome` — only `pass` and `skipped` do not

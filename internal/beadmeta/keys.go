@@ -307,12 +307,19 @@ const (
 	RoutedToMetadataKey              = "gc.routed_to"
 	RunTargetMetadataKey             = "gc.run_target"
 	RuntimeVarsMetadataKey           = "gc.graphv2_vars.v1"
-	ScopeKindMetadataKey             = "gc.scope_kind"
-	ScopeNameMetadataKey             = "gc.scope_name"
-	ScopeRefMetadataKey              = "gc.scope_ref"
-	ScopeRoleMetadataKey             = "gc.scope_role"
-	SessionAffinityMetadataKey       = "gc.session_affinity"
-	SessionIDMetadataKey             = "gc.session_id"
+	// ScopeAbortedByMetadataKey marks a scope body whose abort is decided but
+	// whose close waits for a claimed member to settle. Only a claimed bead
+	// whose own gc.scope_ref names the scope, with its own scope-check,
+	// defers the close. The value is the bead whose failure decided the
+	// abort; the claimed member's scope-check closes the body gc.outcome=fail
+	// once that member closes.
+	ScopeAbortedByMetadataKey  = "gc.scope_aborted_by"
+	ScopeKindMetadataKey       = "gc.scope_kind"
+	ScopeNameMetadataKey       = "gc.scope_name"
+	ScopeRefMetadataKey        = "gc.scope_ref"
+	ScopeRoleMetadataKey       = "gc.scope_role"
+	SessionAffinityMetadataKey = "gc.session_affinity"
+	SessionIDMetadataKey       = "gc.session_id"
 	// StrandedMetadataKey ("true"), StrandedSessionMetadataKey (the closed
 	// session's bead ID) and StrandedAssigneeMetadataKey (the claim's assignee
 	// when it was kept) mark a claim a close kept because no lane serves it
@@ -760,6 +767,7 @@ var KnownMetadataKeys = []string{
 	RoutedToMetadataKey,
 	RunTargetMetadataKey,
 	RuntimeVarsMetadataKey,
+	ScopeAbortedByMetadataKey,
 	ScopeKindMetadataKey,
 	ScopeNameMetadataKey,
 	ScopeRefMetadataKey,

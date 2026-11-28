@@ -524,6 +524,9 @@ func processScopeCheck(store beads.GraphStore, bead beads.Bead, opts ProcessOpti
 			opts.tracef("scope-check bead=%s subject=%s pending status=%s", bead.ID, subject.ID, subject.Status)
 			return ControlResult{}, ErrControlPending
 		}
+		if scopeAbortDecided(body) {
+			return completeScopeAbort(store, bead, subject, body, opts)
+		}
 		remainingOpen, err := tracePhase(opts, bead.ID, "check-open-members", func() (bool, error) {
 			return hasOpenScopeMembersInView(store, rootID, scopeRef, opts, bead.ID)
 		})
@@ -563,21 +566,8 @@ func processScopeCheck(store beads.GraphStore, bead beads.Bead, opts ProcessOpti
 		return ControlResult{}, ErrControlPending
 	}
 
-	if beadOutcomeFailed(subject) {
-		snapshot, err := loadScopeSnapshotForControl(store, rootID, scopeRef, body, subject, bead.ID, opts)
-		if err != nil {
-			return ControlResult{}, err
-		}
-		skipped, err := abortScope(store, snapshot, opts, bead.ID)
-		if err != nil {
-			return ControlResult{}, err
-		}
-		if err := tracePhaseErr(opts, bead.ID, "close-control", func() error {
-			return setOutcomeAndClose(store, bead.ID, beadmeta.OutcomePass)
-		}); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: completing control bead: %w", bead.ID, err)
-		}
-		return ControlResult{Processed: true, Action: "scope-fail", Skipped: skipped}, nil
+	if scopeAbortTriggered(subject, body) {
+		return completeScopeAbort(store, bead, subject, body, opts)
 	}
 
 	remainingOpen, err := tracePhase(opts, bead.ID, "check-open-members", func() (bool, error) {
@@ -609,6 +599,28 @@ func processScopeCheck(store beads.GraphStore, bead beads.Bead, opts ProcessOpti
 	}
 
 	return ControlResult{Processed: true, Action: "continue"}, nil
+}
+
+// completeScopeAbort runs a scope-check's abort of its scope, then closes the
+// scope-check pass: the abort is the scope-check's whole job, whether its
+// subject failed or a claimed subject settled after the abort was decided.
+func completeScopeAbort(store beads.GraphStore, bead, subject, body beads.Bead, opts ProcessOptions) (ControlResult, error) {
+	rootID := bead.Metadata[beadmeta.RootBeadIDMetadataKey]
+	scopeRef := bead.Metadata[beadmeta.ScopeRefMetadataKey]
+	snapshot, err := loadScopeSnapshotForControl(store, rootID, scopeRef, body, subject, bead.ID, opts)
+	if err != nil {
+		return ControlResult{}, err
+	}
+	skipped, err := abortScope(store, snapshot, opts, bead.ID, subject.ID)
+	if err != nil {
+		return ControlResult{}, err
+	}
+	if err := tracePhaseErr(opts, bead.ID, "close-control", func() error {
+		return setOutcomeAndClose(store, bead.ID, beadmeta.OutcomePass)
+	}); err != nil {
+		return ControlResult{}, fmt.Errorf("%s: completing control bead: %w", bead.ID, err)
+	}
+	return ControlResult{Processed: true, Action: "scope-fail", Skipped: skipped}, nil
 }
 
 func loadScopeSnapshotForControl(store beads.GraphStore, rootID, scopeRef string, body, subject beads.Bead, controlID string, opts ProcessOptions) (scopeSnapshot, error) {
@@ -676,25 +688,39 @@ func closeScopeAsPassedWith(store beads.GraphStore, snapshot scopeSnapshot, subj
 	return nil
 }
 
-// abortScope runs the shared convergence sequence for a scope whose subject
-// failed: skip any still-open members, propagate non-gc.* member metadata (e.g.
-// review.verdict) onto the scope body so diagnostics survive failure auto-close,
-// then close the body with outcome=fail. When a member failed hard, the body
-// keeps that member's hard-failure record (gc.failure_class/reason/subject), so
-// the hard class reaches whatever reads the body: a ralph control evaluating
-// the body as its iteration, and the enclosing scope. It returns the number of
-// members skipped. traceID identifies the bead driving the trace and is also
-// the id ignored when skipping open members. The caller owns closing its own
-// control bead. This is the single implementation shared by processScopeCheck
-// and reconcileTerminalScopedMember.
-func abortScope(store beads.GraphStore, snapshot scopeSnapshot, opts ProcessOptions, traceID string) (int, error) {
-	return abortScopeWith(store, snapshot, opts, traceID, updateMetadataAndClose)
+// abortScope runs the shared convergence sequence for a scope whose abort is
+// decided: skip any still-open members, propagate non-gc.* member metadata
+// (e.g. review.verdict) onto the scope body so diagnostics survive failure
+// auto-close, then close the body with outcome=fail. When a member failed hard,
+// the body keeps that member's hard-failure record
+// (gc.failure_class/reason/subject), so the hard class reaches whatever reads
+// the body: a ralph control evaluating the body as its iteration, and the
+// enclosing scope.
+//
+// A bead a worker has claimed is never skipped or closed under it. When a
+// claimed member of this scope still has its scope-check open, that control
+// is kept open, the body is marked gc.scope_aborted_by=deciderID (the first
+// decider's mark stands) and left open; the kept scope-check re-runs this
+// abort once its member closes, and the run that finds no claimed member
+// left closes the body fail. A claimed bead that is not itself a member of
+// this scope (see claimedWorkMembers) does not defer the close.
+//
+// It returns the number of members skipped. traceID identifies the bead
+// driving the trace and is also the id ignored when skipping open members.
+// deciderID is the bead whose failure decided the abort. The caller owns
+// closing its own control bead. This is the single implementation shared by
+// processScopeCheck and reconcileScopeForTerminalMember.
+func abortScope(store beads.GraphStore, snapshot scopeSnapshot, opts ProcessOptions, traceID, deciderID string) (int, error) {
+	return abortScopeWith(store, snapshot, opts, traceID, deciderID, updateMetadataAndClose)
 }
 
-func abortScopeWith(store beads.GraphStore, snapshot scopeSnapshot, opts ProcessOptions, traceID string, closeBody scopeBodyCloser) (int, error) {
+func abortScopeWith(store beads.GraphStore, snapshot scopeSnapshot, opts ProcessOptions, traceID, deciderID string, closeBody scopeBodyCloser) (int, error) {
 	bodyID := snapshot.body.ID
+	var draining []string
 	skipped, err := tracePhase(opts, traceID, "skip-open-members", func() (int, error) {
-		return snapshot.skipOpenScopeMembers(store, traceID)
+		n, live, err := snapshot.skipOpenScopeMembers(store, traceID)
+		draining = live
+		return n, err
 	})
 	if err != nil {
 		return 0, fmt.Errorf("%s: aborting scope: %w", traceID, err)
@@ -703,6 +729,17 @@ func abortScopeWith(store beads.GraphStore, snapshot scopeSnapshot, opts Process
 		return snapshot.propagateScopeMemberMetadata(store, bodyID)
 	}); err != nil {
 		return 0, fmt.Errorf("%s: propagating scope metadata: %w", traceID, err)
+	}
+	if len(draining) > 0 {
+		if !scopeAbortDecided(snapshot.body) {
+			if err := tracePhaseErr(opts, traceID, "mark-body-aborted", func() error {
+				return store.SetMetadata(bodyID, beadmeta.ScopeAbortedByMetadataKey, deciderID)
+			}); err != nil {
+				return 0, fmt.Errorf("%s: marking scope body aborted: %w", bodyID, err)
+			}
+		}
+		opts.tracef("scope-abort-draining bead=%s body=%s live=%s", traceID, bodyID, strings.Join(draining, ","))
+		return skipped, nil
 	}
 	closeMetadata := map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail}
 	if culprit, ok := firstHardFailedMember(snapshot.members, bodyID); ok {
@@ -714,6 +751,21 @@ func abortScopeWith(store beads.GraphStore, snapshot scopeSnapshot, opts Process
 		return 0, fmt.Errorf("%s: completing scope body: %w", bodyID, err)
 	}
 	return skipped, nil
+}
+
+// scopeAbortDecided reports whether body carries the mark of an abort that
+// waits for a claimed member to settle.
+func scopeAbortDecided(body beads.Bead) bool {
+	return strings.TrimSpace(body.Metadata[beadmeta.ScopeAbortedByMetadataKey]) != ""
+}
+
+// scopeAbortTriggered reports whether member reaching a terminal state settles
+// its scope as aborted: member failed, or the scope's abort is already decided
+// and only waited for claimed members. Every scope settlement site decides
+// through it, so a member that settles after a decided abort can never close
+// the body pass.
+func scopeAbortTriggered(member, body beads.Bead) bool {
+	return beadOutcomeFailed(member) || scopeAbortDecided(body)
 }
 
 // closedWithHardFailure reports whether a bead closed with gc.outcome=fail and
@@ -948,18 +1000,25 @@ func (s scopeSnapshot) resolveScopeOutputJSON(subject beads.Bead) (string, error
 	return candidate, nil
 }
 
-func (s scopeSnapshot) skipOpenScopeMembers(store beads.GraphStore, skipControlID string) (int, error) {
+// skipOpenScopeMembers closes the scope's open members as skipped and returns
+// how many it closed, plus the draining members: claimed members whose own
+// scope-check it kept open. A claimed member is never skipped; its scope-check
+// is the control that re-checks the scope once that member settles, so the
+// abort's body close waits for it.
+func (s scopeSnapshot) skipOpenScopeMembers(store beads.GraphStore, skipControlID string) (int, []string, error) {
 	all := s.all
 	if !s.allComplete {
 		loaded, err := beads.DirectMembers(store, s.rootID)
 		if err != nil {
-			return 0, err
+			return 0, nil, err
 		}
 		all = loaded
 	}
 	pending := scopeUnsettledMembers(s.members, all, skipControlID, func(b beads.Bead) bool { return b.Status == "open" })
+	live := s.claimedWorkMembers()
 
 	skipped := 0
+	var draining []string
 	// Termination: nothing is ever added to pending below, and every round that
 	// does not return strictly shrinks it — a preserve deletes its member, a skip
 	// wave deletes every id it closed. So the round count is bounded by the
@@ -969,7 +1028,7 @@ func (s scopeSnapshot) skipOpenScopeMembers(store beads.GraphStore, skipControlI
 		ids := sortedPendingIDs(pending)
 		depsByID, err := loadDownDepsForScopeSkip(store, ids)
 		if err != nil {
-			return skipped, err
+			return skipped, nil, err
 		}
 		preserved := 0
 		skippable := make([]string, 0, len(ids))
@@ -977,6 +1036,12 @@ func (s scopeSnapshot) skipOpenScopeMembers(store beads.GraphStore, skipControlI
 			if preserveScopeCheckForSubject(pending[id], depsByID[id], skipControlID) {
 				delete(pending, id)
 				preserved++
+				continue
+			}
+			if memberID, ok := preserveScopeCheckForLiveMember(pending[id], depsByID[id], live); ok {
+				delete(pending, id)
+				preserved++
+				draining = append(draining, memberID)
 				continue
 			}
 			if !canSkipScopeMemberWithDeps(depsByID[id], pending) {
@@ -997,11 +1062,11 @@ func (s scopeSnapshot) skipOpenScopeMembers(store beads.GraphStore, skipControlI
 			if preserved > 0 {
 				continue
 			}
-			return skipped, fmt.Errorf("unable to skip remaining scope members: %s", describeStuckScopeMembers(pending, depsByID))
+			return skipped, nil, fmt.Errorf("unable to skip remaining scope members: %s", describeStuckScopeMembers(pending, depsByID))
 		}
 		closed, err := skipScopeMembers(store, skippable)
 		if err != nil {
-			return skipped + closed, err
+			return skipped + closed, nil, err
 		}
 		for _, id := range skippable {
 			delete(pending, id)
@@ -1009,7 +1074,37 @@ func (s scopeSnapshot) skipOpenScopeMembers(store beads.GraphStore, skipControlI
 		skipped += closed
 	}
 
-	return skipped, nil
+	sort.Strings(draining)
+	return skipped, draining, nil
+}
+
+// claimedWorkMembers returns the scope's work members a worker has claimed:
+// neither open nor closed. Spec sidecars, the body, teardown and control kinds
+// are dispatcher-owned and never claimed by a worker, so they are excluded.
+// Only beads whose own gc.scope_ref names this scope are read, so a claimed
+// bead defers no other scope's abort. A ralph iteration child names its
+// iteration. A retry's first attempt carries none of its retry step's scope
+// keys (inside a ralph iteration it names the iteration), while a later
+// attempt, spawned at run time, copies the step's declared gc.scope_ref: at
+// top level a claimed later attempt defers the declared scope's abort and a
+// claimed first attempt does not, and inside a ralph iteration the reverse.
+func (s scopeSnapshot) claimedWorkMembers() map[string]struct{} {
+	live := make(map[string]struct{})
+	for _, member := range s.members {
+		if member.Status == "open" || member.Status == "closed" {
+			continue
+		}
+		kind := member.Metadata[beadmeta.KindMetadataKey]
+		if kind == beadmeta.KindSpec || beadmeta.IsControlKind(kind) {
+			continue
+		}
+		switch member.Metadata[beadmeta.ScopeRoleMetadataKey] {
+		case beadmeta.ScopeRoleBody, beadmeta.ScopeRoleTeardown:
+			continue
+		}
+		live[member.ID] = struct{}{}
+	}
+	return live
 }
 
 // scopeUnsettledMembers collects the scope beads that count as unsettled:
@@ -1108,6 +1203,32 @@ func preserveScopeCheckForSubject(candidate beads.Bead, deps []beads.Dep, subjec
 		}
 	}
 	return false
+}
+
+// preserveScopeCheckForLiveMember reports whether candidate is the scope-check
+// of a claimed member (one of live) and returns that member. A scope abort
+// keeps such a control open: it settles the scope once the member closes, and
+// a step outside the scope whose dependency on the member was rewritten onto
+// it must not start before the member has ended.
+func preserveScopeCheckForLiveMember(candidate beads.Bead, deps []beads.Dep, live map[string]struct{}) (string, bool) {
+	if len(live) == 0 {
+		return "", false
+	}
+	if candidate.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindScopeCheck {
+		return "", false
+	}
+	if candidate.Metadata[beadmeta.ScopeRoleMetadataKey] != beadmeta.ScopeRoleControl {
+		return "", false
+	}
+	for _, dep := range deps {
+		if dep.Type != "blocks" {
+			continue
+		}
+		if _, ok := live[dep.DependsOnID]; ok {
+			return dep.DependsOnID, true
+		}
+	}
+	return "", false
 }
 
 // beadOutcomeFailed reports whether a closed bead counts as failed for
@@ -2033,12 +2154,8 @@ func resolveScopeBodyByRole(store beads.GraphStore, rootID, scopeRef string, inc
 	if err != nil {
 		return beads.Bead{}, false, err
 	}
-	for _, bead := range matches {
-		if matchesScopeRef(bead, scopeRef) {
-			return bead, true, nil
-		}
-	}
-	return beads.Bead{}, false, nil
+	bead, ok := firstScopeBodyMatch(matches, scopeRef, func(beads.Bead) bool { return true })
+	return bead, ok, nil
 }
 
 func canSkipScopeMemberWithDeps(deps []beads.Dep, pending map[string]beads.Bead) bool {
@@ -2161,18 +2278,10 @@ func isLogicalDescendant(logical, candidate beads.Bead) bool {
 }
 
 func findScopeBody(all []beads.Bead, rootID, scopeRef string) (beads.Bead, bool) {
-	for _, bead := range all {
-		if bead.Metadata[beadmeta.RootBeadIDMetadataKey] != rootID {
-			continue
-		}
-		if bead.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindScope {
-			continue
-		}
-		if matchesScopeRef(bead, scopeRef) {
-			return bead, true
-		}
-	}
-	return beads.Bead{}, false
+	return firstScopeBodyMatch(all, scopeRef, func(bead beads.Bead) bool {
+		return bead.Metadata[beadmeta.RootBeadIDMetadataKey] == rootID &&
+			bead.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindScope
+	})
 }
 
 func setOutcomeAndClose(store beads.GraphStore, beadID, outcome string) error {
@@ -2228,15 +2337,44 @@ func reconcileClosedScopeMemberWithOptions(store beads.GraphStore, beadID string
 	return reconcileTerminalScopedMemberWithOptions(store, closedBead, opts)
 }
 
+// matchesScopeRef reports whether bead matches scopeRef by either test
+// firstScopeBodyMatch applies: it carries scopeRef as its gc.scope_ref, or its
+// own gc.step_ref names the scope (stepRefNamesScope).
 func matchesScopeRef(bead beads.Bead, scopeRef string) bool {
 	if scopeRef == "" {
 		return false
 	}
-	if bead.Metadata[beadmeta.ScopeRefMetadataKey] == scopeRef {
-		return true
+	return bead.Metadata[beadmeta.ScopeRefMetadataKey] == scopeRef || stepRefNamesScope(bead, scopeRef)
+}
+
+// stepRefNamesScope reports whether bead's own gc.step_ref names scopeRef: the
+// ref itself, or the ref under a formula or iteration prefix.
+func stepRefNamesScope(bead beads.Bead, scopeRef string) bool {
+	if scopeRef == "" {
+		return false
 	}
 	stepRef := bead.Metadata[beadmeta.StepRefMetadataKey]
 	return stepRef == scopeRef || strings.HasSuffix(stepRef, "."+scopeRef)
+}
+
+// firstScopeBodyMatch returns the first of candidates that eligible admits and
+// whose own gc.step_ref names scopeRef, else the first eligible one that
+// matches it through gc.scope_ref. The name goes first because a scope body
+// can itself be a member of an enclosing scope: a nested ralph's iteration
+// body carries the outer iteration as its gc.scope_ref and is minted before
+// the outer iteration body, so taking the first gc.scope_ref match would hand
+// the outer scope's abort or close to the inner body. Every scope-body
+// resolver picks through it, so the root view and the live read resolve the
+// same body.
+func firstScopeBodyMatch(candidates []beads.Bead, scopeRef string, eligible func(beads.Bead) bool) (beads.Bead, bool) {
+	for _, matches := range []func(beads.Bead, string) bool{stepRefNamesScope, matchesScopeRef} {
+		for _, bead := range candidates {
+			if eligible(bead) && matches(bead, scopeRef) {
+				return bead, true
+			}
+		}
+	}
+	return beads.Bead{}, false
 }
 
 func resolveFinalizeOutcome(store beads.GraphStore, finalizer beads.Bead, opts ProcessOptions) (string, error) {

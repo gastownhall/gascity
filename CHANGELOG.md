@@ -1040,6 +1040,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   them (see Fixed). Correct or delete the entry, and check that the overrides
   below it, such as an `enabled = false`, still say what you want.
 
+- **Before downgrading, let every scope body marked `gc.scope_aborted_by`
+  close.** A scope abort now waits for a claimed member before it closes the
+  body and marks the body `gc.scope_aborted_by` meanwhile (#9507, see Fixed).
+  An earlier `gc` ignores the mark and closes such a body `gc.outcome = pass`
+  when its claimed member passes. A body already stuck behind #9507 when you
+  upgrade still needs its manual close: the abort that stuck it skipped its
+  claimed member's scope-check, so nothing re-checks the scope.
+
 ### Added
 
 - **Config: `[beads] migrate_command` names the migrator in `bd schema:`
@@ -1583,6 +1591,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   says so and records the run as partial (`order.skipped`) instead of reading
   the failure as no gates. Gates created before this change carry no stamp and
   stay unannounced; close or re-pour them.
+
+- **A scope abort no longer closes its body under a claimed member (#9507).**
+  When an `abort_scope` member failed while a sibling member was claimed, the
+  abort skipped the sibling's scope-check and tried to close the scope body
+  past it. A bd store refused that close until the control dispatcher
+  quarantined the control, and nothing re-checked the scope after that, so
+  the body and the workflow root stayed open until someone closed the body by
+  hand. A SQLite store accepted the close, and `workflow-finalize` then closed
+  the still-claimed member `skipped` under its worker. The abort now keeps
+  the claimed member's scope-check open and marks the body
+  `gc.scope_aborted_by`, and the body closes `gc.outcome = fail` once that
+  member closes, on every store. A claimed bead defers only the abort of the
+  scope its own `gc.scope_ref` names, through its own scope-check. A retry's
+  first attempt carries none of the retry step's scope keys (inside a ralph
+  iteration it carries the iteration's), while a later attempt copies the
+  step's declared `gc.scope_ref`, so at top level only a later attempt defers
+  the declared scope's abort, and inside a ralph iteration only the first
+  attempt defers the iteration's. The abort of an iteration that holds a
+  nested ralph now settles the iteration's own body: it used to act on the
+  nested iteration's body, which carries the outer iteration's ref, and leave
+  the outer iteration, its ralph and the workflow root open. See Upgrading
+  Notes before downgrading.
 
 - **Split cities seat a released graph step on the next controller pass.**
   On a city whose `[storage.classes]` serves the graph class from a

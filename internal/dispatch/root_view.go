@@ -133,21 +133,17 @@ func viewScopeMembers(members []beads.Bead, rootID, scopeRef string, includeClos
 
 // viewScopeBody is resolveScopeBodyOnce answered from members: an open
 // role-tagged body first, then a closed one, then any scope bead matching the
-// ref.
+// ref, each picked by firstScopeBodyMatch.
 func viewScopeBody(members []beads.Bead, rootID, scopeRef string) (beads.Bead, bool) {
 	for _, open := range []bool{true, false} {
-		for _, member := range members {
-			if member.Metadata[beadmeta.RootBeadIDMetadataKey] != rootID ||
-				member.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindScope ||
-				member.Metadata[beadmeta.ScopeRoleMetadataKey] != beadmeta.ScopeRoleBody {
-				continue
-			}
-			if open && strings.TrimSpace(member.Status) == "closed" {
-				continue
-			}
-			if matchesScopeRef(member, scopeRef) {
-				return member, true
-			}
+		body, ok := firstScopeBodyMatch(members, scopeRef, func(member beads.Bead) bool {
+			return member.Metadata[beadmeta.RootBeadIDMetadataKey] == rootID &&
+				member.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindScope &&
+				member.Metadata[beadmeta.ScopeRoleMetadataKey] == beadmeta.ScopeRoleBody &&
+				(!open || strings.TrimSpace(member.Status) != "closed")
+		})
+		if ok {
+			return body, true
 		}
 	}
 	return findScopeBody(members, rootID, scopeRef)

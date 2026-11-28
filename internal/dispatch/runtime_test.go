@@ -1814,7 +1814,7 @@ func TestSkipOpenScopeMembersBatchesDependencyChecksAndCloses(t *testing.T) {
 		members:     []beads.Bead{body, failed, control, futureMember, futureControl, independent},
 		body:        body,
 	}
-	skipped, err := snapshot.skipOpenScopeMembers(beadstest.Graph(store), control.ID)
+	skipped, _, err := snapshot.skipOpenScopeMembers(beadstest.Graph(store), control.ID)
 	if err != nil {
 		t.Fatalf("skipOpenScopeMembers: %v", err)
 	}
@@ -1941,7 +1941,7 @@ func TestSkipOpenScopeMembersContinuesAfterPreserveOnlyRound(t *testing.T) {
 		members:     []beads.Bead{body, failed, control, apply, applyTwin, scorecardFinalize, applyFinalize, applyTwinFinalize},
 		body:        body,
 	}
-	skipped, err := snapshot.skipOpenScopeMembers(beadstest.Graph(store), control.ID)
+	skipped, _, err := snapshot.skipOpenScopeMembers(beadstest.Graph(store), control.ID)
 	if err != nil {
 		t.Fatalf("skipOpenScopeMembers: %v", err)
 	}
@@ -1995,7 +1995,7 @@ func TestSkipOpenScopeMembersStillFailsOnGenuineBlocksCycle(t *testing.T) {
 		members:     []beads.Bead{body, control, left, right},
 		body:        body,
 	}
-	skipped, err := snapshot.skipOpenScopeMembers(beadstest.Graph(store), control.ID)
+	skipped, _, err := snapshot.skipOpenScopeMembers(beadstest.Graph(store), control.ID)
 	if err == nil {
 		t.Fatalf("skipOpenScopeMembers = (%d, nil), want a deadlock error for a genuine blocks cycle", skipped)
 	}
@@ -2045,7 +2045,7 @@ func TestSkipOpenScopeMembersDeadlockErrorNamesCurrentStuckMembers(t *testing.T)
 		members:     []beads.Bead{body, control, left, right, preserved},
 		body:        body,
 	}
-	_, err := snapshot.skipOpenScopeMembers(beadstest.Graph(store), control.ID)
+	_, _, err := snapshot.skipOpenScopeMembers(beadstest.Graph(store), control.ID)
 	if err == nil {
 		t.Fatal("skipOpenScopeMembers = nil error, want a deadlock error for the surviving blocks cycle")
 	}
@@ -2091,7 +2091,7 @@ func TestSkipOpenScopeMembersConvergesOverManyRounds(t *testing.T) {
 		members:     members,
 		body:        body,
 	}
-	skipped, err := snapshot.skipOpenScopeMembers(beadstest.Graph(store), control.ID)
+	skipped, _, err := snapshot.skipOpenScopeMembers(beadstest.Graph(store), control.ID)
 	if err != nil {
 		t.Fatalf("skipOpenScopeMembers: %v", err)
 	}
@@ -2665,6 +2665,78 @@ func TestResolveScopeBodyStopsRetryWhenContextCanceled(t *testing.T) {
 	}
 	if store.hiddenReads == 0 || store.hiddenReads >= store.hideReads {
 		t.Fatalf("hiddenReads = %d, want cancellation before exhausting %d hidden reads", store.hiddenReads, store.hideReads)
+	}
+}
+
+// TestResolveScopeBodyPrefersTheBodyItsStepRefNames pins the order every
+// scope-body resolver shares, on the live read and on the root view alike: a
+// scope bead whose own gc.step_ref names the scope wins over one listed before
+// it that only carries the scope as its gc.scope_ref, the shape of a nested
+// ralph's iteration body, which is a member of the outer iteration. A body that
+// matches only through gc.scope_ref still resolves when none is named for the
+// scope.
+func TestResolveScopeBodyPrefersTheBodyItsStepRefNames(t *testing.T) {
+	t.Parallel()
+
+	const scopeRef = "loop.iteration.1"
+	for _, tc := range []struct {
+		name string
+		// roleTagged tags the scope beads gc.scope_role=body; untagged ones
+		// resolve through the any-scope-bead fallback.
+		roleTagged bool
+		closed     bool
+		// named mints the outer body, whose own gc.step_ref names the scope.
+		named bool
+		want  string
+	}{
+		{name: "open role-tagged bodies", roleTagged: true, named: true, want: "outer"},
+		{name: "closed role-tagged bodies", roleTagged: true, closed: true, named: true, want: "outer"},
+		{name: "untagged scope beads", named: true, want: "outer"},
+		{name: "no body named for the scope", roleTagged: true, want: "inner"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := beads.NewMemStore()
+			workflow := mustCreateWorkflowBead(t, store, beads.Bead{Title: "workflow", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey: beadmeta.KindWorkflow,
+			}})
+			scopeBead := func(title string, meta map[string]string) {
+				meta[beadmeta.KindMetadataKey] = beadmeta.KindScope
+				meta[beadmeta.RootBeadIDMetadataKey] = workflow.ID
+				if tc.roleTagged {
+					meta[beadmeta.ScopeRoleMetadataKey] = beadmeta.ScopeRoleBody
+				}
+				status := ""
+				if tc.closed {
+					status = "closed"
+				}
+				mustCreateWorkflowBead(t, store, beads.Bead{Title: title, Type: "task", Status: status, Metadata: meta})
+			}
+			// The inner iteration body is minted first, as the compiler mints it.
+			scopeBead("inner", map[string]string{
+				beadmeta.ScopeRefMetadataKey: scopeRef,
+				beadmeta.StepRefMetadataKey:  "wf.loop.iteration.1.inner.iteration.1",
+			})
+			if tc.named {
+				scopeBead("outer", map[string]string{beadmeta.StepRefMetadataKey: "wf.loop.iteration.1"})
+			}
+
+			live, err := resolveScopeBodyOnce(beadstest.Graph(store), workflow.ID, scopeRef)
+			if err != nil {
+				t.Fatalf("live resolve: %v", err)
+			}
+			all, err := beads.DirectMembers(store, workflow.ID)
+			if err != nil {
+				t.Fatalf("listing members: %v", err)
+			}
+			view, err := resolveScopeBodyFromMembers(all, workflow.ID, scopeRef)
+			if err != nil {
+				t.Fatalf("view resolve: %v", err)
+			}
+			if live.Title != tc.want || view.Title != tc.want {
+				t.Fatalf("resolved live %q, view %q, want %q", live.Title, view.Title, tc.want)
+			}
+		})
 	}
 }
 
@@ -11923,7 +11995,7 @@ func TestAbortScopeSharedConvergence(t *testing.T) {
 	opts := ProcessOptions{Work: beadstest.Work(store), Tracef: func(format string, args ...any) {
 		fmt.Fprintf(&trace, format+"\n", args...) //nolint:errcheck // test buffer
 	}}
-	skipped, err := abortScope(beadstest.Graph(store), snapshot, opts, failed.ID)
+	skipped, err := abortScope(beadstest.Graph(store), snapshot, opts, failed.ID, failed.ID)
 	if err != nil {
 		t.Fatalf("abortScope: %v", err)
 	}
@@ -11937,6 +12009,9 @@ func TestAbortScopeSharedConvergence(t *testing.T) {
 	}
 	if got := bodyAfter.Metadata["review.verdict"]; got != "blocked" {
 		t.Fatalf("body review.verdict = %q, want blocked", got)
+	}
+	if got, ok := bodyAfter.Metadata["gc.scope_aborted_by"]; ok {
+		t.Fatalf("body gc.scope_aborted_by = %q, want no deferral marker when no member is in flight", got)
 	}
 	openAfter := mustGetBead(t, store, openMember.ID)
 	if openAfter.Status != "closed" || openAfter.Metadata["gc.outcome"] != "skipped" {
