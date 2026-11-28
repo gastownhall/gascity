@@ -109,6 +109,14 @@ below), creates symlinks under the agent's scope root:
 - City-scoped agent → `<city>/.<vendor>/skills/<name>`
 - Rig-scoped agent → `<rig>/.<vendor>/skills/<name>`
 
+One physical sink directory can have several writers — every agent
+scoped at its root, plus every stage-2-eligible agent whose configured
+work dir resolves into it (see "Shared sinks" below) — so the pass
+groups agents by sink (canonical path, so aliased rig paths and
+city-root symlinks share one key) and materializes each sink once, over
+the union of what all its configured writers want
+(`internal/materialize.SinkUnion`).
+
 Each symlink targets the canonical source:
 `<source-pack>/skills/<name>/` (shared-catalog entry from any pack
 contributing skills; see "Skill source discovery" below) or
@@ -174,6 +182,54 @@ The entry is **appended** to the existing `PreStart` list so any
 user-configured setup (worktree creation, env prep) runs first. The
 materializer has no work to do if `<workdir>` does not yet exist at
 invocation time, so it must run after worktree creation.
+
+#### Shared sinks: one sink, all its writers
+
+A sink is shared whenever more than one pass writes it: two agents
+scoped at the same root, a session whose work dir resolves into another
+scope's root, or several agents configured with the same work dir. The
+ownership manifest records targets without owners, so a pass that
+reconciles a sink over only its own agent treats the other writers'
+links as owned-but-undesired and prunes them (#7549). Both stages
+therefore reconcile a sink over the union of its configured writers:
+
+- **Stage 1** folds the agents scoped at the sink plus the
+  stage-2 writers a reverse lookup (`cmd/gc/skill_sink_writers.go`)
+  finds for it through configured work dirs outside their scope roots —
+  the same condition under which the PreStart is injected. Sinks only
+  stage-2 writers reach are not stage 1's to reconcile.
+- **Stage 2** folds the invoking agent (its snapshot-served catalogs
+  when the controller passed one), the agents whose scope root the
+  work dir sits at, and the other configured stage-2 writers of the
+  same sink. Shared catalogs resolve once per rig scope — the
+  invoker's scope reuses the invoker's catalog, so both stages fold
+  identical inputs and converge on the same desired set.
+
+The fold (`materialize.SinkUnion`) is stateless: identical physical
+sources coalesce (compared canonically), an agent-local entry overrides
+a shared one sink-wide, a name two writers want from different sources
+in the same class holds the sink, and a local override settles a shared
+clash. A held sink — a clash, a catalog a writer could not read — is
+never reconciled by halves: existing links stay, additions and removals
+wait, the problem names the writers and sources, and a stage-2 pass
+still exits 0 so the session starts.
+
+Writers the union cannot see still need their links protected: a
+workdir no agent is configured for (an operator-invoked
+`gc internal materialize-skills --workdir`, a worktree two agents
+ensure into) is written by passes that share only the manifest. The
+stage-2 pass therefore passes `Request.ForeignRoots` — every configured
+agent's skills dir and every scope's shared-catalog source roots, minus
+the pass's owned roots — whenever its target sink is no stage-1
+writer's scope-root sink, and the materializer keeps live links under a
+foreign root (see "Cleanup" below).
+
+Known limits: a writer with no skills is skipped (its PreStart never
+fires, so a departed writer's links prune through the manifest once
+another pass reconciles the sink), a work dir that cannot be resolved
+statically is skipped (the session start it would ride on fails the
+same way), and stage 1 passes no foreign roots — its requests are the
+complete union of the sink's configured writers.
 
 #### Stage 2 runtime gate
 
@@ -368,9 +424,17 @@ desired set:
      rename (see "Atomic symlink update" below).
 4. Regular files and directories are left untouched.
 
-No manifest file. Ownership is encoded in the symlink's target path.
-This aligns with the CLAUDE.md "no status files, query live state"
-principle.
+Ownership is primarily encoded in the symlink's target path (the
+gc-managed roots this pass reconciles), which aligns with the CLAUDE.md
+"no status files, query live state" principle. One bookkeeping file
+does live in the sink: the ownership manifest
+(`.gc-skill-ownership.json`, #4130) records, per name, the last target
+a pass wrote, so a link is still recognized as gc's after its root
+falls out of the current pass's owned set (a pinned-pack sha bump).
+The manifest records targets, not owners: it is what lets one pass
+recognize another writer's link as gc-managed — which is why the
+union and foreign-root rules above, not the manifest, decide whose
+links a pass may prune.
 
 #### Atomic symlink update
 
@@ -387,7 +451,8 @@ symlink during cleanup+recreate.
 #### Safety and decision matrix
 
 Cleanup only deletes when (entry is a symlink) AND (target begins with a
-gc-managed skills root). Regular files and dirs are always left alone.
+gc-managed skills root this pass reconciles, or dangles under a foreign
+one). Regular files and dirs are always left alone.
 
 | Entry type         | Target                   | In desired? | Action                     |
 |--------------------|--------------------------|-------------|----------------------------|
@@ -395,6 +460,8 @@ gc-managed skills root). Regular files and dirs are always left alone.
 | Symlink            | gc-managed root          | Yes, drift  | Atomic replace             |
 | Symlink            | gc-managed root          | No          | Delete                     |
 | Symlink            | gc-managed root          | Dangling    | Delete                     |
+| Symlink            | Foreign root (another writer's, live) | Any | Leave alone — report in Skipped when the name is desired here; its manifest entry stays |
+| Symlink            | Foreign root (another writer's, dangling) | N/A | Delete, manifest entry and all |
 | Symlink            | External path            | N/A         | Leave alone                |
 | Regular file       | —                        | N/A         | Leave alone (legacy stub or user content) |
 | Regular directory  | —                        | N/A         | Leave alone (legacy stub dir or user content) |

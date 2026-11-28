@@ -31,8 +31,10 @@ import (
 //
 // Agents with the same scope root and provider family share one sink
 // directory, so the pass groups agents by sink and runs the
-// materializer once per sink with the union of what those agents want
-// (materialize.SinkUnion). A pass per agent would let each agent prune
+// materializer once per sink with the union of what all its configured
+// writers want (materialize.SinkUnion): the agents scoped at the sink
+// plus the stage-2 writers whose configured work dirs resolve into it
+// (skill_sink_writers.go). A pass per agent would let each agent prune
 // the agent-local skills another agent wrote, since the sink's
 // ownership manifest marks every gc-written link as prunable by any
 // later pass.
@@ -137,10 +139,12 @@ type stage1SkillRequest struct {
 
 // stage1SkillRequests builds the stage-1 skill pass of every eligible
 // agent, grouped so each physical sink directory is materialized once,
-// over the union of everything its configured writers want. Sinks are
-// grouped by their canonical path, so a rig path that is a symlink to
-// another rig's path (or to the city root) reaches one sink, and the
-// first writer's spelling of the directory is the one written.
+// over the union of everything its configured writers want — the agents
+// scoped at the sink plus the stage-2 writers a reverse lookup finds
+// for it through configured work dirs (skill_sink_writers.go). Sinks
+// are grouped by their canonical path, so a rig path that is a symlink
+// to another rig's path (or to the city root) reaches one sink, and
+// the first writer's spelling of the directory is the one written.
 //
 // Catalog load errors are logged and degrade as
 // runStage1SkillMaterialization documents. Both the real pass and the
