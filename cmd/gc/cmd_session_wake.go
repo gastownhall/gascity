@@ -172,9 +172,6 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 		}
 		return 1
 	}
-	if suspendPending {
-		fmt.Fprintf(stderr, "gc session wake: session %s was suspended but its runtime had not stopped yet; this wake canceled the pending suspend and the runtime keeps running\n", id) //nolint:errcheck
-	}
 	nudgeIDs := res.NudgeIDs
 	agent := sessionWakeResolveAgentInfo(res.Info, deps.cfg)
 	hasRunnableTemplate := deps.cfg == nil || agent != nil
@@ -229,6 +226,18 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 		}, deps.now()); why != "" {
 			fmt.Fprintf(stderr, "gc session wake: wake recorded for session %s, but it will not start: %s\n", id, why) //nolint:errcheck
 			rejectStuck = true
+		}
+	}
+	// A wake that found the session suspended with its runtime still running
+	// canceled that pending suspend. The note waits for the verdict above: only
+	// a wake the controller acts on leaves that runtime running. Under a
+	// will-not-start gate (a suspended city, rig or agent among them) the
+	// controller can stop it, so the note promises nothing about the runtime.
+	if suspendPending {
+		if rejectStuck {
+			fmt.Fprintf(stderr, "gc session wake: session %s was suspended but its runtime had not stopped yet; this wake canceled the pending suspend\n", id) //nolint:errcheck
+		} else {
+			fmt.Fprintf(stderr, "gc session wake: session %s was suspended but its runtime had not stopped yet; this wake canceled the pending suspend and the runtime keeps running\n", id) //nolint:errcheck
 		}
 	}
 	if deps.cityResolved {

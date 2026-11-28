@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"maps"
 	"net"
@@ -1196,6 +1197,60 @@ func TestDoSessionWake_RefusedWakeWithFailedPokePromisesNoStart(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestDoSessionWake_RefusedWakeOfAPendingSuspendPromisesNoRunningRuntime: a
+// wake that cancels a managed suspend whose drain is still pending, and is
+// then refused as one that will not start (a suspended rig), says it canceled
+// the suspend and does not say the runtime keeps running: under that gate
+// the controller stops it.
+func TestDoSessionWake_RefusedWakeOfAPendingSuspendPromisesNoRunningRuntime(t *testing.T) {
+	const name = "s-gc-frontend-worker"
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": name,
+			"template":     "frontend/worker",
+			"state":        string(session.StateSuspended),
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(): %v", err)
+	}
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+		t.Fatalf("sp.Start(): %v", err)
+	}
+	deps := sessionWakeDeps{
+		store: store,
+		cfg: &config.City{
+			Agents: []config.Agent{{Name: "worker", Dir: "frontend"}},
+			Rigs:   []config.Rig{{Name: "frontend", SuspendedOnStart: true}},
+		},
+		cityPath:                  "/city",
+		cityResolved:              true,
+		now:                       time.Now,
+		withdrawQueuedWaitNudges:  func(string, []string) error { return nil },
+		cityUsesManagedReconciler: func(string) bool { return true },
+		pokeController:            func(string, reconcilekey.Key) error { return nil },
+		sp:                        sp,
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doSessionWake(b.ID, &stdout, &stderr, false, deps); code != 1 {
+		t.Fatalf("doSessionWake() = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	errText := stderr.String()
+	for _, want := range []string{"it will not start", "this wake canceled the pending suspend\n"} {
+		if !strings.Contains(errText, want) {
+			t.Fatalf("stderr = %q, want it to contain %q", errText, want)
+		}
+	}
+	if strings.Contains(errText, "keeps running") {
+		t.Fatalf("stderr = %q, want no promise that the runtime keeps running for a refused wake", errText)
 	}
 }
 

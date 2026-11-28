@@ -557,8 +557,8 @@ func TestSessionSuspendManagedReportsPendingRuntimeStop(t *testing.T) {
 			if code := cmdSessionWake([]string{c.bead.ID}, "", &stdout, &stderr, false); code != 0 {
 				t.Fatalf("wake = %d; stderr=%s", code, stderr.String())
 			}
-			if got := stderr.String(); !strings.Contains(got, "this wake canceled the pending suspend") {
-				t.Fatalf("wake stderr %q does not say it canceled the pending suspend", got)
+			if got := stderr.String(); !strings.Contains(got, "this wake canceled the pending suspend and the runtime keeps running\n") {
+				t.Fatalf("wake stderr %q does not say it canceled the pending suspend and that the runtime keeps running", got)
 			}
 		})
 	}
