@@ -201,6 +201,40 @@ func (e *drainAckSplitEnv) tick(t *testing.T) {
 	}, newSessionBeadSnapshot([]beads.Bead{session}), nil, false)
 }
 
+// TestDrainAckHeldClaim_FinalizeKeepsBindingStepAndEmitsEvent pins the
+// finalize tick on its own (#2293): a drain-acked seat whose runtime is gone
+// and which still holds an in_progress claim sleeps as idle WITHOUT closing
+// and WITHOUT touching the claim, emitting session.drain_acked_with_assigned_work
+// exactly once for the pair. The clock is never advanced: this is one tick.
+func TestDrainAckHeldClaim_FinalizeKeepsBindingStepAndEmitsEvent(t *testing.T) {
+	env := newDrainAckSplitEnv(t)
+
+	env.tick(t)
+
+	work := env.get(t, env.work.ID)
+	if work.Status != "in_progress" || work.Assignee != bindingOrphanSeat {
+		t.Fatalf("step = status %q assignee %q, want in_progress on its seat — the finalize must not release the claim", work.Status, work.Assignee)
+	}
+	session := env.get(t, env.session.ID)
+	if session.Status == "closed" {
+		t.Fatalf("seat closed on the finalize tick — the drain-ack finalize stops at the event while the seat holds work")
+	}
+	if session.Metadata["state"] != "asleep" || session.Metadata["sleep_reason"] != "idle" {
+		t.Fatalf("seat state=%q sleep_reason=%q, want asleep/idle after the drain-ack finalize",
+			session.Metadata["state"], session.Metadata["sleep_reason"])
+	}
+	evts := drainAckEvents(t, env.rec, events.SessionDrainAckedWithAssignedWork)
+	if len(evts) != 1 {
+		t.Fatalf("%s events = %d, want exactly 1 on the finalize tick", events.SessionDrainAckedWithAssignedWork, len(evts))
+	}
+	if !strings.Contains(string(evts[0].Payload), env.session.ID) || !strings.Contains(string(evts[0].Payload), env.work.ID) {
+		t.Fatalf("event payload does not name the session %q and step %q: %s", env.session.ID, env.work.ID, evts[0].Payload)
+	}
+	if dead := drainAckEvents(t, env.rec, events.BeadDeadAssigneeReopened); len(dead) != 0 {
+		t.Fatalf("%s events = %d on the finalize tick, want 0 — the release is a later lane's job", events.BeadDeadAssigneeReopened, len(dead))
+	}
+}
+
 // TestDrainAckHeldClaim_UndesiredSplitSeatReleasesBindingStep is the split-store
 // recovery end state: after the finalize tick, ONE more tick closes the seat
 // as the orphan it now is, and the orphan close's aligned-store release
