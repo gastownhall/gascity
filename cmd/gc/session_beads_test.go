@@ -9324,6 +9324,254 @@ func TestReapRuntimesBoundToClosedBeadsStopsLiveRuntime(t *testing.T) {
 	}
 }
 
+// reapProbeProvider is a runtime whose GC_SESSION_ID reads of named-1 are
+// counted, with onRead run just after the n-th one returns, onList run at
+// its exact-name listing and onStop at Stop entry. Each Stop records the
+// GC_SESSION_ID the name carries when it lands.
+type reapProbeProvider struct {
+	*runtime.Fake
+	reads     int
+	onRead    func(n int)
+	onList    func()
+	onStop    func()
+	stoppedAt []string
+}
+
+func (p *reapProbeProvider) GetMeta(name, key string) (string, error) {
+	v, err := p.Fake.GetMeta(name, key)
+	if name == "named-1" && key == "GC_SESSION_ID" {
+		p.reads++
+		if p.onRead != nil {
+			p.onRead(p.reads)
+		}
+	}
+	return v, err
+}
+
+func (p *reapProbeProvider) ListRunning(prefix string) ([]string, error) {
+	if prefix == "named-1" && p.onList != nil {
+		p.onList()
+	}
+	return p.Fake.ListRunning(prefix)
+}
+
+func (p *reapProbeProvider) Stop(name string) error {
+	if p.onStop != nil {
+		p.onStop()
+	}
+	id, _ := p.Fake.GetMeta(name, "GC_SESSION_ID") //nolint:errcheck // fake
+	p.stoppedAt = append(p.stoppedAt, id)
+	return p.Fake.Stop(name)
+}
+
+// reapProbeStore runs onGet before the n-th Get of bead id, so a Get of
+// another row (the lease's owner record) cannot shift the count.
+type reapProbeStore struct {
+	beads.Store
+	id    string
+	gets  int
+	onGet func(n int)
+}
+
+func (s *reapProbeStore) Get(id string) (beads.Bead, error) {
+	if id == s.id {
+		s.gets++
+		if s.onGet != nil {
+			s.onGet(s.gets)
+		}
+	}
+	return s.Store.Get(id)
+}
+
+// TestReapRuntimesBoundToClosedBeadsExcludesStartsFromProofToStop pins the
+// closed-bead reap's critical section (#6111): a same-name start, which holds
+// the name's runtime lease across its provider Start, either lands before
+// the reaper takes that lease, and the reaper's under-lease GC_SESSION_ID
+// re-read then spares the rebound runtime, or is refused as busy at every
+// point from that re-read through Stop entry, so the one Stop hits the
+// runtime still bound to the closed bead. It holds with no open row owning
+// the name (the flock alone) and with an open owner row (the flock plus the
+// owner's record), and the lease is free once the reap returns.
+func TestReapRuntimesBoundToClosedBeadsExcludesStartsFromProofToStop(t *testing.T) {
+	type world struct {
+		store    beads.Store
+		closedID string
+		ownerID  string
+		snapshot *sessionBeadSnapshot
+	}
+	variants := []struct {
+		name  string
+		setup func(t *testing.T) world
+	}{
+		{"flock only", func(*testing.T) world {
+			return world{
+				store:    beads.NewMemStoreFrom(0, []beads.Bead{{ID: "gc-closed", Status: "closed"}}, nil),
+				closedID: "gc-closed",
+				snapshot: newSessionBeadSnapshot(nil),
+			}
+		}},
+		{"open owner row", func(t *testing.T) world {
+			store := beads.NewMemStore()
+			mk := func() beads.Bead {
+				b, err := store.Create(beads.Bead{
+					Type: sessionBeadType, Labels: []string{sessionBeadLabel},
+					Metadata: map[string]string{"session_name": "named-1", "state": "awake"},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return b
+			}
+			old, owner := mk(), mk()
+			if err := store.Close(old.ID); err != nil {
+				t.Fatal(err)
+			}
+			return world{store: store, closedID: old.ID, ownerID: owner.ID, snapshot: newSessionBeadSnapshot([]beads.Bead{owner})}
+		}},
+	}
+	points := []struct {
+		name   string
+		direct bool // via stopStillBoundClosedRuntimeLeased with a lane-nominated name
+		lands  bool
+		wire   func(sp *reapProbeProvider, store *reapProbeStore, start func())
+	}{
+		{"(a) sweep's Get, before the lease", false, true, func(_ *reapProbeProvider, store *reapProbeStore, start func()) {
+			store.onGet = func(n int) {
+				if n == 1 {
+					start()
+				}
+			}
+		}},
+		{"(b) under-lease GC_SESSION_ID re-read", false, false, func(sp *reapProbeProvider, _ *reapProbeStore, start func()) {
+			sp.onRead = func(n int) {
+				if n == 2 {
+					start()
+				}
+			}
+		}},
+		{"(c) under-lease status re-read", false, false, func(_ *reapProbeProvider, store *reapProbeStore, start func()) {
+			store.onGet = func(n int) {
+				if n == 2 {
+					start()
+				}
+			}
+		}},
+		{"(d) exact-name listing", true, false, func(sp *reapProbeProvider, _ *reapProbeStore, start func()) {
+			sp.onList = start
+		}},
+		{"(e) Stop entry", false, false, func(sp *reapProbeProvider, _ *reapProbeStore, start func()) {
+			sp.onStop = start
+		}},
+	}
+	for _, v := range variants {
+		for _, p := range points {
+			t.Run(v.name+"/"+p.name, func(t *testing.T) {
+				city := t.TempDir()
+				w := v.setup(t)
+				sp := &reapProbeProvider{Fake: boundFake(t, w.closedID)}
+				store := &reapProbeStore{Store: w.store, id: w.closedID}
+				landed, refused := 0, 0
+				start := func() {
+					l, err := session.TryRuntimeLease(nil, session.RuntimeLeaseRequest{City: city, Name: "named-1"})
+					if errors.Is(err, session.ErrRuntimeLeaseBusy) {
+						refused++
+						return
+					}
+					if err != nil {
+						t.Fatalf("start taking the lease: %v", err)
+					}
+					landed++
+					if err := sp.SetMeta("named-1", "GC_SESSION_ID", "new"); err != nil {
+						t.Fatalf("start rebinding named-1: %v", err)
+					}
+					l.Release()
+				}
+				p.wire(sp, store, start)
+
+				var stderr bytes.Buffer
+				var reaped bool
+				if p.direct {
+					stopped, err := stopStillBoundClosedRuntimeLeased(store, city, "named-1", w.ownerID, w.closedID, sp, true, &stderr)
+					if err != nil {
+						t.Fatalf("stopStillBoundClosedRuntimeLeased: %v", err)
+					}
+					reaped = stopped
+				} else {
+					n := reapRuntimesBoundToClosedBeads(store, w.snapshot, nil, sp, nil, city, &stderr)
+					if n > 1 {
+						t.Fatalf("reaped %d, want at most 1", n)
+					}
+					reaped = n == 1
+				}
+
+				if p.lands {
+					if landed != 1 || refused != 0 || reaped || len(sp.stoppedAt) != 0 {
+						t.Fatalf("landed=%d refused=%d reaped=%v stops=%q; want the start to land and nothing stopped; stderr=%q", landed, refused, reaped, sp.stoppedAt, stderr.String())
+					}
+				} else {
+					if landed != 0 || refused != 1 {
+						t.Fatalf("landed=%d refused=%d; want the start refused as busy; stderr=%q", landed, refused, stderr.String())
+					}
+					if !reaped || len(sp.stoppedAt) != 1 || sp.stoppedAt[0] != w.closedID {
+						t.Fatalf("reaped=%v stops=%q; want one Stop of the runtime bound to %s; stderr=%q", reaped, sp.stoppedAt, w.closedID, stderr.String())
+					}
+				}
+				if w.ownerID != "" && strings.Contains(stderr.String(), "under its flock alone") {
+					t.Fatalf("the reap fell back to the flock alone with an open owner row: %q", stderr.String())
+				}
+				if nameHeld(t, city, "named-1") {
+					t.Fatal("the runtime lease is still held after the reap")
+				}
+			})
+		}
+	}
+}
+
+// TestReapRuntimesBoundToClosedBeadsIgnoresInstanceTokenOfClosedRow pins
+// GC_INSTANCE_TOKEN as outside the closed-bead reap's proof (#6111): a
+// runtime whose GC_SESSION_ID names a closed row is reaped whatever its token
+// says. GC_SESSION_ID and GC_INSTANCE_TOKEN are stamped by the same
+// create-time RuntimeEnv call, so the token exposes no staleness the ID
+// hides, and the runtime lease with its under-lease GC_SESSION_ID re-read
+// already excludes a same-name rebind. A closed row's runtime carries a
+// token other than the row's in two real ways, and both must still be
+// reaped: the preWakeCommit rotation window, where a row rotates its
+// instance_token and closes before the new start replaces the old runtime
+// (deadRuntimeBelongsToRow's comment), and an adopter's minted or kept token
+// on a runtime that still names the closed row, which the #7223 ruling keeps
+// visible to this reap (stampAdoptedRuntime). Skipping on a mismatch would
+// strand that corpse for good.
+func TestReapRuntimesBoundToClosedBeadsIgnoresInstanceTokenOfClosedRow(t *testing.T) {
+	for _, runtimeTok := range []string{"tok-earlier", "tok-row", ""} {
+		for _, rowTok := range []string{"tok-row", ""} {
+			t.Run(fmt.Sprintf("runtime=%q/row=%q", runtimeTok, rowTok), func(t *testing.T) {
+				store := beads.NewMemStoreFrom(0, []beads.Bead{{
+					ID:       "gc-closed",
+					Status:   "closed",
+					Metadata: map[string]string{"instance_token": rowTok},
+				}}, nil)
+				sp := boundFake(t, "gc-closed")
+				if runtimeTok != "" {
+					if err := sp.SetMeta("named-1", runtime.InstanceTokenEnv, runtimeTok); err != nil {
+						t.Fatal(err)
+					}
+				}
+
+				var stderr bytes.Buffer
+				if n := reapRuntimesBoundToClosedBeads(store, newSessionBeadSnapshot(nil), nil, sp, nil, t.TempDir(), &stderr); n != 1 {
+					t.Fatalf("reapRuntimesBoundToClosedBeads() = %d, want 1; stderr=%q", n, stderr.String())
+				}
+				if sp.IsRunning("named-1") {
+					t.Fatal("named-1 is still running, want it reaped")
+				}
+				if want := `reaped runtime "named-1" bound to closed session bead gc-closed`; !strings.Contains(stderr.String(), want) {
+					t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+				}
+			})
+		}
+	}
+}
+
 // TestReapRuntimesBoundToClosedBeadsSkipsOpenBeadRuntime: a healthy runtime
 // whose bead is still open must never be reaped.
 func TestReapRuntimesBoundToClosedBeadsSkipsOpenBeadRuntime(t *testing.T) {
