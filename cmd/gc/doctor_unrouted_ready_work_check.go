@@ -46,15 +46,21 @@ func (c *unroutedReadyWorkCheck) WarmupEligible() bool { return false }
 
 // unroutedReadyWorkFinding is one scope's adoptable unrouted work.
 type unroutedReadyWorkFinding struct {
-	scope   string
-	target  bool
-	count   int
-	samples []string
+	scope  string
+	target bool
+	// targetErr is why the scope's unrouted_work_target cannot adopt, when
+	// the scope sets one that cannot.
+	targetErr error
+	count     int
+	samples   []string
 }
 
 func (f unroutedReadyWorkFinding) describe() string {
 	why := "the scope sets no unrouted_work_target"
-	if f.target {
+	switch {
+	case f.targetErr != nil:
+		why = fmt.Sprintf("the scope's %v", f.targetErr)
+	case f.target:
 		why = "the scope's unrouted_work_target has not adopted them yet"
 	}
 	sample := strings.Join(f.samples, ", ")
@@ -76,10 +82,11 @@ func (c *unroutedReadyWorkCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResu
 	}
 	details := make([]string, 0, len(findings)+len(skipped))
 	var hints []string
-	noTarget, withTarget := false, false
+	noTarget, withTarget, badTarget := false, false, false
 	for _, f := range findings {
 		details = append(details, f.describe())
-		noTarget = noTarget || !f.target
+		badTarget = badTarget || f.targetErr != nil
+		noTarget = noTarget || (!f.target && f.targetErr == nil)
 		withTarget = withTarget || f.target
 	}
 	if noTarget {
@@ -87,6 +94,9 @@ func (c *unroutedReadyWorkCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResu
 	}
 	if withTarget {
 		hints = append(hints, "where the scope sets unrouted_work_target the controller has not adopted them yet; check `gc status` and `gc doctor` route-recovery-quarantine")
+	}
+	if badTarget {
+		hints = append(hints, "fix each unrouted_work_target the details name; `gc config show --validate` lists them, and gc start and a reload refuse the config until they are fixed")
 	}
 	details = append(details, skipped...)
 	msg := fmt.Sprintf("%d scope(s) hold open work no pool will claim until it is routed", len(findings))
@@ -115,7 +125,7 @@ func (c *unroutedReadyWorkCheck) collect(ctx *doctor.CheckContext) (findings []u
 		}
 		paths = append(paths, scopePath{label: "rig " + rig.Name, path: rig.Path, target: rig.UnroutedWorkTarget})
 	}
-	policy := unroutedAdoptionPolicyFor(c.cfg)
+	policy := unroutedAdoptionPolicyFor(c.cfg, c.cityPath)
 	byScope := map[string]*unroutedReadyWorkFinding{}
 	for _, sp := range paths {
 		if strings.TrimSpace(sp.path) == "" || c.open == nil {
@@ -141,14 +151,11 @@ func (c *unroutedReadyWorkCheck) collect(ctx *doctor.CheckContext) (findings []u
 			if !adoptableUnroutedWork(b) {
 				continue
 			}
-			label, hasTarget := sp.label, strings.TrimSpace(sp.target) != ""
-			if sc, ok := policy.scopeFor(b.ID); ok {
-				label, hasTarget = sc.label, sc.route != ""
-			}
-			f := byScope[label]
+			owner := unroutedReadyWorkOwner(policy, sp.label, sp.target, b.ID)
+			f := byScope[owner.scope]
 			if f == nil {
-				f = &unroutedReadyWorkFinding{scope: label, target: hasTarget}
-				byScope[label] = f
+				f = &owner
+				byScope[owner.scope] = f
 			}
 			f.count++
 			f.samples = append(f.samples, b.ID)
@@ -163,4 +170,15 @@ func (c *unroutedReadyWorkCheck) collect(ctx *doctor.CheckContext) (findings []u
 	}
 	sort.Slice(findings, func(i, j int) bool { return findings[i].scope < findings[j].scope })
 	return findings, skipped
+}
+
+// unroutedReadyWorkOwner is the empty finding for the scope that owns beadID:
+// the adoption policy's scope for its prefix, as adoption itself attributes
+// it, else the scope whose store listed it (label, with its configured
+// target).
+func unroutedReadyWorkOwner(policy unroutedAdoptionPolicy, label, target, beadID string) unroutedReadyWorkFinding {
+	if sc, ok := policy.scopeFor(beadID); ok {
+		return unroutedReadyWorkFinding{scope: sc.label, target: sc.route != "", targetErr: sc.err}
+	}
+	return unroutedReadyWorkFinding{scope: label, target: strings.TrimSpace(target) != ""}
 }

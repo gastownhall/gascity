@@ -1116,15 +1116,7 @@ type routeRestoreOutcome struct {
 // being clobbered — a claim flips the bead to in_progress and consumes
 // gc.routed_to in one update (ga-sa0, ga-bgu).
 func (l *routeRecoveryLane) restoreRoute(store beads.Store, live beads.Bead, backstop, adopt bool) routeRestoreOutcome {
-	route := carriedPoolRoute(live)
-	adoptedVia := ""
-	if route == "" && adopt {
-		var scope string
-		route, scope = l.adoptionRoute(live)
-		if route != "" {
-			adoptedVia = scope + "→" + route
-		}
-	}
+	route, adoptedVia := l.routeToWrite(live, adopt)
 	if route == "" || live.Status != "open" || strings.TrimSpace(live.Assignee) != "" {
 		if backstop {
 			marked, err := l.noteRecheckFailure(store, live.ID)
@@ -1158,7 +1150,7 @@ func (l *routeRecoveryLane) restoreRoute(store beads.Store, live beads.Bead, bac
 
 	if adoptedVia != "" {
 		if writer, ok := beads.ConditionalWriterForTarget(store); ok {
-			if out, fenced := l.adoptIfUnchanged(writer, live, route, adoptedVia); fenced {
+			if out, fenced := l.adoptFenced(writer, beads.HandlesFor(store).Live, live, route, adoptedVia); fenced {
 				return out
 			}
 		}
@@ -1180,11 +1172,7 @@ func (l *routeRecoveryLane) restoreRoute(store beads.Store, live beads.Bead, bac
 			// Another writer set gc.routed_to after the live read. Its route
 			// stands: a lost race is a no-op, not an error, and not a restore
 			// the flap bound should count.
-			l.mu.Lock()
-			if l.restores[live.ID] > 0 {
-				l.restores[live.ID]--
-			}
-			l.mu.Unlock()
+			l.forgetRestore(live.ID)
 			return routeRestoreOutcome{writes: 1}
 		default:
 			if !isRouteRecoveryQuarantined(live) {
@@ -1214,34 +1202,98 @@ func (l *routeRecoveryLane) restoreRoute(store beads.Store, live beads.Bead, bac
 	return routedOutcome(adoptedVia, 1, nil)
 }
 
-// adoptIfUnchanged writes an adoption route only while the bead is still the
-// row the live read saw, so a session claim that landed after that read (which
-// leaves gc.routed_to empty, where the key-level compare-and-set cannot see it)
-// stands, exactly like a route another writer stamped. fenced is false when
-// conditional writes are off at the store; the caller then falls back to the
-// key-level compare-and-set.
-func (l *routeRecoveryLane) adoptIfUnchanged(writer beads.ConditionalWriter, live beads.Bead, route, adoptedVia string) (routeRestoreOutcome, bool) {
-	err := writer.UpdateIfMatch(live.ID, live.Revision, beads.UpdateOpts{
+// routeToWrite returns the route restoreRoute writes on live: the route the
+// bead carries or, when it carries none and adopt allows it, its scope's
+// adoption route. adoptedVia, "<scope>→<route>", is set only for an
+// adoption.
+func (l *routeRecoveryLane) routeToWrite(live beads.Bead, adopt bool) (route, adoptedVia string) {
+	if route = carriedPoolRoute(live); route != "" || !adopt {
+		return route, ""
+	}
+	var scope string
+	if route, scope = l.adoptionRoute(live); route == "" {
+		return "", ""
+	}
+	return route, scope + "→" + route
+}
+
+// adoptFenced writes an adoption route through the store's conditional
+// writer only while the bead is still the row the lane decided on, so a
+// session claim that landed after that read (which leaves gc.routed_to empty,
+// where the key-level compare-and-set cannot see it) stands, exactly like a
+// route another writer stamped. fenced is false when conditional writes are
+// off at the store; the caller then takes the key-level compare-and-set.
+//
+// The fence is the row's revision. A row read at revision 0 is one of two
+// rows: a legacy row whose real revision is 0, or a row listed by a store
+// whose list reads carry no revision (BdStore: `bd list --json` publishes
+// none, mc-3c8h5), which is every row once a pass re-reads two or more
+// candidates. Fenced at 0, the second kind fails its precondition on every
+// pass, so adoption would never land there. One live read tells them apart,
+// as releaseWorkAssignmentIfRevisionMatches does: the decision is re-made on
+// the row it returns and the write is fenced on that row's revision, 0 only
+// for a legacy row.
+func (l *routeRecoveryLane) adoptFenced(writer beads.ConditionalWriter, reader beads.LiveReader, live beads.Bead, route, adoptedVia string) (routeRestoreOutcome, bool) {
+	fence, reads := live, 0
+	if live.Revision == 0 {
+		reads = 1
+		row, still, err := l.liveAdoptionRow(reader, live.ID, route)
+		switch {
+		case err != nil:
+			return routeRestoreOutcome{writes: reads, err: fmt.Errorf("bead %s: re-reading its revision before adopting: %w", live.ID, err)}, true
+		case !still:
+			// The bead left adoption after it was listed: removed, claimed,
+			// routed or otherwise changed. That stands; it is a lost race, not
+			// an adoption, and not charged to the flap limit.
+			l.forgetRestore(live.ID)
+			return routeRestoreOutcome{writes: reads}, true
+		}
+		fence = row
+	}
+	err := writer.UpdateIfMatch(fence.ID, fence.Revision, beads.UpdateOpts{
 		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: route},
 	})
 	var moved *beads.PreconditionFailedError
 	switch {
 	case err == nil:
-		return routedOutcome(adoptedVia, 1, nil), true
+		return routedOutcome(adoptedVia, reads+1, nil), true
 	case errors.Is(err, beads.ErrConditionalWriteUnsupported):
 		return routeRestoreOutcome{}, false
 	case errors.As(err, &moved):
-		// The bead changed after the live read: a claim, a route, or any other
-		// write. That writer stands; a lost race is not an adoption and is not
-		// charged to the flap limit. The next pass re-reads it.
-		l.mu.Lock()
-		if l.restores[live.ID] > 0 {
-			l.restores[live.ID]--
-		}
-		l.mu.Unlock()
-		return routeRestoreOutcome{writes: 1}, true
+		// The bead changed after the read the fence came from: a claim, a
+		// route, or any other write. That writer stands; a lost race is not an
+		// adoption and is not charged to the flap limit. The next pass re-reads
+		// it.
+		l.forgetRestore(live.ID)
+		return routeRestoreOutcome{writes: reads + 1}, true
 	default:
-		return routeRestoreOutcome{writes: 1, err: fmt.Errorf("bead %s: adopting gc.routed_to=%q: %w", live.ID, route, err)}, true
+		return routeRestoreOutcome{writes: reads + 1, err: fmt.Errorf("bead %s: adopting gc.routed_to=%q: %w", live.ID, route, err)}, true
+	}
+}
+
+// liveAdoptionRow re-reads bead id through reader, the store's authoritative,
+// cache-bypassing handle (as liveOpenCandidates reads), and reports whether
+// the row it read still adopts to route. A removed bead does not, and is no
+// error.
+func (l *routeRecoveryLane) liveAdoptionRow(reader beads.LiveReader, id, route string) (beads.Bead, bool, error) {
+	row, err := reader.Get(id)
+	switch {
+	case errors.Is(err, beads.ErrNotFound):
+		return beads.Bead{}, false, nil
+	case err != nil:
+		return beads.Bead{}, false, err
+	}
+	return row, l.adoptionRouteOnly(row) == route, nil
+}
+
+// forgetRestore uncounts the restore restoreRoute charged to id before a
+// write that then lost its race: the other writer's route or claim stands,
+// and a lost race is not a restore the flap bound should count.
+func (l *routeRecoveryLane) forgetRestore(id string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.restores[id] > 0 {
+		l.restores[id]--
 	}
 }
 

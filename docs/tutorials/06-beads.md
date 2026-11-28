@@ -461,8 +461,8 @@ _whether_ it appears at all.
 
 A bead made with plain `bd create` carries no `gc.routed_to`, so no pool claims
 it. Route it yourself with `gc sling my-project/worker mc-xp7`, or let the
-orchestrator route new unrouted work in a store by naming an
-**`unrouted_work_target`** for that scope:
+orchestrator route a store's open unrouted work, including what is already in
+the store, by naming an **`unrouted_work_target`** for that scope:
 
 ```toml
 [[rigs]]
@@ -471,10 +471,12 @@ name = "my-project"
 unrouted_work_target = "my-project/worker"  # route plain-created work here
 ```
 
-The workspace sets its own for the city store; a rig without one adopts nothing.
-In an adopting scope, a hold label such as `hold:external` parks a bead until you
-remove it. `gc doctor` reports open work still waiting without a route under the
-`unrouted-ready-work` check.
+Before you set one, preview what it would route: `gc doctor` lists the open work
+still waiting without a route under its `unrouted-ready-work` check. The
+workspace sets its own target for the city store; a rig without one adopts
+nothing. The target must be an agent that reads the scope's store: for a rig,
+one of the rig's own agents or one with `scope = "city"`. A hold label such as
+`hold:external` keeps a bead out until you remove it.
 
 This is the "pull" model: agents check for work instead of having it pushed.
 

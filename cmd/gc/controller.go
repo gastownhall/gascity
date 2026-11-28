@@ -1033,7 +1033,7 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
 	if err := config.ValidateAgents(newCfg.Agents); err != nil {
 		return failWithWarnings(fmt.Errorf("validating agents: %w", err))
 	}
-	if err := validateUnroutedWorkTargets(newCfg); err != nil {
+	if err := validateUnroutedWorkTargets(newCfg, cityRoot); err != nil {
 		return failWithWarnings(fmt.Errorf("validating unrouted work targets: %w", err))
 	}
 	if err := config.ValidateServices(newCfg.Services); err != nil {

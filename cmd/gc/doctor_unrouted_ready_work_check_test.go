@@ -162,3 +162,57 @@ func TestUnroutedReadyWorkUnreadableStoreIsSkippedNeverOK(t *testing.T) {
 		})
 	}
 }
+
+// TestUnroutedReadyWorkIgnoresCoordinationBeads pins the doctor half of the
+// coordination-bead exclusion: gc's own nudge and extmsg beads, built by
+// their real constructors, are not work waiting for a route; the plain bead
+// beside them is.
+func TestUnroutedReadyWorkIgnoresCoordinationBeads(t *testing.T) {
+	cfg := adoptionRigConfig(t, "")
+	cityPath := t.TempDir()
+	city := beads.NewMemStore()
+	city.IDPrefix = "ct"
+	minted := mintCoordinationBeads(t, city)
+	work, err := city.Create(plainCreatedBead(""))
+	if err != nil {
+		t.Fatalf("creating the control bead: %v", err)
+	}
+
+	result := runUnroutedReadyWorkCheck(t, cfg, cityPath, map[string]beads.StoreReader{
+		cityPath:         city,
+		cfg.Rigs[0].Path: beads.NewMemStoreFrom(0, nil, nil),
+	})
+
+	want := fmt.Sprintf("city: 1 open bead(s) carry no gc.routed_to; the scope sets no unrouted_work_target (%s)", work.ID)
+	if len(result.Details) != 1 || result.Details[0] != want {
+		t.Fatalf("details = %q, want only %q (coordination beads %d)", result.Details, want, len(minted))
+	}
+}
+
+// TestUnroutedReadyWorkNamesATargetThatCannotAdopt pins the third reason a
+// scope's work waits: its unrouted_work_target cannot adopt (gc doctor read
+// a config that gc start and a reload refuse). The finding says why, never
+// that the scope sets no target.
+func TestUnroutedReadyWorkNamesATargetThatCannotAdopt(t *testing.T) {
+	cfg := adoptionRigConfig(t, "nobody")
+	result := runUnroutedReadyWorkCheck(t, cfg, t.TempDir(), map[string]beads.StoreReader{
+		cfg.Rigs[0].Path: beads.NewMemStoreFrom(0, []beads.Bead{plainCreatedBead("hw-1")}, nil),
+	})
+
+	if result.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want warning: %#v", result.Status, result)
+	}
+	details := strings.Join(result.Details, "\n")
+	want := `rig hello-world: 1 open bead(s) carry no gc.routed_to; the scope's unrouted_work_target "nobody" names no configured agent (hw-1)`
+	if !strings.Contains(details, want) {
+		t.Fatalf("details missing %q:\n%s", want, details)
+	}
+	if !strings.Contains(result.FixHint, "gc config show --validate") {
+		t.Fatalf("fix hint = %q, want it to point at gc config show --validate", result.FixHint)
+	}
+	for _, unwanted := range []string{"has not adopted them yet", "route-recovery-quarantine"} {
+		if strings.Contains(details+"\n"+result.FixHint, unwanted) {
+			t.Fatalf("result says %q for a target that cannot adopt:\n%s\n%s", unwanted, details, result.FixHint)
+		}
+	}
+}

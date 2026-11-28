@@ -661,7 +661,9 @@ type Rig struct {
 	// `gc sling <target> <id>` would write. Empty (the default) adopts
 	// nothing; the workspace unrouted_work_target does not apply to rigs. The
 	// target must resolve to a configured agent with built-in sling routing
-	// (no custom sling_query). Example: "rig/polecat"
+	// (no custom sling_query) that reads this rig's bead store, as gc sling
+	// requires: one of the rig's own agents, or one with scope = "city".
+	// Example: "rig/polecat"
 	UnroutedWorkTarget string `toml:"unrouted_work_target,omitempty"`
 	// Federation selects which of this city's agents may act on the rig's bead
 	// store. "city" (the default) keeps today's behavior: city-scoped agents
@@ -1372,7 +1374,9 @@ type Workspace struct {
 	// nothing, so such work stays unrouted until something routes it. It
 	// governs the city store only; a rig adopts through its own
 	// unrouted_work_target. The target must resolve to a configured agent
-	// with built-in sling routing (no custom sling_query).
+	// with built-in sling routing (no custom sling_query) that reads the
+	// city store, as gc sling requires: an agent outside every rig, or one
+	// with scope = "city".
 	UnroutedWorkTarget string `toml:"unrouted_work_target,omitempty"`
 	// Timezone is the city-default IANA time zone (e.g. "America/New_York")
 	// in which cron order schedules are evaluated when an order does not set

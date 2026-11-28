@@ -125,7 +125,7 @@ func doConfigShow(validate, showProvenance, asJSON bool, stdout, stderr io.Write
 	if err := config.ValidateAgents(cfg.Agents); err != nil {
 		validationErrors = append(validationErrors, err.Error())
 	}
-	if err := validateUnroutedWorkTargets(cfg); err != nil {
+	if err := validateUnroutedWorkTargets(cfg, cityPath); err != nil {
 		validationErrors = append(validationErrors, err.Error())
 	}
 	if err := config.ValidateRigs(cfg.Rigs, config.EffectiveHQPrefix(cfg)); err != nil {

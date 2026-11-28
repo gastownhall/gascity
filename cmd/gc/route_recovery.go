@@ -78,7 +78,7 @@ func carriedPoolRoute(b beads.Bead) string {
 func (cr *CityRuntime) routeRecoveryLaneOf() *routeRecoveryLane {
 	cr.routeRecoveryOnce.Do(func() {
 		cr.routeRecovery = newRouteRecoveryLane()
-		cr.routeRecovery.setAdoptionPolicy(unroutedAdoptionPolicyFor(cr.serviceConfigSnapshot()))
+		cr.refreshRouteAdoptionPolicy(cr.routeRecovery)
 	})
 	return cr.routeRecovery
 }
@@ -87,7 +87,7 @@ func (cr *CityRuntime) routeRecoveryLaneOf() *routeRecoveryLane {
 // config snapshot. Every pass calls it first, so a reload's
 // unrouted_work_target takes effect on the next pass.
 func (cr *CityRuntime) refreshRouteAdoptionPolicy(lane *routeRecoveryLane) {
-	lane.setAdoptionPolicy(unroutedAdoptionPolicyFor(cr.serviceConfigSnapshot()))
+	lane.setAdoptionPolicy(unroutedAdoptionPolicyFor(cr.serviceConfigSnapshot(), cr.cityPath))
 }
 
 // claimLoopGuardOf is the runtime's claim-loop guard, created on first use. Its
