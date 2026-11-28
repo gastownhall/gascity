@@ -121,6 +121,31 @@ func TestPoolDemandFilterDropsANonLiveHoldersCityStoreClaim(t *testing.T) {
 	}
 }
 
+func TestPoolDemandFilterLiveHolderWideningStaysExact(t *testing.T) {
+	routedElsewhere := liveHolderWork("gcg-1", liveHolderSessionName)
+	routedElsewhere.Metadata[beadmeta.RoutedToMetadataKey] = "rigb/worker"
+	for _, tc := range []struct {
+		name string
+		work beads.Bead
+		ref  string
+	}{
+		{name: "routed to another template", work: routedElsewhere, ref: ""},
+		{name: "resident in another rig's store", work: liveHolderWork("gcg-1", liveHolderSessionName), ref: "rigb"},
+		{name: "unassigned", work: liveHolderWork("gcg-1", ""), ref: ""},
+		{name: "assigned to the template identity", work: liveHolderWork("gcg-1", "riga/worker"), ref: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, cityPath, infos := liveHolderFilterFixture(t, "active")
+
+			kept, keptRefs := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, beads.NewMemStore(), infos, []beads.Bead{tc.work}, []string{tc.ref})
+
+			if len(kept) != 0 || len(keptRefs) != 0 {
+				t.Fatalf("kept = %v refs %q, want the row dropped exactly as before", beadIDs(kept), keptRefs)
+			}
+		})
+	}
+}
+
 // liveHolderDesiredName is the busy holder's session name in the
 // desired-state scenarios.
 const liveHolderDesiredName = "worker-gc-1"
