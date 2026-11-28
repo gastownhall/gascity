@@ -3141,9 +3141,11 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 
 	// Stage-1 skill materialization. Runs on every tick so
 	// catalog edits land without requiring a supervisor restart.
-	// Idempotent — converged passes create nothing new.
-	// runStage1SkillMaterialization logs all errors inline and
-	// returns nil; this step cannot fail the tick.
+	// Idempotent — converged passes create nothing new. A held sink
+	// (an unreadable agent catalog, a name two writers want from
+	// different sources) is logged inline and returned as an error;
+	// the tick discards it because a hold is a standing condition the
+	// next tick retries, not a tick failure.
 	_ = runStep("materializing_skills", func() error {
 		return runStage1SkillMaterialization(cityPath, cfg, stderr)
 	})

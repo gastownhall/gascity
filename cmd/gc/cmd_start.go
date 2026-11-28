@@ -977,9 +977,12 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	}
 
 	// Stage-1 skill materialization — runs for every eligible agent
-	// at its scope root before sessions spawn. Non-fatal: per-agent
-	// errors are logged inline by runStage1SkillMaterialization
-	// itself; it never returns a non-nil error to its caller.
+	// at its scope root before sessions spawn. Non-fatal: held sinks
+	// (an unreadable agent catalog, a name two writers want from
+	// different sources) are logged inline by
+	// runStage1SkillMaterialization; its returned error is discarded
+	// here because a hold keeps the sink's existing links, which is
+	// the safe state to start sessions against.
 	//
 	// Stage-1 MCP projection is a hard gate because it mutates the provider's
 	// active runtime config surface. Conflicting shared targets or projection
