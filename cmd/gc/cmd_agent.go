@@ -815,8 +815,8 @@ func newAgentSuspendCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Suspend an agent by setting suspended=true in its durable config.
 
 Suspended agents are skipped by the reconciler — their sessions are not
-started or restarted. Existing sessions continue running but won't be
-replaced if they exit. Use "gc agent resume" to restore.`,
+started or restarted. A live session is drained unless it still holds
+open assigned work. Use "gc agent resume" to restore.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if jsonOutput {
