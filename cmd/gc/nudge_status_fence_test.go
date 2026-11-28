@@ -34,7 +34,7 @@ func writeFenceStatusCityTOML(t *testing.T, dir string) {
 func TestNudgeStatusListsItemsFencedToTheSessionBeyondTheirQueueKey(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
-	dir, _, _, info := retiredNudgeTestCity(t, nil)
+	dir, _, _, info := retiredNudgeTestCity(t)
 	writeFenceStatusCityTOML(t, dir)
 	t.Setenv("GC_CITY", dir)
 
@@ -75,7 +75,7 @@ func TestNudgeStatusListsItemsFencedToTheSessionBeyondTheirQueueKey(t *testing.T
 func TestNudgeStatusListsTheDeadLetterForATerminatedSessionByKeyMismatch(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
-	dir, mgr, _, info := retiredNudgeTestCity(t, nil)
+	dir, mgr, _, info := retiredNudgeTestCity(t)
 	writeFenceStatusCityTOML(t, dir)
 	t.Setenv("GC_CITY", dir)
 	if err := mgr.Close(context.Background(), testActorIn(t, session.ActorOperator, dir), info.ID); err != nil {

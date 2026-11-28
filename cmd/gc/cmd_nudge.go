@@ -3986,6 +3986,7 @@ func listQueuedNudgesSnapshotMatching(cityPath string, match func(queuedNudge) b
 }
 
 func listQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, []queuedNudge, []queuedNudge, error) {
+	sweepRetiredSessionNudgesFromList(cityPath, target.cfg, now)
 	return openNudgeQueue(cityPath, beads.NudgesStore{}).Queue.ListFor(target.claimTarget(cityPath, nil), now)
 }
 
