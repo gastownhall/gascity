@@ -11,6 +11,12 @@ import (
 	"github.com/gastownhall/gascity/internal/doctor"
 )
 
+// doctorScopeSweepConcurrency caps the scope reads a sweep keeps in flight.
+// On a bd-backed scope each read is a bd subprocess, so it matches the cap
+// doctor already applies to concurrent bd calls
+// (proxiedBackupCoverageParallelism in internal/doctor).
+const doctorScopeSweepConcurrency = 4
+
 // doctorWorkScope is one bead store a doctor check reads: the city store or
 // a rig store, named by the label its findings and skip lines carry.
 type doctorWorkScope struct {
@@ -54,7 +60,8 @@ type doctorScopeList[S doctorScopeLister] struct {
 }
 
 // sweepDoctorScopeLists opens every scope through newStore and lists it with
-// query, reading distinct scopes concurrently. Results are returned in scope
+// query, keeping at most doctorScopeSweepConcurrency scope reads in flight at
+// once. Results are returned in scope
 // order whatever order the reads finish in.
 //
 // Once the runner abandons the check (ctx.Canceled), the sweep issues no new
@@ -62,11 +69,11 @@ type doctorScopeList[S doctorScopeLister] struct {
 // abandoned, and the sweep returns when the calls already in flight finish.
 // A store's List takes no context, so a call in flight runs to completion.
 func sweepDoctorScopeLists[S doctorScopeLister](ctx *doctor.CheckContext, scopes []doctorWorkScope, newStore func(string) (S, error), query beads.ListQuery) []doctorScopeList[S] {
-	return sweepDoctorScopeListsLimit(ctx, scopes, newStore, query, -1)
+	return sweepDoctorScopeListsLimit(ctx, scopes, newStore, query, doctorScopeSweepConcurrency)
 }
 
 // sweepDoctorScopeListsLimit is sweepDoctorScopeLists with at most limit
-// scope reads in flight at once; a negative limit is unbounded.
+// scope reads in flight at once; tests read scopes one at a time with a limit of 1.
 func sweepDoctorScopeListsLimit[S doctorScopeLister](ctx *doctor.CheckContext, scopes []doctorWorkScope, newStore func(string) (S, error), query beads.ListQuery, limit int) []doctorScopeList[S] {
 	results := make([]doctorScopeList[S], len(scopes))
 	var g errgroup.Group

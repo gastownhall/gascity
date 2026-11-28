@@ -476,3 +476,50 @@ func TestDoctorScopeSweepEdgeCases(t *testing.T) {
 		t.Fatalf("shared-path scopes = %+v, want both rigs to list S-1", got[1:])
 	}
 }
+
+// TestDoctorScopeSweepBoundsConcurrency (AC-6): the sweep keeps exactly
+// doctorScopeSweepConcurrency reads in flight, never more, and a sweep at a
+// limit of 1 returns the same results as one at the default limit.
+func TestDoctorScopeSweepBoundsConcurrency(t *testing.T) {
+	// newScopes builds 3x the limit readable scopes; with a probe, every List
+	// runs inside the probe's blocking section.
+	newScopes := func(probe *inFlightProbe) ([]doctorWorkScope, func(string) (beads.Store, error)) {
+		stores := map[string]beads.Store{}
+		var scopes []doctorWorkScope
+		for range 3 * doctorScopeSweepConcurrency {
+			path := t.TempDir()
+			var store beads.Store = beads.NewMemStoreFrom(0, []beads.Bead{{ID: path, Title: "x", Type: "task", Status: "open"}}, nil)
+			if probe != nil {
+				store = inFlightStore{Store: store, probe: probe}
+			}
+			stores[path] = store
+			scopes = append(scopes, doctorWorkScope{label: "rig " + path, path: path})
+		}
+		return scopes, holdLabelStores(stores)
+	}
+
+	// A one-past-the-limit target only releases early if the bound leaks;
+	// otherwise the safety timer releases the first full batch.
+	probe := newInFlightProbe(t, doctorScopeSweepConcurrency+1, time.Second)
+	scopes, factory := newScopes(probe)
+	got := sweepDoctorScopeLists(&doctor.CheckContext{}, scopes, factory, beads.ListQuery{AllowScan: true})
+	if peak := probe.peak.Load(); peak != doctorScopeSweepConcurrency {
+		t.Fatalf("peak concurrent List calls = %d, want exactly %d", peak, doctorScopeSweepConcurrency)
+	}
+	for i, sc := range got {
+		if !sc.read || len(sc.items) != 1 {
+			t.Fatalf("scope %d = %+v, want read with one item", i, sc)
+		}
+	}
+
+	scopes, factory = newScopes(nil)
+	query := beads.ListQuery{AllowScan: true}
+	serial := sweepDoctorScopeListsLimit(&doctor.CheckContext{}, scopes, factory, query, 1)
+	parallel := sweepDoctorScopeLists(&doctor.CheckContext{}, scopes, factory, query)
+	for i := range scopes {
+		if serial[i].label != parallel[i].label || serial[i].skipped != parallel[i].skipped || serial[i].read != parallel[i].read ||
+			!slices.EqualFunc(serial[i].items, parallel[i].items, func(a, b beads.Bead) bool { return a.ID == b.ID }) {
+			t.Fatalf("scope %d: limit 1 = %+v, default = %+v", i, serial[i], parallel[i])
+		}
+	}
+}
