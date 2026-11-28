@@ -1161,6 +1161,36 @@ func TestArmCloseHoldsAParkedSeat(t *testing.T) {
 	})
 }
 
+// A21 keeps a seat a wait parks (gastownhall/gascity#5561): a pool row asleep
+// as idle whose disposition still holds a wait (`gc session wait --sleep`;
+// the with-work drain-ack keeps it, D-J 3) is not slot-freeable, so the
+// desireSleep close proposes nothing — no parked hold, no stranded hold, no
+// close-pool-slot and no repair, with or without an aged stranded marker,
+// however much claimed work the seat still holds.
+func TestArmCloseKeepsAWaitParkedSeat(t *testing.T) {
+	slept := gatherNow.Add(-time.Hour)
+	for _, tc := range []struct {
+		name string
+		meta []string
+	}{
+		{"no stranded marker", nil},
+		{"a marker aged past the grace", []string{strandedEventEmittedKey, gatherNow.Add(-time.Hour).UTC().Format(time.RFC3339)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			meta := append([]string{
+				"state", "asleep", "sleep_reason", "idle", "slept_at", slept.UTC().Format(time.RFC3339),
+				"wait_hold", "true", "sleep_intent", "wait-hold",
+			}, tc.meta...)
+			c := newCloseCase(t, livenessGone, desireSleep, meta...)
+			c.work(t, "in_progress", nil) // the claimed step the seat parked on
+			it := c.decide()
+			if it.Kind != "" || it.Reason != decideNoAction {
+				t.Fatalf("decideRow = (%q, %q), want no intent: the wait parks the seat", it.Kind, it.Reason)
+			}
+		})
+	}
+}
+
 // blockedPin is an open pin assigned to the case's row, blocked by an open
 // bead it depends on.
 func (c *closeCase) blockedPin(t *testing.T) beads.Bead {
