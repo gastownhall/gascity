@@ -1031,7 +1031,10 @@ func managedBdWaitTestTemplate(t *testing.T, bdPath, doltPath string) string {
 			"GC_BEADS_TARGET":    "local",
 			"HOME":               homeDir,
 			"DOLT_ROOT_PATH":     homeDir,
-			"PATH":               strings.Join([]string{filepath.Dir(bdPath), filepath.Dir(doltPath), os.Getenv("PATH")}, string(os.PathListSeparator)),
+			// init's lock lives in /tmp by default, shared with the host's own
+			// initializers: keep this template's two inits in its own directory.
+			"GC_DOLT_INIT_LOCK_DIR": filepath.Join(homeDir, "dolt-init-locks"),
+			"PATH":                  strings.Join([]string{filepath.Dir(bdPath), filepath.Dir(doltPath), os.Getenv("PATH")}, string(os.PathListSeparator)),
 		})
 		runScript := func(args ...string) error {
 			cmd := exec.Command(script, args...)

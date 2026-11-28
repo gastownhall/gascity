@@ -42,3 +42,38 @@ func runResolverGit(t *testing.T, dir string, args ...string) {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
 }
+
+// TestApiBranchResolverBaseRefMissing pins the API adapter of the sling-time
+// base_branch check: a local branch, a bare name found as origin/<name> and a
+// full remote-tracking ref all resolve; a name that is none of them is missing;
+// and an empty dir falls back to the city path, as DefaultBranch does.
+func TestApiBranchResolverBaseRefMissing(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available in PATH")
+	}
+	repo := t.TempDir()
+	runResolverGit(t, repo, "init", "-b", "main")
+	runResolverGit(t, repo, "config", "user.email", "test@test.com")
+	runResolverGit(t, repo, "config", "user.name", "Test")
+	runResolverGit(t, repo, "commit", "--allow-empty", "-m", "init")
+	runResolverGit(t, repo, "update-ref", "refs/remotes/origin/only-on-origin", "HEAD")
+	runResolverGit(t, repo, "update-ref", "refs/remotes/headfork/restack/foo", "HEAD")
+
+	r := apiBranchResolver{cityPath: repo}
+	for _, tt := range []struct {
+		ref  string
+		want bool
+	}{
+		{"main", false},
+		{"only-on-origin", false},
+		{"headfork/restack/foo", false},
+		{"ghost/base", true},
+	} {
+		if got := r.BaseRefMissing(repo, tt.ref); got != tt.want {
+			t.Errorf("BaseRefMissing(%q) = %v, want %v", tt.ref, got, tt.want)
+		}
+	}
+	if got := r.BaseRefMissing("", "ghost/base"); !got {
+		t.Error("BaseRefMissing with an empty dir must probe the city path and report ghost/base missing")
+	}
+}

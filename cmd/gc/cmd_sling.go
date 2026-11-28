@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/opjournal"
@@ -885,6 +886,13 @@ type cliBranchResolver struct{}
 
 func (cliBranchResolver) DefaultBranch(dir string) string {
 	return defaultBranchFor(dir)
+}
+
+func (cliBranchResolver) BaseRefMissing(dir, ref string) bool {
+	if dir == "" {
+		return false
+	}
+	return git.New(dir).BaseRefMissing(ref)
 }
 
 // cliNotifier implements sling.Notifier using IPC.
@@ -2014,10 +2022,12 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store, city bead
 		return
 	}
 	// Session observation/handle and the last-nudge-delivered stamp route to the
-	// session coordination-class store (derived from the target's cfg+cityPath); the
-	// queued-nudge enqueue below stays on the passed store (nudges class). Identity
-	// today (cliSessionStore is the identity resolver; a nil target.cfg → identity
-	// too), so byte-identical until a [beads.classes.sessions] relocation lands.
+	// session coordination-class store (derived from the target's cfg+cityPath),
+	// which is identity until a [beads.classes.sessions] relocation lands. The
+	// queued-nudge enqueue below does not use store at all: store is the slung
+	// bead's work store, which may be a rig store, and every reader and closer of
+	// a nudge shadow holds the city store. The zero beads.NudgesStore makes the
+	// enqueue open and own the city nudges-class store itself.
 	sessStore := cliSessionStore(store, target.cfg, target.cityPath)
 	obs, err := workerObserveNudgeTarget(target, sessStore, sp)
 	running := err == nil && obs.Running
@@ -2050,7 +2060,7 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store, city bead
 		}
 	}
 
-	if err := enqueueQueuedNudgeWithStore(target.cityPath, cliNudgesStore(store, target.cfg, target.cityPath), newQueuedNudgeWithOptions(target.agent.QualifiedName(), msg, "sling", now, queuedNudgeOptionsFromTarget(target))); err != nil {
+	if err := enqueueQueuedNudgeWithStore(target.cityPath, beads.NudgesStore{}, newQueuedNudgeWithOptions(target.agent.QualifiedName(), msg, "sling", now, queuedNudgeOptionsFromTarget(target))); err != nil {
 		telemetry.RecordNudge(context.Background(), target.agent.QualifiedName(), err)
 		fmt.Fprintf(stderr, "warning: bead routed but nudge failed: %v\n", err) //nolint:errcheck // best-effort
 		return

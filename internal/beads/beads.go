@@ -720,6 +720,17 @@ func IsCASRetriesExhausted(err error) bool {
 	return errors.As(err, &cre)
 }
 
+// IsRetryableConflict reports whether err is a store write conflict that is
+// known not to have committed, so that repeating the request is safe: a
+// Dolt/MySQL serialization conflict, or a *CASRetriesExhaustedError. Ambiguous
+// connection failures (i/o timeout, invalid connection, an indeterminate
+// commit) are deliberately not retryable: the write may have landed.
+// A bare ErrVersionMismatch is the conditional writers' fence, not exhaustion,
+// and is not retryable either.
+func IsRetryableConflict(err error) bool {
+	return isNativeDoltSerializationConflict(err) || IsCASRetriesExhausted(err)
+}
+
 // IsConditionalWriteUnsupported reports whether err is or wraps
 // ErrConditionalWriteUnsupported.
 func IsConditionalWriteUnsupported(err error) bool {
