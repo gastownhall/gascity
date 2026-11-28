@@ -1004,6 +1004,15 @@ A session cannot auto-sleep while any of these are true:
 - dependency wake propagation from an awake dependent
 - active drain reason unrelated to idle sleep
 
+This list governs the controller's *idle auto-sleep*. It is not the whole
+sleep story: an explicit `gc session wait --sleep` park is a deliberate
+sleep, allowed while the seat still holds claimed work. A pool seat parked
+that way keeps its bead, slot, and claim until the wait wakes it (wait-ready,
+same bead) or ends — the pool-slot gate reads the standing wait on the row
+even when the sleep's reason reads idle (`waitParksIdleRow`). "Assigned work
+that should wake it now" means ready work: an in-progress claim does not
+block sleep, it survives it.
+
 The controller should surface the blockers as data, not just logs.
 
 ### Attach Behavior
