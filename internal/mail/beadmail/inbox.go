@@ -11,9 +11,9 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
-// Inbox is one read of the open message rows addressed to a known set of
-// mailbox routes. Every inbox question a command asks about the same mailbox
-// is a projection of it, so the command reads the mailbox once.
+// Inbox is one read of the live (non-closed) message rows addressed to a known
+// set of mailbox routes. Every inbox question a command asks about the same
+// mailbox is a projection of it, so the command reads the mailbox once.
 type Inbox struct {
 	routes []string
 	rows   []beads.Bead
@@ -31,11 +31,11 @@ type SessionInboxReader interface {
 
 var _ SessionInboxReader = (*Provider)(nil)
 
-// InboxForRoutes reads the open message rows addressed to exactly routes, in
-// one listing. Unlike [Provider.Check], it does not expand the routes: the
-// caller already holds the route set it means. A session's own mailbox is read
-// with [Provider.InboxForSession], which defines that set. Empty routes are
-// refused rather than read as "every mailbox".
+// InboxForRoutes reads the live (non-closed) message rows addressed to exactly
+// routes, in one listing. Unlike [Provider.Check], it does not expand the
+// routes: the caller already holds the route set it means. A session's own
+// mailbox is read with [Provider.InboxForSession], which defines that set.
+// Empty routes are refused rather than read as "every mailbox".
 func (p *Provider) InboxForRoutes(routes []string) (*Inbox, error) {
 	var cleaned []string
 	for _, route := range routes {
@@ -50,7 +50,7 @@ func (p *Provider) InboxForRoutes(routes []string) (*Inbox, error) {
 	}
 	rows := make([]beads.Bead, 0, len(candidates))
 	for _, b := range candidates {
-		if b.Status != "open" || !matchesRecipientRoute(cleaned, b.Assignee) {
+		if !isLiveMail(b) || !matchesRecipientRoute(cleaned, b.Assignee) {
 			continue
 		}
 		rows = append(rows, b)

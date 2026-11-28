@@ -806,3 +806,108 @@ func contains(ss []string, want string) bool {
 	}
 	return false
 }
+
+// TestSweepReadMessagesBeforeClosesInProgressReadMail pins #6211's retention
+// half for read mail: an in_progress read message past the cutoff is swept and
+// counted exactly like an open one, and with a shared close budget (limit=1)
+// the OLDER in_progress candidate is the one closed.
+func TestSweepReadMessagesBeforeClosesInProgressReadMail(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	older := now.Add(-2 * time.Minute)
+	newer := now.Add(-time.Minute)
+
+	seed := []beads.Bead{
+		readMailSeed("in-progress-old", older, func(b *beads.Bead) { b.Status = "in_progress" }),
+		readMailSeed("open-new", newer),
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+	mailStore := beads.MailStore{Store: store}
+
+	count, err := CountReadMessagesBefore(mailStore, now, 0)
+	if err != nil {
+		t.Fatalf("CountReadMessagesBefore: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("count = %d, want 2 (an in_progress read message counts like an open one)", count)
+	}
+
+	const reason = "mail gc-swept: test retention reason padded to length"
+	closed, closeErrs, listErr := SweepReadMessagesBefore(mailStore, now, 1, reason)
+	if listErr != nil || len(closeErrs) != 0 {
+		t.Fatalf("unexpected errors: list=%v perBead=%v", listErr, closeErrs)
+	}
+	if closed != 1 {
+		t.Fatalf("closed = %d, want 1 (limit)", closed)
+	}
+	swept, err := store.Get("in-progress-old")
+	if err != nil {
+		t.Fatalf("Get(in-progress-old): %v", err)
+	}
+	if swept.Status != "closed" || swept.Metadata["close_reason"] != reason {
+		t.Fatalf("in-progress-old = status %q close_reason %q; want closed with the retention reason", swept.Status, swept.Metadata["close_reason"])
+	}
+	left, err := store.Get("open-new")
+	if err != nil {
+		t.Fatalf("Get(open-new): %v", err)
+	}
+	if left.Status != "open" {
+		t.Fatalf("open-new status = %q, want open (limit left it)", left.Status)
+	}
+
+	// Unbounded, the remaining candidates sweep too.
+	if closed, _, _ := SweepReadMessagesBefore(mailStore, now, 0, reason); closed != 1 {
+		t.Fatalf("second sweep closed = %d, want 1 (the open read message)", closed)
+	}
+}
+
+// TestSweepUnreadMessagesBeforeClosesInProgressUnreadMail is the unread twin:
+// an in_progress unread message past the cutoff is swept and counted exactly
+// like an open one, with the same retention close_reason.
+func TestSweepUnreadMessagesBeforeClosesInProgressUnreadMail(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-time.Minute)
+	fresh := now.Add(time.Minute)
+
+	inProgressUnread := func(b *beads.Bead) {
+		b.Labels = nil
+		b.Status = "in_progress"
+	}
+	seed := []beads.Bead{
+		readMailSeed("in-progress-old", old, inProgressUnread),
+		readMailSeed("read-old", old),
+		unreadMailSeed("open-fresh", fresh),
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+	mailStore := beads.MailStore{Store: store}
+
+	count, err := CountUnreadMessagesBefore(mailStore, now, 0)
+	if err != nil {
+		t.Fatalf("CountUnreadMessagesBefore: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("count = %d, want 1 (the in_progress unread message counts like an open one)", count)
+	}
+
+	const reason = "mail gc-swept: unread test reason padded to length"
+	closed, closeErrs, listErr := SweepUnreadMessagesBefore(mailStore, now, 0, reason)
+	if listErr != nil || len(closeErrs) != 0 {
+		t.Fatalf("unexpected errors: list=%v perBead=%v", listErr, closeErrs)
+	}
+	if closed != 1 {
+		t.Fatalf("closed = %d, want 1", closed)
+	}
+	swept, err := store.Get("in-progress-old")
+	if err != nil {
+		t.Fatalf("Get(in-progress-old): %v", err)
+	}
+	if swept.Status != "closed" || swept.Metadata["close_reason"] != reason {
+		t.Fatalf("in-progress-old = status %q close_reason %q; want closed with the unread retention reason", swept.Status, swept.Metadata["close_reason"])
+	}
+	readOld, err := store.Get("read-old")
+	if err != nil {
+		t.Fatalf("Get(read-old): %v", err)
+	}
+	if readOld.Status != "open" {
+		t.Fatalf("read-old status = %q, want open (the unread sweep leaves read mail alone)", readOld.Status)
+	}
+}

@@ -198,10 +198,10 @@ func (p *Provider) sendWithExtraMetadata(from, to, subject, body string, extra m
 // unresolvable address) falls back to the literal recipient, exactly as
 // [Provider.Inbox] does, so the probe keeps answering the inbox's question: the
 // effect is a narrower match, which sends rather than suppresses, and a
-// duplicate notification beats a dropped one. The probe reads only open
-// messages, and archiving closes one, so an archived notification no longer
-// matches: the dedup horizon is the previous message's live lifetime by design
-// (see [mail.DedupSender]).
+// duplicate notification beats a dropped one. The probe reads only live
+// (non-closed) messages, and archiving closes one, so an archived notification
+// no longer matches: the dedup horizon is the previous message's live lifetime
+// by design (see [mail.DedupSender]).
 func (p *Provider) SendDeduped(from, to, subject, body, key string) (mail.Message, bool, error) {
 	key = strings.TrimSpace(key)
 	if key == "" {
@@ -225,9 +225,11 @@ func (p *Provider) SendDeduped(from, to, subject, body, key string) (mail.Messag
 }
 
 func (p *Provider) findLiveDuplicate(to, key string, pendingHandoffOnly bool) (mail.Message, bool, error) {
+	// Empty Status with no IncludeClosed selects non-closed beads: a pending
+	// duplicate stays a duplicate however its status moved, until a close
+	// retires it (#6211).
 	existing, err := p.store.List(beads.ListQuery{
 		Type:     messageBeadType,
-		Status:   "open",
 		Metadata: map[string]string{mail.DedupKeyMetadataKey: key},
 		TierMode: beads.TierBoth,
 		Live:     true,
@@ -500,7 +502,8 @@ func (p *Provider) MarkUnread(id string) error {
 	})
 }
 
-// ArchiveFilter selects open message beads for bounded archive cleanup.
+// ArchiveFilter selects live (non-closed) message beads for bounded archive
+// cleanup.
 type ArchiveFilter struct {
 	Recipients      []string
 	From            string
@@ -514,7 +517,7 @@ type ArchiveFilter struct {
 
 // Archive closes a message bead, retaining its body for later retrieval via
 // gc mail peek or bd show. A closed message no longer appears in inbox views
-// (all listing paths filter Status != "open"). Archiving an already-closed
+// (all listing paths drop closed mail). Archiving an already-closed
 // message is idempotent and returns ErrAlreadyArchived without mutating it.
 func (p *Provider) Archive(id string) error {
 	// The cached Get can answer ErrNotFound from a stale tombstone for a bead
@@ -570,8 +573,8 @@ func (p *Provider) closeArchived(id string, alreadyRead bool) error {
 	return p.store.Close(id)
 }
 
-// ArchiveCandidates returns open messages that match filter without archiving
-// them.
+// ArchiveCandidates returns live (non-closed) messages that match filter
+// without archiving them.
 func (p *Provider) ArchiveCandidates(filter ArchiveFilter) ([]mail.Message, error) {
 	routes := p.recipientRoutesForAll(filter.Recipients)
 	candidates, err := p.messageCandidatesForRoutes(routes)
@@ -580,7 +583,7 @@ func (p *Provider) ArchiveCandidates(filter ArchiveFilter) ([]mail.Message, erro
 	}
 	matches := make([]mail.Message, 0, len(candidates))
 	for _, b := range candidates {
-		if b.Status != "open" {
+		if !isLiveMail(b) {
 			continue
 		}
 		if len(routes) > 0 && !matchesRecipientRoute(routes, b.Assignee) {
@@ -610,9 +613,10 @@ func (p *Provider) ArchiveCandidates(filter ArchiveFilter) ([]mail.Message, erro
 	return matches, nil
 }
 
-// ArchiveMatching archives open messages selected by filter without per-message
-// lookups after the candidate list has already verified them. Matched beads are
-// closed rather than deleted, so their bodies stay readable.
+// ArchiveMatching archives live (non-closed) messages selected by filter
+// without per-message lookups after the candidate list has already verified
+// them. Matched beads are closed rather than deleted, so their bodies stay
+// readable.
 func (p *Provider) ArchiveMatching(filter ArchiveFilter) ([]mail.Message, []mail.ArchiveResult, error) {
 	candidates, err := p.ArchiveCandidates(filter)
 	if err != nil {
@@ -809,7 +813,8 @@ func (p *Provider) DeleteMany(ids []string) ([]mail.ArchiveResult, error) {
 	return p.ArchiveMany(ids)
 }
 
-// All returns all open messages (read and unread) for the recipient.
+// All returns all live (non-closed) messages (read and unread) for the
+// recipient.
 func (p *Provider) All(recipient string) ([]mail.Message, error) {
 	return p.filterMessages(recipient, true)
 }
@@ -830,7 +835,7 @@ func (p *Provider) CheckAutoHandoffs(recipients []string) ([]mail.Message, error
 	}
 	var messages []mail.Message
 	for _, b := range candidates {
-		if b.Status != "open" ||
+		if !isLiveMail(b) ||
 			(len(routes) > 0 && !matchesRecipientRoute(routes, b.Assignee)) ||
 			hasLabel(b.Labels, "read") ||
 			!hasLabel(b.Labels, mail.AutoHandoffLabel) ||
@@ -957,27 +962,40 @@ func beadmailError(operation string, err error) error {
 	return fmt.Errorf("beadmail %s: %w", operation, err)
 }
 
+// isLiveMail reports whether message bead b is live mail: any status but
+// closed. Gas City's status model is open, in_progress or closed, and for a
+// message "in_progress" only means someone ran a bd claim on it — a claim
+// neither reads nor removes mail — so open and in_progress mail are the same
+// live mail. Only a close retires mail (delivered-and-archived, swept, or
+// user-removed), which is why every mailbox view, direct-ID read and
+// retention sweep gates on this predicate rather than on "open" (#6211: an
+// auto-handoff wisp claimed to in_progress was otherwise invisible to every
+// delivery, archive and aging path, wedging its session forever).
+func isLiveMail(b beads.Bead) bool {
+	return b.Status != "closed"
+}
+
 // isRemovedMessageBead reports whether b is a message bead that direct-ID
 // operations must treat as removed. The eager-delete archive path removes a
 // message bead from the store outright, but a store upgraded from a release
 // that archived by closing (rather than deleting) can still hold closed
 // Type=="message" beads. Those legacy user-removed beads must not stay readable
-// or mutable through Get/Read/MarkRead/MarkUnread/Reply/Thread — the same "open
-// only" visibility the list views (Inbox/Check/All/Count) already enforce — even
-// though Archive can still delete one when it is called explicitly.
+// or mutable through Get/Read/MarkRead/MarkUnread/Reply/Thread — the same
+// non-closed visibility the list views (Inbox/Check/All/Count) already enforce
+// — even though Archive can still delete one when it is called explicitly.
 //
 // Retention-swept read mail is NOT user-removed and must be excluded here. The
 // always-on nudge-mail watchdog closes read mail past its TTL (stamping
 // [RetentionSweepCloseReason]) and PurgeReadMessageWisps deletes it later;
 // between close and purge the message is only system-aged. Gating on bare
-// Status!="open" turned every retention-swept read message into a not-found the
+// closed-status turned every retention-swept read message into a not-found the
 // moment the sweep ran — an always-on regression for any caller that holds a
 // message ID and re-reads or replies to it after the TTL (a long-latency human
 // approval reply, a persisted molecule handle). Excluding the retention reason
 // preserves that pre-sweep addressability while still hiding genuinely
 // user-removed beads.
 func isRemovedMessageBead(b beads.Bead) bool {
-	if b.Type != messageBeadType || b.Status == "open" {
+	if b.Type != messageBeadType || isLiveMail(b) {
 		return false
 	}
 	// Retention-swept mail is system-aged, not user-removed. Read-swept mail
@@ -1047,8 +1065,8 @@ func (p *Provider) Thread(id string) ([]mail.Message, error) {
 	}
 	msgs := make([]mail.Message, 0, len(bs))
 	for _, b := range bs {
-		if b.Status != "open" {
-			// Thread listings show only open messages, matching the list views
+		if !isLiveMail(b) {
+			// Thread listings show only live mail, matching the list views
 			// and the pre-removal List-without-IncludeClosed behavior: a closed
 			// message bead — whether a legacy close-on-archive remnant or a
 			// retention-swept read message — stays out of thread views. (A
@@ -1085,7 +1103,7 @@ func (p *Provider) CountRecipients(recipients []string) (int, int, error) {
 	}
 	var total, unread int
 	for _, b := range candidates {
-		if b.Status != "open" {
+		if !isLiveMail(b) {
 			continue
 		}
 		if len(routes) > 0 && !matchesRecipientRoute(routes, b.Assignee) {
@@ -1099,14 +1117,16 @@ func (p *Provider) CountRecipients(recipients []string) (int, int, error) {
 	return total, unread, nil
 }
 
-// filterMessages returns open message beads assigned to the recipient.
-// When includeRead is false, messages with the "read" label are excluded.
+// filterMessages returns live (non-closed) message beads assigned to the
+// recipient. When includeRead is false, messages with the "read" label are
+// excluded.
 func (p *Provider) filterMessages(recipient string, includeRead bool) ([]mail.Message, error) {
 	return p.filterMessagesForRecipients([]string{recipient}, includeRead)
 }
 
-// filterMessagesForRecipients returns open message beads assigned to any
-// recipient route represented by recipients. Empty recipients mean all routes.
+// filterMessagesForRecipients returns live (non-closed) message beads assigned
+// to any recipient route represented by recipients. Empty recipients mean all
+// routes.
 func (p *Provider) filterMessagesForRecipients(recipients []string, includeRead bool) ([]mail.Message, error) {
 	routes := p.recipientRoutesForAll(recipients)
 	candidates, err := p.messageCandidatesForRoutes(routes)
@@ -1115,7 +1135,7 @@ func (p *Provider) filterMessagesForRecipients(recipients []string, includeRead 
 	}
 	var msgs []mail.Message
 	for _, b := range candidates {
-		if b.Status != "open" {
+		if !isLiveMail(b) {
 			continue
 		}
 		if len(routes) > 0 && !matchesRecipientRoute(routes, b.Assignee) {
@@ -1181,7 +1201,7 @@ const RetentionSweepCloseReason = "mail gc-swept: read mail bead past gc retenti
 //
 // limit caps the number of beads closed (pass 0 for no cap); it bounds both the
 // candidate query and the loop so a caller sharing a cross-phase close budget
-// (see the nudge+mail sweep) honors it exactly. Beads that are no longer open
+// (see the nudge+mail sweep) honors it exactly. Beads that are already closed
 // when revisited are skipped without consuming the limit.
 //
 // Errors are split by severity so callers can preserve fatal-vs-recoverable
@@ -1197,7 +1217,7 @@ func SweepReadMessagesBefore(store beads.MailStore, cutoff time.Time, limit int,
 		if limit > 0 && closed >= limit {
 			break
 		}
-		if b.Status != "open" {
+		if !isLiveMail(b) {
 			continue
 		}
 		if err := store.SetMetadata(b.ID, "close_reason", closeReason); err != nil {
@@ -1227,7 +1247,7 @@ func CountReadMessagesBefore(store beads.MailStore, cutoff time.Time, limit int)
 		if limit > 0 && count >= limit {
 			break
 		}
-		if b.Status != "open" {
+		if !isLiveMail(b) {
 			continue
 		}
 		count++
@@ -1291,7 +1311,7 @@ const UnreadRetentionSweepCloseReason = "mail gc-swept: unread mail bead past gc
 // limit caps the number of beads closed (pass 0 for no cap); the close loop
 // enforces it over the full unbounded candidate set (see unreadMessagesBefore)
 // so a caller sharing a cross-phase close budget (see the nudge+mail sweep)
-// honors it exactly. Beads that are no longer open when revisited are skipped
+// honors it exactly. Beads that are already closed when revisited are skipped
 // without consuming the limit.
 //
 // Errors are split by severity the same way SweepReadMessagesBefore's are:
@@ -1307,7 +1327,7 @@ func SweepUnreadMessagesBefore(store beads.MailStore, cutoff time.Time, limit in
 		if limit > 0 && closed >= limit {
 			break
 		}
-		if b.Status != "open" {
+		if !isLiveMail(b) {
 			continue
 		}
 		if err := store.SetMetadata(b.ID, "close_reason", closeReason); err != nil {
@@ -1337,7 +1357,7 @@ func CountUnreadMessagesBefore(store beads.MailStore, cutoff time.Time, limit in
 		if limit > 0 && count >= limit {
 			break
 		}
-		if b.Status != "open" {
+		if !isLiveMail(b) {
 			continue
 		}
 		count++
@@ -1585,15 +1605,16 @@ func (p *Provider) messageCandidatesForRoutes(routes []string) ([]beads.Bead, er
 	return p.messageCandidatesAll(routes)
 }
 
-// messageCandidatesAll returns all open message beads matching any route.
-// TierBoth is one logical query; BdStore may satisfy it with separate
-// issue-tier and wisp-tier reads before deduping. Empty routes return all open
-// messages. Live reads are required so command-visible mail sees fresh wisps
-// even when the active store cache was primed earlier.
+// messageCandidatesAll returns all live (non-closed) message beads matching
+// any route. TierBoth is one logical query; BdStore may satisfy it with
+// separate issue-tier and wisp-tier reads before deduping. Empty Status with
+// no IncludeClosed selects non-closed beads, so an in_progress message — live
+// mail per isLiveMail — is served like an open one (#6211). Empty routes
+// return all live messages. Live reads are required so command-visible mail
+// sees fresh wisps even when the active store cache was primed earlier.
 func (p *Provider) messageCandidatesAll(routes []string) ([]beads.Bead, error) {
 	query := beads.ListQuery{
 		Type:     messageBeadType,
-		Status:   "open",
 		TierMode: beads.TierBoth,
 		Live:     true,
 	}

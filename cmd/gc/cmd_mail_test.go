@@ -5741,3 +5741,96 @@ func TestCmdMailSendAllFlagBodyWinsOverPositional(t *testing.T) {
 func newTestBeadMail(store beads.Store) *beadmail.Provider {
 	return beadmail.NewWithStores(beadstest.Mail(store), beadstest.Sessions(store))
 }
+
+// setMailBeadInProgress flips a message bead to in_progress — the state the
+// #6211 wisp was observed in in production — without touching anything else.
+func setMailBeadInProgress(t *testing.T, store beads.Store, id string) {
+	t.Helper()
+	inProgress := "in_progress"
+	if err := store.Update(id, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("set %s in_progress: %v", id, err)
+	}
+}
+
+// TestMailCheckInjectArchivesInProgressAutoHandoff pins the #6211 self-heal on
+// the recipient path: `gc mail check --inject` surfaces an in_progress
+// auto-handoff wisp in the injected output and then retires it
+// (mark-read + close, retain-addressable) instead of leaving the session
+// wedged forever.
+func TestMailCheckInjectArchivesInProgressAutoHandoff(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := newTestBeadMail(store)
+	auto, err := store.Create(beads.Bead{
+		Title:     "context cycle",
+		Type:      "message",
+		Assignee:  "mayor",
+		From:      "mayor",
+		Labels:    []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create ephemeral auto handoff: %v", err)
+	}
+	setMailBeadInProgress(t, store, auto.ID)
+
+	var stdout, stderr bytes.Buffer
+	code := doMailCheck(mp, "mayor", true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailCheck = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), auto.ID) {
+		t.Fatalf("injected output missing in_progress auto handoff id %s:\n%s", auto.ID, stdout.String())
+	}
+	assertAutoHandoffRetainedAddressable(t, store, auto.ID)
+}
+
+// TestMailCheckInjectFromSessionInboxArchivesInProgressAutoHandoff is the
+// session-inbox twin: when the mailbox is read as one session inbox
+// (InboxForSession → ArchiveInjectedAutoHandoffsFromInbox), an in_progress
+// auto-handoff is injected and archived exactly as an open one is.
+func TestMailCheckInjectFromSessionInboxArchivesInProgressAutoHandoff(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := newTestBeadMail(store)
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "sky",
+			"session_name": "runtime-sky",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	auto, err := store.Create(beads.Bead{
+		Title:     "context cycle",
+		Type:      "message",
+		Assignee:  sessionBead.ID,
+		From:      sessionBead.ID,
+		Labels:    []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create ephemeral auto handoff: %v", err)
+	}
+	setMailBeadInProgress(t, store, auto.ID)
+
+	info, _, err := session.ResolveSessionRecordByExactID(beadstest.Sessions(store), sessionBead.ID)
+	if err != nil {
+		t.Fatalf("ResolveSessionRecordByExactID: %v", err)
+	}
+	target, err := mailTargetFromSessionInfo(info, sessionBead.ID)
+	if err != nil {
+		t.Fatalf("mailTargetFromSessionInfo: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doMailCheckTarget(mp, target, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailCheckTarget = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), auto.ID) {
+		t.Fatalf("injected output missing in_progress auto handoff id %s:\n%s", auto.ID, stdout.String())
+	}
+	assertAutoHandoffRetainedAddressable(t, store, auto.ID)
+}

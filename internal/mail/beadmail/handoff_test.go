@@ -192,3 +192,47 @@ func TestSendHandoffResendsAfterPendingHandoffRead(t *testing.T) {
 		t.Fatalf("injectable handoffs = %v, want exactly the new %s", pending, second.ID)
 	}
 }
+
+// TestSendHandoffSuppressedByPendingInProgressAutoHandoff pins the dedup half
+// of #6211: a pending unread auto-handoff suppresses a re-send even after it
+// left "open" (in_progress), so a stuck handoff still stops duplicate
+// continuations — and once it is read, the next send goes through.
+func TestSendHandoffSuppressedByPendingInProgressAutoHandoff(t *testing.T) {
+	store := beads.NewMemStore()
+	p := newTestProvider(store)
+
+	first, suppressed, err := p.SendHandoff(autoHandoffIntent())
+	if err != nil || suppressed {
+		t.Fatalf("first SendHandoff = suppressed %v, err %v; want created", suppressed, err)
+	}
+	inProgress := "in_progress"
+	if err := store.Update(first.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("set in_progress: %v", err)
+	}
+
+	second, suppressed, err := p.SendHandoff(autoHandoffIntent())
+	if err != nil {
+		t.Fatalf("second SendHandoff: %v", err)
+	}
+	if !suppressed {
+		t.Fatal("send while the in_progress handoff is unread not suppressed; want suppressed")
+	}
+	if second.ID != first.ID {
+		t.Fatalf("suppressed send returned %s, want the pending %s", second.ID, first.ID)
+	}
+
+	// An already-read in_progress handoff does not suppress.
+	if err := p.MarkRead(first.ID); err != nil {
+		t.Fatalf("MarkRead: %v", err)
+	}
+	third, suppressed, err := p.SendHandoff(autoHandoffIntent())
+	if err != nil {
+		t.Fatalf("third SendHandoff: %v", err)
+	}
+	if suppressed {
+		t.Fatal("send after the in_progress handoff was read suppressed; want a fresh handoff")
+	}
+	if third.ID == first.ID {
+		t.Fatalf("third send reused %s; want a new message", first.ID)
+	}
+}

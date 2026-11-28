@@ -1682,3 +1682,59 @@ func TestDoPrimeWithHook_DevNullStdinLetsEnvMarkersRoute(t *testing.T) {
 		t.Fatalf("stdout = %q, want hook beacon", out)
 	}
 }
+
+// TestDoPrimeWithHook_SessionStartInjectsAndArchivesInProgressAutoHandoff
+// pins the SessionStart delivery path of #6211: a recycled session whose
+// auto-handoff wisp left "open" (in_progress) still gets the continuation in
+// its hook context, and the archive acknowledgement retires it exactly as it
+// would an open handoff.
+func TestDoPrimeWithHook_SessionStartInjectsAndArchivesInProgressAutoHandoff(t *testing.T) {
+	clearGCEnv(t)
+	store := beads.NewMemStore()
+	sessionInfo, err := store.Create(beads.Bead{
+		Title:  "gastown--worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"agent_name":   "worker",
+			"session_name": "gastown--worker",
+			"state":        "active",
+			"template":     "worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	auto, ok := createHandoffMail(store, store, events.Discard, sessionInfo.ID, sessionInfo.ID,
+		[]string{"context cycle", "continue the durable work"}, "context cycle",
+		[]string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel}, io.Discard)
+	if !ok {
+		t.Fatal("createHandoffMail(auto) failed")
+	}
+	inProgress := "in_progress"
+	if err := store.Update(auto.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("set auto handoff in_progress: %v", err)
+	}
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_SESSION_ID", sessionInfo.ID)
+
+	injection, ids, _ := sessionStartAutoHandoffInjectionWithStore(store, cityDir, io.Discard)
+
+	for _, want := range []string{auto.ID, auto.Subject, auto.Body} {
+		if !strings.Contains(injection.text, want) {
+			t.Fatalf("injection = %q, want in_progress auto-handoff substring %q", injection.text, want)
+		}
+	}
+	if !ids[auto.ID] {
+		t.Fatalf("rendered IDs = %#v, want the in_progress auto-handoff %q", ids, auto.ID)
+	}
+	if injection.afterDelivery == nil {
+		t.Fatal("afterDelivery = nil, want archive acknowledgement")
+	}
+	injection.afterDelivery()
+	assertAutoHandoffRetainedAddressable(t, store, auto.ID)
+}

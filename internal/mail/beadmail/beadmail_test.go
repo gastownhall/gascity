@@ -183,8 +183,8 @@ func TestInboxUsesSingleBothTierMessageScanAcrossRoutes(t *testing.T) {
 	}
 	query := store.messageQueries[0]
 	wantRoutes := []string{"sky", sessionBead.ID, "runtime-sky", "mayor", "witness"}
-	if query.TierMode != beads.TierBoth || query.AllowScan || query.Type != "message" || query.Status != "open" || query.Assignee != "" || !slices.Equal(query.Assignees, wantRoutes) {
-		t.Fatalf("message query = %+v, want one both-tier Assignees scan for %v", query, wantRoutes)
+	if query.TierMode != beads.TierBoth || query.AllowScan || query.Type != "message" || query.Status != "" || query.IncludeClosed || query.Assignee != "" || !slices.Equal(query.Assignees, wantRoutes) {
+		t.Fatalf("message query = %+v, want one both-tier non-closed Assignees scan for %v", query, wantRoutes)
 	}
 	if !query.Live {
 		t.Fatalf("message query = %+v, want live read for command-visible mail freshness", query)
@@ -328,7 +328,10 @@ func TestCheckDoesNotUseMessageLabelSupplement(t *testing.T) {
 		if strings.Contains(cmd, "bd query --json") {
 			return []byte(`[]`), nil
 		}
-		if strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=message") && strings.Contains(cmd, "--status=open") {
+		// The message scan is the non-closed scan: neither --status nor --all,
+		// so an in_progress message is served like an open one (#6211).
+		if strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=message") &&
+			!strings.Contains(cmd, "--status=") && !strings.Contains(cmd, "--all") {
 			return []byte(`[{"id":"msg-1","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"mayor","from":"human","created_at":"2026-01-02T03:04:05Z","ephemeral":true,"labels":["gc:message"]}]`), nil
 		}
 		return nil, errors.New("unexpected command: " + cmd)
@@ -356,7 +359,8 @@ func TestCheckUsesSingleAssigneeMessageScanForSlashRecipient(t *testing.T) {
 			return []byte(`[]`), nil
 		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=session"):
 			return []byte(`[]`), nil
-		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=message") && strings.Contains(cmd, "--status=open"):
+		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=message") &&
+			!strings.Contains(cmd, "--status=") && !strings.Contains(cmd, "--all"):
 			if !strings.Contains(cmd, "--assignee="+recipient) {
 				t.Fatalf("slash recipient message query = %s, want single --assignee filter", cmd)
 			}
@@ -405,7 +409,8 @@ func TestCheckUsesSingleBothTierBdMessageScan(t *testing.T) {
 			return []byte(`[]`), nil
 		case strings.Contains(cmd, "bd query --json"):
 			return []byte(`[]`), nil
-		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=message") && strings.Contains(cmd, "--status=open"):
+		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=message") &&
+			!strings.Contains(cmd, "--status=") && !strings.Contains(cmd, "--all"):
 			messageListCalls++
 			return []byte(`[{"id":"msg-1","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"mayor","from":"human","created_at":"2026-01-02T03:04:05Z","ephemeral":true}]`), nil
 		}
@@ -3417,3 +3422,181 @@ var (
 	_ mail.Provider    = (*Provider)(nil)
 	_ mail.DedupSender = (*Provider)(nil)
 )
+
+// TestInProgressMailListedLikeOpenMail pins the listing rule behind #6211's
+// wedge fix: an in_progress message bead is live mail, so every mailbox view —
+// Inbox/Check/All, the session inbox, Count/CountRecipients, Thread and
+// ArchiveCandidates — returns it with the same read/unread state and counts as
+// if it were open. Only a closed message leaves the views.
+func TestInProgressMailListedLikeOpenMail(t *testing.T) {
+	readView := func(p *Provider) (inbox, all, thread, archiveCandidates []string, total, unread int) {
+		t.Helper()
+		check, err := p.Check("sky")
+		if err != nil {
+			t.Fatalf("Check: %v", err)
+		}
+		everything, err := p.All("sky")
+		if err != nil {
+			t.Fatalf("All: %v", err)
+		}
+		threadMsgs, err := p.Thread("thread-shared")
+		if err != nil {
+			t.Fatalf("Thread: %v", err)
+		}
+		archivable, err := p.ArchiveCandidates(ArchiveFilter{Recipients: []string{"sky"}, IncludeRead: true})
+		if err != nil {
+			t.Fatalf("ArchiveCandidates: %v", err)
+		}
+		total, unread, err = p.CountRecipients([]string{"sky"})
+		if err != nil {
+			t.Fatalf("CountRecipients: %v", err)
+		}
+		return messageIDs(check), messageIDs(everything), messageIDs(threadMsgs), messageIDs(archivable), total, unread
+	}
+
+	store := beads.NewMemStore()
+	p := newTestProvider(store)
+	plain, err := p.Send("human", "sky", "unread plain", "body")
+	if err != nil {
+		t.Fatalf("Send plain: %v", err)
+	}
+	read, err := p.Send("human", "sky", "read plain", "body")
+	if err != nil {
+		t.Fatalf("Send read: %v", err)
+	}
+	if err := p.MarkRead(read.ID); err != nil {
+		t.Fatalf("MarkRead: %v", err)
+	}
+	threaded, _, err := p.SendHandoff(mail.HandoffIntent{
+		From: "human", To: "sky", Subject: "threaded", Body: "body", ThreadID: "thread-shared",
+	})
+	if err != nil {
+		t.Fatalf("SendHandoff threaded: %v", err)
+	}
+	wantCheck, wantAll, wantThread, wantArchivable, wantTotal, wantUnread := readView(p)
+	if wantUnread != 2 {
+		t.Fatalf("fixture unread = %d, want 2 (plain + threaded)", wantUnread)
+	}
+
+	inProgress := "in_progress"
+	for _, id := range []string{plain.ID, read.ID, threaded.ID} {
+		if err := store.Update(id, beads.UpdateOpts{Status: &inProgress}); err != nil {
+			t.Fatalf("set %s in_progress: %v", id, err)
+		}
+	}
+
+	gotCheck, gotAll, gotThread, gotArchivable, gotTotal, gotUnread := readView(p)
+	if !slices.Equal(gotCheck, wantCheck) || !slices.Equal(gotAll, wantAll) || !slices.Equal(gotThread, wantThread) {
+		t.Fatalf("in_progress listing diverged from open:\ncheck:   %v vs %v\nall:     %v vs %v\nthread:  %v vs %v",
+			gotCheck, wantCheck, gotAll, wantAll, gotThread, wantThread)
+	}
+	if !slices.Equal(gotArchivable, wantArchivable) {
+		t.Fatalf("ArchiveCandidates = %v, want the open result %v", gotArchivable, wantArchivable)
+	}
+	if gotTotal != wantTotal || gotUnread != wantUnread {
+		t.Fatalf("counts = %d total, %d unread; want the open result %d, %d", gotTotal, gotUnread, wantTotal, wantUnread)
+	}
+
+	// The session inbox agrees: same rows, same counts.
+	inbox, err := p.InboxForRoutes([]string{"sky"})
+	if err != nil {
+		t.Fatalf("InboxForRoutes: %v", err)
+	}
+	inboxTotal, inboxUnread := inbox.Counts()
+	if inboxTotal != wantTotal || inboxUnread != wantUnread || !slices.Equal(messageIDs(inbox.Unread()), wantCheck) {
+		t.Fatalf("session inbox = %d total, %d unread, unread %v; want the open result %d, %d, %v",
+			inboxTotal, inboxUnread, messageIDs(inbox.Unread()), wantTotal, wantUnread, wantCheck)
+	}
+
+	// A closed message is retired from every view, as before.
+	if err := store.Close(threaded.ID); err != nil {
+		t.Fatalf("Close threaded: %v", err)
+	}
+	closedCheck, _, closedThread, _, closedTotal, closedUnread := readView(p)
+	if slices.Contains(closedCheck, threaded.ID) || slices.Contains(closedThread, threaded.ID) {
+		t.Fatalf("closed message %s still listed (check %v, thread %v)", threaded.ID, closedCheck, closedThread)
+	}
+	if closedTotal != wantTotal-1 || closedUnread != wantUnread-1 {
+		t.Fatalf("counts after close = %d total, %d unread; want %d, %d", closedTotal, closedUnread, wantTotal-1, wantUnread-1)
+	}
+}
+
+// TestDirectIDOpsTreatInProgressMailAsLive pins the ID-addressed half of the
+// #6211 fix: Get, Read, MarkRead, MarkUnread and Reply succeed on an
+// in_progress message exactly as on an open one, while a closed message
+// without a retention close_reason still reads as user-removed (not-found).
+func TestDirectIDOpsTreatInProgressMailAsLive(t *testing.T) {
+	store := beads.NewMemStore()
+	p := newTestProvider(store)
+	msg, err := p.Send("human", "sky", "in progress", "body")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := store.Update(msg.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("set in_progress: %v", err)
+	}
+
+	got, err := p.Get(msg.ID)
+	if err != nil {
+		t.Fatalf("Get(in_progress) = %v; want success as for open mail", err)
+	}
+	if got.Read {
+		t.Fatalf("Get(in_progress).Read = true, want unread")
+	}
+	if _, err := p.Read(msg.ID); err != nil {
+		t.Fatalf("Read(in_progress) = %v; want success as for open mail", err)
+	}
+	b, err := store.Get(msg.ID)
+	if err != nil {
+		t.Fatalf("store.Get after Read: %v", err)
+	}
+	if b.Status != "in_progress" || !hasLabel(b.Labels, "read") || b.Metadata[mail.ReadMetadataKey] != "true" {
+		t.Fatalf("after Read: status %q labels %v metadata %v; want in_progress, read", b.Status, b.Labels, b.Metadata)
+	}
+	if err := p.MarkUnread(msg.ID); err != nil {
+		t.Fatalf("MarkUnread(in_progress) = %v; want success as for open mail", err)
+	}
+	if err := p.MarkRead(msg.ID); err != nil {
+		t.Fatalf("MarkRead(in_progress) = %v; want success as for open mail", err)
+	}
+	reply, err := p.Reply(msg.ID, "sky", "", "reply body")
+	if err != nil {
+		t.Fatalf("Reply(in_progress) = %v; want success as for open mail", err)
+	}
+	if reply.ReplyTo != msg.ID {
+		t.Fatalf("reply.ReplyTo = %q, want %q", reply.ReplyTo, msg.ID)
+	}
+
+	// Closed edge cases: system-aged (retention close_reason) stays
+	// addressable; user-removed (any other reason, or none) is not-found.
+	closed := func(reason string) string {
+		t.Helper()
+		m, err := p.Send("human", "sky", "closed "+reason, "body")
+		if err != nil {
+			t.Fatalf("Send closed: %v", err)
+		}
+		if err := store.Close(m.ID); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		if reason != "" {
+			if err := store.SetMetadata(m.ID, "close_reason", reason); err != nil {
+				t.Fatalf("SetMetadata: %v", err)
+			}
+		}
+		return m.ID
+	}
+	for _, reason := range []string{RetentionSweepCloseReason, UnreadRetentionSweepCloseReason} {
+		if _, err := p.Get(closed(reason)); err != nil {
+			t.Fatalf("Get(closed, %q) = %v; want system-aged mail to stay addressable", reason, err)
+		}
+	}
+	if _, err := p.Get(closed("")); err == nil {
+		t.Fatal("Get(closed, no reason) = nil; want not-found for user-removed mail")
+	} else if !errors.Is(err, mail.ErrNotFound) {
+		t.Fatalf("Get(closed, no reason) = %v; want mail.ErrNotFound", err)
+	}
+	if _, err := p.Get(closed("some other reason")); err == nil {
+		t.Fatal("Get(closed, other reason) = nil; want not-found for user-removed mail")
+	}
+}

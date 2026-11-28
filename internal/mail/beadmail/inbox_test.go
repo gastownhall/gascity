@@ -759,3 +759,79 @@ func TestInboxForSessionWithPredecessorsStaysKeyed(t *testing.T) {
 		t.Fatalf("native plan has %d requests, want one per route (%d)", len(plan), len(inbox.Routes()))
 	}
 }
+
+// setInProgress flips a bead to in_progress, the state a production wisp was
+// observed in (#6211): mail that left "open" without being closed.
+func setInProgress(t *testing.T, store beads.Store, id string) {
+	t.Helper()
+	inProgress := "in_progress"
+	if err := store.Update(id, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("set %s in_progress: %v", id, err)
+	}
+}
+
+// TestInboxUnreadAutoHandoffsIncludesInProgressHandoff pins the SessionStart
+// delivery path against #6211's wedge: an auto-handoff wisp that left "open"
+// (in_progress) must still be read by the session inbox and surfaced by
+// UnreadAutoHandoffs, so `gc prime --hook` delivers and then archives it exactly
+// as it would an open handoff.
+func TestInboxUnreadAutoHandoffsIncludesInProgressHandoff(t *testing.T) {
+	store, p, info := newInboxFixture(t)
+	auto, _, err := p.SendHandoff(mail.HandoffIntent{
+		From: "sky", To: "sky", Subject: "context cycle", Body: "continue", ThreadID: "t-inprogress",
+		ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+	})
+	if err != nil {
+		t.Fatalf("SendHandoff: %v", err)
+	}
+	setInProgress(t, store, auto.ID)
+
+	inbox, err := p.InboxForSession(info)
+	if err != nil {
+		t.Fatalf("InboxForSession: %v", err)
+	}
+	got := messageIDs(inbox.UnreadAutoHandoffs())
+	if !slices.Contains(got, auto.ID) {
+		t.Fatalf("UnreadAutoHandoffs = %v, want the in_progress auto-handoff %s", got, auto.ID)
+	}
+	if total, unread := inbox.Counts(); unread == 0 || total < unread {
+		t.Fatalf("inbox counts = %d total, %d unread; the in_progress handoff must count as unread mail", total, unread)
+	}
+}
+
+// TestArchiveFromInboxRetiresInProgressHandoff pins the session-inbox archive
+// path of #6211's self-heal: after the inbox read an in_progress handoff as
+// unread archive-after-inject mail, ArchiveInjectedAutoHandoffsFromInbox
+// retires it — one close-with-metadata write, then the read label — leaving it
+// closed, read and retain-addressable.
+func TestArchiveFromInboxRetiresInProgressHandoff(t *testing.T) {
+	store, p, info := newInboxFixture(t)
+	auto, _, err := p.SendHandoff(mail.HandoffIntent{
+		From: "sky", To: "sky", Subject: "context cycle", Body: "continue", ThreadID: "t-inprogress",
+		ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+	})
+	if err != nil {
+		t.Fatalf("SendHandoff: %v", err)
+	}
+	setInProgress(t, store, auto.ID)
+
+	inbox, err := p.InboxForSession(info)
+	if err != nil {
+		t.Fatalf("InboxForSession: %v", err)
+	}
+	ids := inbox.InjectedAutoHandoffIDs([]string{auto.ID})
+	if !slices.Equal(ids, []string{auto.ID}) {
+		t.Fatalf("InjectedAutoHandoffIDs = %v, want the in_progress handoff %s", ids, auto.ID)
+	}
+	if err := p.ArchiveInjectedAutoHandoffsFromInbox(inbox, ids, nil); err != nil {
+		t.Fatalf("ArchiveInjectedAutoHandoffsFromInbox: %v", err)
+	}
+	b, err := store.Get(auto.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", auto.ID, err)
+	}
+	if b.Status != "closed" || !hasLabel(b.Labels, "read") ||
+		b.Metadata[mail.ReadMetadataKey] != "true" || b.Metadata["close_reason"] != RetentionSweepCloseReason {
+		t.Fatalf("archived in_progress handoff = status %q labels %v metadata %v; want closed, read, retain-addressable", b.Status, b.Labels, b.Metadata)
+	}
+}
