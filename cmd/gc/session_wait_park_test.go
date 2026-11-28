@@ -135,3 +135,74 @@ func TestReconcileSessionBeads_WaitParkedPoolSeatKeepsSlotAndClaim(t *testing.T)
 		t.Errorf("recorded %d session.stranded events for a parked seat, want none", len(evts))
 	}
 }
+
+// TestReconcileSessionBeads_WaitParkedSeatWakesInPlaceOnWaitReady continues
+// the park: with a sleep policy and a current fingerprint, once the wait
+// turns ready the same bead wakes in place (wait-ready) and no fresh bead is
+// minted for the pool.
+func TestReconcileSessionBeads_WaitParkedSeatWakesInPlaceOnWaitReady(t *testing.T) {
+	env, session, task, _ := newWaitParkedSeatEnv(t, config.SessionSleepConfig{InteractiveResume: "5m", InteractiveFresh: "5m"}, true)
+	drainAckAndWaitPark(t, env, session)
+	// A tick persists the sleep policy (the fingerprint), as every tick does.
+	policy := resolveSessionSleepPolicyInfo(env.sessionInfo(session.ID), env.cfg, env.sp)
+	cur, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	env.setSessionMetadata(&cur, map[string]string{"sleep_policy_fingerprint": policy.Fingerprint})
+
+	// Ticks past the stranded confirmation window: the seat must survive them
+	// parked, or there is no bead left to wake.
+	for _, advance := range []time.Duration{0, strandedRepairConfirmGrace + time.Minute} {
+		env.clk.Time = env.clk.Now().Add(advance)
+		row, err := env.store.Get(session.ID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", session.ID, err)
+		}
+		reconcileSessionBeadsAtPath(
+			context.Background(), env.city, []beads.Bead{row}, env.desiredState, map[string]bool{"worker": true},
+			env.cfg, env.sp, env.store, nil, []beads.Bead{task}, nil, nil, env.dt,
+			map[string]int{"worker": 1}, false, nil, "",
+			nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr, env.startOptions...)
+	}
+	if got, _ := env.store.Get(session.ID); got.Status == "closed" {
+		t.Fatalf("the parked seat was closed before its wait could turn ready; metadata=%v", got.Metadata)
+	}
+
+	// The wait turns ready: the same session wakes in place.
+	env.clk.Time = env.clk.Now().Add(10 * time.Minute)
+	row, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	var out, errw strings.Builder
+	reconcileSessionBeadsAtPath(
+		context.Background(), env.city, []beads.Bead{row}, env.desiredState, map[string]bool{"worker": true},
+		env.cfg, env.sp, env.store, nil, []beads.Bead{task}, nil, map[string]bool{session.ID: true}, env.dt,
+		map[string]int{"worker": 1}, false, nil, "",
+		nil, env.clk, env.rec, 0, 0, &out, &errw, env.startOptions...)
+	if !env.sp.IsRunning("worker") {
+		after, _ := env.store.Get(session.ID)
+		t.Errorf("wait ready: the waiter was not woken; state=%q config_wake_suppressed=%q; stderr=%s",
+			after.Metadata["state"], after.Metadata["config_wake_suppressed"], errw.String())
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Status == "closed" {
+		t.Errorf("the woken waiter's bead is closed")
+	}
+	// No fresh bead for the pool: the same bead woke in place.
+	rows, err := env.store.List(beads.ListQuery{Type: sessionBeadType, IncludeClosed: true, AllowScan: true})
+	if err != nil {
+		t.Fatalf("List(session): %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != session.ID {
+		ids := make([]string, len(rows))
+		for i, r := range rows {
+			ids[i] = r.ID + "/" + r.Status
+		}
+		t.Errorf("session beads = %v, want exactly the parked bead %s woken in place", ids, session.ID)
+	}
+}
