@@ -2,6 +2,7 @@ package agentutil
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/agent"
@@ -175,4 +176,32 @@ func PoolInstanceName(base string, slot int, a config.Agent) string {
 		return a.NamepoolNames[slot-1]
 	}
 	return fmt.Sprintf("%s-%d", base, slot)
+}
+
+// PoolMemberSlot is the inverse of PoolInstanceName: it returns the slot
+// whose display name is local (an unqualified member name such as "furiosa"
+// or "polecat-3") and true when that slot is within the pool's bound. It
+// returns false for any name PoolInstanceName never renders for an in-bound
+// slot, including every name of a pool that does not expand into members.
+// The bound follows ScaleParamsFor: a negative max means unlimited.
+func PoolMemberSlot(a config.Agent, local string) (int, bool) {
+	if !a.SupportsInstanceExpansion() || a.UsesCanonicalSingletonPoolIdentity() {
+		return 0, false
+	}
+	maxSlots := ScaleParamsFor(&a).Max
+	inBound := func(slot int) bool { return maxSlots < 0 || slot <= maxSlots }
+	for i, name := range a.NamepoolNames {
+		if name == local {
+			return i + 1, inBound(i + 1)
+		}
+	}
+	suffix, found := strings.CutPrefix(local, a.Name+"-")
+	if !found {
+		return 0, false
+	}
+	slot, err := strconv.Atoi(suffix)
+	if err != nil || slot <= len(a.NamepoolNames) || strconv.Itoa(slot) != suffix || !inBound(slot) {
+		return 0, false
+	}
+	return slot, true
 }

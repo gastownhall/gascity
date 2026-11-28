@@ -2454,7 +2454,7 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 			}
 			req := RouteRequest{
 				BeadID:  child.ID,
-				Target:  a.QualifiedName(),
+				Target:  agentutil.RoutedToIdentity(&a),
 				WorkDir: rigDir,
 				Env:     childEnv,
 				Force:   opts.Force,
