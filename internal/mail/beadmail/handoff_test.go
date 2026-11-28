@@ -192,3 +192,35 @@ func TestSendHandoffResendsAfterPendingHandoffRead(t *testing.T) {
 		t.Fatalf("injectable handoffs = %v, want exactly the new %s", pending, second.ID)
 	}
 }
+
+// TestSendHandoffSuppressedByPendingInProgressAutoHandoff pins that an unread
+// auto handoff a bd claim moved to in_progress is still pending: it suppresses
+// a re-send with its dedup key, while a read in_progress handoff does not.
+func TestSendHandoffSuppressedByPendingInProgressAutoHandoff(t *testing.T) {
+	store := beads.NewMemStore()
+	p := newTestProvider(store)
+
+	first, _, err := p.SendHandoff(autoHandoffIntent())
+	if err != nil {
+		t.Fatalf("first SendHandoff: %v", err)
+	}
+	setInProgress(t, store, first.ID)
+	second, suppressed, err := p.SendHandoff(autoHandoffIntent())
+	if err != nil {
+		t.Fatalf("second SendHandoff: %v", err)
+	}
+	if !suppressed || second.ID != first.ID {
+		t.Fatalf("send while in_progress %s is unread = (%s, suppressed %v), want it suppressed", first.ID, second.ID, suppressed)
+	}
+
+	if err := p.MarkRead(first.ID); err != nil {
+		t.Fatalf("MarkRead: %v", err)
+	}
+	third, suppressed, err := p.SendHandoff(autoHandoffIntent())
+	if err != nil {
+		t.Fatalf("third SendHandoff: %v", err)
+	}
+	if suppressed || third.ID == first.ID {
+		t.Fatalf("send after in_progress %s was read = (%s, suppressed %v), want a fresh handoff", first.ID, third.ID, suppressed)
+	}
+}

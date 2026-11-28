@@ -198,10 +198,10 @@ func (p *Provider) sendWithExtraMetadata(from, to, subject, body string, extra m
 // unresolvable address) falls back to the literal recipient, exactly as
 // [Provider.Inbox] does, so the probe keeps answering the inbox's question: the
 // effect is a narrower match, which sends rather than suppresses, and a
-// duplicate notification beats a dropped one. The probe reads only open
-// messages, and archiving closes one, so an archived notification no longer
-// matches: the dedup horizon is the previous message's live lifetime by design
-// (see [mail.DedupSender]).
+// duplicate notification beats a dropped one. The probe reads only live
+// (non-closed, see [isLiveMail]) messages, and archiving closes one, so an
+// archived notification no longer matches: the dedup horizon is the previous
+// message's live lifetime by design (see [mail.DedupSender]).
 func (p *Provider) SendDeduped(from, to, subject, body, key string) (mail.Message, bool, error) {
 	key = strings.TrimSpace(key)
 	if key == "" {
@@ -227,7 +227,6 @@ func (p *Provider) SendDeduped(from, to, subject, body, key string) (mail.Messag
 func (p *Provider) findLiveDuplicate(to, key string, pendingHandoffOnly bool) (mail.Message, bool, error) {
 	existing, err := p.store.List(beads.ListQuery{
 		Type:     messageBeadType,
-		Status:   "open",
 		Metadata: map[string]string{mail.DedupKeyMetadataKey: key},
 		TierMode: beads.TierBoth,
 		Live:     true,
@@ -240,6 +239,9 @@ func (p *Provider) findLiveDuplicate(to, key string, pendingHandoffOnly bool) (m
 	}
 	routes := p.recipientRoutes(to)
 	for _, b := range existing {
+		if !isLiveMail(b) {
+			continue
+		}
 		if pendingHandoffOnly && !isUnreadInjectedAutoHandoff(b) {
 			continue
 		}
@@ -257,8 +259,8 @@ func (p *Provider) findLiveDuplicate(to, key string, pendingHandoffOnly bool) (m
 // does, so handoff mail replies route correctly. When intent.DedupKey is
 // non-empty the send is suppressed, returning the existing message with
 // suppressed=true, only while an unread archive-after-inject auto-handoff for
-// the same recipient and key is pending; a handoff that was read but left open
-// does not suppress.
+// the same recipient and key is pending; a handoff that was read but left live
+// (open or in_progress) does not suppress.
 func (p *Provider) SendHandoff(intent mail.HandoffIntent) (mail.Message, bool, error) {
 	if intent.To == "" {
 		return mail.Message{}, false, fmt.Errorf("beadmail handoff: recipient is required")
