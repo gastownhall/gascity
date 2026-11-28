@@ -1241,8 +1241,8 @@ func TestDeliverSessionNudgeWithWorkerManagedWakeFailureRollsBackQueuedNudge(t *
 	if len(pending) != 0 || len(inFlight) != 0 || len(dead) != 1 {
 		t.Fatalf("pending/inFlight/dead = %d/%d/%d, want 0/0/1", len(pending), len(inFlight), len(dead))
 	}
-	if !strings.Contains(dead[0].LastError, "managed wake failed: session "+info.ID+" is closing") {
-		t.Fatalf("dead LastError = %q, want managed wake failure", dead[0].LastError)
+	if dead[0].LastError != nudgeDeadReasonSessionTerminated {
+		t.Fatalf("dead LastError = %q, want %q", dead[0].LastError, nudgeDeadReasonSessionTerminated)
 	}
 	updated, err := store.Get(info.ID)
 	if err != nil {
@@ -2141,8 +2141,8 @@ func TestSendMailNotifyWithWorkerManagedWakeFailureRollsBackQueuedNudge(t *testi
 	if len(pending) != 0 || len(inFlight) != 0 || len(dead) != 1 {
 		t.Fatalf("pending/inFlight/dead = %d/%d/%d, want 0/0/1", len(pending), len(inFlight), len(dead))
 	}
-	if !strings.Contains(dead[0].LastError, "managed wake failed: session "+info.ID+" is closing") {
-		t.Fatalf("dead LastError = %q, want managed wake failure", dead[0].LastError)
+	if dead[0].LastError != nudgeDeadReasonSessionTerminated {
+		t.Fatalf("dead LastError = %q, want %q", dead[0].LastError, nudgeDeadReasonSessionTerminated)
 	}
 	updated, err := store.Get(info.ID)
 	if err != nil {

@@ -3588,6 +3588,10 @@ type sessionNudgeJSON struct {
 	Delivery      string `json:"delivery"`
 	Queued        bool   `json:"queued"`
 	Outcome       string `json:"outcome"`
+	// Reason and SessionState explain an undeliverable nudge: the op's
+	// refused reason and the target session's lifecycle state.
+	Reason       string `json:"reason,omitempty"`
+	SessionState string `json:"session_state,omitempty"`
 	// OpID, Key and Replayed name the operation-journal op that backs the
 	// run, when one does (DES-O0API §8.3).
 	OpID     string `json:"op_id,omitempty"`

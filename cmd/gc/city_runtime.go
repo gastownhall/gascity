@@ -2477,6 +2477,15 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(cfg *config.City, now time.Time
 	if _, err := openNudgeQueue(cr.cityPath, nudgeStore).Queue.Maintain(context.Background(), now); err != nil && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog: nudge queue maintenance: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 	}
+	// Dead-letter the nudges fenced to retired sessions (#4534): a pending
+	// item whose session closed for good would otherwise wait out its TTL
+	// with no seat ever claiming it. Best-effort on this pass's stores; a
+	// failure is reported and retried by the next tick.
+	if moved, sweepErr := sweepRetiredSessionNudges(cr.cityPath, cfg, nudgeStore, stores.Sessions(), now); sweepErr != nil && cr.stderr != nil {
+		fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog: retired-session sweep: %v\n", cr.logPrefix, sweepErr) //nolint:errcheck // best-effort stderr
+	} else if moved > 0 && cr.stderr != nil {
+		fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog: dead-lettered %d nudge(s) whose session terminated\n", cr.logPrefix, moved) //nolint:errcheck // best-effort stderr
+	}
 	// Load nudge state to protect live nudge IDs. A missing state file is not an
 	// error (LoadState returns empty state), so any error here is a real
 	// read/parse failure: fail closed and skip this sweep rather than sweeping

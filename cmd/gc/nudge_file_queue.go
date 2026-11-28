@@ -1125,6 +1125,60 @@ func fileRollbackQueuedNudge(cityPath string, store beads.NudgesStore, item queu
 	return nudgeFrontDoor(store).Terminalize(item, "failed", reason, "", now)
 }
 
+// DeadLetterRetiredFence moves the planned pending items whose fence —
+// SessionID and ContinuationEpoch — still equals the snapshot the plan was
+// built from into Dead with the session-terminated reason, in one locked
+// run, and pays the shadow debts after the lock. It is the retired-session
+// sweep's terminal path (#4534), the batch shape of fileRollbackQueuedNudge:
+// the sweep judges a snapshot, plans only provable orphans, and this run
+// moves nothing whose fence changed since.
+func (q *fileNudgeQueue) DeadLetterRetiredFence(planned map[string]queuedNudge, now time.Time) (int, error) {
+	ledger := newNudgeShadowLedger(now)
+	moved := 0
+	err := updateNudgeQueueState(q.cityPath, "retired-sweep", func(state *nudgeQueueState) error {
+		ledger.reset()
+		moved = deadLetterRetiredFencePlan(state, planned, ledger, now)
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	if moved > 0 {
+		settleNudgeShadowDebts(q.cityPath, q.store, ledger.taken, nudgeControllerPayBudget, now)
+	}
+	return moved, nil
+}
+
+// deadLetterRetiredFencePlan moves the planned pending items whose fence —
+// SessionID and ContinuationEpoch — still equals the snapshot the plan was
+// built from into Dead with the session-terminated reason: claim fields
+// zeroed, DeadAt stamped, the shadow owed the failed close (paid after the
+// lock). It is the dead-letter pattern of the queue's other terminal paths,
+// as a pure function of the state it is given.
+func deadLetterRetiredFencePlan(state *nudgeQueueState, planned map[string]queuedNudge, ledger *nudgeShadowLedger, now time.Time) int {
+	moved := 0
+	pending := state.Pending[:0]
+	for _, item := range state.Pending {
+		want, ok := planned[item.ID]
+		if ok && item.SessionID == want.SessionID && item.ContinuationEpoch == want.ContinuationEpoch {
+			item.ClaimedAt = time.Time{}
+			item.LeaseUntil = time.Time{}
+			item.DeadAt = now.UTC()
+			item.LastError = nudgeDeadReasonSessionTerminated
+			ledger.owe(&item, "failed", nudgeDeadReasonSessionTerminated, "", now)
+			state.Dead = append(state.Dead, item)
+			moved++
+			continue
+		}
+		pending = append(pending, item)
+	}
+	state.Pending = pending
+	if moved > 0 {
+		sortQueuedNudges(state)
+	}
+	return moved
+}
+
 // fileAckQueuedNudges retires the pending and in-flight ids. The queue write
 // commits whatever the shadow store does: each acked item that can have a
 // shadow moves to the retired bucket owing its shadow the outcome, and the

@@ -495,6 +495,31 @@ func cmdNudgeStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) in
 	inFlight = append(inFlight, laneInFlight...)
 	dead = append(dead, laneDead...)
 
+	// Status answers by fence as well as by key (#4534): an item fenced to
+	// this session whose queue key the session no longer serves — a moved
+	// identity, a renamed alias — is still this session's nudge in the
+	// operator's view, so it is unioned in from a lock-free snapshot read
+	// instead of disappearing from the counts. A fence read that fails fails
+	// the command like a lane read does: stderr always, exit 1 under --json,
+	// where ok promises the whole view.
+	var fenceErr error
+	if target.sessionID != "" {
+		var fencePending, fenceInFlight, fenceDead []queuedNudge
+		fencePending, fenceInFlight, fenceDead, fenceErr = listQueuedNudgesSnapshotMatching(target.cityPath, func(item queuedNudge) bool {
+			return item.SessionID == target.sessionID
+		}, now)
+		if fenceErr == nil {
+			pending = unionQueuedNudges(pending, fencePending)
+			inFlight = unionQueuedNudges(inFlight, fenceInFlight)
+			dead = unionQueuedNudges(dead, fenceDead)
+		} else {
+			fmt.Fprintf(stderr, "gc nudge status: fenced items not read: %v\n", fenceErr) //nolint:errcheck
+			if jsonOutput {
+				return 1
+			}
+		}
+	}
+
 	// City-wide (not agent-scoped) skip-reason totals from the supervisor
 	// dispatch tick, read directly off the persisted queue state — a raw
 	// read so this doesn't re-run the maintenance sweep listQueuedNudgesForTarget
@@ -563,7 +588,7 @@ func cmdNudgeStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) in
 			_, _ = fmt.Fprintf(stdout, "  %s=%d\n", reason, dispatchSkips[reason])
 		}
 	}
-	if laneErr != nil {
+	if laneErr != nil || fenceErr != nil {
 		return 1
 	}
 	return 0
@@ -1485,6 +1510,9 @@ func deliverSessionNudgeKeyed(target nudgeTarget, store beads.Store, sp runtime.
 	res, err := deliverSessionNudgeLegacy(target, store, sp, message, mode, stderr)
 	op.finishMessage(res.queued, err)
 	if err != nil {
+		if code, ok := writeUndeliverableSessionNudge(target, mode, jsonOutput, err, op, stdout, stderr); ok {
+			return code
+		}
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 		return 1
 	}
@@ -1529,8 +1557,15 @@ func sessionNudgeOpPolicy(mode nudgeDeliveryMode) opjournal.Policy {
 // deliverSessionNudgeLegacy delivers a session nudge live, or queues it when
 // the live leg cannot or must not deliver it. It reports nothing on stdout;
 // its notes and warnings go to stderr, and a refusal is a cliMessageRefusal.
+// A nudge to a retired session is refused in every mode before anything is
+// queued or typed (refuseNudgeToRetiredSession).
 func deliverSessionNudgeLegacy(target nudgeTarget, store beads.Store, sp runtime.Provider, message string, mode nudgeDeliveryMode, stderr io.Writer) (sessionNudgeResult, error) {
 	programShadowDecideForTarget(target)
+	if store != nil {
+		if err := refuseNudgeToRetiredSession(target, cliSessionFrontDoor(store, target.cfg, target.cityPath)); err != nil {
+			return sessionNudgeResult{}, err
+		}
+	}
 	if mode == nudgeDeliveryQueue {
 		return queueSessionNudgeWithWorker(target, store, sp, message, "")
 	}
@@ -1825,15 +1860,21 @@ func queueManagedSessionNudgeWake(target nudgeTarget, store beads.Store, message
 	item := newQueuedNudgeWithOptions(target.agentKey(), message, "session", time.Now(), queuedNudgeOptionsFromTarget(target))
 	outcome, err := enqueueManagedNudgeThenWake(target, store, item)
 	if err != nil {
-		return sessionNudgeResult{}, err
+		return sessionNudgeResult{}, undeliverableWakeConflict(err)
 	}
 	var undelivered worker.NudgeUndeliveredReason
+	note := ""
 	if outcome == session.WakeHeld {
 		undelivered = worker.NudgeQueuedHeld
-	} else if err := nudgePokeController(target.cityPath, reconcilekey.Session(target.sessionID)); err != nil {
-		fmt.Fprintf(stderr, "gc session nudge: warning: poke failed: %v\n", err) //nolint:errcheck
+	} else {
+		if outcome == session.WakeNotDormant {
+			note = notDormantSessionNudgeNote(target, cliSessionFrontDoor(store, target.cfg, target.cityPath), stderr)
+		}
+		if err := nudgePokeController(target.cityPath, reconcilekey.Session(target.sessionID)); err != nil {
+			fmt.Fprintf(stderr, "gc session nudge: warning: poke failed: %v\n", err) //nolint:errcheck
+		}
 	}
-	return sessionNudgeResult{queued: true, undelivered: undelivered}, nil
+	return sessionNudgeResult{queued: true, undelivered: undelivered, note: note}, nil
 }
 
 func enqueueManagedNudgeThenWake(target nudgeTarget, store beads.Store, item queuedNudge) (session.WakeRequestOutcome, error) {
@@ -1848,8 +1889,19 @@ func enqueueManagedNudgeThenWake(target nudgeTarget, store beads.Store, item que
 	}
 	outcome, err := requestManagedNudgeWake(target, cliSessionFrontDoor(store, target.cfg, target.cityPath))
 	if err != nil {
-		if rollbackErr := rollbackQueuedNudge(target.cityPath, nudges, item, "managed wake failed: "+err.Error()); rollbackErr != nil {
+		// A wake conflict (closing, closed, archived without continuity) means
+		// the session will not run this nudge: it is dead-lettered as
+		// session-terminated and reported as nudgeSessionTerminatedError.
+		var conflict *session.WakeConflictError
+		reason := "managed wake failed: " + err.Error()
+		if errors.As(err, &conflict) {
+			reason = nudgeDeadReasonSessionTerminated
+		}
+		if rollbackErr := rollbackQueuedNudge(target.cityPath, nudges, item, reason); rollbackErr != nil {
 			return 0, managedWakeRollbackError(item.ID, err, rollbackErr)
+		}
+		if conflict != nil {
+			return 0, &nudgeSessionTerminatedError{conflict: conflict}
 		}
 		return 0, err
 	}
@@ -3877,13 +3929,24 @@ func claimDueQueuedNudgeBatchForTarget(cityPath string, target nudgeTarget, laun
 // mirrored: it depends on the bead store, and treating a not-yet-swept dead
 // letter as still dead is harmless for a liveness check.
 func listQueuedNudgesForTargetSnapshot(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, []queuedNudge, []queuedNudge, error) {
+	return listQueuedNudgesSnapshotMatching(cityPath, func(item queuedNudge) bool {
+		return target.matchesQueueAgent(item.Agent)
+	}, now)
+}
+
+// listQueuedNudgesSnapshotMatching is the bucket walk behind
+// listQueuedNudgesForTargetSnapshot with the keep-rule as a predicate, so a
+// caller can select by fence (item.SessionID) as the status view does (#4534)
+// instead of by the target's queue keys. The same mirroring of the
+// recover/prune passes and the same lock-free read apply.
+func listQueuedNudgesSnapshotMatching(cityPath string, match func(queuedNudge) bool, now time.Time) ([]queuedNudge, []queuedNudge, []queuedNudge, error) {
 	state, err := openNudgeQueue(cityPath, beads.NudgesStore{}).Queue.Snapshot()
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	var pending, inFlight, dead []queuedNudge
 	add := func(bucket *[]queuedNudge, item queuedNudge) {
-		if target.matchesQueueAgent(item.Agent) {
+		if match(item) {
 			*bucket = append(*bucket, item)
 		}
 	}
@@ -3923,7 +3986,29 @@ func listQueuedNudgesForTargetSnapshot(cityPath string, target nudgeTarget, now 
 }
 
 func listQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, []queuedNudge, []queuedNudge, error) {
+	sweepRetiredSessionNudgesFromList(cityPath, target.cfg, now)
 	return openNudgeQueue(cityPath, beads.NudgesStore{}).Queue.ListFor(target.claimTarget(cityPath, nil), now)
+}
+
+// unionQueuedNudges concatenates more onto items keeping the first occurrence
+// of each ID, so a fence-matched item a key-matched list already carries is
+// not doubled when the two views are unioned (#4534).
+func unionQueuedNudges(items, more []queuedNudge) []queuedNudge {
+	if len(more) == 0 {
+		return items
+	}
+	seen := make(map[string]struct{}, len(items)+len(more))
+	for _, item := range items {
+		seen[item.ID] = struct{}{}
+	}
+	for _, item := range more {
+		if _, ok := seen[item.ID]; ok {
+			continue
+		}
+		seen[item.ID] = struct{}{}
+		items = append(items, item)
+	}
+	return items
 }
 
 func enqueueQueuedNudge(cityPath string, item queuedNudge) error {

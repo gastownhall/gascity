@@ -511,6 +511,29 @@ func lifecycleWakeConflictState(view LifecycleView) (string, bool) {
 	}
 }
 
+// LifecycleClosed reports whether a session row with the given persisted
+// status and metadata projects to the closed base state.
+func LifecycleClosed(status string, metadata map[string]string) bool {
+	return ProjectLifecycle(LifecycleInputFromMetadata(status, metadata)).BaseState == BaseStateClosed
+}
+
+// LifecycleRetired reports whether a session row is retired for good: its
+// lifecycle projects closed and it is not a configured named row the
+// reconciler may still reopen (ClosedNamedSessionReopenEligibleMetadata).
+// Retirement is absorbing: a retired row never runs again under its ID.
+// Asleep, drained, draining, quarantined, held, closing and archived rows are
+// not retired. Callers that know the named row's identity is no longer
+// configured treat that closed row as retired too.
+func LifecycleRetired(status string, metadata map[string]string) bool {
+	if !LifecycleClosed(status, metadata) {
+		return false
+	}
+	if strings.TrimSpace(metadata[NamedSessionIdentityMetadata]) == "" {
+		return true
+	}
+	return !ClosedNamedSessionReopenEligibleMetadata(metadata)
+}
+
 // LifecycleIdentityReleased reports whether a bead no longer owns its
 // user-facing session identity and should not be treated as an active owner.
 func LifecycleIdentityReleased(status string, metadata map[string]string) bool {

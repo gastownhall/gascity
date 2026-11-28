@@ -27,6 +27,17 @@ type nudgeQueueHandle struct {
 	// poll loop's due-work gate, nudgePollGate, and the starvation check,
 	// queuedNudgeStarvedForTarget).
 	Probe nudgeClaimProber
+	// RetiredFence dead-letters the pending items a retired-session sweep
+	// planned (#4534), in one locked run that re-checks each item's fence.
+	RetiredFence nudgeRetiredFenceSweeper
+}
+
+// nudgeRetiredFenceSweeper is the retired-session sweep's dead-letter run:
+// it moves the planned pending items whose fence still matches the plan's
+// snapshot into Dead with the session-terminated reason, paying the shadow
+// debts after the lock.
+type nudgeRetiredFenceSweeper interface {
+	DeadLetterRetiredFence(planned map[string]queuedNudge, now time.Time) (int, error)
 }
 
 // nudgeClaimProber reports, without the queue lock and without claiming, what
@@ -62,11 +73,12 @@ type nudgeClaimRepinner interface {
 func openNudgeQueue(cityPath string, store beads.NudgesStore) nudgeQueueHandle {
 	q := &fileNudgeQueue{cityPath: cityPath, store: store, clk: clock.Real{}}
 	return nudgeQueueHandle{
-		Queue:    q,
-		Location: q.location(),
-		Skips:    q,
-		Repin:    q,
-		Probe:    q,
+		Queue:        q,
+		Location:     q.location(),
+		Skips:        q,
+		Repin:        q,
+		Probe:        q,
+		RetiredFence: q,
 	}
 }
 
