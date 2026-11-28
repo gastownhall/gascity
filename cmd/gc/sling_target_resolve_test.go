@@ -105,6 +105,54 @@ func TestCmdSlingNamepoolMemberTargetRoutesToPool(t *testing.T) {
 	}
 }
 
+// TestCmdSlingNamepoolMemberConvoyRoutesChildrenToPool is the convoy twin of
+// TestCmdSlingNamepoolMemberTargetRoutesToPool: slinging a convoy to a
+// namepool member, qualified or bare, routes every open child to the base
+// pool, the route the pool's work and demand queries serve.
+func TestCmdSlingNamepoolMemberConvoyRoutesChildrenToPool(t *testing.T) {
+	for _, target := range []string{"frontend/furiosa", "furiosa"} {
+		t.Run(target, func(t *testing.T) {
+			cityDir, rigDir := namepoolSlingCity(t)
+			store, err := openStoreAtForCity(rigDir, cityDir)
+			if err != nil {
+				t.Fatalf("openStoreAtForCity(rig): %v", err)
+			}
+			convoy, err := store.Create(beads.Bead{Title: "frontend batch", Type: "convoy"})
+			if err != nil {
+				t.Fatalf("Create(convoy): %v", err)
+			}
+			children := make(map[string]bool)
+			for _, title := range []string{"first task", "second task"} {
+				child, err := store.Create(beads.Bead{Title: title, Type: "task", ParentID: convoy.ID})
+				if err != nil {
+					t.Fatalf("Create(%s): %v", title, err)
+				}
+				children[child.ID] = true
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := cmdSling([]string{target, convoy.ID}, false, false, false, "", nil, "", false, false, false, "", false, false, false, "", "", &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("cmdSling(%s, %s) = %d, want 0; stderr: %s", target, convoy.ID, code, stderr.String())
+			}
+
+			found := 0
+			for _, b := range listStoreBeads(t, rigDir, cityDir) {
+				if !children[b.ID] {
+					continue
+				}
+				found++
+				if got := b.Metadata["gc.routed_to"]; got != "frontend/polecat" {
+					t.Errorf("child %s gc.routed_to = %q, want frontend/polecat", b.ID, got)
+				}
+			}
+			if found != len(children) {
+				t.Fatalf("rig store holds %d of the %d convoy children", found, len(children))
+			}
+		})
+	}
+}
+
 // TestBuiltInSlingNamepoolMemberTargetNormalizesRoutedTo is the namepool twin
 // of TestBuiltInSlingSlotSuffixedTargetNormalizesRoutedTo: a binding-qualified
 // namepool member target resolves to the member identity, and slinging it

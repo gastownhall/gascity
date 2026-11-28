@@ -2133,6 +2133,60 @@ func TestDoSlingBatchExpandsTracksConvoy(t *testing.T) {
 	}
 }
 
+// TestDoSlingBatchRoutesPoolInstanceChildrenToBasePool pins the batch route
+// to the identity the single-bead route uses: a convoy slung to a pool
+// instance (a copy whose PoolName is its base pool, named from the namepool
+// or numbered) routes every child under RoutedToIdentity, the base pool, not
+// under the instance's own QualifiedName, which no pool query serves.
+func TestDoSlingBatchRoutesPoolInstanceChildrenToBasePool(t *testing.T) {
+	for _, member := range []string{"furiosa", "polecat-2"} {
+		t.Run(member, func(t *testing.T) {
+			router := &fakeBeadRouter{}
+			deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), newFakeRunner().run)
+			deps.Router = router
+			store := deps.Store
+			convoy, err := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
+			if err != nil {
+				t.Fatalf("create convoy: %v", err)
+			}
+			children := make(map[string]bool)
+			for _, title := range []string{"one", "two"} {
+				child, err := store.Create(beads.Bead{Title: title, Type: "task", Status: "open", ParentID: convoy.ID})
+				if err != nil {
+					t.Fatalf("create child %s: %v", title, err)
+				}
+				children[child.ID] = true
+			}
+
+			a := config.Agent{
+				Name:              member,
+				PoolName:          "polecat",
+				NamepoolNames:     []string{"furiosa", "rictus"},
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(2),
+			}
+			result, err := DoSlingBatch(SlingOpts{Target: a, BeadOrFormula: convoy.ID}, deps, store)
+			if err != nil {
+				t.Fatalf("DoSlingBatch: %v", err)
+			}
+			if result.Routed != len(children) {
+				t.Fatalf("Routed = %d, want %d", result.Routed, len(children))
+			}
+			if len(router.routed) != len(children) {
+				t.Fatalf("route calls = %d, want %d: %#v", len(router.routed), len(children), router.routed)
+			}
+			for _, req := range router.routed {
+				if !children[req.BeadID] {
+					t.Errorf("routed %q, want only the convoy's children", req.BeadID)
+				}
+				if req.Target != "polecat" {
+					t.Errorf("route of %s Target = %q, want polecat (RoutedToIdentity, not QualifiedName %q)", req.BeadID, req.Target, a.QualifiedName())
+				}
+			}
+		})
+	}
+}
+
 func TestDoSlingBatchRoutesNonContainerFoundInQuerierStore(t *testing.T) {
 	runner := newFakeRunner()
 	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
