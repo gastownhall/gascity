@@ -1950,11 +1950,16 @@ func endedTurns(recent ...runtime.EndedTurn) ladderTurnReader {
 	}
 }
 
-// wokeAgo stamps the session row's last_woke_at d before the fixture's clock:
-// the fence a turn's end must not precede to count for this incarnation.
-func (f *executionBackstopFixture) wokeAgo(t *testing.T, d time.Duration) {
+// overloadWokeAgo is how long before the fixture's clock wokeAgo stamps the
+// seat's wake.
+const overloadWokeAgo = 10 * time.Minute
+
+// wokeAgo stamps the session row's last_woke_at overloadWokeAgo before the
+// fixture's clock: the fence a turn's end must not precede to count for this
+// incarnation.
+func (f *executionBackstopFixture) wokeAgo(t *testing.T) {
 	t.Helper()
-	f.setSessionMeta(t, map[string]string{"last_woke_at": f.now.Add(-d).UTC().Format(time.RFC3339)})
+	f.setSessionMeta(t, map[string]string{"last_woke_at": f.now.Add(-overloadWokeAgo).UTC().Format(time.RFC3339)})
 }
 
 // A quiet seat whose own turns show the provider ended its newest turn
@@ -1963,7 +1968,7 @@ func (f *executionBackstopFixture) wokeAgo(t *testing.T, d time.Duration) {
 // sees the claim, as attempt 1/3 (ga-fo294b).
 func TestExecutionBackstopRetriesAProviderOverloadWithoutGenericGrace(t *testing.T) {
 	f := newExecutionBackstopFixture(t)
-	f.wokeAgo(t, 10*time.Minute)
+	f.wokeAgo(t)
 	f.idleFor(t, idleClaimNudgeGrace+time.Second)
 	f.turns = overloadedTurns(f.now.Add(-91 * time.Second))
 
@@ -2008,7 +2013,7 @@ func TestExecutionBackstopWaitsTheGraceWithoutOverloadEvidence(t *testing.T) {
 	overload := runtime.TurnFailure{Code: "server_overloaded", Overloaded: true}
 	for _, tc := range []struct {
 		name      string
-		woke      bool // stamp last_woke_at 10 minutes ago
+		woke      bool // stamp last_woke_at overloadWokeAgo ago
 		turns     func(now time.Time) ladderTurnReader
 		immediate bool
 		logged    bool // the tick logs that it could not read the turns
@@ -2029,7 +2034,7 @@ func TestExecutionBackstopWaitsTheGraceWithoutOverloadEvidence(t *testing.T) {
 		}},
 		{name: "overloaded before last_woke_at", woke: true, turns: failed(11*time.Minute, overload)},
 		{name: "overloaded at last_woke_at counts", woke: true, immediate: true, turns: func(now time.Time) ladderTurnReader {
-			woke := now.Add(-10 * time.Minute).Truncate(time.Second) // last_woke_at as RFC3339 stores it
+			woke := now.Add(-overloadWokeAgo).Truncate(time.Second) // last_woke_at as RFC3339 stores it
 			return endedTurns(runtime.EndedTurn{TurnID: "t1", EndedAt: woke, Status: runtime.TurnStatusFailed, Failure: overload})
 		}},
 		{name: "last_woke_at unset", turns: failed(91*time.Second, overload)},
@@ -2040,7 +2045,7 @@ func TestExecutionBackstopWaitsTheGraceWithoutOverloadEvidence(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newExecutionBackstopFixture(t)
 			if tc.woke {
-				f.wokeAgo(t, 10*time.Minute)
+				f.wokeAgo(t)
 			}
 			if tc.turns != nil {
 				f.turns = tc.turns(f.now)
@@ -2091,7 +2096,7 @@ func TestExecutionBackstopOverloadSkipsOnlyTheFirstGrace(t *testing.T) {
 			if started {
 				f.startedSinceWake(t)
 			} else {
-				f.wokeAgo(t, 10*time.Minute)
+				f.wokeAgo(t)
 			}
 			f.turns = overloadedTurns(f.now.Add(-91 * time.Second))
 			start := f.now
@@ -2145,6 +2150,74 @@ func TestExecutionBackstopOverloadSkipsOnlyTheFirstGrace(t *testing.T) {
 			}
 			if f.turnReads != 1 {
 				t.Fatalf("turn reads = %d, want 1: only the tick the grace was still to wait", f.turnReads)
+			}
+		})
+	}
+}
+
+// An overloaded quiet seat with nothing to send gets no immediate verdict:
+// there is no nudge to hurry, and the empty-content escalation keeps its
+// grace. Two shapes have nothing to send: an unstarted seat whose template
+// configures no Nudge, and a started seat whose template names no configured
+// agent, so not even the held-claim default. The first sighting writes the
+// observe marker, neither drains nor holds the seat and reads no turns; once
+// the grace has run the unstarted seat is drained and the started one is held
+// executing.
+func TestExecutionBackstopOverloadWithNothingToSendKeepsTheGrace(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		started bool
+	}{
+		{name: "unstarted, no configured nudge"},
+		{name: "started, no configured agent", started: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExecutionBackstopFixture(t)
+			if tc.started {
+				f.startedSinceWake(t)
+				f.cfg.Agents = nil
+			} else {
+				f.cfg.Agents[0].Nudge = ""
+				f.wokeAgo(t)
+			}
+			f.turns = overloadedTurns(f.now.Add(-91 * time.Second))
+			f.idleFor(t, idleClaimNudgeGrace+time.Second)
+
+			f.tick(t)
+
+			if len(f.drained) != 0 || f.stalledEvents() != 0 {
+				t.Fatalf("drains %v, step_stalled %d on the first sighting; want neither inside the grace; stdout=%s", f.drained, f.stalledEvents(), f.stdout.String())
+			}
+			if got := f.nudgeCount(); got != 0 {
+				t.Fatalf("nudges with nothing to send = %d, want 0", got)
+			}
+			if got := f.sessionMeta(t, executionClaimNudgeWorkKey); got != f.work.ID {
+				t.Fatalf("observe marker = %q, want %q", got, f.work.ID)
+			}
+			if got := atoiOr0(f.sessionMeta(t, executionClaimNudgeCountKey)); got != 0 {
+				t.Fatalf("persisted attempt count = %d, want 0", got)
+			}
+			if got := f.sessionMeta(t, executionClaimHoldKey); got != "" {
+				t.Fatalf("hold breadcrumb = %q, want none", got)
+			}
+			if f.turnReads != 0 {
+				t.Fatalf("turn reads = %d, want 0 with nothing to send", f.turnReads)
+			}
+
+			f.now = f.now.Add(idleClaimNudgeGrace + time.Second)
+			f.idleFor(t, 10*time.Minute)
+			f.tick(t)
+			if got := f.nudgeCount(); got != 0 {
+				t.Fatalf("nudges once the grace has run = %d, want 0; stdout=%s", got, f.stdout.String())
+			}
+			if tc.started {
+				if len(f.drained) != 0 || !strings.HasPrefix(f.sessionMeta(t, executionClaimHoldKey), executionHoldExecuting) {
+					t.Fatalf("a started seat once the grace has run: drains %v, hold %q; want the executing hold and no drain; stdout=%s", f.drained, f.sessionMeta(t, executionClaimHoldKey), f.stdout.String())
+				}
+				return
+			}
+			if len(f.drained) != 1 || f.drained[0] != f.sessName {
+				t.Fatalf("drains once the grace has run = %v, want one of %s; stdout=%s", f.drained, f.sessName, f.stdout.String())
 			}
 		})
 	}
