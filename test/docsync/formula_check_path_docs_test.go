@@ -424,3 +424,54 @@ func TestFormulaSpecAssetCheckPathExampleCompiles(t *testing.T) {
 		}
 	})
 }
+
+// TestPackSpecDocumentsCheckScriptAssets pins pack-spec §1.3: the assets
+// and formulas sections must teach that check scripts are pack assets,
+// declared as "../assets/scripts/checks/<name>" and resolved through the
+// formula layer order exactly like description_file, and that Gas City
+// does not stage pack assets into .gc/ runtime state (#4239).
+func TestPackSpecDocumentsCheckScriptAssets(t *testing.T) {
+	root := repoRoot()
+	data, err := os.ReadFile(filepath.Join(root, "docs", "reference", "specs", "pack-spec.md"))
+	if err != nil {
+		t.Fatalf("reading pack-spec.md: %v", err)
+	}
+	s131, ok := specSection(string(data), "### 1.3.1.")
+	if !ok {
+		t.Fatal("pack-spec.md has no §1.3.1 section")
+	}
+	s132, ok := specSection(string(data), "### 1.3.2.")
+	if !ok {
+		t.Fatal("pack-spec.md has no §1.3.2 section")
+	}
+
+	// §1.3.2 must carry a fenced TOML check example in the layer-asset form.
+	blocks, err := fencedTOMLBlocks(s132)
+	if err != nil {
+		t.Fatalf("scanning §1.3.2 fences: %v", err)
+	}
+	found := false
+	for _, block := range blocks {
+		for _, cp := range checkPathsInTOML(block) {
+			if strings.HasPrefix(cp.path, "../assets/scripts/checks/") {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error(`§1.3.2 has no fenced TOML check example whose path starts with "../assets/scripts/checks/"`)
+	}
+
+	// Prose assertions run on whitespace-collapsed text: spec paragraphs wrap
+	// at ~80 columns, so a phrase can span a line break.
+	combined := strings.Join(strings.Fields(s131+"\n"+s132), " ")
+	if !strings.Contains(combined, "check script") {
+		t.Error(`§1.3.1/§1.3.2 never mention check scripts; they must name them alongside description_file`)
+	}
+	if !strings.Contains(combined, "layer order") {
+		t.Error(`§1.3.1/§1.3.2 must state that check scripts resolve through the formula layer order like description_file`)
+	}
+	if !strings.Contains(combined, ".gc/") || !strings.Contains(combined, "does not stage") {
+		t.Error(`§1.3.1/§1.3.2 must state that Gas City does not stage pack assets/ into .gc/`)
+	}
+}

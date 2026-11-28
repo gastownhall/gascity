@@ -760,8 +760,9 @@ Authors should put new private scripts, prompt fragments, overlays, and other
 implementation files under `assets/` unless an established loader convention
 requires a well-known directory.
 
-Formula steps reference prompt assets with
-`description_file = "../assets/<relative-path>"`; section 1.3.2 specifies how
+Formula steps reference pack prompt assets with
+`description_file = "../assets/<relative-path>"` and check scripts with
+`check.path = "../assets/scripts/checks/<name>"`; section 1.3.2 specifies how
 those references resolve across formula layers.
 
 ### 1.3.2. `formulas/`
@@ -779,6 +780,24 @@ formula itself remains inherited from the lower-priority pack. Other relative
 that declares them. See the
 [Formula Specification](/reference/specs/formula-spec-v2#11-file-naming-and-layers) for
 formula file naming and layer resolution.
+
+A step's check script is a pack asset riding the same mechanism, named with
+`path = "../assets/scripts/checks/<name>"`:
+
+```toml
+[steps.check.check]
+mode = "exec"
+path = "../assets/scripts/checks/build-artifact-valid.sh"
+timeout = "5m"
+```
+
+Check scripts resolve through the same formula layer order as
+`description_file`: an importing pack can name an imported pack's script
+without copying it, and a higher-priority layer can shadow it. Gas City does
+not stage pack `assets/` into `.gc/` — that directory is runtime state — so a
+check path pointing there has no backing file. See
+[Check](/reference/specs/formula-spec-v2#31-check) in the Formula Specification
+for the full `check.path` contract.
 
 ### 1.3.3. `overlay/`
 
