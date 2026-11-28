@@ -274,3 +274,14 @@ func TestPoolDemandFilterStillDropsRowsTheHolderDoesNotOwn(t *testing.T) {
 		})
 	}
 }
+
+// The v2 allocator over the same shape: it threads the demand's WakeClaimRefs
+// into the pool-demand filter, so it counts the live holder's city-store claim
+// beside the custom count exactly as v1 does — no explained difference.
+func TestPoolDemandV2AllocationCountsALiveHoldersCityStoreClaim(t *testing.T) {
+	out := v2Allocation(t, liveRigPoolHolderDiffCity(t))
+
+	if out.accepted["riga/worker"] != 2 {
+		t.Fatalf("v2 accepted riga/worker = %d, want 2: the live holder's city-store claim beside the custom count", out.accepted["riga/worker"])
+	}
+}

@@ -630,6 +630,7 @@ func diffCities(t *testing.T) []diffCity {
 			cfg:   chat("on_demand"),
 			beads: []beads.Bead{chatRow("dr-c", "1", "configured_named_mode", "on_demand")},
 		},
+		liveRigPoolHolderDiffCity(t),
 		v5HashedCity(),
 	}, scaleCheckDiffCities()...)
 }
@@ -639,6 +640,26 @@ func customPool(name, check string, maxActive int) config.Agent {
 	a := diffAgent(name, maxActive)
 	a.ScaleCheck = check
 	return a
+}
+
+// liveRigPoolHolderDiffCity is ga-6ab279's shape: a rig-scoped pool on a
+// single-store city whose live holder's in-progress claim sits in the city
+// store, beside the pool's custom count. Both planes must count the claim:
+// the holder's resume request plus the custom count's fresh session.
+func liveRigPoolHolderDiffCity(t *testing.T) diffCity {
+	cfg := diffConfig(customPool("worker", "echo 1", 4))
+	cfg.Agents[0].Dir = "riga"
+	cfg.Rigs = []config.Rig{{Name: "riga", Path: t.TempDir()}}
+	return diffCity{
+		name: "a live rig-pool holder's city-store claim is demand beside a custom count",
+		cfg:  cfg,
+		beads: []beads.Bead{
+			poolRow("dr-1", "riga/worker", 1, "active"),
+			{ID: "dw-1", Title: "dw-1", Type: "task", Status: "in_progress", Assignee: "dr-1", CreatedAt: diffNow.Add(-time.Hour), Metadata: map[string]string{"gc.routed_to": "riga/worker"}},
+		},
+		alive:      []string{"s-dr-1"},
+		scaleCheck: true,
+	}
 }
 
 // scaleCheckDiffCities are PAR-SC's custom scale_check cities (I5,
