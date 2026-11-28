@@ -16000,3 +16000,64 @@ func TestReconcileSessionBeads_HealedSoftSuspendPoolBeadFreesSlot(t *testing.T) 
 		}
 	})
 }
+
+// TestReconcileSessionBeads_HealedSoftSuspendPoolBeadWithDemandWakes pins
+// that a healed soft-suspended pool seat holding ready assigned work, or an
+// explicit wake the sweep left for the next start, is woken in place and
+// never closed by the pool-slot close.
+func TestReconcileSessionBeads_HealedSoftSuspendPoolBeadWithDemandWakes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		meta map[string]string
+		work bool
+	}{
+		{name: "ready assigned work", work: true},
+		{name: "unserved explicit wake", meta: map[string]string{
+			"wake_request": string(sessionpkg.WakeCauseExplicit),
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newReconcilerTestEnv(t)
+			meta := map[string]string{
+				"state":        string(sessionpkg.StateAsleep),
+				"suspended_at": env.clk.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+			}
+			for k, v := range tc.meta {
+				meta[k] = v
+			}
+			session := healedSoftSuspendPoolSession(env, meta)
+			if tc.meta["wake_request"] != "" {
+				env.setSessionMetadata(&session, map[string]string{"wake_requested_at": env.clk.Now().UTC().Format(time.RFC3339)})
+			}
+			var assigned []beads.Bead
+			if tc.work {
+				work, err := env.store.Create(beads.Bead{Title: "ready work", Type: "task", Status: "open", Assignee: session.ID})
+				if err != nil {
+					t.Fatalf("Create work bead: %v", err)
+				}
+				assigned = []beads.Bead{work}
+			}
+			cur, err := env.store.Get(session.ID)
+			if err != nil {
+				t.Fatalf("Get(%s): %v", session.ID, err)
+			}
+			reconcileSessionBeadsAtPath(
+				context.Background(), env.city, []beads.Bead{cur}, env.desiredState,
+				configuredSessionNames(env.cfg, "", env.store), env.cfg, env.sp, env.store,
+				nil, assigned, nil, nil, env.dt, map[string]int{"worker": 1}, false, nil, "",
+				nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+				append(slices.Clone(env.startOptions), withReadyAssignedFlags(slices.Repeat([]bool{true}, len(assigned))))...,
+			)
+			got, err := env.store.Get(session.ID)
+			if err != nil {
+				t.Fatalf("Get(%s): %v", session.ID, err)
+			}
+			if got.Status == "closed" {
+				t.Fatalf("status = closed (meta %v), want the seat woken in place, not closed", got.Metadata)
+			}
+			if !env.sp.IsRunning("worker") {
+				t.Fatalf("runtime not started (state %q, meta %v), want the seat woken in place", got.Metadata["state"], got.Metadata)
+			}
+		})
+	}
+}

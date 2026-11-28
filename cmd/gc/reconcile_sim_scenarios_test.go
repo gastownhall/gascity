@@ -1954,6 +1954,42 @@ func TestSimRigRestartFreesUnflooredSeatsForRoutedDemand(t *testing.T) {
 	s.noViolations(t)
 }
 
+// Kills a v2 pool-slot close that takes a healed soft-suspended seat with
+// demand on it (ga-4xbxwl): a seat holding ready assigned work, or the
+// explicit wake the sweep leaves for the next start, is woken in place on
+// its row, never closed.
+func TestSimHealedSoftSuspendWithDemandWakesInPlace(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		meta []string
+		work bool
+	}{
+		{name: "ready assigned work", work: true},
+		{name: "unserved explicit wake", meta: []string{"wake_request", string(session.WakeCauseExplicit), "wake_requested_at", rowAt(-time.Minute)}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			rows := []beads.Bead{poolRow("gc-1", "worker", 1, "asleep", append([]string{"instance_token", "tok-gc-1", "suspended_at", rowAt(-time.Minute)}, c.meta...)...)}
+			if c.work {
+				rows = append(rows, beads.Bead{ID: "gw-gc-1", Title: "w", Type: "task", Status: "open", Assignee: "gc-1", Metadata: map[string]string{"gc.routed_to": "worker"}})
+			}
+			s := scripted(t, nil, rows...)
+			for range 6 {
+				s.settle()
+				s.advance(simPatrol)
+			}
+			s.quiesce()
+			b, err := s.legs[0].backing.Get("gc-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if b.Status == "closed" || !s.livePane(b) {
+				t.Fatalf("gc-1: %s/%s %v, want woken in place on its row", b.Status, b.Metadata["state"], b.Metadata)
+			}
+			s.noViolations(t)
+		})
+	}
+}
+
 // Scenario J21 C / mc-sqdv6 (CONTRACT v5.7 D7 rule 2, §12.2 #26): an
 // operator wakes an asleep seat and attaches, so its runtime comes up
 // outside the controller, the wake request still on the row. A6's
