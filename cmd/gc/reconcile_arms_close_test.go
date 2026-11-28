@@ -1161,6 +1161,36 @@ func TestArmCloseHoldsAParkedSeat(t *testing.T) {
 	})
 }
 
+// A21 on a pool seat a wait parks while it holds claimed work
+// (gastownhall/gascity#5561): its drain-ack completed as an idle sleep that
+// keeps the wait (the Sleep cell, D-J 3), so the pool-slot gate refuses it
+// and A21 proposes nothing for it, whatever stranded marker it carries: no
+// parked hold, stranded hold, pool-slot close or repair.
+func TestArmCloseKeepsAWaitParkedSeat(t *testing.T) {
+	slept := gatherNow.Add(-time.Hour).UTC().Format(time.RFC3339)
+	parked := []string{"state", "asleep", "sleep_reason", "idle", "slept_at", slept, "wait_hold", "true", "sleep_intent", "wait-hold"}
+	for _, tc := range []struct {
+		name   string
+		marker string
+	}{
+		{name: "no stranded marker"},
+		{name: "a marker aged past the grace", marker: gatherNow.Add(-strandedRepairConfirmGrace - time.Minute).UTC().Format(time.RFC3339)},
+		{name: "a young marker", marker: gatherNow.Add(-time.Minute).UTC().Format(time.RFC3339)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			meta := append([]string{}, parked...)
+			if tc.marker != "" {
+				meta = append(meta, strandedEventEmittedKey, tc.marker)
+			}
+			c := newCloseCase(t, livenessGone, desireSleep, meta...)
+			c.work(t, "in_progress", routedClaim())
+			if it, _ := decideRow(c.w, c.a, c.k); it.Kind != "" || it.Reason != decideNoAction || it.Closing.Repair {
+				t.Fatalf("decideRow = (%q, %q) repair=%v, want no intent for a wait-parked seat", it.Kind, it.Reason, it.Closing.Repair)
+			}
+		})
+	}
+}
+
 // blockedPin is an open pin assigned to the case's row, blocked by an open
 // bead it depends on.
 func (c *closeCase) blockedPin(t *testing.T) beads.Bead {
