@@ -393,12 +393,20 @@ func hookBudgetScenarios() []hookBudgetScenario {
 	controllerUp := func(t *testing.T, f hookBudgetFixture) {
 		withActiveWorkStepClient(t, readyWorkTestServer(t, hookCityController(t, f)), "")
 	}
+	// Every scenario that reads a mailbox (mail check, prime, and the
+	// handoff's dedup probe) pays for its in_progress mail on top of its open
+	// mail: beadmail lists live mail by status, open then in_progress, each by
+	// the mailbox's own routes, so a read fetches neither the closed mail the
+	// mailbox ever held nor the in_progress beads other sessions own
+	// (beadmail's listLiveMessages, #6211). A mail check or prime pays one
+	// in_progress request per mailbox route, as for its open mail; the
+	// handoff's metadata-keyed dedup probe pays one.
 	return []hookBudgetScenario{
-		{name: "mail check --inject/empty", seed: none, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 7, Opens: 1, SessionGets: 1, GetMisses: 0}},
-		{name: "mail check --inject/one mail", seed: oneMail, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 7, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "status please"},
-		{name: "mail check --inject/auto-handoff", seed: handoff, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 9, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "context cycle"},
-		{name: "mail check --inject/priority window", seed: priorityWindow, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 9, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "update " + fmt.Sprint(mailInjectMaxMessages+1)},
-		{name: "mail check --inject/closed predecessors", seed: func(t *testing.T, f hookBudgetFixture) { f.predecessorMail(t) }, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 27, Opens: 1, SessionGets: 1, GetMisses: 4}, wantStdout: "for my predecessor"},
+		{name: "mail check --inject/empty", seed: none, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 9, Opens: 1, SessionGets: 1, GetMisses: 0}},
+		{name: "mail check --inject/one mail", seed: oneMail, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 9, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "status please"},
+		{name: "mail check --inject/auto-handoff", seed: handoff, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 11, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "context cycle"},
+		{name: "mail check --inject/priority window", seed: priorityWindow, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 11, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "update " + fmt.Sprint(mailInjectMaxMessages+1)},
+		{name: "mail check --inject/closed predecessors", seed: func(t *testing.T, f hookBudgetFixture) { f.predecessorMail(t) }, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 37, Opens: 1, SessionGets: 1, GetMisses: 4}, wantStdout: "for my predecessor"},
 		// Every nudge drain --inject row of a family whose prompt hook output
 		// reaches the model includes the in-band lane pass's one keyed probe
 		// of the hook's conversation (opjournal.HasOpenLaneOps, DES-O1 §8);
@@ -415,10 +423,10 @@ func hookBudgetScenarios() []hookBudgetScenario {
 		{name: "nudge drain --inject/one nudge", seed: func(t *testing.T, f hookBudgetFixture) { f.queueNudge(t) }, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 14, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "review queued work"},
 		{name: "nudge drain --inject/empty output dropped", seed: none, run: nudgeDrainInjectDroppedOutput, ceiling: hookBudgetCeiling{Requests: 7, Opens: 1, SessionGets: 0, GetMisses: 0}},
 		{name: "nudge drain --inject/empty rig agent", seed: none, run: nudgeDrainInjectRigAgent, ceiling: hookBudgetCeiling{Requests: 11, Opens: 2, SessionGets: 0, GetMisses: 0}},
-		{name: "prime --hook/fresh", seed: none, run: primeHook, ceiling: hookBudgetCeiling{Requests: 11, Opens: 1, SessionGets: 1, GetMisses: 0}},
-		{name: "prime --hook/auto-handoff", seed: handoff, run: primeHook, ceiling: hookBudgetCeiling{Requests: 13, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "context cycle"},
-		{name: "prime --hook/auto-handoff and mail", seed: handoffAndMail, run: primeHook, ceiling: hookBudgetCeiling{Requests: 13, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "status please"},
-		{name: "handoff --auto", seed: none, ceiling: hookBudgetCeiling{Requests: 7, Opens: 1, SessionGets: 1, GetMisses: 0}, run: func(_ *testing.T, _ hookBudgetFixture, stdout, stderr io.Writer) int {
+		{name: "prime --hook/fresh", seed: none, run: primeHook, ceiling: hookBudgetCeiling{Requests: 13, Opens: 1, SessionGets: 1, GetMisses: 0}},
+		{name: "prime --hook/auto-handoff", seed: handoff, run: primeHook, ceiling: hookBudgetCeiling{Requests: 15, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "context cycle"},
+		{name: "prime --hook/auto-handoff and mail", seed: handoffAndMail, run: primeHook, ceiling: hookBudgetCeiling{Requests: 15, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "status please"},
+		{name: "handoff --auto", seed: none, ceiling: hookBudgetCeiling{Requests: 8, Opens: 1, SessionGets: 1, GetMisses: 0}, run: func(_ *testing.T, _ hookBudgetFixture, stdout, stderr io.Writer) int {
 			return handoffForTest([]string{"context cycle"}, "", true, stdout, stderr)
 		}},
 		{name: "mail send human", seed: none, ceiling: hookBudgetCeiling{Requests: 6, Opens: 1, SessionGets: 1, GetMisses: 0}, run: func(_ *testing.T, _ hookBudgetFixture, stdout, stderr io.Writer) int {

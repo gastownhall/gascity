@@ -32,10 +32,11 @@ type SessionInboxReader interface {
 var _ SessionInboxReader = (*Provider)(nil)
 
 // InboxForRoutes reads the live message rows addressed to exactly routes, in
-// one listing. Unlike [Provider.Check], it does not expand the routes: the
-// caller already holds the route set it means. A session's own mailbox is read
-// with [Provider.InboxForSession], which defines that set. Empty routes are
-// refused rather than read as "every mailbox".
+// one mailbox read ([Provider.listLiveMessages]). Unlike [Provider.Check], it
+// does not expand the routes: the caller already holds the route set it means.
+// A session's own mailbox is read with [Provider.InboxForSession], which
+// defines that set. Empty routes are refused rather than read as "every
+// mailbox".
 func (p *Provider) InboxForRoutes(routes []string) (*Inbox, error) {
 	var cleaned []string
 	for _, route := range routes {
@@ -58,7 +59,7 @@ func (p *Provider) InboxForRoutes(routes []string) (*Inbox, error) {
 	return &Inbox{routes: cleaned, rows: rows}, nil
 }
 
-// InboxForSession reads one session's own mailbox in one message listing. It
+// InboxForSession reads one session's own mailbox in one read. It
 // is the inbox every self-read — a hook's mail check and its SessionStart
 // mail, and `gc mail inbox` — answers from, so they all see the same mail.
 //
@@ -78,7 +79,7 @@ func (p *Provider) InboxForRoutes(routes []string) (*Inbox, error) {
 // [session.AddressDirectory.ResolveMailboxAddress]), never a listing of every
 // session.
 //
-// alsoRoutes join the mailbox as they are, unexpanded, in the same listing: a
+// alsoRoutes join the mailbox as they are, unexpanded, in the same read: a
 // mailbox wider than one session — a configured named session's identity and
 // its closed incarnations — is the live incarnation's inbox plus those routes.
 func (p *Provider) InboxForSession(info session.Info, alsoRoutes ...string) (*Inbox, error) {

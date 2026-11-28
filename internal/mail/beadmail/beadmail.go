@@ -193,15 +193,16 @@ func (p *Provider) sendWithExtraMetadata(from, to, subject, body string, extra m
 // resolves to the recipient rather than the literal string it was given: an
 // alias and the session id behind it are one mailbox to [Provider.Inbox], and a
 // stream that addresses it both ways must not get two live copies. The probe is
-// one metadata-keyed list; a probe error fails the send rather than risking a
-// silent duplicate. A route resolution that degrades (an ambiguous or
-// unresolvable address) falls back to the literal recipient, exactly as
-// [Provider.Inbox] does, so the probe keeps answering the inbox's question: the
-// effect is a narrower match, which sends rather than suppresses, and a
-// duplicate notification beats a dropped one. The probe reads only live
-// (non-closed, see [isLiveMail]) messages, and archiving closes one, so an
-// archived notification no longer matches: the dedup horizon is the previous
-// message's live lifetime by design (see [mail.DedupSender]).
+// a metadata-keyed read of the live messages ([Provider.listLiveMessages]); a
+// probe error fails the send rather than risking a silent duplicate. A route
+// resolution that degrades (an ambiguous or unresolvable address) falls back to
+// the literal recipient, exactly as [Provider.Inbox] does, so the probe keeps
+// answering the inbox's question: the effect is a narrower match, which sends
+// rather than suppresses, and a duplicate notification beats a dropped one. The
+// probe reads only live (open or in_progress, see [isLiveMail]) messages, and
+// archiving closes one, so an archived notification no longer matches: the
+// dedup horizon is the previous message's live lifetime by design (see
+// [mail.DedupSender]).
 func (p *Provider) SendDeduped(from, to, subject, body, key string) (mail.Message, bool, error) {
 	key = strings.TrimSpace(key)
 	if key == "" {
@@ -225,7 +226,7 @@ func (p *Provider) SendDeduped(from, to, subject, body, key string) (mail.Messag
 }
 
 func (p *Provider) findLiveDuplicate(to, key string, pendingHandoffOnly bool) (mail.Message, bool, error) {
-	existing, err := p.store.List(beads.ListQuery{
+	existing, err := p.listLiveMessages(beads.ListQuery{
 		Type:     messageBeadType,
 		Metadata: map[string]string{mail.DedupKeyMetadataKey: key},
 		TierMode: beads.TierBoth,
@@ -1598,11 +1599,12 @@ func (p *Provider) messageCandidatesForRoutes(routes []string) ([]beads.Bead, er
 	return p.messageCandidatesAll(routes)
 }
 
-// messageCandidatesAll returns all live (non-closed, see [isLiveMail]) message
-// beads matching any route. TierBoth is one logical query; BdStore may satisfy
-// it with separate issue-tier and wisp-tier reads before deduping. Empty routes
-// return all live messages. Live reads are required so command-visible mail
-// sees fresh wisps even when the active store cache was primed earlier.
+// messageCandidatesAll returns all live (see [isLiveMail]) message beads
+// matching any route, read by [Provider.listLiveMessages]. TierBoth is one
+// logical query; BdStore may satisfy it with separate issue-tier and wisp-tier
+// reads before deduping. Empty routes return all live messages. Live reads are
+// required so command-visible mail sees fresh wisps even when the active store
+// cache was primed earlier.
 func (p *Provider) messageCandidatesAll(routes []string) ([]beads.Bead, error) {
 	query := beads.ListQuery{
 		Type:     messageBeadType,
@@ -1614,7 +1616,7 @@ func (p *Provider) messageCandidatesAll(routes []string) ([]beads.Bead, error) {
 	} else {
 		query.AllowScan = true
 	}
-	all, err := p.store.List(query)
+	all, err := p.listLiveMessages(query)
 	if err != nil {
 		return nil, fmt.Errorf("scanning message beads: %w", err)
 	}
@@ -1623,13 +1625,55 @@ func (p *Provider) messageCandidatesAll(routes []string) ([]beads.Bead, error) {
 	}
 	out := make([]beads.Bead, 0, len(all))
 	for _, b := range all {
-		// matchesRecipientRoute is defense-in-depth: HQStore returns exact
-		// matches from the index; BdStore multi-route fallback may return excess.
+		// matchesRecipientRoute is defense-in-depth: both listings are keyed
+		// by these routes, but a BdStore multi-route fallback may return
+		// excess.
 		if matchesRecipientRoute(routes, b.Assignee) {
 			out = append(out, b)
 		}
 	}
 	return out, nil
+}
+
+// listLiveMessages lists the live message beads ([isLiveMail]) query selects,
+// in two listings that each carry a status and query's own route keys
+// (Assignee, Assignees): the open rows, then the in_progress rows. The native
+// store pushes neither the message type nor "not closed", so the status and
+// the route keys are what narrow a mailbox read there. Without a status a
+// listing would also fetch every closed message its routes ever held, and
+// without the route keys the in_progress listing would fetch every in_progress
+// bead in the store, of every type: the city's claimed tasks, workflow roots
+// and claimed steps. On the native store each listing fans out to one request
+// per route ([beads.NativeListPlan]), so a mailbox read costs two keyed
+// requests per route. A query with no route keys is read in one request per
+// status: the metadata-keyed dedup probe stays narrow, while the unrouted
+// count, which reads every mailbox, reads every open and every in_progress
+// bead in the store. The rows are unioned by id, open rows first, so a message
+// that moves between the two listings is listed once.
+func (p *Provider) listLiveMessages(query beads.ListQuery) ([]beads.Bead, error) {
+	open := query
+	open.Status = "open"
+	rows, err := p.store.List(open)
+	if err != nil {
+		return nil, err
+	}
+	claimed := query
+	claimed.Status = "in_progress"
+	claimedRows, err := p.store.List(claimed)
+	if err != nil {
+		return nil, err
+	}
+	listed := make(map[string]bool, len(rows))
+	for _, b := range rows {
+		listed[b.ID] = true
+	}
+	for _, b := range claimedRows {
+		if !listed[b.ID] {
+			listed[b.ID] = true
+			rows = append(rows, b)
+		}
+	}
+	return rows, nil
 }
 
 // beadToMessage converts a bead to a mail.Message.

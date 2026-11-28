@@ -1192,9 +1192,16 @@ prompt_template = "prompts/worker.md"
 		t.Fatalf("hook output is not JSON: %v; stdout=%q", err, stdout.String())
 	}
 	context := got.HookSpecificOutput.AdditionalContext
-	for _, want := range []string{auto.ID, auto.Subject, auto.Body} {
+	// The mail block proves delivery; the handoff's id, subject and body alone
+	// do not, since on this single-store city the step reminder also names the
+	// in_progress handoff as the active work assignment.
+	for _, want := range []string{
+		"You have 1 unread message(s).",
+		fmt.Sprintf("- %s from ", auto.ID),
+		fmt.Sprintf("[%s]: %s", auto.Subject, auto.Body),
+	} {
 		if !strings.Contains(context, want) {
-			t.Fatalf("additionalContext = %q, want in_progress auto-handoff substring %q", context, want)
+			t.Fatalf("additionalContext = %q, want the in_progress auto-handoff's mail block line %q", context, want)
 		}
 	}
 	assertAutoHandoffRetainedAddressable(t, store, auto.ID)
