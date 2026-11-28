@@ -117,6 +117,22 @@ func TestCurrentTurnReadsCodexTranscripts(t *testing.T) {
 			},
 		},
 		{
+			// A turn the provider refused for lack of capacity keeps Codex's
+			// class for it, Overloaded, read from codex_error_info.
+			name: "failed overloaded",
+			lines: []string{
+				codexStarted(codexTurn1, "2026-10-08T02:22:22.191Z", 1791426142),
+				codexFailed(codexTurn1, "2026-10-08T02:22:24.999Z", "server_overloaded", "Selected model is at capacity."),
+			},
+			want: func(t *testing.T) runtime.TurnHistory {
+				return runtime.TurnHistory{Recent: []runtime.EndedTurn{{
+					TurnID: codexTurn1, StartedAt: mustTurnTime(t, "2026-10-08T02:22:22.191Z"), EndedAt: mustTurnTime(t, "2026-10-08T02:22:24.999Z"),
+					Status:  runtime.TurnStatusFailed,
+					Failure: runtime.TurnFailure{Code: "server_overloaded", Overloaded: true, Message: "Selected model is at capacity."},
+				}}}
+			},
+		},
+		{
 			name:    "torn tail",
 			lines:   []string{codexStarted(codexTurn1, "2026-10-08T02:22:22.191Z", 1791426142), `{"timestamp":"2026-10-08T02:22:30.500Z","type":"event_msg","payload":{"type":"task_comp`},
 			wantErr: runtime.ErrRuntimeUnavailable,
@@ -186,7 +202,7 @@ func TestTurnHistoryFromScan(t *testing.T) {
 	})
 	t.Run("a failed turn keeps the error its source recorded", func(t *testing.T) {
 		cooling := sessionlog.TurnFailure{Code: "rate_limit", Status: 429, RateLimited: true, Message: "API Error: Request rejected (429) · pool cooling for another 3d 16h"}
-		overloaded := sessionlog.TurnFailure{Code: "server_error", Status: 529, Message: "API Error: overloaded"}
+		overloaded := sessionlog.TurnFailure{Code: "server_error", Status: 529, Overloaded: true, Message: "API Error: overloaded"}
 		spent := sessionlog.TurnFailure{Code: "usage_limit_exceeded", RateLimited: true, Quota: true, Message: "You've hit your usage limit."}
 		got, err := turnHistoryFromScan(sessionlog.TurnScan{Recent: []sessionlog.ScannedTurn{
 			{ID: "spent", StartedAt: at, EndedAt: at, Status: sessionlog.TurnStatusFailed, Failure: spent},
@@ -200,7 +216,7 @@ func TestTurnHistoryFromScan(t *testing.T) {
 		want := []runtime.TurnFailure{
 			{Code: "usage_limit_exceeded", RateLimited: true, Quota: true, Message: spent.Message},
 			{Code: "rate_limit", HTTPStatus: 429, RateLimited: true, Message: cooling.Message},
-			{Code: "server_error", HTTPStatus: 529, Message: overloaded.Message},
+			{Code: "server_error", HTTPStatus: 529, Overloaded: true, Message: overloaded.Message},
 			{},
 		}
 		for i, w := range want {
@@ -753,6 +769,17 @@ func TestCurrentTurnIdleOverlayEndsATurnStoppedAtAnErrorFailed(t *testing.T) {
 		clock.advance(time.Hour)
 		s.handle.turns.inferred = inferredTurnEnd{} // a handle that never inferred it
 		assertCurrentTurn(t, s.handle, clock.now(), func(*testing.T) runtime.TurnHistory { return want }, nil)
+	})
+	t.Run("stopped at an overload", func(t *testing.T) {
+		idle := newIdleScript(idleAnswer{idle: true})
+		s, clock := session(t, idle, claudePrompt(claudeTurn1, startedAt), claudeAPIError(refusedAt, "server_error", 529, "API Error: overloaded"))
+		assertCurrentTurn(t, s.handle, clock.now(), func(t *testing.T) runtime.TurnHistory {
+			return runtime.TurnHistory{Recent: []runtime.EndedTurn{{
+				TurnID: claudeTurn1, StartedAt: mustTurnTime(t, startedAt), EndedAt: mustTurnTime(t, refusedAt),
+				Status: runtime.TurnStatusFailed, Inferred: true,
+				Failure: runtime.TurnFailure{Code: "server_error", HTTPStatus: 529, Overloaded: true, Message: "API Error: overloaded"},
+			}}}
+		}, nil)
 	})
 	t.Run("retrying", func(t *testing.T) {
 		s, clock := session(t, newIdleScript(idleAnswer{idle: false}), claudePrompt(claudeTurn1, startedAt), claudeAPIError(refusedAt, "rate_limit", 429, cooling))

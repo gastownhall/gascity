@@ -33,6 +33,32 @@ func workerSessionCatalogWithConfig(cityPath string, store beads.Store, sp runti
 	return factory.Catalog()
 }
 
+// workerTurnReader reads a seat's current and recent turns through its
+// worker handle: the transcript of its current conversation, or its
+// runtime's own turn record. The worker factory is built by newFactory on
+// the first read, so a caller with nothing to read builds none.
+func workerTurnReader(newFactory func() (*worker.Factory, error)) ladderTurnReader {
+	var (
+		factory *worker.Factory
+		err     error
+		built   bool
+	)
+	return func(ctx context.Context, row beads.Bead) (runtime.TurnHistory, error) {
+		if !built {
+			built = true
+			factory, err = newFactory()
+		}
+		if err != nil {
+			return runtime.TurnHistory{}, fmt.Errorf("worker factory: %w", err)
+		}
+		h, err := factory.SessionByID(row.ID)
+		if err != nil {
+			return runtime.TurnHistory{}, err
+		}
+		return h.CurrentTurn(ctx)
+	}
+}
+
 func workerFactoryWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City) (*worker.Factory, error) {
 	return workerFactoryWithStaleKeyDetectionWaiter(cityPath, store, sp, cfg, nil)
 }

@@ -36,6 +36,7 @@ func TestLadderTurnReading(t *testing.T) {
 	earlier := limited
 	earlier.TurnID, earlier.EndedAt = "429-earlier", at.Add(-time.Minute)
 	spent := runtime.EndedTurn{TurnID: "quota", EndedAt: at, Status: runtime.TurnStatusFailed, Failure: runtime.TurnFailure{Code: "usage_limit_exceeded", RateLimited: true, Quota: true, Message: "You've hit your usage limit."}}
+	overloaded := runtime.EndedTurn{TurnID: "overloaded", EndedAt: at, Status: runtime.TurnStatusFailed, Failure: runtime.TurnFailure{Code: "server_overloaded", Overloaded: true, Message: "Selected model is at capacity."}}
 	for _, tc := range []struct {
 		name    string
 		hist    runtime.TurnHistory
@@ -48,6 +49,8 @@ func TestLadderTurnReading(t *testing.T) {
 		{"two refused in a row", runtime.TurnHistory{Recent: []runtime.EndedTurn{limited, earlier, completed}}, workladder.TurnReading{Read: true, Conv: 3, LastFailed: true, ServedAt: completed.EndedAt, Refused: 2, RefusedAt: at}, limited.Failure},
 		{"a 524 breaks the run", runtime.TurnHistory{Recent: []runtime.EndedTurn{limited, gateway, earlier}}, workladder.TurnReading{Read: true, Conv: 3, LastFailed: true, Refused: 1, RefusedAt: at}, limited.Failure},
 		{"a spent quota", runtime.TurnHistory{Recent: []runtime.EndedTurn{spent, limited}}, workladder.TurnReading{Read: true, Conv: 3, LastFailed: true, Refused: 2, RefusedAt: at, Quota: true}, spent.Failure},
+		{"newest overloaded is no refusal", runtime.TurnHistory{Recent: []runtime.EndedTurn{overloaded, completed}}, workladder.TurnReading{Read: true, Conv: 3, LastFailed: true, ServedAt: completed.EndedAt}, runtime.TurnFailure{}},
+		{"an overload breaks the run", runtime.TurnHistory{Recent: []runtime.EndedTurn{overloaded, limited, earlier}}, workladder.TurnReading{Read: true, Conv: 3, LastFailed: true}, runtime.TurnFailure{}},
 		{"newest failed (524), never served", runtime.TurnHistory{Recent: []runtime.EndedTurn{gateway, limited}}, workladder.TurnReading{Read: true, Conv: 3, LastFailed: true}, runtime.TurnFailure{}},
 		{"no status (Gemini) is no failure, and no completion", runtime.TurnHistory{Recent: []runtime.EndedTurn{noStatus, limited}}, workladder.TurnReading{Read: true, Conv: 3}, runtime.TurnFailure{}},
 		{"an inferred end with no status after a completed turn is not completed", runtime.TurnHistory{Recent: []runtime.EndedTurn{inferred, completed}}, workladder.TurnReading{Read: true, Conv: 3, ServedAt: completed.EndedAt}, runtime.TurnFailure{}},

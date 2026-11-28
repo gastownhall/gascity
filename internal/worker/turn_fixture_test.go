@@ -108,6 +108,12 @@ func codexComplete(id, ts string) string {
 	return fmt.Sprintf(`{"timestamp":%q,"type":"event_msg","payload":{"type":"task_complete","turn_id":%q,"completed_at":1791426150,"error":null}}`, ts, id)
 }
 
+// codexFailed is a task_complete that ends its turn on an error Codex
+// classified with the codex_error_info variant class.
+func codexFailed(id, ts, class, message string) string {
+	return fmt.Sprintf(`{"timestamp":%q,"type":"event_msg","payload":{"type":"task_complete","turn_id":%q,"completed_at":1791426150,"error":{"message":%q,"codex_error_info":%q}}}`, ts, id, message, class)
+}
+
 func codexAborted(id, ts string) string {
 	return fmt.Sprintf(`{"timestamp":%q,"type":"event_msg","payload":{"type":"turn_aborted","turn_id":%q,"reason":"interrupted"}}`, ts, id)
 }

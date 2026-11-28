@@ -3755,6 +3755,10 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 		// lockstep with the beads and refs, so the filtered triple is equally
 		// index-aligned.
 		nudgeStalledPoolExecution(
+			ctx,
+			workerTurnReader(func() (*worker.Factory, error) {
+				return workerFactoryWithConfig(cr.cityPath, sessStore, cr.sp, cr.cfg)
+			}),
 			cr.sp,
 			cr.cfg,
 			sessStore,

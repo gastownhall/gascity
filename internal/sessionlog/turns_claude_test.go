@@ -111,7 +111,7 @@ func TestScanTurnsClaudeFixtures(t *testing.T) {
 			return TurnScan{
 				Recent: []ScannedTurn{
 					{ID: claudeP2, StartedAt: turnTime(t, "2026-10-13T05:01:00.459Z"), EndedAt: turnTime(t, "2026-10-13T05:01:01.500Z"), Status: TurnStatusCompleted},
-					{EndedAt: turnTime(t, "2026-10-13T05:00:05.025Z"), Status: TurnStatusFailed, Failure: TurnFailure{Code: "server_error", Status: 529, Message: "API Error: overloaded"}},
+					{EndedAt: turnTime(t, "2026-10-13T05:00:05.025Z"), Status: TurnStatusFailed, Failure: TurnFailure{Code: "server_error", Status: 529, Overloaded: true, Message: "API Error: overloaded"}},
 				},
 				MissingIDs: true,
 			}
@@ -166,7 +166,7 @@ func TestScanTurnsClaudeContinuedSessionOpensMidTurn(t *testing.T) {
 	lines := strings.SplitAfter(strings.TrimSuffix(string(data), "\n"), "\n")
 	ts := func(clock string) string { return "2026-10-13T05:" + clock + "Z" }
 	running := TurnScan{Open: true, MissingIDs: true}
-	overloaded := TurnFailure{Code: "server_error", Status: 529, Message: "API Error: overloaded"}
+	overloaded := TurnFailure{Code: "server_error", Status: 529, Overloaded: true, Message: "API Error: overloaded"}
 	failed := ScannedTurn{EndedAt: turnTime(t, ts("00:05.025")), Status: TurnStatusFailed, Failure: overloaded}
 	tests := []struct {
 		lines int
@@ -649,6 +649,47 @@ func BenchmarkScanTurnsClaudeLongTurn(b *testing.B) {
 	for b.Loop() {
 		if _, err := ScanTurns("claude", path); err != nil {
 			b.Fatal(err)
+		}
+	}
+}
+
+// TestScanTurnsClaudeClassesProviderOverload: an API error entry Claude Code
+// recorded with HTTP 529 (Anthropic's overloaded_error) ends its turn failed
+// with the family's own capacity class (TurnFailure.Overloaded). A capacity
+// refusal is not a rate limit, and neither a rate_limit class, a bare 429
+// status, a 503 server_error, nor an error with neither class nor status
+// reads as one — the text never enters it.
+func TestScanTurnsClaudeClassesProviderOverload(t *testing.T) {
+	user := func(ts, id string) string {
+		return `{"type":"user","timestamp":"2026-10-13T05:` + ts + `Z","promptId":"` + id + `","promptSource":"typed","message":{"role":"user","content":"prompt"}}`
+	}
+	apiErr := func(ts, extra, text string) string {
+		return `{"type":"assistant","timestamp":"2026-10-13T05:` + ts + `Z","isApiErrorMessage":true` + extra + `,"message":{"role":"assistant","content":[{"type":"text","text":` + strconv.Quote(text) + `}]}}`
+	}
+	end := func(ts string) string {
+		return `{"type":"system","subtype":"turn_duration","timestamp":"2026-10-13T05:` + ts + `Z"}`
+	}
+	path := writeTurnLines(t, "claude.jsonl",
+		user("00:00.100", "p1"), apiErr("00:01.000", `,"error":"server_error","apiErrorStatus":529`, "API Error: overloaded"), end("00:01.010"),
+		user("00:02.100", "p2"), apiErr("00:03.000", `,"error":"rate_limit","apiErrorStatus":429`, "API Error: rate limited"), end("00:03.010"),
+		user("00:04.100", "p3"), apiErr("00:05.000", `,"apiErrorStatus":429`, "API Error: 429"), end("00:05.010"),
+		user("00:06.100", "p4"), apiErr("00:07.000", `,"error":"server_error","apiErrorStatus":503`, "API Error: 503 status code (no body)"), end("00:07.010"),
+		user("00:08.100", "p5"), apiErr("00:09.000", ``, "API Error: overloaded"), end("00:09.010"),
+	)
+	got, err := ScanTurns("claude", path)
+	if err != nil {
+		t.Fatalf("ScanTurns: %v", err)
+	}
+	want := []TurnFailure{
+		{Message: "API Error: overloaded"},
+		{Code: "server_error", Status: 503, Message: "API Error: 503 status code (no body)"},
+		{Status: 429, RateLimited: true, Message: "API Error: 429"},
+		{Code: "rate_limit", Status: 429, RateLimited: true, Message: "API Error: rate limited"},
+		{Code: "server_error", Status: 529, Overloaded: true, Message: "API Error: overloaded"},
+	}
+	for i, w := range want {
+		if got.Recent[i].Status != TurnStatusFailed || got.Recent[i].Failure != w {
+			t.Errorf("recent[%d] = status %q failure %+v, want failed %+v", i, got.Recent[i].Status, got.Recent[i].Failure, w)
 		}
 	}
 }

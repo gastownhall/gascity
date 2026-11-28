@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	sessionhybrid "github.com/gastownhall/gascity/internal/runtime/hybrid"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/pkg/eventexport"
 )
 
@@ -52,6 +53,10 @@ type executionBackstopFixture struct {
 	// sessionStore, when set, is the store the backstop reads and writes the
 	// session row through, in place of store.
 	sessionStore beads.Store
+	// turns, when set, is the seat's turn source the tick hands the
+	// backstop; nil hands it none. turnReads counts its reads.
+	turns     ladderTurnReader
+	turnReads int
 }
 
 func newExecutionBackstopFixture(t *testing.T) *executionBackstopFixture {
@@ -149,7 +154,14 @@ func (f *executionBackstopFixture) tick(t *testing.T) {
 	if f.sessionStore != nil {
 		sessionStore = f.sessionStore
 	}
-	nudgeStalledPoolExecution(sp, f.cfg, sessionStore, sessions, work, stores, refs, false, f.now, rec,
+	var turns ladderTurnReader
+	if f.turns != nil {
+		turns = func(ctx context.Context, row beads.Bead) (runtime.TurnHistory, error) {
+			f.turnReads++
+			return f.turns(ctx, row)
+		}
+	}
+	nudgeStalledPoolExecution(context.Background(), turns, sp, f.cfg, sessionStore, sessions, work, stores, refs, false, f.now, rec,
 		func(sessionBead beads.Bead) error {
 			f.drained = append(f.drained, strings.TrimSpace(sessionBead.Metadata["session_name"]))
 			return nil
@@ -1919,5 +1931,382 @@ func TestExecutionBackstopANewClaimStartsWithoutTheOldLatch(t *testing.T) {
 	}
 	if got := f.sessionMeta(t, executionClaimNudgeStalledTokenKey); got != "incarnation-1" {
 		t.Fatalf("latch token after B's escalation = %q, want incarnation-1", got)
+	}
+}
+
+// overloadedTurns is a turn source whose seat has no turn open and whose
+// newest turn ended at endedAt, failed on a provider overload.
+func overloadedTurns(endedAt time.Time) ladderTurnReader {
+	return endedTurns(runtime.EndedTurn{
+		TurnID: "t1", EndedAt: endedAt, Status: runtime.TurnStatusFailed,
+		Failure: runtime.TurnFailure{Code: "server_overloaded", Overloaded: true, Message: "Selected model is at capacity."},
+	})
+}
+
+// endedTurns is a turn source whose seat has no turn open and whose newest
+// turns are recent, newest first.
+func endedTurns(recent ...runtime.EndedTurn) ladderTurnReader {
+	return func(context.Context, beads.Bead) (runtime.TurnHistory, error) {
+		return runtime.TurnHistory{Recent: recent}, nil
+	}
+}
+
+// overloadWokeAgo is how long before the fixture's clock wokeAgo stamps the
+// seat's wake.
+const overloadWokeAgo = 10 * time.Minute
+
+// wokeAgo stamps the session row's last_woke_at overloadWokeAgo before the
+// fixture's clock: the fence a turn's end must not precede to count for this
+// incarnation.
+func (f *executionBackstopFixture) wokeAgo(t *testing.T) {
+	t.Helper()
+	f.setSessionMeta(t, map[string]string{"last_woke_at": f.now.Add(-overloadWokeAgo).UTC().Format(time.RFC3339)})
+}
+
+// A quiet seat whose own turns show the provider ended its newest turn
+// overloaded, this incarnation, has nothing left for the observe-first grace
+// to wait for: the backstop delivers the claim nudge on the tick that first
+// sees the claim, as attempt 1/3 (ga-fo294b).
+func TestExecutionBackstopRetriesAProviderOverloadWithoutGenericGrace(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.wokeAgo(t)
+	f.idleFor(t, idleClaimNudgeGrace+time.Second)
+	f.turns = overloadedTurns(f.now.Add(-91 * time.Second))
+
+	f.tick(t)
+
+	if got := f.nudgeCount(); got != 1 {
+		t.Fatalf("nudges after an explicit provider overload = %d, want 1 immediately; stdout=%s", got, f.stdout.String())
+	}
+	if got := f.nudgesDelivered(); len(got) != 1 || got[0] != "gc hook --claim --drain-ack --json" {
+		t.Fatalf("delivered nudges = %q, want the configured claim nudge once", got)
+	}
+	if got := f.sessionMeta(t, executionClaimNudgeCountKey); got != "1" {
+		t.Fatalf("persisted attempt count = %q, want 1", got)
+	}
+	if got := f.sessionMeta(t, executionClaimNudgeWorkKey); got != f.work.ID {
+		t.Fatalf("persisted work marker = %q, want %q", got, f.work.ID)
+	}
+	if out := f.stdout.String(); !strings.Contains(out, "(attempt 1/3, immediate)") {
+		t.Fatalf("stdout = %q, want the delivery named attempt 1/3, immediate", out)
+	}
+}
+
+// turnsFailing is a turn source whose every read fails with err.
+func turnsFailing(err error) ladderTurnReader {
+	return func(context.Context, beads.Bead) (runtime.TurnHistory, error) {
+		return runtime.TurnHistory{}, err
+	}
+}
+
+// Without structural evidence that the provider refused the seat's newest
+// turn this incarnation for lack of capacity, the first sighting of a quiet
+// claim writes the observe marker and sends nothing until the grace has run,
+// exactly as before ga-fo294b: a completed turn, another failure class, a turn
+// still open, an overload from before the wake, no wake time, no turn source,
+// or a read that fails. An overload ending exactly at the wake counts.
+func TestExecutionBackstopWaitsTheGraceWithoutOverloadEvidence(t *testing.T) {
+	failed := func(endedAgo time.Duration, failure runtime.TurnFailure) func(time.Time) ladderTurnReader {
+		return func(now time.Time) ladderTurnReader {
+			return endedTurns(runtime.EndedTurn{TurnID: "t1", EndedAt: now.Add(-endedAgo), Status: runtime.TurnStatusFailed, Failure: failure})
+		}
+	}
+	overload := runtime.TurnFailure{Code: "server_overloaded", Overloaded: true}
+	for _, tc := range []struct {
+		name      string
+		woke      bool // stamp last_woke_at overloadWokeAgo ago
+		turns     func(now time.Time) ladderTurnReader
+		immediate bool
+		logged    bool // the tick logs that it could not read the turns
+	}{
+		{name: "completed", woke: true, turns: func(now time.Time) ladderTurnReader {
+			return endedTurns(runtime.EndedTurn{TurnID: "t1", EndedAt: now.Add(-91 * time.Second), Status: runtime.TurnStatusCompleted})
+		}},
+		{name: "failed 429 rate_limit", woke: true, turns: failed(91*time.Second, runtime.TurnFailure{Code: "rate_limit", HTTPStatus: 429, RateLimited: true})},
+		{name: "failed usage_limit_exceeded", woke: true, turns: failed(91*time.Second, runtime.TurnFailure{Code: "usage_limit_exceeded", RateLimited: true, Quota: true})},
+		{name: "failed Claude 503 server_error", woke: true, turns: failed(91*time.Second, runtime.TurnFailure{Code: "server_error", HTTPStatus: 503})},
+		{name: "overloaded but a turn open", woke: true, turns: func(now time.Time) ladderTurnReader {
+			return func(context.Context, beads.Bead) (runtime.TurnHistory, error) {
+				return runtime.TurnHistory{
+					Current: runtime.TurnState{TurnID: "t2"},
+					Recent:  []runtime.EndedTurn{{TurnID: "t1", EndedAt: now.Add(-91 * time.Second), Status: runtime.TurnStatusFailed, Failure: overload}},
+				}, nil
+			}
+		}},
+		{name: "overloaded before last_woke_at", woke: true, turns: failed(11*time.Minute, overload)},
+		{name: "overloaded at last_woke_at counts", woke: true, immediate: true, turns: func(now time.Time) ladderTurnReader {
+			woke := now.Add(-overloadWokeAgo).Truncate(time.Second) // last_woke_at as RFC3339 stores it
+			return endedTurns(runtime.EndedTurn{TurnID: "t1", EndedAt: woke, Status: runtime.TurnStatusFailed, Failure: overload})
+		}},
+		{name: "last_woke_at unset", turns: failed(91*time.Second, overload)},
+		{name: "reader fails", woke: true, logged: true, turns: func(time.Time) ladderTurnReader { return turnsFailing(runtime.ErrRuntimeUnavailable) }},
+		{name: "family records no turns", woke: true, turns: func(time.Time) ladderTurnReader { return turnsFailing(runtime.ErrTurnIdentityUnsupported) }},
+		{name: "no turn source", woke: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExecutionBackstopFixture(t)
+			if tc.woke {
+				f.wokeAgo(t)
+			}
+			if tc.turns != nil {
+				f.turns = tc.turns(f.now)
+			}
+			f.idleFor(t, idleClaimNudgeGrace+time.Second)
+
+			f.tick(t)
+
+			if got := f.sessionMeta(t, executionClaimNudgeWorkKey); got != f.work.ID {
+				t.Fatalf("observe marker = %q, want %q", got, f.work.ID)
+			}
+			want := 0
+			if tc.immediate {
+				want = 1
+			}
+			if got := f.nudgeCount(); got != want {
+				t.Fatalf("nudges on the first quiet tick = %d, want %d; stdout=%s", got, want, f.stdout.String())
+			}
+			if got := strings.Contains(f.stdout.String(), "reading its turns:"); got != tc.logged {
+				t.Fatalf("logged a failed turn read = %v, want %v; stdout=%s", got, tc.logged, f.stdout.String())
+			}
+			if tc.immediate {
+				return
+			}
+
+			f.now = f.now.Add(idleClaimNudgeGrace + time.Second)
+			f.idleFor(t, 2*idleClaimNudgeGrace)
+			f.tick(t)
+			if got := f.nudgeCount(); got != 1 {
+				t.Fatalf("nudges once the grace has run = %d, want 1; stdout=%s", got, f.stdout.String())
+			}
+			if strings.Contains(f.stdout.String(), "immediate") {
+				t.Fatalf("stdout = %q, want no immediate delivery", f.stdout.String())
+			}
+		})
+	}
+}
+
+// An overload skips only the observe-first grace: once the immediate attempt
+// is spent, attempts 2 and 3 each wait the full backoff, and after the third
+// attempt's backoff the terminal action is the one any stall gets. An
+// unstarted seat is drained (execution_stalled); a started seat is held as
+// executing. The turns are read only while the grace is still to wait.
+func TestExecutionBackstopOverloadSkipsOnlyTheFirstGrace(t *testing.T) {
+	for _, started := range []bool{false, true} {
+		t.Run(fmt.Sprintf("started=%v", started), func(t *testing.T) {
+			f := newExecutionBackstopFixture(t)
+			if started {
+				f.startedSinceWake(t)
+			} else {
+				f.wokeAgo(t)
+			}
+			f.turns = overloadedTurns(f.now.Add(-91 * time.Second))
+			start := f.now
+			tickAt := func(after time.Duration) {
+				t.Helper()
+				f.now = start.Add(after)
+				f.idleFor(t, 10*time.Minute)
+				f.tick(t)
+			}
+
+			tickAt(0)
+			if got := f.nudgeCount(); got != 1 {
+				t.Fatalf("nudges on the first quiet tick = %d, want the immediate attempt; stdout=%s", got, f.stdout.String())
+			}
+			for _, step := range []struct {
+				after time.Duration
+				want  int
+			}{
+				{after: time.Minute, want: 1},
+				{after: idleClaimNudgeBackoff - time.Second, want: 1},
+				{after: idleClaimNudgeBackoff, want: 2},
+				{after: 2*idleClaimNudgeBackoff - time.Second, want: 2},
+				{after: 2 * idleClaimNudgeBackoff, want: 3},
+				{after: 3*idleClaimNudgeBackoff - time.Second, want: 3},
+			} {
+				tickAt(step.after)
+				if got := f.nudgeCount(); got != step.want {
+					t.Fatalf("nudges at +%v = %d, want %d; stdout=%s", step.after, got, step.want, f.stdout.String())
+				}
+				if len(f.drained) != 0 {
+					t.Fatalf("drains at +%v = %v, want none before the last backoff has run", step.after, f.drained)
+				}
+			}
+			if got := f.sessionMeta(t, executionClaimNudgeCountKey); got != "3" {
+				t.Fatalf("persisted attempt count = %q, want 3", got)
+			}
+
+			tickAt(3 * idleClaimNudgeBackoff)
+			if got := f.nudgeCount(); got != idleClaimNudgeMaxAttempts {
+				t.Fatalf("nudges after the cap = %d, want %d", got, idleClaimNudgeMaxAttempts)
+			}
+			if started {
+				if len(f.drained) != 0 || f.stalledEvents() != 0 {
+					t.Fatalf("drains %v, step_stalled %d; want neither for a started seat", f.drained, f.stalledEvents())
+				}
+				if got := f.sessionMeta(t, executionClaimHoldKey); !strings.HasPrefix(got, executionHoldExecuting) {
+					t.Fatalf("hold breadcrumb = %q, want %q", got, executionHoldExecuting)
+				}
+			} else if len(f.drained) != 1 || f.drained[0] != f.sessName || f.stalledEvents() != 1 {
+				t.Fatalf("drains %v, step_stalled %d; want one drain of %s and one event", f.drained, f.stalledEvents(), f.sessName)
+			}
+			if f.turnReads != 1 {
+				t.Fatalf("turn reads = %d, want 1: only the tick the grace was still to wait", f.turnReads)
+			}
+		})
+	}
+}
+
+// An overloaded quiet seat with nothing to send gets no immediate verdict:
+// there is no nudge to hurry, and the empty-content escalation keeps its
+// grace. Two shapes have nothing to send: an unstarted seat whose template
+// configures no Nudge, and a started seat whose template names no configured
+// agent, so not even the held-claim default. The first sighting writes the
+// observe marker, neither drains nor holds the seat and reads no turns; once
+// the grace has run the unstarted seat is drained and the started one is held
+// executing.
+func TestExecutionBackstopOverloadWithNothingToSendKeepsTheGrace(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		started bool
+	}{
+		{name: "unstarted, no configured nudge"},
+		{name: "started, no configured agent", started: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExecutionBackstopFixture(t)
+			if tc.started {
+				f.startedSinceWake(t)
+				f.cfg.Agents = nil
+			} else {
+				f.cfg.Agents[0].Nudge = ""
+				f.wokeAgo(t)
+			}
+			f.turns = overloadedTurns(f.now.Add(-91 * time.Second))
+			f.idleFor(t, idleClaimNudgeGrace+time.Second)
+
+			f.tick(t)
+
+			if len(f.drained) != 0 || f.stalledEvents() != 0 {
+				t.Fatalf("drains %v, step_stalled %d on the first sighting; want neither inside the grace; stdout=%s", f.drained, f.stalledEvents(), f.stdout.String())
+			}
+			if got := f.nudgeCount(); got != 0 {
+				t.Fatalf("nudges with nothing to send = %d, want 0", got)
+			}
+			if got := f.sessionMeta(t, executionClaimNudgeWorkKey); got != f.work.ID {
+				t.Fatalf("observe marker = %q, want %q", got, f.work.ID)
+			}
+			if got := atoiOr0(f.sessionMeta(t, executionClaimNudgeCountKey)); got != 0 {
+				t.Fatalf("persisted attempt count = %d, want 0", got)
+			}
+			if got := f.sessionMeta(t, executionClaimHoldKey); got != "" {
+				t.Fatalf("hold breadcrumb = %q, want none", got)
+			}
+			if f.turnReads != 0 {
+				t.Fatalf("turn reads = %d, want 0 with nothing to send", f.turnReads)
+			}
+
+			f.now = f.now.Add(idleClaimNudgeGrace + time.Second)
+			f.idleFor(t, 10*time.Minute)
+			f.tick(t)
+			if got := f.nudgeCount(); got != 0 {
+				t.Fatalf("nudges once the grace has run = %d, want 0; stdout=%s", got, f.stdout.String())
+			}
+			if tc.started {
+				if len(f.drained) != 0 || !strings.HasPrefix(f.sessionMeta(t, executionClaimHoldKey), executionHoldExecuting) {
+					t.Fatalf("a started seat once the grace has run: drains %v, hold %q; want the executing hold and no drain; stdout=%s", f.drained, f.sessionMeta(t, executionClaimHoldKey), f.stdout.String())
+				}
+				return
+			}
+			if len(f.drained) != 1 || f.drained[0] != f.sessName {
+				t.Fatalf("drains once the grace has run = %v, want one of %s; stdout=%s", f.drained, f.sessName, f.stdout.String())
+			}
+		})
+	}
+}
+
+// closedLiveStore is a work store whose live read finds the claim closed.
+type closedLiveStore struct {
+	beads.Store
+}
+
+func (c closedLiveStore) Get(id string) (beads.Bead, error) {
+	b, err := c.Store.Get(id)
+	b.Status = "closed"
+	return b, err
+}
+
+// An immediate verdict passes every gate a due nudge passes. A live claim no
+// longer this seat's in-progress bead clears; a live read that fails, a
+// pending interaction and an operator's content hold hold; a busy session
+// refunds the reservation. None spends an attempt or delivers anything, and a
+// refunded seat is nudged on the next quiet tick.
+func TestExecutionBackstopOverloadKeepsThePreDeliveryGates(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		setup   func(t *testing.T, f *executionBackstopFixture)
+		cleared bool   // the tick clears the work marker
+		hold    string // the hold the tick records, timestamp aside
+		log     string // a line the tick writes
+		retries bool   // a later quiet tick, with the gate gone, nudges at once
+	}{
+		{name: "live claim closed", cleared: true, setup: func(_ *testing.T, f *executionBackstopFixture) {
+			f.workStore = closedLiveStore{Store: f.store}
+		}},
+		{name: "live read fails", hold: backstopHoldRevalidate, setup: func(_ *testing.T, f *executionBackstopFixture) {
+			f.workStore = unreadableStore{Store: f.store}
+		}},
+		{name: "pending interaction", hold: backstopHoldPendingInteraction, setup: func(_ *testing.T, f *executionBackstopFixture) {
+			f.sp.SetPendingInteraction(f.sessName, &runtime.PendingInteraction{RequestID: "req-1", Kind: "approval"})
+		}},
+		{name: "content hold", hold: backstopHoldContentHeld, setup: func(t *testing.T, f *executionBackstopFixture) {
+			f.setSessionMeta(t, map[string]string{session.ContentHoldKey: "operator"})
+		}},
+		{name: "session busy", log: "is busy; deferred the nudge", retries: true, setup: func(_ *testing.T, f *executionBackstopFixture) {
+			f.sp.NudgeErrors = map[string]error{f.sessName: runtime.ErrSessionBusy}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExecutionBackstopFixture(t)
+			f.wokeAgo(t)
+			f.turns = overloadedTurns(f.now.Add(-91 * time.Second))
+			f.idleFor(t, idleClaimNudgeGrace+time.Second)
+			tc.setup(t, f)
+
+			f.tick(t)
+
+			if got := f.nudgeCount(); got != 0 {
+				t.Fatalf("nudges past a refusing gate = %d, want 0; stdout=%s", got, f.stdout.String())
+			}
+			if got := atoiOr0(f.sessionMeta(t, executionClaimNudgeCountKey)); got != 0 {
+				t.Fatalf("persisted attempt count = %d, want 0: no attempt spent; stdout=%s", got, f.stdout.String())
+			}
+			wantMarker := f.work.ID
+			if tc.cleared {
+				wantMarker = ""
+			}
+			if got := f.sessionMeta(t, executionClaimNudgeWorkKey); got != wantMarker {
+				t.Fatalf("work marker = %q, want %q", got, wantMarker)
+			}
+			if got := f.sessionMeta(t, executionClaimHoldKey); (tc.hold == "") != (got == "") || !strings.HasPrefix(got, tc.hold) {
+				t.Fatalf("hold breadcrumb = %q, want %q; stdout=%s", got, tc.hold, f.stdout.String())
+			}
+			if tc.log != "" && !strings.Contains(f.stdout.String(), tc.log) {
+				t.Fatalf("stdout = %q, want it to name %q", f.stdout.String(), tc.log)
+			}
+			if !tc.retries {
+				if got := f.nudgesDelivered(); len(got) != 0 {
+					t.Fatalf("nudges handed to the runtime = %q, want none", got)
+				}
+				return
+			}
+
+			f.sp.NudgeErrors = nil
+			f.now = f.now.Add(30 * time.Second)
+			f.idleFor(t, idleClaimNudgeGrace+time.Second)
+			f.tick(t)
+			if got := f.nudgeCount(); got != 1 || !strings.Contains(f.stdout.String(), "(attempt 1/3, immediate)") {
+				t.Fatalf("nudges on the next quiet tick = %d, want the immediate attempt; stdout=%s", got, f.stdout.String())
+			}
+		})
 	}
 }
