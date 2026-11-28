@@ -118,8 +118,8 @@ func TestInboxForRoutesMatchesPerAddressCheck(t *testing.T) {
 	if len(got) != 4 {
 		t.Fatalf("unread = %d messages, want the 4 unread ones addressed to the session's routes", len(got))
 	}
-	if store.messageLists != 1 || store.sessionLists != 0 || store.gets != 0 {
-		t.Fatalf("reads = %d message lists, %d session lists, %d gets; want 1, 0, 0", store.messageLists, store.sessionLists, store.gets)
+	if store.messageLists != 2 || store.sessionLists != 0 || store.gets != 0 {
+		t.Fatalf("reads = %d message lists, %d session lists, %d gets; want 2 (open, in_progress), 0, 0", store.messageLists, store.sessionLists, store.gets)
 	}
 	if !slices.Equal(inbox.Routes(), session.RecipientRoutesFromInfo(info)) {
 		t.Fatalf("Routes() = %v, want %v", inbox.Routes(), session.RecipientRoutesFromInfo(info))
@@ -598,8 +598,8 @@ func TestInboxForSessionReadBudget(t *testing.T) {
 	if _, err := p.InboxForSession(info); err != nil {
 		t.Fatalf("InboxForSession: %v", err)
 	}
-	if store.gets != 0 || store.sessionLists != 0 || store.messageLists != 1 {
-		t.Fatalf("no history: %d gets, %d session lists, %d message lists; want 0, 0, 1", store.gets, store.sessionLists, store.messageLists)
+	if store.gets != 0 || store.sessionLists != 0 || store.messageLists != 2 {
+		t.Fatalf("no history: %d gets, %d session lists, %d message lists; want 0, 0, 2 (open, in_progress)", store.gets, store.sessionLists, store.messageLists)
 	}
 
 	recording := &keyedListStore{readCountingStore: store}
@@ -611,8 +611,8 @@ func TestInboxForSessionReadBudget(t *testing.T) {
 	if recording.unkeyed != 0 {
 		t.Fatalf("%d session listings carried no address key", recording.unkeyed)
 	}
-	if recording.gets+recording.sessionLists > 6 || recording.messageLists != 1 {
-		t.Fatalf("one history alias: %d gets, %d session lists, %d message lists; want at most 6 session reads and 1 message list",
+	if recording.gets+recording.sessionLists > 6 || recording.messageLists != 2 {
+		t.Fatalf("one history alias: %d gets, %d session lists, %d message lists; want at most 6 session reads and 2 message lists (open, in_progress)",
 			recording.gets, recording.sessionLists, recording.messageLists)
 	}
 }
@@ -720,8 +720,10 @@ func (s *planRecordingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 
 // TestInboxForSessionWithPredecessorsStaysKeyed pins that a session inbox
 // joining two closed predecessors' routes — more routes than one identity
-// carries — still reads the mailbox by keyed requests on the native store
-// (beads.NativeListPlan), never by one request that walks the whole ledger.
+// carries — still reads the mailbox by requests a status and a route key on
+// the native store (beads.NativeListPlan), never by one request that walks the
+// whole ledger or every in_progress bead: one per route for the open mail, and
+// one per route for the in_progress mail.
 func TestInboxForSessionWithPredecessorsStaysKeyed(t *testing.T) {
 	store, _, current := newSuccessionFixture(t)
 	if err := store.SetMetadata(current().ID, "alias_history", "older-sky,old-sky"); err != nil {
@@ -746,16 +748,92 @@ func TestInboxForSessionWithPredecessorsStaysKeyed(t *testing.T) {
 	if got := len(inbox.Routes()); got <= 8 {
 		t.Fatalf("inbox joins %d routes; the fixture must exceed one identity's routes", got)
 	}
-	if len(recording.messageQueries) != 1 {
-		t.Fatalf("read the mailbox with %d listings, want 1", len(recording.messageQueries))
+	if len(recording.messageQueries) != 2 {
+		t.Fatalf("read the mailbox with %d listings, want 2 (open, then in_progress, both by route)", len(recording.messageQueries))
 	}
-	plan := beads.NativeListPlan(recording.messageQueries[0])
-	for _, req := range plan {
-		if !beads.NativeListRequestKeyed(req) {
-			t.Fatalf("the inbox listing plans an unkeyed request on the native store: %+v", recording.messageQueries[0])
+	for _, query := range recording.messageQueries {
+		for _, req := range beads.NativeListPlan(query) {
+			if req.Status == "" || req.Assignee == "" {
+				t.Fatalf("the inbox listing plans a native request no status and route key: %+v", query)
+			}
 		}
 	}
-	if len(plan) != len(inbox.Routes()) {
-		t.Fatalf("native plan has %d requests, want one per route (%d)", len(plan), len(inbox.Routes()))
+	for i, status := range []string{"open", "in_progress"} {
+		if plan := beads.NativeListPlan(recording.messageQueries[i]); len(plan) != len(inbox.Routes()) {
+			t.Fatalf("%s-mail native plan has %d requests, want one per route (%d)", status, len(plan), len(inbox.Routes()))
+		}
+	}
+}
+
+// setInProgress moves a message bead to in_progress, the state a bd claim
+// leaves it in.
+func setInProgress(t *testing.T, store beads.Store, id string) {
+	t.Helper()
+	inProgress := "in_progress"
+	if err := store.Update(id, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("set %s in_progress: %v", id, err)
+	}
+}
+
+// An in_progress auto handoff is live mail: the session inbox holds it unread,
+// and archiving it from that inbox retires it like an open one.
+func TestArchiveFromInboxRetiresInProgressHandoff(t *testing.T) {
+	store := beads.NewMemStore()
+	p := newTestProvider(store)
+	handoff, _, err := p.SendHandoff(mail.HandoffIntent{
+		From: "worker", To: "worker", Subject: "context cycle", ThreadID: "t1",
+		ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+	})
+	if err != nil {
+		t.Fatalf("SendHandoff: %v", err)
+	}
+	setInProgress(t, store, handoff.ID)
+
+	inbox, err := p.InboxForRoutes([]string{"worker"})
+	if err != nil {
+		t.Fatalf("InboxForRoutes: %v", err)
+	}
+	if got := messageIDs(inbox.Unread()); !slices.Equal(got, []string{handoff.ID}) {
+		t.Fatalf("inbox unread = %v, want the in_progress handoff %s", got, handoff.ID)
+	}
+	if err := p.ArchiveInjectedAutoHandoffsFromInbox(inbox, []string{handoff.ID}, nil); err != nil {
+		t.Fatalf("ArchiveInjectedAutoHandoffsFromInbox: %v", err)
+	}
+	b, err := store.Get(handoff.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if b.Status != "closed" || b.Metadata[mail.ReadMetadataKey] != "true" || b.Metadata["close_reason"] != RetentionSweepCloseReason {
+		t.Fatalf("archived handoff = status %q metadata %v, want closed, read, retention close_reason", b.Status, b.Metadata)
+	}
+}
+
+// The session inbox and CheckAutoHandoffs both offer an unread in_progress
+// auto handoff for SessionStart delivery, as they do an open one.
+func TestInboxUnreadAutoHandoffsIncludesInProgressHandoff(t *testing.T) {
+	store := beads.NewMemStore()
+	p := newTestProvider(store)
+	handoff, _, err := p.SendHandoff(mail.HandoffIntent{
+		From: "worker", To: "worker", Subject: "context cycle", ThreadID: "t1",
+		ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+	})
+	if err != nil {
+		t.Fatalf("SendHandoff: %v", err)
+	}
+	setInProgress(t, store, handoff.ID)
+
+	inbox, err := p.InboxForRoutes([]string{"worker"})
+	if err != nil {
+		t.Fatalf("InboxForRoutes: %v", err)
+	}
+	if got := messageIDs(inbox.UnreadAutoHandoffs()); !slices.Equal(got, []string{handoff.ID}) {
+		t.Fatalf("UnreadAutoHandoffs = %v, want the in_progress handoff %s", got, handoff.ID)
+	}
+	checked, err := p.CheckAutoHandoffs([]string{"worker"})
+	if err != nil {
+		t.Fatalf("CheckAutoHandoffs: %v", err)
+	}
+	if got := messageIDs(checked); !slices.Equal(got, []string{handoff.ID}) {
+		t.Fatalf("CheckAutoHandoffs = %v, want the in_progress handoff %s", got, handoff.ID)
 	}
 }

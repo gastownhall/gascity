@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -178,17 +179,193 @@ func TestInboxUsesSingleBothTierMessageScanAcrossRoutes(t *testing.T) {
 	if len(msgs) != 4 {
 		t.Fatalf("Inbox = %#v, want four routed messages", msgs)
 	}
-	if len(store.messageQueries) != 1 {
-		t.Fatalf("message query count = %d, want 1; queries=%+v", len(store.messageQueries), store.messageQueries)
+	if len(store.messageQueries) != 2 {
+		t.Fatalf("message query count = %d, want 2 (open, then in_progress, both by route); queries=%+v", len(store.messageQueries), store.messageQueries)
 	}
-	query := store.messageQueries[0]
+	open, claimed := store.messageQueries[0], store.messageQueries[1]
 	wantRoutes := []string{"sky", sessionBead.ID, "runtime-sky", "mayor", "witness"}
-	if query.TierMode != beads.TierBoth || query.AllowScan || query.Type != "message" || query.Status != "open" || query.Assignee != "" || !slices.Equal(query.Assignees, wantRoutes) {
-		t.Fatalf("message query = %+v, want one both-tier Assignees scan for %v", query, wantRoutes)
+	if open.TierMode != beads.TierBoth || open.AllowScan || open.Type != "message" || open.Status != "open" || open.IncludeClosed || open.Assignee != "" || !slices.Equal(open.Assignees, wantRoutes) {
+		t.Fatalf("open message query = %+v, want one both-tier open Assignees scan for %v", open, wantRoutes)
 	}
-	if !query.Live {
-		t.Fatalf("message query = %+v, want live read for command-visible mail freshness", query)
+	if claimed.TierMode != beads.TierBoth || claimed.AllowScan || claimed.Type != "message" || claimed.Status != "in_progress" || claimed.IncludeClosed || claimed.Assignee != "" || !slices.Equal(claimed.Assignees, wantRoutes) {
+		t.Fatalf("in_progress message query = %+v, want one both-tier in_progress Assignees scan for %v", claimed, wantRoutes)
 	}
+	if !open.Live || !claimed.Live {
+		t.Fatalf("message queries = %+v, want live reads for command-visible mail freshness", store.messageQueries)
+	}
+}
+
+// TestMailboxReadsStayStatusScopedOnTheNativeStore pins that every mailbox
+// read lists mail by a status the native store pushes (beads.NativeListPlan),
+// so a read never fetches the closed mail its mailbox ever held, and that no
+// read — the unrouted count behind /status included — plans a request that
+// walks the whole ledger (beadstest.WireModel). It also pins that a read of
+// one mailbox plans no request that returns the in_progress beads other
+// sessions own: the native store pushes no message type, so only the read's
+// route keys keep its in_progress listing off the city's claimed work.
+func TestMailboxReadsStayStatusScopedOnTheNativeStore(t *testing.T) {
+	rec := beadstest.NewOpRecordingStore(beads.NewMemStore())
+	p := newTestProvider(rec)
+	var foreign []beads.Bead
+	for _, claim := range []beads.Bead{
+		{Title: "claimed task", Type: "task", Assignee: "carol"},
+		{Title: "claimed step", Type: "task", Assignee: "dave"},
+	} {
+		b, err := rec.Create(claim)
+		if err != nil {
+			t.Fatalf("Create(%s): %v", claim.Title, err)
+		}
+		foreign = append(foreign, b)
+	}
+	carolsMail, err := p.Send("alice", "carol", "claimed elsewhere", "carol's in_progress mail")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	carolsMailBead, err := rec.Get(carolsMail.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", carolsMail.ID, err)
+	}
+	foreign = append(foreign, carolsMailBead)
+	for i := range foreign {
+		setInProgress(t, rec, foreign[i].ID)
+		if foreign[i], err = rec.Get(foreign[i].ID); err != nil {
+			t.Fatalf("Get(%s): %v", foreign[i].ID, err)
+		}
+	}
+	pending, err := p.Send("alice", "bob", "pending", "open mail")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	claimed, err := p.Send("alice", "bob", "claimed", "in_progress mail")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	setInProgress(t, rec, claimed.ID)
+	archived, err := p.Send("alice", "bob", "archived", "closed mail")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if err := p.Archive(archived.ID); err != nil {
+		t.Fatalf("Archive: %v", err)
+	}
+	msgs, err := p.All("bob")
+	if err != nil {
+		t.Fatalf("All: %v", err)
+	}
+	var got []string
+	for _, m := range msgs {
+		got = append(got, m.ID)
+	}
+	if want := []string{pending.ID, claimed.ID}; !slices.Equal(got, want) {
+		t.Fatalf("All(bob) = %v, want the open and the in_progress message %v, not the archived %s", got, want, archived.ID)
+	}
+
+	// An every-mailbox read (all) reads every session's mail by design; each
+	// other read reads bob's mailbox alone.
+	reads := []struct {
+		name string
+		all  bool
+		read func() error
+	}{
+		{"Count(all)", true, func() error { _, _, err := p.Count(""); return err }},
+		{"Count", false, func() error { _, _, err := p.Count("bob"); return err }},
+		{"CountRecipients", false, func() error { _, _, err := p.CountRecipients([]string{"bob"}); return err }},
+		{"Check", false, func() error { _, err := p.Check("bob"); return err }},
+		{"Inbox", false, func() error { _, err := p.Inbox("bob"); return err }},
+		{"All", false, func() error { _, err := p.All("bob"); return err }},
+		{"InboxRecipients(all)", true, func() error { _, err := p.InboxRecipients(nil); return err }},
+		{"InboxForRoutes", false, func() error { _, err := p.InboxForRoutes([]string{"bob"}); return err }},
+		{"InboxForSession", false, func() error { _, err := p.InboxForSession(session.Info{ID: "bob"}); return err }},
+		{"CheckAutoHandoffs", false, func() error { _, err := p.CheckAutoHandoffs([]string{"bob"}); return err }},
+		{"ArchiveCandidates", false, func() error {
+			_, err := p.ArchiveCandidates(ArchiveFilter{Recipients: []string{"bob"}, IncludeRead: true})
+			return err
+		}},
+		{"SendDeduped", false, func() error { _, _, err := p.SendDeduped("alice", "bob", "alert", "body", "stream-1"); return err }},
+		{"SendHandoff", false, func() error {
+			_, _, err := p.SendHandoff(mail.HandoffIntent{
+				From: "bob", To: "bob", Subject: "context cycle", DedupKey: "handoff-1",
+				ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+			})
+			return err
+		}},
+	}
+	model := beadstest.WireModel{LedgerRows: 4000}
+	bigger := beadstest.WireModel{LedgerRows: 40000}
+	for _, r := range reads {
+		rec.Reset()
+		if err := r.read(); err != nil {
+			t.Fatalf("%s: %v", r.name, err)
+		}
+		var listings []beadstest.RecordedOp
+		for _, op := range rec.Ops() {
+			if op.Kind == beadstest.OpList && op.Query.Type == messageBeadType {
+				listings = append(listings, op)
+			}
+		}
+		if len(listings) == 0 {
+			t.Errorf("%s recorded no message listing; the read did not take its path", r.name)
+		}
+		for _, op := range listings {
+			for _, req := range beads.NativeListPlan(op.Query) {
+				if !beads.NativeListRequestKeyed(req) || req.Status == "" {
+					t.Errorf("%s: listing (%s) plans a native request with status %q (keyed=%t), want one keyed by a status",
+						r.name, beadstest.DescribeListQuery(op.Query), req.Status, beads.NativeListRequestKeyed(req))
+				}
+			}
+			if r.all {
+				continue
+			}
+			if got := nativePlanAdmits(op.Query, foreign); len(got) != 0 {
+				t.Errorf("%s: listing (%s) plans a native request that returns in_progress beads other sessions own %v, want none",
+					r.name, beadstest.DescribeListQuery(op.Query), got)
+			}
+		}
+		cost := model.Price(0, listings)
+		if cost.Unkeyed != 0 {
+			t.Errorf("%s: %s", r.name, cost)
+		}
+		if grown := bigger.Price(0, listings); grown.Requests != cost.Requests {
+			t.Errorf("%s: modeled requests grow with the ledger: %d at %d rows, %d at %d rows", r.name, cost.Requests, model.LedgerRows, grown.Requests, bigger.LedgerRows)
+		}
+	}
+}
+
+// nativePlanAdmits returns the ids of the candidates some request of query's
+// native plan (beads.NativeListPlan) admits: the rows the native store would
+// send for query before it re-applies the whole query. It applies the
+// predicates a plan pushes for a mailbox listing (status, assignee, type,
+// parent, labels, metadata). Any other predicate a request carries is not
+// applied, which can only widen the answer, so an assertion that a row is not
+// admitted never passes wrongly.
+func nativePlanAdmits(query beads.ListQuery, candidates []beads.Bead) []string {
+	var admitted []string
+	for _, b := range candidates {
+		for _, req := range beads.NativeListPlan(query) {
+			if req.Status != "" && !slices.Contains(strings.Split(req.Status, ","), b.Status) {
+				continue
+			}
+			if (req.Assignee != "" && req.Assignee != b.Assignee) ||
+				(req.IssueType != "" && req.IssueType != b.Type) ||
+				(req.ParentID != "" && req.ParentID != b.ParentID) {
+				continue
+			}
+			if slices.ContainsFunc(req.Labels, func(label string) bool { return !slices.Contains(b.Labels, label) }) {
+				continue
+			}
+			metadataMatches := true
+			for key, value := range req.MetadataFields {
+				if b.Metadata[key] != value {
+					metadataMatches = false
+				}
+			}
+			if metadataMatches {
+				admitted = append(admitted, b.ID)
+				break
+			}
+		}
+	}
+	return admitted
 }
 
 func TestInboxBypassesPrimedCacheForFreshMessages(t *testing.T) {
@@ -284,8 +461,8 @@ func TestInboxRecipientsDedupesRoutesAndReadFiltering(t *testing.T) {
 	if msgs[0].ID != msg1.ID && msgs[1].ID != msg1.ID {
 		t.Fatalf("InboxRecipients = %#v, want current-alias message %s", msgs, msg1.ID)
 	}
-	if len(store.messageQueries) != 1 {
-		t.Fatalf("message query count = %d, want 1; queries=%+v", len(store.messageQueries), store.messageQueries)
+	if len(store.messageQueries) != 2 {
+		t.Fatalf("message query count = %d, want 2 (open, then in_progress, both by route); queries=%+v", len(store.messageQueries), store.messageQueries)
 	}
 }
 
@@ -331,6 +508,9 @@ func TestCheckDoesNotUseMessageLabelSupplement(t *testing.T) {
 		if strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=message") && strings.Contains(cmd, "--status=open") {
 			return []byte(`[{"id":"msg-1","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"mayor","from":"human","created_at":"2026-01-02T03:04:05Z","ephemeral":true,"labels":["gc:message"]}]`), nil
 		}
+		if strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=message") && strings.Contains(cmd, "--status=in_progress") {
+			return []byte(`[]`), nil
+		}
 		return nil, errors.New("unexpected command: " + cmd)
 	}
 	p := newTestProvider(beads.NewBdStore(t.TempDir(), runner))
@@ -362,11 +542,20 @@ func TestCheckUsesSingleAssigneeMessageScanForSlashRecipient(t *testing.T) {
 			}
 			messageListCalls++
 			return []byte(`[{"id":"msg-w","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"gascity/workflows.codex-max","from":"human","created_at":"2026-01-02T03:04:05Z","ephemeral":true}]`), nil
+		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=message") && strings.Contains(cmd, "--status=in_progress"):
+			// The in_progress mail is listed by the same route as the open
+			// mail.
+			if !strings.Contains(cmd, "--assignee="+recipient) {
+				t.Fatalf("slash recipient in_progress message query = %s, want single --assignee filter", cmd)
+			}
+			return []byte(`[]`), nil
 		case strings.Contains(cmd, "bd query --json"):
 			// A slash recipient is not a bare bd query token; it must reach
-			// the wisp query as a quoted predicate, not be dropped (which
-			// would read every open ephemeral message).
-			if strings.Contains(cmd, "type=message") && !strings.Contains(cmd, `assignee="`+recipient+`"`) {
+			// the open-mail and the in_progress-mail wisp queries as a quoted
+			// predicate, not be dropped (which would read every ephemeral
+			// message of that status).
+			mailWisps := strings.Contains(cmd, "status=open") || strings.Contains(cmd, "status=in_progress")
+			if strings.Contains(cmd, "type=message") && mailWisps && !strings.Contains(cmd, `assignee="`+recipient+`"`) {
 				t.Fatalf("supplemental wisp query = %s, want quoted assignee=%q predicate", cmd, recipient)
 			}
 			// The session-alias lookup may carry the recipient as a quoted
@@ -408,6 +597,8 @@ func TestCheckUsesSingleBothTierBdMessageScan(t *testing.T) {
 		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=message") && strings.Contains(cmd, "--status=open"):
 			messageListCalls++
 			return []byte(`[{"id":"msg-1","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"mayor","from":"human","created_at":"2026-01-02T03:04:05Z","ephemeral":true}]`), nil
+		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=message") && strings.Contains(cmd, "--status=in_progress"):
+			return []byte(`[]`), nil
 		}
 		return nil, errors.New("unexpected command: " + cmd)
 	}
@@ -3417,3 +3608,154 @@ var (
 	_ mail.Provider    = (*Provider)(nil)
 	_ mail.DedupSender = (*Provider)(nil)
 )
+
+// mailboxViews renders every list view of bob's mailbox as "id:read" strings,
+// so two mailboxes compare in one equality check.
+func mailboxViews(t *testing.T, p *Provider, threadOf string) map[string]string {
+	t.Helper()
+	render := func(msgs []mail.Message) string {
+		parts := make([]string, 0, len(msgs))
+		for _, m := range msgs {
+			parts = append(parts, fmt.Sprintf("%s:%t", m.ID, m.Read))
+		}
+		return strings.Join(parts, ",")
+	}
+	views := map[string]string{}
+	must := func(name string, msgs []mail.Message, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		views[name] = render(msgs)
+	}
+	inbox, err := p.InboxForRoutes([]string{"bob"})
+	if err != nil {
+		t.Fatalf("InboxForRoutes: %v", err)
+	}
+	views["InboxForRoutes.Unread"] = render(inbox.Unread())
+	views["InboxForRoutes.All"] = render(inbox.All())
+	total, unread := inbox.Counts()
+	views["InboxForRoutes.Counts"] = fmt.Sprintf("%d/%d", total, unread)
+	sessionInbox, err := p.InboxForSession(session.Info{ID: "bob"})
+	if err != nil {
+		t.Fatalf("InboxForSession: %v", err)
+	}
+	views["InboxForSession.All"] = render(sessionInbox.All())
+	checked, err := p.Check("bob")
+	must("Check", checked, err)
+	inboxed, err := p.Inbox("bob")
+	must("Inbox", inboxed, err)
+	all, err := p.All("bob")
+	must("All", all, err)
+	thread, err := p.Thread(threadOf)
+	must("Thread", thread, err)
+	candidates, err := p.ArchiveCandidates(ArchiveFilter{Recipients: []string{"bob"}, IncludeRead: true})
+	must("ArchiveCandidates", candidates, err)
+	total, unread, err = p.Count("bob")
+	if err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+	views["Count"] = fmt.Sprintf("%d/%d", total, unread)
+	total, unread, err = p.CountRecipients([]string{"bob"})
+	if err != nil {
+		t.Fatalf("CountRecipients: %v", err)
+	}
+	views["CountRecipients"] = fmt.Sprintf("%d/%d", total, unread)
+	return views
+}
+
+// TestInProgressMailListedLikeOpenMail pins that in_progress mail is live
+// mail: every list view returns it with the same read state and counts as the
+// same mailbox left open.
+func TestInProgressMailListedLikeOpenMail(t *testing.T) {
+	seed := func(status string) map[string]string {
+		store := beads.NewMemStore()
+		p := newTestProvider(store)
+		first, err := p.Send("alice", "bob", "hello", "first")
+		if err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		reply, err := p.Reply(first.ID, "alice", "re: hello", "second")
+		if err != nil {
+			t.Fatalf("Reply: %v", err)
+		}
+		if err := p.MarkRead(reply.ID); err != nil {
+			t.Fatalf("MarkRead: %v", err)
+		}
+		if status == "in_progress" {
+			for _, id := range []string{first.ID, reply.ID} {
+				setInProgress(t, store, id)
+			}
+		}
+		return mailboxViews(t, p, first.ID)
+	}
+	open := seed("open")
+	if open["CountRecipients"] != "2/1" || open["Thread"] == "" {
+		t.Fatalf("open mailbox views = %v, want two messages, one unread, in one thread", open)
+	}
+	inProgress := seed("in_progress")
+	for view, want := range open {
+		if got := inProgress[view]; got != want {
+			t.Errorf("%s with in_progress mail = %q, want %q as for open mail", view, got, want)
+		}
+	}
+}
+
+// TestDirectIDOpsTreatInProgressMailAsLive pins that an in_progress message is
+// addressable by ID like open mail, while a closed message stays not-found
+// unless a retention sweep closed it.
+func TestDirectIDOpsTreatInProgressMailAsLive(t *testing.T) {
+	store := beads.NewMemStore()
+	p := newTestProvider(store)
+	msg, err := p.Send("alice", "bob", "hello", "body")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	setInProgress(t, store, msg.ID)
+
+	if got, err := p.Get(msg.ID); err != nil || got.ID != msg.ID {
+		t.Fatalf("Get(in_progress) = (%q, %v), want the message", got.ID, err)
+	}
+	if err := p.MarkRead(msg.ID); err != nil {
+		t.Fatalf("MarkRead(in_progress): %v", err)
+	}
+	if err := p.MarkUnread(msg.ID); err != nil {
+		t.Fatalf("MarkUnread(in_progress): %v", err)
+	}
+	if got, err := p.Read(msg.ID); err != nil || !got.Read {
+		t.Fatalf("Read(in_progress) = (read=%v, %v), want a read message", got.Read, err)
+	}
+	if _, err := p.Reply(msg.ID, "bob", "re: hello", "reply"); err != nil {
+		t.Fatalf("Reply(in_progress): %v", err)
+	}
+
+	for _, tc := range []struct {
+		reason      string
+		addressable bool
+	}{
+		{reason: RetentionSweepCloseReason, addressable: true},
+		{reason: UnreadRetentionSweepCloseReason, addressable: true},
+		{reason: "", addressable: false},
+		{reason: "archived-by-user", addressable: false},
+	} {
+		closed, err := p.Send("alice", "bob", "closed "+tc.reason, "body")
+		if err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		if tc.reason != "" {
+			if err := store.SetMetadata(closed.ID, "close_reason", tc.reason); err != nil {
+				t.Fatalf("SetMetadata: %v", err)
+			}
+		}
+		if err := store.Close(closed.ID); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		_, err = p.Get(closed.ID)
+		if tc.addressable && err != nil {
+			t.Errorf("Get(closed, close_reason=%q) = %v, want addressable", tc.reason, err)
+		}
+		if !tc.addressable && !errors.Is(err, mail.ErrNotFound) {
+			t.Errorf("Get(closed, close_reason=%q) = %v, want mail.ErrNotFound", tc.reason, err)
+		}
+	}
+}
