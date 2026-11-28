@@ -806,3 +806,88 @@ func contains(ss []string, want string) bool {
 	}
 	return false
 }
+
+func inProgressSeed(b *beads.Bead) { b.Status = "in_progress" }
+
+// assertSweptWithReason fails unless every id is closed with reason.
+func assertSweptWithReason(t *testing.T, store beads.Store, reason string, ids ...string) {
+	t.Helper()
+	for _, id := range ids {
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if b.Status != "closed" || b.Metadata["close_reason"] != reason {
+			t.Errorf("%s = status %q close_reason %q, want closed with %q", id, b.Status, b.Metadata["close_reason"], reason)
+		}
+	}
+}
+
+// TestSweepReadMessagesBeforeClosesInProgressReadMail pins that the read-mail
+// retention sweep and its count twin age in_progress read mail like open read
+// mail, and that a limit counts an older in_progress candidate first.
+func TestSweepReadMessagesBeforeClosesInProgressReadMail(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	older, old := now.Add(-2*time.Minute), now.Add(-time.Minute)
+	newStore := func() *beads.MemStore {
+		return beads.NewMemStoreFrom(100, []beads.Bead{
+			readMailSeed("in-progress", older, inProgressSeed),
+			readMailSeed("open", old),
+		}, nil)
+	}
+
+	store := newStore()
+	mailStore := beads.MailStore{Store: store}
+	if count, err := CountReadMessagesBefore(mailStore, now, 0); err != nil || count != 2 {
+		t.Fatalf("CountReadMessagesBefore = (%d, %v), want 2", count, err)
+	}
+	closed, closeErrs, listErr := SweepReadMessagesBefore(mailStore, now, 0, RetentionSweepCloseReason)
+	if listErr != nil || len(closeErrs) != 0 || closed != 2 {
+		t.Fatalf("SweepReadMessagesBefore = (%d, %v, %v), want 2 closed", closed, closeErrs, listErr)
+	}
+	assertSweptWithReason(t, store, RetentionSweepCloseReason, "in-progress", "open")
+
+	store = newStore()
+	mailStore = beads.MailStore{Store: store}
+	if count, err := CountReadMessagesBefore(mailStore, now, 1); err != nil || count != 1 {
+		t.Fatalf("CountReadMessagesBefore(limit 1) = (%d, %v), want 1", count, err)
+	}
+	if closed, _, _ := SweepReadMessagesBefore(mailStore, now, 1, RetentionSweepCloseReason); closed != 1 {
+		t.Fatalf("SweepReadMessagesBefore(limit 1) closed %d, want 1", closed)
+	}
+	assertSweptWithReason(t, store, RetentionSweepCloseReason, "in-progress")
+}
+
+// TestSweepUnreadMessagesBeforeClosesInProgressUnreadMail is the unread-mail
+// counterpart: the opt-in unread sweep and its count twin age in_progress
+// unread mail like open unread mail.
+func TestSweepUnreadMessagesBeforeClosesInProgressUnreadMail(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	older, old := now.Add(-2*time.Minute), now.Add(-time.Minute)
+	newStore := func() *beads.MemStore {
+		inProgress := unreadMailSeed("in-progress", older)
+		inProgress.Status = "in_progress"
+		return beads.NewMemStoreFrom(100, []beads.Bead{inProgress, unreadMailSeed("open", old)}, nil)
+	}
+
+	store := newStore()
+	mailStore := beads.MailStore{Store: store}
+	if count, err := CountUnreadMessagesBefore(mailStore, now, 0); err != nil || count != 2 {
+		t.Fatalf("CountUnreadMessagesBefore = (%d, %v), want 2", count, err)
+	}
+	closed, closeErrs, listErr := SweepUnreadMessagesBefore(mailStore, now, 0, UnreadRetentionSweepCloseReason)
+	if listErr != nil || len(closeErrs) != 0 || closed != 2 {
+		t.Fatalf("SweepUnreadMessagesBefore = (%d, %v, %v), want 2 closed", closed, closeErrs, listErr)
+	}
+	assertSweptWithReason(t, store, UnreadRetentionSweepCloseReason, "in-progress", "open")
+
+	store = newStore()
+	mailStore = beads.MailStore{Store: store}
+	if count, err := CountUnreadMessagesBefore(mailStore, now, 1); err != nil || count != 1 {
+		t.Fatalf("CountUnreadMessagesBefore(limit 1) = (%d, %v), want 1", count, err)
+	}
+	if closed, _, _ := SweepUnreadMessagesBefore(mailStore, now, 1, UnreadRetentionSweepCloseReason); closed != 1 {
+		t.Fatalf("SweepUnreadMessagesBefore(limit 1) closed %d, want 1", closed)
+	}
+	assertSweptWithReason(t, store, UnreadRetentionSweepCloseReason, "in-progress")
+}

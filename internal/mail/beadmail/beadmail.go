@@ -1192,7 +1192,7 @@ const RetentionSweepCloseReason = "mail gc-swept: read mail bead past gc retenti
 //
 // limit caps the number of beads closed (pass 0 for no cap); it bounds both the
 // candidate query and the loop so a caller sharing a cross-phase close budget
-// (see the nudge+mail sweep) honors it exactly. Beads that are no longer open
+// (see the nudge+mail sweep) honors it exactly. Beads that are no longer live
 // when revisited are skipped without consuming the limit.
 //
 // Errors are split by severity so callers can preserve fatal-vs-recoverable
@@ -1208,7 +1208,7 @@ func SweepReadMessagesBefore(store beads.MailStore, cutoff time.Time, limit int,
 		if limit > 0 && closed >= limit {
 			break
 		}
-		if b.Status != "open" {
+		if !isLiveMail(b) {
 			continue
 		}
 		if err := store.SetMetadata(b.ID, "close_reason", closeReason); err != nil {
@@ -1238,7 +1238,7 @@ func CountReadMessagesBefore(store beads.MailStore, cutoff time.Time, limit int)
 		if limit > 0 && count >= limit {
 			break
 		}
-		if b.Status != "open" {
+		if !isLiveMail(b) {
 			continue
 		}
 		count++
@@ -1302,7 +1302,7 @@ const UnreadRetentionSweepCloseReason = "mail gc-swept: unread mail bead past gc
 // limit caps the number of beads closed (pass 0 for no cap); the close loop
 // enforces it over the full unbounded candidate set (see unreadMessagesBefore)
 // so a caller sharing a cross-phase close budget (see the nudge+mail sweep)
-// honors it exactly. Beads that are no longer open when revisited are skipped
+// honors it exactly. Beads that are no longer live when revisited are skipped
 // without consuming the limit.
 //
 // Errors are split by severity the same way SweepReadMessagesBefore's are:
@@ -1318,7 +1318,7 @@ func SweepUnreadMessagesBefore(store beads.MailStore, cutoff time.Time, limit in
 		if limit > 0 && closed >= limit {
 			break
 		}
-		if b.Status != "open" {
+		if !isLiveMail(b) {
 			continue
 		}
 		if err := store.SetMetadata(b.ID, "close_reason", closeReason); err != nil {
@@ -1348,7 +1348,7 @@ func CountUnreadMessagesBefore(store beads.MailStore, cutoff time.Time, limit in
 		if limit > 0 && count >= limit {
 			break
 		}
-		if b.Status != "open" {
+		if !isLiveMail(b) {
 			continue
 		}
 		count++
