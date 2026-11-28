@@ -493,7 +493,7 @@ max_attempts = 6
 
 [template.check.check]
 mode = "exec"
-path = ".gc/scripts/checks/implementation-review-approved.sh"
+path = "../assets/scripts/checks/implementation-review-approved.sh"
 timeout = "10m"
 
 [[template.children]]
@@ -535,6 +535,14 @@ makes the smallest fixes and records a verdict in bead metadata. The orchestrato
 verdict is `iterate` and budget remains (`max_attempts = 6`), it re-spawns the
 *entire* lanes-synthesize-fix subtree as the next iteration. The verdict
 travels as bead metadata; no judgment lives in Go.
+
+The check path names the script where a pack ships it: in a formula layer's
+`assets/` directory, here the gascity pack's validators. The compiler resolves
+`../assets/scripts/checks/<name>` through the formula layers, so the
+highest-priority layer that ships the script wins, and a v2 formula whose
+script no layer ships does not compile. See
+[where the check script lives](/reference/specs/formula-spec-v2#31-check) in
+the v2 spec.
 
 <Warning>
 A step cannot combine `expand` with its own `[steps.check]` — the compiler
@@ -601,7 +609,7 @@ max_attempts = 3
 
 [steps.check.check]
 mode = "exec"
-path = ".gc/scripts/checks/build-artifact-valid.sh"
+path = "../assets/scripts/checks/build-artifact-valid.sh"
 timeout = "5m"
 ```
 
@@ -734,7 +742,7 @@ max_attempts = 3
 
 [steps.check.check]
 mode = "exec"
-path = ".gc/scripts/checks/build-artifact-valid.sh"
+path = "../assets/scripts/checks/build-artifact-valid.sh"
 timeout = "5m"
 ```
 
