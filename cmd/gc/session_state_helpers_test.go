@@ -49,6 +49,7 @@ func TestIsPoolSessionSlotFreeable_Matrix(t *testing.T) {
 	now := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
 	recent := now.Add(-time.Minute).Format(time.RFC3339)
 	stale := now.Add(-sessionpkg.KillPendingGrace - time.Minute).Format(time.RFC3339)
+	future := now.Add(time.Hour).Format(time.RFC3339)
 	cases := []struct {
 		name string
 		meta map[string]string
@@ -78,6 +79,15 @@ func TestIsPoolSessionSlotFreeable_Matrix(t *testing.T) {
 		// A soft suspend (the shutdown sweep) healed to asleep: no reason, no
 		// slept_at, suspended_at kept. Its writer is known, so it frees.
 		{"asleep+healed-soft-suspend", map[string]string{"state": "asleep", "suspended_at": recent}, true},
+		// A deliberate hold or any intent on that shape keeps the slot.
+		{"asleep+healed-soft-suspend+user-hold", map[string]string{"state": "asleep", "suspended_at": recent, "sleep_intent": string(sessionpkg.SleepReasonUserHold)}, false},
+		{"asleep+healed-soft-suspend+wait-hold", map[string]string{"state": "asleep", "suspended_at": recent, "wait_hold": "true"}, false},
+		{"asleep+healed-soft-suspend+wait-intent", map[string]string{"state": "asleep", "suspended_at": recent, "sleep_intent": string(sessionpkg.SleepReasonWaitHold)}, false},
+		{"asleep+healed-soft-suspend+live-hold-timer", map[string]string{"state": "asleep", "suspended_at": recent, "held_until": future}, false},
+		{"asleep+healed-soft-suspend+live-quarantine", map[string]string{"state": "asleep", "suspended_at": recent, "quarantined_until": future}, false},
+		{"asleep+healed-soft-suspend+unreadable-timer", map[string]string{"state": "asleep", "suspended_at": recent, "held_until": "not-a-time"}, false},
+		{"asleep+healed-soft-suspend+unknown-intent", map[string]string{"state": "asleep", "suspended_at": recent, "sleep_intent": "future-intent"}, false},
+		{"suspended+suspended_at", map[string]string{"state": "suspended", "suspended_at": recent}, false},
 		{"asleep+empty-reason", map[string]string{"state": "asleep", "sleep_reason": ""}, false},
 		{"asleep+missing-reason", map[string]string{"state": "asleep"}, false},
 		{"asleep+wait-hold", map[string]string{"state": "asleep", "sleep_reason": "wait-hold"}, false},
