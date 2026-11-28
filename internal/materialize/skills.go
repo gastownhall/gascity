@@ -382,6 +382,18 @@ type Request struct {
 	// Use LegacyOwnedRootsFor for the canonical list. Pass nil to keep
 	// the historical behavior.
 	LegacyOwnedRoots []string
+	// ForeignRoots lists skill roots of other configured writers this
+	// pass does not fold (another agent's skills dir). A live link whose
+	// target is under one of them and under none of OwnedRoots belongs to
+	// a writer this pass cannot see: it is neither pruned nor re-pointed,
+	// its manifest entry is kept, and a desired name it occupies is
+	// reported in Result.Skipped. A dangling link under a foreign root
+	// serves no writer and is removed. The check runs before the
+	// ownership manifest's, so list no root this pass's own writers may
+	// have linked from before (a pack catalog another scope also
+	// imports): their stale links would never be re-pointed or pruned.
+	// Pass nil when the request folds every writer of the sink.
+	ForeignRoots []string
 	// DryRun computes the pass without touching the filesystem: no sink
 	// directory, symlink, removal, or ownership manifest. The Result
 	// reports what a real pass would do.
@@ -562,6 +574,19 @@ func Run(req Request) (Result, error) {
 		legacyOwned = append(legacyOwned, canon)
 	}
 
+	foreign := make([]string, 0, len(req.ForeignRoots))
+	for _, root := range req.ForeignRoots {
+		if root == "" {
+			continue
+		}
+		canon, err := canonicalizePath(root)
+		if err != nil {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("canonicalize foreign root %q: %v", root, err))
+			continue
+		}
+		foreign = append(foreign, canon)
+	}
+
 	// Step 2: legacy stub migration.
 	for _, name := range req.LegacyNames {
 		path := filepath.Join(absSink, name)
@@ -609,8 +634,26 @@ func Run(req Request) (Result, error) {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("canonicalize target %q: %v", target, terr))
 			continue
 		}
+		underOwned := targetUnderOwnedRoot(canonTarget, owned)
+		if foreignRoot := rootContaining(canonTarget, foreign); !underOwned && foreignRoot != "" {
+			// Another writer's link. Leave it while it resolves; a
+			// dangling one serves no writer and is removed below.
+			if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+				if _, want := desiredByName[name]; want {
+					result.Skipped = append(result.Skipped, SkippedConflict{
+						Name: name,
+						Path: path,
+						Reason: fmt.Sprintf("held by a live link to %s under another writer's skill root %s",
+							target, foreignRoot),
+					})
+					delete(desiredByName, name)
+				}
+				continue
+			}
+			underOwned = true
+		}
 		legacyTarget := false
-		if !targetUnderOwnedRoot(canonTarget, owned) && !manifestRecordsTarget(manifest, name, canonTarget) {
+		if !underOwned && !manifestRecordsTarget(manifest, name, canonTarget) {
 			// Not under any currently-owned root, and not a target this
 			// materializer's own manifest remembers writing for this name
 			// in a previous pass. Retired gc-managed roots
@@ -1007,20 +1050,22 @@ func bootstrapSkillDirs() ([]namedSkillsDir, error) {
 // equal; otherwise a self-written symlink can be mis-classified as
 // external (the failure mode the macOS path-alias regression catches).
 func targetUnderOwnedRoot(target string, ownedRoots []string) bool {
+	return rootContaining(target, ownedRoots) != ""
+}
+
+// rootContaining returns the first of roots that equals or contains the
+// canonical symlink target, or "" when none does. A relative target is
+// never under a root: the materializer always writes absolute targets.
+func rootContaining(target string, roots []string) string {
 	if !filepath.IsAbs(target) {
-		// Materializer always writes absolute targets, so a relative
-		// link is by definition not ours.
-		return false
+		return ""
 	}
-	for _, root := range ownedRoots {
-		if target == root {
-			return true
-		}
-		if strings.HasPrefix(target, root+string(os.PathSeparator)) {
-			return true
+	for _, root := range roots {
+		if target == root || strings.HasPrefix(target, root+string(os.PathSeparator)) {
+			return root
 		}
 	}
-	return false
+	return ""
 }
 
 // canonicalizePath returns path with all symlinks resolved, walking up to

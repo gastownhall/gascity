@@ -398,8 +398,92 @@ gc-managed skills root). Regular files and dirs are always left alone.
 | Symlink            | External path            | N/A         | Leave alone                |
 | Regular file       | —                        | N/A         | Leave alone (legacy stub or user content) |
 | Regular directory  | —                        | N/A         | Leave alone (legacy stub dir or user content) |
+| Symlink            | Foreign root only        | Any, live   | Leave alone (a desired name it holds is reported skipped) |
+| Symlink            | Foreign root only        | Dangling    | Delete                     |
 
-A unit test enumerates this matrix directly.
+A unit test enumerates the first seven rows directly. The foreign-root
+rows apply only to a stage-2 pass into a sink that is no scope root (see
+"Shared sinks" below); the `TestRun*ForeignRoot*` tests cover them.
+
+### Shared sinks: one desired set over every writer
+
+Several agents can write one sink: agents that share a scope root and
+provider family, an agent whose `work_dir` is another agent's scope root
+(a rig agent with `work_dir = "{{.CityRoot}}"`), or two agents whose
+sessions share one work dir. The sink holds one link per name and one
+ownership manifest, so a pass that wanted only one agent's skills would
+prune its co-writers' links, and whichever writer ran last would decide
+what the sink holds.
+
+Every pass over a sink therefore reconciles the same desired set: the
+union of every configured writer of that sink (`materialize.SinkUnion`).
+The writer index (`cmd/gc/skill_sink_writers.go`) is computed from config
+on each pass, with no state file:
+
+- **Stage-1 writers** of `<scope root>/<sink>`: every agent stage 1
+  materializes at that scope root.
+- **Stage-2 writers** of `<work dir>/<sink>`: every stage-2-eligible
+  agent whose template or pool-slot work dir resolves there and differs
+  from its scope root. Writers are template identities, so pool slots
+  share one entry.
+
+Sinks are keyed by physical path, so a rig path that aliases the city
+root is one sink. Stage 1 folds every writer of each scope-root sink;
+stage 2 folds the writers indexed for its target sink plus the invoking
+agent, loading each co-writer scope's shared catalog once (the invoking
+agent's scope uses the controller's snapshot when one is supplied).
+
+The fold applies the single-agent precedence sink-wide: an agent-local
+entry overrides the shared entry of that name for the whole sink. Sources
+are compared by physical path. A sink is **held** (nothing added,
+removed or re-pointed; the problems are logged naming the agents and
+sources) when two writers provide one name from different sources in the
+same class (agent-local or shared) that no agent-local entry settles, or
+when a writer's catalog cannot be read. A held stage-1 sink is reported
+as a reload warning; a held stage-2 sink still lets the session start.
+
+A sink that is no agent's scope-root sink may have writers the index
+cannot see: a worktree that `gc worktree ensure --agent` prepares for
+several agents, or a session whose environment resolved its work dir
+differently. Stage 2 passes such sinks `ForeignRoots`: the skills dirs
+of the configured agents other than the pass's writers (the invoking
+agent and the sink's indexed writers), less the roots the pass owns. A
+live link under a foreign root is left alone (its manifest entry is
+kept, and a desired name it occupies is reported as skipped); a dangling
+one is removed. Scope-root sinks get no foreign roots, because stage 1
+reconciles them with every writer and prunes the links of a writer whose
+`work_dir` moved away.
+
+The foreign check runs before the ownership manifest's, so a root the
+pass's own stale links may point at must not be foreign, or the manifest
+could never re-point or prune them. Each rig pins its imports on its own
+(`gc rig add --include`), so when a rig bumps or drops a pack that
+another rig still pins, its sessions' old links point into the other
+rig's pin. Therefore:
+
+- Pack catalogs (the city pack's `skills/`, city and rig imports) are
+  never foreign.
+- An agent with the binding-qualified name of one of the pass's writers,
+  such as `ops.polecat` in rigs `fe` and `be`, counts as that writer (a
+  pool slot matches through its template): it is the writer bound in
+  another rig, and its skills dir lies under that rig's pin of the pack.
+
+Two gaps remain until the manifest records which writer wrote each
+entry:
+
+- A pack agent is matched across rigs by its binding-qualified name
+  only. If a pack renames the agent between versions, or two rigs bind
+  the pack under different names, a rig that bumps the pack keeps the
+  agent's old agent-local links in its sessions' sinks that are no scope
+  root (a name the new version still provides is reported as skipped)
+  until the other rig moves too.
+- A writer the index cannot see contributes nothing to a co-writer's
+  pass, so that pass treats the writer's links as passes did before
+  shared-sink reconciliation: it prunes those into pack catalogs outside
+  its own scope, and re-points those whose name it wants from another
+  source (the same pack at another pin, say). It does the same to the
+  agent-local links of a writer that is its own agent bound in another
+  rig. The writer's own next pass links them back.
 
 ### Legacy stub migration
 
@@ -520,11 +604,12 @@ first, materialize-skills runs last (immediately before the agent command).
 
 **Concurrency note.** Stage-1 materialization writes to scope-root sinks
 (`<city>/.claude/skills/`, `<rig>/.claude/skills/`). Stage-2 materialization
-writes to per-session-worktree sinks
-(`<rig>/.gc/worktrees/<rig>/polecat-N/.claude/skills/`). These paths are
-disjoint by construction, so the supervisor-tick materializer and a
-per-session PreStart never target the same sink. No cross-stage lock is
-required.
+usually writes to per-session-worktree sinks
+(`<rig>/.gc/worktrees/<rig>/polecat-N/.claude/skills/`), but a `work_dir`
+can point at another agent's scope root or at a work dir other sessions
+share. Both stages then compute the same desired set for that sink (see
+"Shared sinks"), so their passes agree and no cross-stage lock is
+required: a pass that finds the sink converged changes nothing.
 
 **Pool scale-up cost.** A pool scaling from 0 to N spawns N sessions, each
 running its own `gc internal materialize-skills` invocation in PreStart —

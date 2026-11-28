@@ -1,9 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
-	"path/filepath"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
@@ -25,13 +26,25 @@ import (
 // root; acp runs in-process and doesn't read from it). Hybrid is
 // per-session-routed; conservatively ineligible until v0.15.2.
 //
-// Catalog load happens once per scope per call and feeds every
-// agent's materialization in this tick. Per-agent errors
-// (LoadAgentCatalog, MaterializeAgent) are logged to stderr and do
-// not abort the pass — the supervisor should continue reconciling
-// every other agent. Shared-catalog load failures are also logged and
-// then downgraded to an empty shared desired set, while preserving
-// owned-root cleanup so stale gc-managed symlinks can still be pruned.
+// Agents with the same scope root and provider family share one sink
+// directory, so the pass runs the materializer once per sink with the
+// union of what every writer of that sink wants (materialize.SinkUnion).
+// A pass per agent would let each agent prune the agent-local skills
+// another agent wrote, since the sink's ownership manifest marks every
+// gc-written link as prunable by any later pass.
+//
+// Catalog load happens once per scope per call and feeds every sink in
+// this pass. A sink with a writer catalog that cannot be read, a name
+// it cannot resolve, or a Run error is logged to stderr and left as it
+// is for the pass; the pass goes on to reconcile every other sink.
+// Shared-catalog load failures are also logged and then downgraded to
+// an empty shared desired set, while preserving owned-root cleanup so
+// stale gc-managed symlinks can still be pruned.
+//
+// The returned error joins one error per sink the pass left as it was
+// (stage1UnreconciledSinks splits it), so a caller can surface them; it
+// is nil when every sink reconciled. It never means the pass stopped
+// early.
 func runStage1SkillMaterialization(cityPath string, cfg *config.City, stderr io.Writer) error {
 	if cfg == nil {
 		return nil
@@ -39,47 +52,87 @@ func runStage1SkillMaterialization(cityPath string, cfg *config.City, stderr io.
 	skipPass := stage1SkillSkipLog.beginPass(cityPath)
 	defer skipPass.finish()
 
+	var unreconciled []error
 	for _, req := range stage1SkillRequests(cityPath, cfg, stderr) {
+		dir := req.Request.SinkDir
+		if len(req.Problems) > 0 {
+			reportHeldSkillSink(stderr, "gc: stage-1 materialize-skills", dir, req.Problems)
+			unreconciled = append(unreconciled, fmt.Errorf("skill sink %s not reconciled: %s", dir, strings.Join(req.Problems, "; ")))
+			req.markIncomplete(skipPass)
+			continue
+		}
 		res, merr := materialize.Run(req.Request)
 		if merr != nil {
-			skipPass.markIncomplete(req.Agent)
-			fmt.Fprintf(stderr, "gc: stage-1 materialize-skills for agent %q at %s: %v\n", //nolint:errcheck // best-effort stderr
-				req.Agent, req.Request.SinkDir, merr)
+			req.markIncomplete(skipPass)
+			fmt.Fprintf(stderr, "gc: stage-1 materialize-skills at %s (agents %s): %v\n", dir, req.Union.AgentList(), merr) //nolint:errcheck // best-effort stderr
+			unreconciled = append(unreconciled, fmt.Errorf("skill sink %s (agents %s) not reconciled: %w", dir, req.Union.AgentList(), merr))
 			continue
 		}
 		for _, s := range res.Skipped {
 			// A skip is the standing outcome for user content at a sink
 			// path; report it once per episode, not on every pass
-			// (skill_skip_log.go).
-			msg := fmt.Sprintf("gc: agent %q skipped skill %q at %s — %s", req.Agent, s.Name, s.Path, s.Reason)
-			if skipPass.shouldReport(req.Agent, s.Path, msg) {
+			// (skill_skip_log.go). It is reported once per sink, under
+			// the agent whose entry the sink wants for that name.
+			agent := req.Union.WantedBy(s.Name)
+			msg := fmt.Sprintf("gc: agent %q skipped skill %q at %s — %s", agent, s.Name, s.Path, s.Reason)
+			if skipPass.shouldReport(agent, s.Path, msg) {
 				fmt.Fprintln(stderr, msg) //nolint:errcheck // best-effort stderr
 			}
 		}
 		for _, w := range res.Warnings {
-			fmt.Fprintf(stderr, "gc: agent %q stage-1 materialize warning: %s\n", //nolint:errcheck // best-effort stderr
-				req.Agent, w)
+			fmt.Fprintf(stderr, "gc: stage-1 materialize warning at %s (agents %s): %s\n", dir, req.Union.AgentList(), w) //nolint:errcheck // best-effort stderr
 		}
+	}
+	return errors.Join(unreconciled...)
+}
+
+// reportHeldSkillSink logs why a sink was held rather than reconciled.
+func reportHeldSkillSink(stderr io.Writer, prefix, dir string, problems []string) {
+	for _, p := range problems {
+		fmt.Fprintf(stderr, "%s at %s: %s; sink not reconciled this pass (existing links kept, additions and removals wait until it is resolved)\n", prefix, dir, p) //nolint:errcheck // best-effort stderr
+	}
+}
+
+// stage1UnreconciledSinks splits the error runStage1SkillMaterialization
+// returns into one error per sink it left as it was.
+func stage1UnreconciledSinks(err error) []error {
+	var joined interface{ Unwrap() []error }
+	if errors.As(err, &joined) {
+		return joined.Unwrap()
+	}
+	if err != nil {
+		return []error{err}
 	}
 	return nil
 }
 
-// stage1SkillRequest is one agent's stage-1 skill materialization pass.
+// stage1SkillRequest is one sink's stage-1 skill materialization pass,
+// folded over every writer of that sink.
 type stage1SkillRequest struct {
-	Agent   string
+	// Union is the sink's writers and what they want.
+	Union *materialize.SinkUnion
+	// Problems is non-empty when the sink must be held this pass.
+	Problems []string
+	// Request is the materializer pass; it runs only when Problems is
+	// empty.
 	Request materialize.Request
 }
 
-// stage1SkillRequests builds the stage-1 skill pass of every eligible agent,
-// in config order, loading each scope's shared catalog once. Catalog load
-// errors are logged and degrade as runStage1SkillMaterialization documents.
-// Both the real pass and the dry-run plan run exactly these requests.
+// markIncomplete carries every writer's previously reported skips in
+// this sink over to the next pass, since this pass did not finish it.
+func (r stage1SkillRequest) markIncomplete(pass *skillSkipPass) {
+	for _, agent := range r.Union.Agents() {
+		pass.markIncomplete(agent)
+	}
+}
+
+// stage1SkillRequests builds the stage-1 skill pass of every scope-root
+// sink, sorted by sink, loading each scope's shared catalog once. Catalog
+// load errors are logged and degrade as runStage1SkillMaterialization
+// documents. Both the real pass and the dry-run plan run exactly these
+// requests.
 func stage1SkillRequests(cityPath string, cfg *config.City, stderr io.Writer) []stage1SkillRequest {
-	catalogs := make(map[string]materialize.CityCatalog)
-	loadCatalog := func(rigName string) materialize.CityCatalog {
-		if cat, ok := catalogs[rigName]; ok {
-			return cat
-		}
+	catalogs := newSkillScopeCatalogs(func(rigName string) materialize.CityCatalog {
 		result := loadSharedSkillCatalogWithFallback(cityPath, cfg, rigName)
 		cat := result.Catalog
 		if result.Err != nil {
@@ -94,63 +147,27 @@ func stage1SkillRequests(cityPath string, cfg *config.City, stderr io.Writer) []
 				cat.Entries = nil
 				cat.Shadowed = nil
 			}
-			catalogs[rigName] = cat
-			return catalogs[rigName]
 		}
-		catalogs[rigName] = cat
 		return cat
-	}
+	})
 
 	var reqs []stage1SkillRequest
-	rt := cityMaterializationRuntime(cfg, cityPath)
-	for i := range cfg.Agents {
-		agent := &cfg.Agents[i]
-		if !canStage1Materialize(rt, agent) {
+	for _, sink := range stage1SkillSinks(cityPath, cfg) {
+		union := materialize.NewSinkUnion()
+		for _, w := range sink.Writers {
+			addSkillSinkWriter(union, w.Agent, w.Name, catalogs.load(agentRigScopeName(w.Agent, cfg.Rigs)))
+		}
+		owned := union.OwnedRoots()
+		desired := union.Desired()
+		problems := union.Problems()
+		if len(problems) == 0 && len(desired) == 0 && len(owned) == 0 {
 			continue
 		}
-		provider := effectiveAgentProviderFamily(agent, cfg.Workspace.Provider, cfg.Providers)
-		vendor, ok := materialize.VendorSink(provider)
-		if !ok {
-			continue
-		}
-
-		agentCat, lerr := materialize.LoadAgentCatalog(agent.SkillsDir)
-		if lerr != nil {
-			fmt.Fprintf(stderr, "gc: stage-1 materialize-skills for agent %q: LoadAgentCatalog %q: %v\n", //nolint:errcheck // best-effort stderr
-				agent.QualifiedName(), agent.SkillsDir, lerr)
-			// Continue with empty agent catalog rather than skipping the
-			// whole materialization — the shared catalog still delivers.
-			agentCat = materialize.AgentCatalog{}
-		}
-
-		rigName := agentRigScopeName(agent, cfg.Rigs)
-		cityCat := loadCatalog(rigName)
-		desired := materialize.EffectiveSet(cityCat, agentCat)
-
-		// Resolve the agent's scope root to an absolute path. Use the
-		// un-canonicalized form here so the materializer writes into
-		// the operator-intended location (e.g., /city/rigs/fe even
-		// when it's a symlink to /private/city/...). canonicalisation
-		// happens at comparison time inside MaterializeAgent via
-		// EvalSymlinks, so owner-root matching still works.
-		scopeRoot := resolveAgentScopeRoot(agent, cityPath, cfg.Rigs)
-		if !filepath.IsAbs(scopeRoot) {
-			scopeRoot = filepath.Join(cityPath, scopeRoot)
-		}
-		sinkDir := filepath.Join(scopeRoot, vendor)
-
-		owned := append([]string{}, cityCat.OwnedRoots...)
-		if agentCat.OwnedRoot != "" {
-			owned = append(owned, agentCat.OwnedRoot)
-		}
-		if len(desired) == 0 && len(owned) == 0 {
-			continue
-		}
-
 		reqs = append(reqs, stage1SkillRequest{
-			Agent: agent.QualifiedName(),
+			Union:    union,
+			Problems: problems,
 			Request: materialize.Request{
-				SinkDir:          sinkDir,
+				SinkDir:          sink.Dir,
 				Desired:          desired,
 				OwnedRoots:       owned,
 				LegacyNames:      materialize.LegacyStubNames(),
@@ -159,6 +176,37 @@ func stage1SkillRequests(cityPath string, cfg *config.City, stderr io.Writer) []
 		})
 	}
 	return reqs
+}
+
+// addSkillSinkWriter folds one writer's agent-local catalog and its
+// scope's shared catalog into union. A writer whose agent catalog cannot
+// be read makes the union incomplete, so the sink is held rather than
+// pruning that writer's links.
+func addSkillSinkWriter(union *materialize.SinkUnion, agent *config.Agent, name string, cityCat materialize.CityCatalog) {
+	agentCat, err := materialize.LoadAgentCatalog(agent.SkillsDir)
+	union.Add(name, cityCat, agentCat)
+	if err != nil {
+		union.MarkUnreadable(fmt.Sprintf("agent %q: LoadAgentCatalog %q: %v", name, agent.SkillsDir, err))
+	}
+}
+
+// skillScopeCatalogs loads each scope's shared skill catalog once.
+type skillScopeCatalogs struct {
+	loaded map[string]materialize.CityCatalog
+	loadFn func(rigName string) materialize.CityCatalog
+}
+
+func newSkillScopeCatalogs(loadFn func(rigName string) materialize.CityCatalog) *skillScopeCatalogs {
+	return &skillScopeCatalogs{loaded: make(map[string]materialize.CityCatalog), loadFn: loadFn}
+}
+
+func (c *skillScopeCatalogs) load(rigName string) materialize.CityCatalog {
+	if cat, ok := c.loaded[rigName]; ok {
+		return cat
+	}
+	cat := c.loadFn(rigName)
+	c.loaded[rigName] = cat
+	return cat
 }
 
 // checkSkillCollisions runs the skill-collision validator before
