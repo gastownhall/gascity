@@ -563,6 +563,86 @@ func TestScopeAbortDefersUntilLastInFlightMemberSettles(t *testing.T) {
 	}
 }
 
+// TestScopeAbortReconcileDriversDeferWhileMemberInFlight drives the abort
+// through each reconcile path instead of a scope-check. Every one reaches the
+// same deferral, so none forces the body closed past the in-flight member, and
+// the member's own scope-check settles the body once it closes.
+func TestScopeAbortReconcileDriversDeferWhileMemberInFlight(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		// drive runs the reconcile path and returns the bead that decided the abort.
+		drive func(t *testing.T, f inFlightAbortFixture, opts ProcessOptions) (string, error)
+	}{
+		{
+			name: "retry exhaustion",
+			drive: func(_ *testing.T, f inFlightAbortFixture, opts ProcessOptions) (string, error) {
+				_, err := reconcileClosedScopeMemberWithOptions(beadstest.Graph(f.store), f.b.ID, opts)
+				return f.b.ID, err
+			},
+		},
+		{
+			name: "quarantine reconcile",
+			drive: func(t *testing.T, f inFlightAbortFixture, _ ProcessOptions) (string, error) {
+				closed := "closed"
+				if err := f.store.Update(f.checkB.ID, beads.UpdateOpts{
+					Status:   &closed,
+					Labels:   []string{"gc:control-quarantined"},
+					Metadata: map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail},
+				}); err != nil {
+					t.Fatalf("quarantining %s: %v", f.checkB.ID, err)
+				}
+				_, err := ReconcileClosedScopeMember(beadstest.Graph(f.store), f.checkB.ID)
+				return f.checkB.ID, err
+			},
+		},
+		{
+			name: "fanout closing fail",
+			drive: func(t *testing.T, f inFlightAbortFixture, opts ProcessOptions) (string, error) {
+				fanout := mustCreateWorkflowBead(t, f.store, beads.Bead{Title: "fanout", Type: "task", Metadata: map[string]string{
+					beadmeta.KindMetadataKey:       beadmeta.KindFanout,
+					beadmeta.RootBeadIDMetadataKey: "wf-1",
+					beadmeta.ScopeRefMetadataKey:   "body",
+					beadmeta.ScopeRoleMetadataKey:  beadmeta.ScopeRoleControl,
+					beadmeta.StepRefMetadataKey:    "demo.survey-fanout",
+				}})
+				mustDepAdd(t, f.store, f.body.ID, fanout.ID, "blocks")
+				_, err := closeScopedControl(beadstest.Graph(f.store), fanout.ID,
+					map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail}, "fanout-fail", opts)
+				if err == nil {
+					assertBeadState(t, f.store, fanout.ID, "closed", beadmeta.OutcomeFail)
+				}
+				return fanout.ID, err
+			},
+		},
+	} {
+		for _, st := range []struct {
+			name  string
+			store func() beads.Store
+		}{
+			{name: "bd close policy", store: func() beads.Store { return newStrictCloseStore() }},
+			{name: "non-refusing store", store: func() beads.Store { return beads.NewMemStore() }},
+		} {
+			t.Run(tc.name+"/"+st.name, func(t *testing.T) {
+				t.Parallel()
+				f := newInFlightAbortFixture(t, st.store())
+				decider, err := tc.drive(t, f, ProcessOptions{Work: beadstest.Work(f.store)})
+				if err != nil {
+					t.Fatalf("reconcile path: %v", err)
+				}
+				assertInFlightUntouched(t, f.store, f.a.ID)
+				assertAbortDeferred(t, f.store, f.body.ID, decider, f.checkA.ID)
+
+				closeMember(t, f.store, f.a.ID, map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass})
+				processScopeControl(t, f.store, f.checkA.ID)
+				assertAbortSettled(t, f.store, f.body.ID, f.b.ID, nil)
+				assertBeadState(t, f.store, f.checkA.ID, "closed", beadmeta.OutcomePass)
+			})
+		}
+	}
+}
+
 // TestScopeAbortTriggeredHonorsDecidedAbort pins the predicate both settlement
 // sites (processScopeCheck and reconcileScopeForTerminalMember) share: a member
 // that passed still settles a scope whose abort is already decided as aborted.
