@@ -4,13 +4,15 @@
   "required": ["schema_version", "ok", "target", "delivery", "queued", "outcome"],
   "properties": {
     "schema_version": { "const": "1" },
-    "ok": { "const": true },
+    "ok": { "type": "boolean" },
     "target": { "type": "string" },
     "session_id": { "type": "string" },
     "session_name": { "type": "string" },
     "delivery": { "type": "string", "enum": ["immediate", "wait-idle", "queue"] },
     "queued": { "type": "boolean" },
-    "outcome": { "type": "string", "enum": ["delivered", "queued"] },
+    "outcome": { "type": "string", "enum": ["delivered", "queued", "undeliverable"] },
+    "reason": { "type": "string", "minLength": 1 },
+    "session_state": { "type": "string", "minLength": 1 },
     "op_id": { "type": "string", "minLength": 1 },
     "key": { "type": "string", "minLength": 1 },
     "replayed": { "type": "boolean" }

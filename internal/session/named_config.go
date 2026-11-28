@@ -1127,14 +1127,23 @@ func ClosedNamedSessionBeadIn(candidates []beads.Bead, sessionName string) (bead
 }
 
 func closedNamedSessionReopenEligible(b beads.Bead) bool {
-	if strings.TrimSpace(b.Metadata["continuity_eligible"]) == "false" {
+	return ClosedNamedSessionReopenEligibleMetadata(b.Metadata)
+}
+
+// ClosedNamedSessionReopenEligibleMetadata reports whether a closed named
+// session row's metadata leaves it eligible for the reconciler to reopen
+// under its configured identity: it keeps continuity and was closed for none
+// of the reasons (duplicate, swept, orphaned, reconfigured, stale, failed
+// create) that retire it for good.
+func ClosedNamedSessionReopenEligibleMetadata(md map[string]string) bool {
+	if strings.TrimSpace(md["continuity_eligible"]) == "false" {
 		return false
 	}
-	switch strings.TrimSpace(b.Metadata["close_reason"]) {
+	switch strings.TrimSpace(md["close_reason"]) {
 	case "duplicate", "duplicate-repair", "gc_swept", "orphaned", "reconfigured", "stale-session", string(StateFailedCreate):
 		return false
 	}
-	switch strings.TrimSpace(b.Metadata["state"]) {
+	switch strings.TrimSpace(md["state"]) {
 	case "duplicate", "duplicate-repair", "gc_swept", "orphaned", "reconfigured", "stale-session", string(StateFailedCreate):
 		return false
 	}

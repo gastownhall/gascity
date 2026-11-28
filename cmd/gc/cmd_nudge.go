@@ -1485,6 +1485,9 @@ func deliverSessionNudgeKeyed(target nudgeTarget, store beads.Store, sp runtime.
 	res, err := deliverSessionNudgeLegacy(target, store, sp, message, mode, stderr)
 	op.finishMessage(res.queued, err)
 	if err != nil {
+		if code, ok := writeUndeliverableSessionNudge(target, mode, jsonOutput, err, op, stdout, stderr); ok {
+			return code
+		}
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 		return 1
 	}
@@ -1529,8 +1532,15 @@ func sessionNudgeOpPolicy(mode nudgeDeliveryMode) opjournal.Policy {
 // deliverSessionNudgeLegacy delivers a session nudge live, or queues it when
 // the live leg cannot or must not deliver it. It reports nothing on stdout;
 // its notes and warnings go to stderr, and a refusal is a cliMessageRefusal.
+// A nudge to a retired session is refused in every mode before anything is
+// queued or typed (refuseNudgeToRetiredSession).
 func deliverSessionNudgeLegacy(target nudgeTarget, store beads.Store, sp runtime.Provider, message string, mode nudgeDeliveryMode, stderr io.Writer) (sessionNudgeResult, error) {
 	programShadowDecideForTarget(target)
+	if store != nil {
+		if err := refuseNudgeToRetiredSession(target, cliSessionFrontDoor(store, target.cfg, target.cityPath)); err != nil {
+			return sessionNudgeResult{}, err
+		}
+	}
 	if mode == nudgeDeliveryQueue {
 		return queueSessionNudgeWithWorker(target, store, sp, message, "")
 	}

@@ -180,6 +180,7 @@ go_test(
         "lifecycle_input_test.go",
         "lifecycle_pending_create_claim_test.go",
         "lifecycle_projection_test.go",
+        "lifecycle_retired_test.go",
         "lifecycle_timers_test.go",
         "lifecycle_transition_test.go",
         "lifecycle_vocabulary_test.go",

@@ -298,6 +298,17 @@ type cliOp struct {
 	restartedAs int64
 	// apiOp is the open legacy:api op a cliOpAcceptedByAPI start found.
 	apiOp opjournal.Op
+	// resultWritten records that the command already wrote its --json
+	// result line, which stands in for end's failure envelope.
+	resultWritten bool
+}
+
+// markResultWritten records that the command wrote its own --json result
+// for a run that did not succeed, so end writes no second line.
+func (o *cliOp) markResultWritten() {
+	if o != nil {
+		o.resultWritten = true
+	}
 }
 
 // newCLIOp resolves req's gate from cfg and builds its recorder over the op
@@ -885,6 +896,9 @@ func (o *cliOp) end() {
 	}
 	message := fmt.Sprintf("op %s (key %s): %s", o.adm.Op.ID, o.adm.Key, cliOpOutcomeText(*o.closedWith))
 	fmt.Fprintf(o.req.stderr, "%s: %s\n", o.req.verb, message) //nolint:errcheck // best-effort stderr
+	if o.resultWritten {
+		return
+	}
 	o.writeFailure(cliOpCodeFailed, message, o.adm.Op.ID, o.adm.Key)
 }
 
