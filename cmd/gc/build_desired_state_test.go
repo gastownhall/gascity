@@ -2139,6 +2139,73 @@ func TestCollectAssignedWorkBeads_ExcludesSessionBeads(t *testing.T) {
 	}
 }
 
+// createInProgressWorkerBead creates a bead of beadType assigned to worker-1
+// and moves it to in_progress, the state a bd claim leaves it in.
+func createInProgressWorkerBead(t *testing.T, store beads.Store, beadType string) beads.Bead {
+	t.Helper()
+	b, err := store.Create(beads.Bead{Title: beadType + " for worker-1", Type: beadType, Assignee: "worker-1"})
+	if err != nil {
+		t.Fatalf("create %s bead: %v", beadType, err)
+	}
+	if err := store.Update(b.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("set %s in_progress: %v", beadType, err)
+	}
+	return b
+}
+
+// TestCollectAssignedWorkBeads_ExcludesInProgressMessageBeads pins that mail a
+// bd claim moved to in_progress is not assigned work: mail reaches a session
+// through the mail hooks, not through the work snapshot.
+func TestCollectAssignedWorkBeads_ExcludesInProgressMessageBeads(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+	createInProgressWorkerBead(t, store, "message")
+	task := createInProgressWorkerBead(t, store, "task")
+
+	got, _ := collectAssignedWorkBeads(&config.City{}, store)
+	if len(got) != 1 || got[0].ID != task.ID {
+		t.Fatalf("collectAssignedWorkBeads = %#v, want only the in_progress task %s", got, task.ID)
+	}
+}
+
+// TestComputeAwakeSetFromCollectedSnapshotIgnoresInProgressMail feeds the
+// collector's own snapshot through the awake-set bridge: a session whose only
+// claimed bead is an in_progress message gets no assigned-work demand, while
+// the same session holding an in_progress task does.
+func TestComputeAwakeSetFromCollectedSnapshotIgnoresInProgressMail(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	info := sessionpkg.Info{
+		ID:                  "gc-w1",
+		SessionNameMetadata: "worker-1",
+		Template:            "worker",
+		MetadataState:       string(sessionpkg.StateActive),
+		CreatedAt:           now.Add(-time.Hour),
+	}
+	decide := func(store beads.Store) AwakeDecision {
+		t.Helper()
+		assigned, _ := collectAssignedWorkBeads(cfg, store)
+		input := newAwakeInputFromSnapshot(cfg, func(*config.Agent) bool { return false },
+			[]sessionpkg.Info{info}, nil, nil, nil, nil, nil, assigned, nil, now)
+		return computeAwakeSetChecked(t, input)["worker-1"]
+	}
+
+	mailOnly := beads.NewMemStore()
+	createInProgressWorkerBead(t, mailOnly, "message")
+	d := decide(mailOnly)
+	if d.Reason == "assigned-work" || d.HasAssignedWork || d.AssignedWorkBeadID != "" || d.AssignedWorkClaimed || d.RequiresFreshCycle {
+		t.Fatalf("decision for a session holding only in_progress mail = %+v, want no assigned-work demand", d)
+	}
+
+	withTask := beads.NewMemStore()
+	task := createInProgressWorkerBead(t, withTask, "task")
+	d = decide(withTask)
+	if d.Reason != "assigned-work" || !d.HasAssignedWork || d.AssignedWorkBeadID != task.ID || !d.AssignedWorkClaimed {
+		t.Fatalf("decision for a session holding in_progress task %s = %+v, want claimed assigned-work", task.ID, d)
+	}
+}
+
 func TestCollectAssignedWorkBeads_PreservesPartialInProgressSurvivors(t *testing.T) {
 	t.Parallel()
 

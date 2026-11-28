@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
+	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/poolplan"
 	"github.com/gastownhall/gascity/internal/readywork"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -3670,18 +3671,17 @@ func appendOpenRoutedWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, storeR
 }
 
 // appendWorkUnique appends b to the aligned dst/stores/storeRefs slices unless
-// it is a session bead or already seen. It reports whether the bead was
+// it is a session bead, a message bead or already seen. It reports whether the bead was
 // actually appended, so ready-pass callers can record readiness only for beads
 // this call admitted (and not for beads a prior pass already claimed via seen).
 func appendWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, b beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) bool {
 	// Invariant: dst, stores, and storeRefs are kept index-aligned by this
 	// shared growth path and the shared seen guard.
-	// Session beads are not actionable work — filter them at the source
-	// so all consumers see only real tasks. Message beads are NOT filtered
-	// here because they represent mail that should wake/materialize sessions;
-	// idle nudge filters messages locally since mail nudging is handled
-	// separately by the mail system.
-	if b.Type == sessionBeadType {
+	// Session beads and mail are not actionable work — filter them at the
+	// source so all consumers see only real tasks. Mail reaches a session
+	// through the mail hooks, not through the work snapshot, so a message a
+	// bd claim moved to in_progress never holds a seat awake.
+	if b.Type == sessionBeadType || beadmail.IsMessageBead(b) {
 		return false
 	}
 	if _, ok := seen[b.ID]; ok {
