@@ -9527,6 +9527,51 @@ func TestReapRuntimesBoundToClosedBeadsExcludesStartsFromProofToStop(t *testing.
 	}
 }
 
+// TestReapRuntimesBoundToClosedBeadsIgnoresInstanceTokenOfClosedRow pins
+// GC_INSTANCE_TOKEN as outside the closed-bead reap's proof (#6111): a
+// runtime whose GC_SESSION_ID names a closed row is reaped whatever its token
+// says. GC_SESSION_ID and GC_INSTANCE_TOKEN are stamped by the same
+// create-time RuntimeEnv call, so the token exposes no staleness the ID
+// hides, and the runtime lease with its under-lease GC_SESSION_ID re-read
+// already excludes a same-name rebind. A closed row's runtime carries a
+// token other than the row's in two real ways, and both must still be
+// reaped: the preWakeCommit rotation window, where a row rotates its
+// instance_token and closes before the new start replaces the old runtime
+// (deadRuntimeBelongsToRow's comment), and an adopter's minted or kept token
+// on a runtime that still names the closed row, which the #7223 ruling keeps
+// visible to this reap (stampAdoptedRuntime). Skipping on a mismatch would
+// strand that corpse for good.
+func TestReapRuntimesBoundToClosedBeadsIgnoresInstanceTokenOfClosedRow(t *testing.T) {
+	for _, runtimeTok := range []string{"tok-earlier", "tok-row", ""} {
+		for _, rowTok := range []string{"tok-row", ""} {
+			t.Run(fmt.Sprintf("runtime=%q/row=%q", runtimeTok, rowTok), func(t *testing.T) {
+				store := beads.NewMemStoreFrom(0, []beads.Bead{{
+					ID:       "gc-closed",
+					Status:   "closed",
+					Metadata: map[string]string{"instance_token": rowTok},
+				}}, nil)
+				sp := boundFake(t, "gc-closed")
+				if runtimeTok != "" {
+					if err := sp.SetMeta("named-1", runtime.InstanceTokenEnv, runtimeTok); err != nil {
+						t.Fatal(err)
+					}
+				}
+
+				var stderr bytes.Buffer
+				if n := reapRuntimesBoundToClosedBeads(store, newSessionBeadSnapshot(nil), nil, sp, nil, t.TempDir(), &stderr); n != 1 {
+					t.Fatalf("reapRuntimesBoundToClosedBeads() = %d, want 1; stderr=%q", n, stderr.String())
+				}
+				if sp.IsRunning("named-1") {
+					t.Fatal("named-1 is still running, want it reaped")
+				}
+				if want := `reaped runtime "named-1" bound to closed session bead gc-closed`; !strings.Contains(stderr.String(), want) {
+					t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+				}
+			})
+		}
+	}
+}
+
 // TestReapRuntimesBoundToClosedBeadsSkipsOpenBeadRuntime: a healthy runtime
 // whose bead is still open must never be reaped.
 func TestReapRuntimesBoundToClosedBeadsSkipsOpenBeadRuntime(t *testing.T) {
