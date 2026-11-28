@@ -98,7 +98,7 @@ func reconcileScopeForTerminalMember(store beads.GraphStore, bead beads.Bead, op
 		if err != nil {
 			return ControlResult{}, err
 		}
-		skipped, err := abortScopeWith(store, snapshot, opts, bead.ID, closeBody)
+		skipped, err := abortScopeWith(store, snapshot, opts, bead.ID, bead.ID, closeBody)
 		if err != nil {
 			return ControlResult{}, err
 		}

@@ -568,7 +568,7 @@ func processScopeCheck(store beads.GraphStore, bead beads.Bead, opts ProcessOpti
 		if err != nil {
 			return ControlResult{}, err
 		}
-		skipped, err := abortScope(store, snapshot, opts, bead.ID)
+		skipped, err := abortScope(store, snapshot, opts, bead.ID, subject.ID)
 		if err != nil {
 			return ControlResult{}, err
 		}
@@ -676,25 +676,37 @@ func closeScopeAsPassedWith(store beads.GraphStore, snapshot scopeSnapshot, subj
 	return nil
 }
 
-// abortScope runs the shared convergence sequence for a scope whose subject
-// failed: skip any still-open members, propagate non-gc.* member metadata (e.g.
-// review.verdict) onto the scope body so diagnostics survive failure auto-close,
-// then close the body with outcome=fail. When a member failed hard, the body
-// keeps that member's hard-failure record (gc.failure_class/reason/subject), so
-// the hard class reaches whatever reads the body: a ralph control evaluating
-// the body as its iteration, and the enclosing scope. It returns the number of
-// members skipped. traceID identifies the bead driving the trace and is also
-// the id ignored when skipping open members. The caller owns closing its own
-// control bead. This is the single implementation shared by processScopeCheck
-// and reconcileTerminalScopedMember.
-func abortScope(store beads.GraphStore, snapshot scopeSnapshot, opts ProcessOptions, traceID string) (int, error) {
-	return abortScopeWith(store, snapshot, opts, traceID, updateMetadataAndClose)
+// abortScope runs the shared convergence sequence for a scope whose abort is
+// decided: skip any still-open members, propagate non-gc.* member metadata
+// (e.g. review.verdict) onto the scope body so diagnostics survive failure
+// auto-close, then close the body with outcome=fail. When a member failed hard,
+// the body keeps that member's hard-failure record
+// (gc.failure_class/reason/subject), so the hard class reaches whatever reads
+// the body: a ralph control evaluating the body as its iteration, and the
+// enclosing scope.
+//
+// A member a worker has claimed is neither skipped nor closed under it. When
+// one still has its scope-check open, that control is kept open, the body is
+// marked gc.scope_aborted_by=deciderID (the first decider's mark stands) and
+// left open; the kept scope-check re-runs this abort once its member closes,
+// and the run that finds no claimed member left closes the body fail.
+//
+// It returns the number of members skipped. traceID identifies the bead
+// driving the trace and is also the id ignored when skipping open members.
+// deciderID is the bead whose failure decided the abort. The caller owns
+// closing its own control bead. This is the single implementation shared by
+// processScopeCheck and reconcileScopeForTerminalMember.
+func abortScope(store beads.GraphStore, snapshot scopeSnapshot, opts ProcessOptions, traceID, deciderID string) (int, error) {
+	return abortScopeWith(store, snapshot, opts, traceID, deciderID, updateMetadataAndClose)
 }
 
-func abortScopeWith(store beads.GraphStore, snapshot scopeSnapshot, opts ProcessOptions, traceID string, closeBody scopeBodyCloser) (int, error) {
+func abortScopeWith(store beads.GraphStore, snapshot scopeSnapshot, opts ProcessOptions, traceID, deciderID string, closeBody scopeBodyCloser) (int, error) {
 	bodyID := snapshot.body.ID
+	var draining []string
 	skipped, err := tracePhase(opts, traceID, "skip-open-members", func() (int, error) {
-		return snapshot.skipOpenScopeMembers(store, traceID)
+		n, live, err := snapshot.skipOpenScopeMembers(store, traceID)
+		draining = live
+		return n, err
 	})
 	if err != nil {
 		return 0, fmt.Errorf("%s: aborting scope: %w", traceID, err)
@@ -703,6 +715,17 @@ func abortScopeWith(store beads.GraphStore, snapshot scopeSnapshot, opts Process
 		return snapshot.propagateScopeMemberMetadata(store, bodyID)
 	}); err != nil {
 		return 0, fmt.Errorf("%s: propagating scope metadata: %w", traceID, err)
+	}
+	if len(draining) > 0 {
+		if !scopeAbortDecided(snapshot.body) {
+			if err := tracePhaseErr(opts, traceID, "mark-body-aborted", func() error {
+				return store.SetMetadata(bodyID, beadmeta.ScopeAbortedByMetadataKey, deciderID)
+			}); err != nil {
+				return 0, fmt.Errorf("%s: marking scope body aborted: %w", bodyID, err)
+			}
+		}
+		opts.tracef("scope-abort-draining bead=%s body=%s live=%s", traceID, bodyID, strings.Join(draining, ","))
+		return skipped, nil
 	}
 	closeMetadata := map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail}
 	if culprit, ok := firstHardFailedMember(snapshot.members, bodyID); ok {
@@ -714,6 +737,12 @@ func abortScopeWith(store beads.GraphStore, snapshot scopeSnapshot, opts Process
 		return 0, fmt.Errorf("%s: completing scope body: %w", bodyID, err)
 	}
 	return skipped, nil
+}
+
+// scopeAbortDecided reports whether body carries the mark of an abort that
+// waits for a claimed member to settle.
+func scopeAbortDecided(body beads.Bead) bool {
+	return strings.TrimSpace(body.Metadata[beadmeta.ScopeAbortedByMetadataKey]) != ""
 }
 
 // closedWithHardFailure reports whether a bead closed with gc.outcome=fail and
@@ -948,18 +977,25 @@ func (s scopeSnapshot) resolveScopeOutputJSON(subject beads.Bead) (string, error
 	return candidate, nil
 }
 
-func (s scopeSnapshot) skipOpenScopeMembers(store beads.GraphStore, skipControlID string) (int, error) {
+// skipOpenScopeMembers closes the scope's open members as skipped and returns
+// how many it closed, plus the draining members: claimed members whose own
+// scope-check it kept open. A claimed member is never skipped; its scope-check
+// is the control that re-checks the scope once that member settles, so the
+// abort's body close waits for it.
+func (s scopeSnapshot) skipOpenScopeMembers(store beads.GraphStore, skipControlID string) (int, []string, error) {
 	all := s.all
 	if !s.allComplete {
 		loaded, err := beads.DirectMembers(store, s.rootID)
 		if err != nil {
-			return 0, err
+			return 0, nil, err
 		}
 		all = loaded
 	}
 	pending := scopeUnsettledMembers(s.members, all, skipControlID, func(b beads.Bead) bool { return b.Status == "open" })
+	live := s.claimedWorkMembers()
 
 	skipped := 0
+	var draining []string
 	// Termination: nothing is ever added to pending below, and every round that
 	// does not return strictly shrinks it — a preserve deletes its member, a skip
 	// wave deletes every id it closed. So the round count is bounded by the
@@ -969,7 +1005,7 @@ func (s scopeSnapshot) skipOpenScopeMembers(store beads.GraphStore, skipControlI
 		ids := sortedPendingIDs(pending)
 		depsByID, err := loadDownDepsForScopeSkip(store, ids)
 		if err != nil {
-			return skipped, err
+			return skipped, nil, err
 		}
 		preserved := 0
 		skippable := make([]string, 0, len(ids))
@@ -977,6 +1013,12 @@ func (s scopeSnapshot) skipOpenScopeMembers(store beads.GraphStore, skipControlI
 			if preserveScopeCheckForSubject(pending[id], depsByID[id], skipControlID) {
 				delete(pending, id)
 				preserved++
+				continue
+			}
+			if memberID, ok := preserveScopeCheckForLiveMember(pending[id], depsByID[id], live); ok {
+				delete(pending, id)
+				preserved++
+				draining = append(draining, memberID)
 				continue
 			}
 			if !canSkipScopeMemberWithDeps(depsByID[id], pending) {
@@ -997,11 +1039,11 @@ func (s scopeSnapshot) skipOpenScopeMembers(store beads.GraphStore, skipControlI
 			if preserved > 0 {
 				continue
 			}
-			return skipped, fmt.Errorf("unable to skip remaining scope members: %s", describeStuckScopeMembers(pending, depsByID))
+			return skipped, nil, fmt.Errorf("unable to skip remaining scope members: %s", describeStuckScopeMembers(pending, depsByID))
 		}
 		closed, err := skipScopeMembers(store, skippable)
 		if err != nil {
-			return skipped + closed, err
+			return skipped + closed, nil, err
 		}
 		for _, id := range skippable {
 			delete(pending, id)
@@ -1009,7 +1051,30 @@ func (s scopeSnapshot) skipOpenScopeMembers(store beads.GraphStore, skipControlI
 		skipped += closed
 	}
 
-	return skipped, nil
+	sort.Strings(draining)
+	return skipped, draining, nil
+}
+
+// claimedWorkMembers returns the scope's work members a worker has claimed:
+// neither open nor closed. Spec sidecars, the body, teardown and control kinds
+// are dispatcher-owned and never claimed by a worker, so they are excluded.
+func (s scopeSnapshot) claimedWorkMembers() map[string]struct{} {
+	live := make(map[string]struct{})
+	for _, member := range s.members {
+		if member.Status == "open" || member.Status == "closed" {
+			continue
+		}
+		kind := member.Metadata[beadmeta.KindMetadataKey]
+		if kind == beadmeta.KindSpec || beadmeta.IsControlKind(kind) {
+			continue
+		}
+		switch member.Metadata[beadmeta.ScopeRoleMetadataKey] {
+		case beadmeta.ScopeRoleBody, beadmeta.ScopeRoleTeardown:
+			continue
+		}
+		live[member.ID] = struct{}{}
+	}
+	return live
 }
 
 // scopeUnsettledMembers collects the scope beads that count as unsettled:
@@ -1108,6 +1173,32 @@ func preserveScopeCheckForSubject(candidate beads.Bead, deps []beads.Dep, subjec
 		}
 	}
 	return false
+}
+
+// preserveScopeCheckForLiveMember reports whether candidate is the scope-check
+// of a claimed member (one of live) and returns that member. A scope abort
+// keeps such a control open: it settles the scope once the member closes, and
+// a step outside the scope whose dependency on the member was rewritten onto
+// it must not start before the member has ended.
+func preserveScopeCheckForLiveMember(candidate beads.Bead, deps []beads.Dep, live map[string]struct{}) (string, bool) {
+	if len(live) == 0 {
+		return "", false
+	}
+	if candidate.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindScopeCheck {
+		return "", false
+	}
+	if candidate.Metadata[beadmeta.ScopeRoleMetadataKey] != beadmeta.ScopeRoleControl {
+		return "", false
+	}
+	for _, dep := range deps {
+		if dep.Type != "blocks" {
+			continue
+		}
+		if _, ok := live[dep.DependsOnID]; ok {
+			return dep.DependsOnID, true
+		}
+	}
+	return "", false
 }
 
 // beadOutcomeFailed reports whether a closed bead counts as failed for

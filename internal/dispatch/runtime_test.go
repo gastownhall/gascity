@@ -1814,7 +1814,7 @@ func TestSkipOpenScopeMembersBatchesDependencyChecksAndCloses(t *testing.T) {
 		members:     []beads.Bead{body, failed, control, futureMember, futureControl, independent},
 		body:        body,
 	}
-	skipped, err := snapshot.skipOpenScopeMembers(beadstest.Graph(store), control.ID)
+	skipped, _, err := snapshot.skipOpenScopeMembers(beadstest.Graph(store), control.ID)
 	if err != nil {
 		t.Fatalf("skipOpenScopeMembers: %v", err)
 	}
@@ -1941,7 +1941,7 @@ func TestSkipOpenScopeMembersContinuesAfterPreserveOnlyRound(t *testing.T) {
 		members:     []beads.Bead{body, failed, control, apply, applyTwin, scorecardFinalize, applyFinalize, applyTwinFinalize},
 		body:        body,
 	}
-	skipped, err := snapshot.skipOpenScopeMembers(beadstest.Graph(store), control.ID)
+	skipped, _, err := snapshot.skipOpenScopeMembers(beadstest.Graph(store), control.ID)
 	if err != nil {
 		t.Fatalf("skipOpenScopeMembers: %v", err)
 	}
@@ -1995,7 +1995,7 @@ func TestSkipOpenScopeMembersStillFailsOnGenuineBlocksCycle(t *testing.T) {
 		members:     []beads.Bead{body, control, left, right},
 		body:        body,
 	}
-	skipped, err := snapshot.skipOpenScopeMembers(beadstest.Graph(store), control.ID)
+	skipped, _, err := snapshot.skipOpenScopeMembers(beadstest.Graph(store), control.ID)
 	if err == nil {
 		t.Fatalf("skipOpenScopeMembers = (%d, nil), want a deadlock error for a genuine blocks cycle", skipped)
 	}
@@ -2045,7 +2045,7 @@ func TestSkipOpenScopeMembersDeadlockErrorNamesCurrentStuckMembers(t *testing.T)
 		members:     []beads.Bead{body, control, left, right, preserved},
 		body:        body,
 	}
-	_, err := snapshot.skipOpenScopeMembers(beadstest.Graph(store), control.ID)
+	_, _, err := snapshot.skipOpenScopeMembers(beadstest.Graph(store), control.ID)
 	if err == nil {
 		t.Fatal("skipOpenScopeMembers = nil error, want a deadlock error for the surviving blocks cycle")
 	}
@@ -2091,7 +2091,7 @@ func TestSkipOpenScopeMembersConvergesOverManyRounds(t *testing.T) {
 		members:     members,
 		body:        body,
 	}
-	skipped, err := snapshot.skipOpenScopeMembers(beadstest.Graph(store), control.ID)
+	skipped, _, err := snapshot.skipOpenScopeMembers(beadstest.Graph(store), control.ID)
 	if err != nil {
 		t.Fatalf("skipOpenScopeMembers: %v", err)
 	}
@@ -11923,7 +11923,7 @@ func TestAbortScopeSharedConvergence(t *testing.T) {
 	opts := ProcessOptions{Work: beadstest.Work(store), Tracef: func(format string, args ...any) {
 		fmt.Fprintf(&trace, format+"\n", args...) //nolint:errcheck // test buffer
 	}}
-	skipped, err := abortScope(beadstest.Graph(store), snapshot, opts, failed.ID)
+	skipped, err := abortScope(beadstest.Graph(store), snapshot, opts, failed.ID, failed.ID)
 	if err != nil {
 		t.Fatalf("abortScope: %v", err)
 	}

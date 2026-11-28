@@ -198,3 +198,191 @@ func TestDrainRecordedCloseWithoutOutcomeIsMalformed(t *testing.T) {
 		t.Fatalf("drain status = %s, want open", got)
 	}
 }
+
+// scopeAbortedByKey is the body marker a deferred scope abort writes. The tests
+// spell the wire key so they pin it independently of the constant.
+const scopeAbortedByKey = "gc.scope_aborted_by"
+
+// inFlightAbortFixture is the issue #9507 graph: a scope body that needs
+// members A (claimed, in_progress), B (closed fail hard) and C, with A and B
+// each guarded by their minted scope-check. C (a scope member) and D (a step
+// outside the scope) need A, so the compiler rewrote both edges onto A's
+// scope-check. workflow-finalize needs the body.
+type inFlightAbortFixture struct {
+	store    beads.Store
+	body     beads.Bead
+	a        beads.Bead
+	b        beads.Bead
+	c        beads.Bead
+	d        beads.Bead
+	checkA   beads.Bead
+	checkB   beads.Bead
+	finalize beads.Bead
+}
+
+const inFlightAbortAssignee = "worker-1"
+
+func newInFlightAbortFixture(t *testing.T, store beads.Store) inFlightAbortFixture {
+	t.Helper()
+	f := inFlightAbortFixture{store: store}
+	member := func(name string) beads.Bead {
+		return mustCreateWorkflowBead(t, store, beads.Bead{Title: name, Type: "task", Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey: "wf-1",
+			beadmeta.ScopeRefMetadataKey:   "body",
+			beadmeta.ScopeRoleMetadataKey:  beadmeta.ScopeRoleMember,
+			beadmeta.OnFailMetadataKey:     "abort_scope",
+			beadmeta.StepRefMetadataKey:    "demo." + name,
+		}})
+	}
+	f.body = mustCreateWorkflowBead(t, store, beads.Bead{Title: "body", Type: "task", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:       beadmeta.KindScope,
+		beadmeta.ScopeRoleMetadataKey:  beadmeta.ScopeRoleBody,
+		beadmeta.RootBeadIDMetadataKey: "wf-1",
+		beadmeta.StepRefMetadataKey:    "demo.body",
+	}})
+	f.a = member("step-a")
+	f.b = member("step-b")
+	f.checkA = newScopeCheckFor(t, store, "step-a")
+	f.checkB = newScopeCheckFor(t, store, "step-b")
+	f.c = member("step-c")
+	f.d = mustCreateWorkflowBead(t, store, beads.Bead{Title: "step-d", Type: "task", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: "wf-1",
+		beadmeta.StepRefMetadataKey:    "demo.step-d",
+	}})
+	f.finalize = mustCreateWorkflowBead(t, store, beads.Bead{Title: "finalize", Type: "task", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:       beadmeta.KindWorkflowFinalize,
+		beadmeta.RootBeadIDMetadataKey: "wf-1",
+		beadmeta.StepRefMetadataKey:    "demo.workflow-finalize",
+	}})
+	mustDepAdd(t, store, f.body.ID, f.a.ID, "blocks")
+	mustDepAdd(t, store, f.body.ID, f.b.ID, "blocks")
+	mustDepAdd(t, store, f.body.ID, f.c.ID, "blocks")
+	mustDepAdd(t, store, f.checkA.ID, f.a.ID, "blocks")
+	mustDepAdd(t, store, f.checkB.ID, f.b.ID, "blocks")
+	mustDepAdd(t, store, f.c.ID, f.checkA.ID, "blocks")
+	mustDepAdd(t, store, f.d.ID, f.checkA.ID, "blocks")
+	mustDepAdd(t, store, f.finalize.ID, f.body.ID, "blocks")
+
+	claimInFlight(t, store, f.a.ID)
+	closeMember(t, store, f.b.ID, map[string]string{
+		beadmeta.OutcomeMetadataKey:       beadmeta.OutcomeFail,
+		beadmeta.FailureClassMetadataKey:  beadmeta.FailureClassHard,
+		beadmeta.FailureReasonMetadataKey: "step-b broke",
+		"review.verdict":                  "blocked",
+	})
+	return f
+}
+
+func newScopeCheckFor(t *testing.T, store beads.Store, step string) beads.Bead {
+	t.Helper()
+	return mustCreateWorkflowBead(t, store, beads.Bead{Title: "Finalize scope for " + step, Type: "task", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:       beadmeta.KindScopeCheck,
+		beadmeta.RootBeadIDMetadataKey: "wf-1",
+		beadmeta.ScopeRefMetadataKey:   "body",
+		beadmeta.ScopeRoleMetadataKey:  beadmeta.ScopeRoleControl,
+		beadmeta.StepRefMetadataKey:    "demo." + step + "-scope-check",
+	}})
+}
+
+func claimInFlight(t *testing.T, store beads.Store, id string) {
+	t.Helper()
+	inProgress, assignee := "in_progress", inFlightAbortAssignee
+	if err := store.Update(id, beads.UpdateOpts{Status: &inProgress, Assignee: &assignee}); err != nil {
+		t.Fatalf("claiming %s: %v", id, err)
+	}
+}
+
+// closeMember is a worker's own close of a step: a plain status update that
+// runs no dispatch code.
+func closeMember(t *testing.T, store beads.Store, id string, metadata map[string]string) {
+	t.Helper()
+	closed := "closed"
+	if err := store.Update(id, beads.UpdateOpts{Status: &closed, Metadata: metadata}); err != nil {
+		t.Fatalf("closing %s: %v", id, err)
+	}
+}
+
+func processScopeControl(t *testing.T, store beads.Store, id string) ControlResult {
+	t.Helper()
+	result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, id), ProcessOptions{Work: beadstest.Work(store)})
+	if err != nil {
+		t.Fatalf("ProcessControl(%s): %v", id, err)
+	}
+	return result
+}
+
+func readyIDs(t *testing.T, store beads.Store) []string {
+	t.Helper()
+	ready, err := store.Ready()
+	if err != nil {
+		t.Fatalf("store.Ready: %v", err)
+	}
+	ids := make([]string, 0, len(ready))
+	for _, b := range ready {
+		ids = append(ids, b.ID)
+	}
+	return ids
+}
+
+func assertBeadState(t *testing.T, store beads.Store, id, wantStatus, wantOutcome string) beads.Bead {
+	t.Helper()
+	got := mustGetBead(t, store, id)
+	if got.Status != wantStatus || got.Metadata[beadmeta.OutcomeMetadataKey] != wantOutcome {
+		t.Fatalf("%s (%s) = %s/%q, want %s/%q", id, got.Metadata[beadmeta.StepRefMetadataKey],
+			got.Status, got.Metadata[beadmeta.OutcomeMetadataKey], wantStatus, wantOutcome)
+	}
+	return got
+}
+
+// assertInFlightUntouched pins that the claimed member is still its worker's:
+// never skipped, never closed, never reassigned.
+func assertInFlightUntouched(t *testing.T, store beads.Store, id string) {
+	t.Helper()
+	got := mustGetBead(t, store, id)
+	if got.Status != "in_progress" || got.Assignee != inFlightAbortAssignee {
+		t.Fatalf("in-flight member %s = %s assignee %q, want in_progress assignee %q", id, got.Status, got.Assignee, inFlightAbortAssignee)
+	}
+	if outcome := got.Metadata[beadmeta.OutcomeMetadataKey]; outcome != "" {
+		t.Fatalf("in-flight member %s carries gc.outcome=%q, want none", id, outcome)
+	}
+	if reason := got.Metadata["close_reason"]; reason != "" {
+		t.Fatalf("in-flight member %s carries close_reason %q, want none", id, reason)
+	}
+}
+
+// assertAbortDeferred pins the ledger right after an abort decided while a
+// member is in flight: the body stays open, marked with the bead that decided
+// the abort, and the in-flight member's scope-check stays open as the control
+// that settles it.
+func assertAbortDeferred(t *testing.T, store beads.Store, bodyID, decider, liveCheckID string) {
+	t.Helper()
+	body := assertBeadState(t, store, bodyID, "open", "")
+	if got := body.Metadata[scopeAbortedByKey]; got != decider {
+		t.Fatalf("body %s = %q, want %q", scopeAbortedByKey, got, decider)
+	}
+	assertBeadState(t, store, liveCheckID, "open", "")
+}
+
+// TestScopeAbortDefersBodyCloseWhileMemberInFlight is issue #9507 on bd's close
+// policy: an abort decided while a sibling member is claimed must not try to
+// close the body past it (bd refuses, the control retries until quarantine) nor
+// destroy the in-flight member's scope-check, the one control that re-checks the
+// scope once that member settles.
+func TestScopeAbortDefersBodyCloseWhileMemberInFlight(t *testing.T) {
+	t.Parallel()
+
+	f := newInFlightAbortFixture(t, newStrictCloseStore())
+
+	result := processScopeControl(t, f.store, f.checkB.ID)
+	if result.Action != "scope-fail" || result.Skipped != 1 {
+		t.Fatalf("result = %+v, want action scope-fail with Skipped 1 (member C)", result)
+	}
+	assertScopeSkipCloseReason(t, assertBeadState(t, f.store, f.c.ID, "closed", beadmeta.OutcomeSkipped))
+	assertInFlightUntouched(t, f.store, f.a.ID)
+	assertAbortDeferred(t, f.store, f.body.ID, f.b.ID, f.checkA.ID)
+	assertBeadState(t, f.store, f.d.ID, "open", "")
+	assertBeadState(t, f.store, f.checkB.ID, "closed", beadmeta.OutcomePass)
+	if slices.Contains(readyIDs(t, f.store), f.d.ID) {
+		t.Fatalf("step outside the scope %s is ready while the member it needs is in flight", f.d.ID)
+	}
+}
