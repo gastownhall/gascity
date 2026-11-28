@@ -269,6 +269,58 @@ work_query = ` + strconv.Quote(printJSONCommand(`[{"id":"ga-pool1","status":"ope
 	}
 }
 
+// TestCmdHookNamepoolMemberIdentityFallsBackToTemplate pins that a namepool
+// pool member session, whose runtime identity (GC_AGENT = GC_ALIAS) is its
+// themed member name, still resolves "gc hook $GC_AGENT" through the
+// GC_TEMPLATE fallback. That fallback keeps the session's GC_SESSION_ID and
+// GC_TEMPLATE in the work query, which a namepool-aware resolveAgentIdentity
+// would blank out.
+func TestCmdHookNamepoolMemberIdentityFallsBackToTemplate(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "polecat-names.txt"), []byte("furiosa\nrictus\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The work query echoes the session identity it was given.
+	workQuery := `printf '[{"id":"ga-np1","status":"open","title":"session=%s template=%s alias=%s"}]' "$GC_SESSION_ID" "$GC_TEMPLATE" "$GC_ALIAS"`
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "polecat"
+min_active_sessions = 0
+max_active_sessions = 2
+namepool = "polecat-names.txt"
+work_query = ` + strconv.Quote(workQuery) + `
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_AGENT", "furiosa")
+	t.Setenv("GC_ALIAS", "furiosa")
+	t.Setenv("GC_TEMPLATE", "polecat")
+	t.Setenv("GC_SESSION_NAME", "polecat-mc-np1")
+	t.Setenv("GC_SESSION_ID", "mc-np1")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithFormat([]string{"furiosa"}, false, "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHookWithFormat(furiosa) = %d, want 0; stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if want := "session=mc-np1 template=polecat alias=furiosa"; !strings.Contains(stdout.String(), want) {
+		t.Errorf("stdout = %q, want the work query to see %q", stdout.String(), want)
+	}
+}
+
 // TestCmdHookUnrelatedExplicitTargetDoesNotFallBackToTemplate verifies that
 // the GC_TEMPLATE fallback does NOT fire for an unrelated explicit target that
 // is not this instance's own runtime identity. An unresolved explicit arg that
