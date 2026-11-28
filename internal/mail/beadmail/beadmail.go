@@ -500,7 +500,7 @@ func (p *Provider) MarkUnread(id string) error {
 	})
 }
 
-// ArchiveFilter selects open message beads for bounded archive cleanup.
+// ArchiveFilter selects live message beads for bounded archive cleanup.
 type ArchiveFilter struct {
 	Recipients      []string
 	From            string
@@ -514,7 +514,7 @@ type ArchiveFilter struct {
 
 // Archive closes a message bead, retaining its body for later retrieval via
 // gc mail peek or bd show. A closed message no longer appears in inbox views
-// (all listing paths filter Status != "open"). Archiving an already-closed
+// (all listing paths list only live mail, see [isLiveMail]). Archiving an already-closed
 // message is idempotent and returns ErrAlreadyArchived without mutating it.
 func (p *Provider) Archive(id string) error {
 	// The cached Get can answer ErrNotFound from a stale tombstone for a bead
@@ -570,7 +570,7 @@ func (p *Provider) closeArchived(id string, alreadyRead bool) error {
 	return p.store.Close(id)
 }
 
-// ArchiveCandidates returns open messages that match filter without archiving
+// ArchiveCandidates returns live messages that match filter without archiving
 // them.
 func (p *Provider) ArchiveCandidates(filter ArchiveFilter) ([]mail.Message, error) {
 	routes := p.recipientRoutesForAll(filter.Recipients)
@@ -580,7 +580,7 @@ func (p *Provider) ArchiveCandidates(filter ArchiveFilter) ([]mail.Message, erro
 	}
 	matches := make([]mail.Message, 0, len(candidates))
 	for _, b := range candidates {
-		if b.Status != "open" {
+		if !isLiveMail(b) {
 			continue
 		}
 		if len(routes) > 0 && !matchesRecipientRoute(routes, b.Assignee) {
@@ -610,7 +610,7 @@ func (p *Provider) ArchiveCandidates(filter ArchiveFilter) ([]mail.Message, erro
 	return matches, nil
 }
 
-// ArchiveMatching archives open messages selected by filter without per-message
+// ArchiveMatching archives live messages selected by filter without per-message
 // lookups after the candidate list has already verified them. Matched beads are
 // closed rather than deleted, so their bodies stay readable.
 func (p *Provider) ArchiveMatching(filter ArchiveFilter) ([]mail.Message, []mail.ArchiveResult, error) {
@@ -809,7 +809,7 @@ func (p *Provider) DeleteMany(ids []string) ([]mail.ArchiveResult, error) {
 	return p.ArchiveMany(ids)
 }
 
-// All returns all open messages (read and unread) for the recipient.
+// All returns all live messages (read and unread) for the recipient.
 func (p *Provider) All(recipient string) ([]mail.Message, error) {
 	return p.filterMessages(recipient, true)
 }
@@ -1056,9 +1056,9 @@ func (p *Provider) Thread(id string) ([]mail.Message, error) {
 	}
 	msgs := make([]mail.Message, 0, len(bs))
 	for _, b := range bs {
-		if b.Status != "open" {
-			// Thread listings show only open messages, matching the list views
-			// and the pre-removal List-without-IncludeClosed behavior: a closed
+		if !isLiveMail(b) {
+			// Thread listings show only live messages, matching the list views
+			// and the List-without-IncludeClosed behavior: a closed
 			// message bead — whether a legacy close-on-archive remnant or a
 			// retention-swept read message — stays out of thread views. (A
 			// retention-swept message is still resolvable by direct-ID Get, but,
@@ -1094,7 +1094,7 @@ func (p *Provider) CountRecipients(recipients []string) (int, int, error) {
 	}
 	var total, unread int
 	for _, b := range candidates {
-		if b.Status != "open" {
+		if !isLiveMail(b) {
 			continue
 		}
 		if len(routes) > 0 && !matchesRecipientRoute(routes, b.Assignee) {
