@@ -516,6 +516,53 @@ func TestScopeAbortDeferralMatchesOnNonRefusingStore(t *testing.T) {
 	}
 }
 
+// TestScopeAbortDefersUntilLastInFlightMemberSettles pins that each in-flight
+// member keeps the abort deferred: the body closes fail only when the last one
+// settles, on either close policy.
+func TestScopeAbortDefersUntilLastInFlightMemberSettles(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		store func() beads.Store
+	}{
+		{name: "bd close policy", store: func() beads.Store { return newStrictCloseStore() }},
+		{name: "non-refusing store", store: func() beads.Store { return beads.NewMemStore() }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newInFlightAbortFixture(t, tc.store())
+			a2 := mustCreateWorkflowBead(t, f.store, beads.Bead{Title: "step-a2", Type: "task", Metadata: map[string]string{
+				beadmeta.RootBeadIDMetadataKey: "wf-1",
+				beadmeta.ScopeRefMetadataKey:   "body",
+				beadmeta.ScopeRoleMetadataKey:  beadmeta.ScopeRoleMember,
+				beadmeta.OnFailMetadataKey:     "abort_scope",
+				beadmeta.StepRefMetadataKey:    "demo.step-a2",
+			}})
+			checkA2 := newScopeCheckFor(t, f.store, "step-a2")
+			mustDepAdd(t, f.store, f.body.ID, a2.ID, "blocks")
+			mustDepAdd(t, f.store, checkA2.ID, a2.ID, "blocks")
+			claimInFlight(t, f.store, a2.ID)
+
+			processScopeControl(t, f.store, f.checkB.ID)
+			assertAbortDeferred(t, f.store, f.body.ID, f.b.ID, f.checkA.ID)
+			assertBeadState(t, f.store, checkA2.ID, "open", "")
+			assertInFlightUntouched(t, f.store, a2.ID)
+
+			closeMember(t, f.store, f.a.ID, map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass})
+			processScopeControl(t, f.store, f.checkA.ID)
+			assertAbortDeferred(t, f.store, f.body.ID, f.b.ID, checkA2.ID)
+			assertBeadState(t, f.store, f.checkA.ID, "closed", beadmeta.OutcomePass)
+			assertInFlightUntouched(t, f.store, a2.ID)
+
+			closeMember(t, f.store, a2.ID, map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass})
+			processScopeControl(t, f.store, checkA2.ID)
+			assertAbortSettled(t, f.store, f.body.ID, f.b.ID, nil)
+			assertBeadState(t, f.store, checkA2.ID, "closed", beadmeta.OutcomePass)
+		})
+	}
+}
+
 // TestScopeAbortTriggeredHonorsDecidedAbort pins the predicate both settlement
 // sites (processScopeCheck and reconcileScopeForTerminalMember) share: a member
 // that passed still settles a scope whose abort is already decided as aborted.
