@@ -6,7 +6,7 @@ description: Authoritative specification for Gas City pack format and loading se
 | Field | Value |
 |---|---|
 | Status | Authoritative specification |
-| Last verified | 2026-05-30 |
+| Last verified | 2026-11-28 |
 | Pack schema | 2 |
 | Primary implementation | `internal/config/pack.go`, `internal/config/config.go`, `internal/config/compose.go` |
 | User-facing guide | `docs/guides/shareable-packs.md` |
@@ -761,7 +761,8 @@ implementation files under `assets/` unless an established loader convention
 requires a well-known directory.
 
 Formula steps reference prompt assets with
-`description_file = "../assets/<relative-path>"`; section 1.3.2 specifies how
+`description_file = "../assets/<relative-path>"` and check scripts with a
+`check.path` of `../assets/scripts/checks/<name>`; section 1.3.2 specifies how
 those references resolve across formula layers.
 
 ### 1.3.2. `formulas/`
@@ -779,6 +780,25 @@ formula itself remains inherited from the lower-priority pack. Other relative
 that declares them. See the
 [Formula Specification](/reference/specs/formula-spec-v2#11-file-naming-and-layers) for
 formula file naming and layer resolution.
+
+A check script a step runs ships the same way, under
+`assets/scripts/checks/`, and the step names it with the same
+`../assets/` form:
+
+```toml
+[steps.check.check]
+mode = "exec"
+path = "../assets/scripts/checks/build-artifact-valid.sh"
+timeout = "5m"
+```
+
+The check path resolves through the same layer order as a
+`description_file`: a pack that imports another can name the imported
+pack's check script without copying it, and a higher layer can shadow it.
+Gas City does not stage a pack's `assets/` into the city's `.gc/` runtime
+state, so a check path under `.gc/` names a script no pack ships. See
+[Check](/reference/specs/formula-spec-v2#31-check) in the Formula
+Specification.
 
 ### 1.3.3. `overlay/`
 

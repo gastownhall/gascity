@@ -435,3 +435,36 @@ func TestFormulaSpecAssetCheckPathExampleCompiles(t *testing.T) {
 		}
 	})
 }
+
+// TestPackSpecDocumentsCheckScriptAssets keeps the pack spec's assets/ and
+// formulas/ sections telling pack authors where a check script ships and how
+// a formula names it.
+func TestPackSpecDocumentsCheckScriptAssets(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(repoRoot(), "docs", "reference", "specs", "pack-spec.md"))
+	if err != nil {
+		t.Fatalf("reading pack spec: %v", err)
+	}
+	content := string(data)
+
+	assets := markdownSection(t, content, "### 1.3.1. `assets/`")
+	if !strings.Contains(assets, "check script") {
+		t.Errorf("pack-spec section 1.3.1 does not name check scripts among the assets formula steps reference")
+	}
+
+	formulas := markdownSection(t, content, "### 1.3.2. `formulas/`")
+	_, checks := assetCheckExamples(t, formulas)
+	var stepCheck bool
+	for _, c := range checks {
+		if c.table == "steps.check.check" {
+			stepCheck = true
+		}
+	}
+	if !stepCheck {
+		t.Errorf("pack-spec section 1.3.2 has no [steps.check.check] TOML example with a ../assets/scripts/checks/ path")
+	}
+	for _, want := range []string{"check script", "description_file", "layer order", "`.gc/`", "/reference/specs/formula-spec-v2#31-check"} {
+		if !strings.Contains(formulas, want) {
+			t.Errorf("pack-spec section 1.3.2 does not mention %q", want)
+		}
+	}
+}
