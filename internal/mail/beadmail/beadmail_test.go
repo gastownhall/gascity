@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -3417,3 +3418,95 @@ var (
 	_ mail.Provider    = (*Provider)(nil)
 	_ mail.DedupSender = (*Provider)(nil)
 )
+
+// mailboxViews renders every list view of bob's mailbox as "id:read" strings,
+// so two mailboxes compare in one equality check.
+func mailboxViews(t *testing.T, p *Provider, threadOf string) map[string]string {
+	t.Helper()
+	render := func(msgs []mail.Message) string {
+		parts := make([]string, 0, len(msgs))
+		for _, m := range msgs {
+			parts = append(parts, fmt.Sprintf("%s:%t", m.ID, m.Read))
+		}
+		return strings.Join(parts, ",")
+	}
+	views := map[string]string{}
+	must := func(name string, msgs []mail.Message, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		views[name] = render(msgs)
+	}
+	inbox, err := p.InboxForRoutes([]string{"bob"})
+	if err != nil {
+		t.Fatalf("InboxForRoutes: %v", err)
+	}
+	views["InboxForRoutes.Unread"] = render(inbox.Unread())
+	views["InboxForRoutes.All"] = render(inbox.All())
+	total, unread := inbox.Counts()
+	views["InboxForRoutes.Counts"] = fmt.Sprintf("%d/%d", total, unread)
+	sessionInbox, err := p.InboxForSession(session.Info{ID: "bob"})
+	if err != nil {
+		t.Fatalf("InboxForSession: %v", err)
+	}
+	views["InboxForSession.All"] = render(sessionInbox.All())
+	checked, err := p.Check("bob")
+	must("Check", checked, err)
+	inboxed, err := p.Inbox("bob")
+	must("Inbox", inboxed, err)
+	all, err := p.All("bob")
+	must("All", all, err)
+	thread, err := p.Thread(threadOf)
+	must("Thread", thread, err)
+	candidates, err := p.ArchiveCandidates(ArchiveFilter{Recipients: []string{"bob"}, IncludeRead: true})
+	must("ArchiveCandidates", candidates, err)
+	total, unread, err = p.Count("bob")
+	if err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+	views["Count"] = fmt.Sprintf("%d/%d", total, unread)
+	total, unread, err = p.CountRecipients([]string{"bob"})
+	if err != nil {
+		t.Fatalf("CountRecipients: %v", err)
+	}
+	views["CountRecipients"] = fmt.Sprintf("%d/%d", total, unread)
+	return views
+}
+
+// TestInProgressMailListedLikeOpenMail pins that in_progress mail is live
+// mail: every list view returns it with the same read state and counts as the
+// same mailbox left open.
+func TestInProgressMailListedLikeOpenMail(t *testing.T) {
+	seed := func(status string) map[string]string {
+		store := beads.NewMemStore()
+		p := newTestProvider(store)
+		first, err := p.Send("alice", "bob", "hello", "first")
+		if err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		reply, err := p.Reply(first.ID, "alice", "re: hello", "second")
+		if err != nil {
+			t.Fatalf("Reply: %v", err)
+		}
+		if err := p.MarkRead(reply.ID); err != nil {
+			t.Fatalf("MarkRead: %v", err)
+		}
+		if status == "in_progress" {
+			for _, id := range []string{first.ID, reply.ID} {
+				setInProgress(t, store, id)
+			}
+		}
+		return mailboxViews(t, p, first.ID)
+	}
+	open := seed("open")
+	if open["CountRecipients"] != "2/1" || open["Thread"] == "" {
+		t.Fatalf("open mailbox views = %v, want two messages, one unread, in one thread", open)
+	}
+	inProgress := seed("in_progress")
+	for view, want := range open {
+		if got := inProgress[view]; got != want {
+			t.Errorf("%s with in_progress mail = %q, want %q as for open mail", view, got, want)
+		}
+	}
+}
