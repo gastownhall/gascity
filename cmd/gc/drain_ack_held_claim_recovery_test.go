@@ -266,3 +266,198 @@ func TestDrainAckHeldClaim_UndesiredSplitSeatReleasesBindingStep(t *testing.T) {
 		t.Fatalf("%s events = %d across both ticks, want 1", events.SessionDrainAckedWithAssignedWork, len(evts))
 	}
 }
+
+// drainAckDesiredSeat is the single-store drain-ack shape over a DESIRED pool
+// seat: the seat drain-acks holding one in_progress claim (blocked or not)
+// and the finalize tick lands it asleep/idle with the claim kept.
+type drainAckDesiredSeat struct {
+	env     *reconcilerTestEnv
+	rec     *events.Fake
+	session beads.Bead
+	work    beads.Bead
+}
+
+func newDrainAckDesiredSeat(t *testing.T, blocked bool) *drainAckDesiredSeat {
+	t.Helper()
+	env := newReconcilerTestEnv(t)
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0)}}}
+	rec := events.NewFake()
+	env.rec = rec
+	env.addDesired("worker", "worker", false)
+
+	session := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"pool_managed": "true",
+		"pool_slot":    "1",
+	})
+	env.markSessionActive(&session)
+
+	seed := beads.Bead{
+		Title:    "step held across the drain-ack",
+		Type:     "task",
+		Status:   "open",
+		Assignee: session.ID,
+	}
+	if blocked {
+		seed.IsBlocked = boolPtr(true)
+	}
+	// MemStore.Create normalizes a new bead's status to open, so the
+	// in_progress claim lands through an explicit transition.
+	work, err := env.store.Create(seed)
+	if err != nil {
+		t.Fatalf("Create(step): %v", err)
+	}
+	inProgress := "in_progress"
+	if err := env.store.Update(work.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("set step in_progress: %v", err)
+	}
+	work, err = env.store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("reload step: %v", err)
+	}
+
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+	env.dt.set(session.ID, &drainState{
+		startedAt:  env.clk.Now().Add(-defaultDrainTimeout),
+		deadline:   env.clk.Now().Add(-time.Second),
+		reason:     "orphaned",
+		generation: 1,
+		ackSet:     true,
+	})
+
+	// The finalize tick: the dead runtime plus the acknowledged drain lands
+	// the seat asleep/idle with the claim kept, once.
+	woken := reconcileSessionBeadsAtPath(
+		context.Background(),
+		env.city,
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		dops,
+		[]beads.Bead{work},
+		nil,
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+		withAsyncDrainAckStopTracker(env.stops),
+	)
+	if woken != 0 {
+		t.Fatalf("woken on the finalize tick = %d, want 0", woken)
+	}
+	return &drainAckDesiredSeat{env: env, rec: rec, session: session, work: work}
+}
+
+// assertFinalized pins the shared first tick: asleep/idle, seat open, claim
+// untouched, exactly one assigned-work event naming the pair.
+func (d *drainAckDesiredSeat) assertFinalized(t *testing.T) {
+	t.Helper()
+	work := d.mustGet(t, d.work.ID)
+	if work.Status != "in_progress" || work.Assignee != d.session.ID {
+		t.Fatalf("step = status %q assignee %q, want in_progress on its seat after the finalize", work.Status, work.Assignee)
+	}
+	session := d.mustGet(t, d.session.ID)
+	if session.Status == "closed" {
+		t.Fatalf("seat closed on the finalize tick while holding work")
+	}
+	if session.Metadata["state"] != "asleep" || session.Metadata["sleep_reason"] != "idle" {
+		t.Fatalf("seat state=%q sleep_reason=%q, want asleep/idle after the finalize",
+			session.Metadata["state"], session.Metadata["sleep_reason"])
+	}
+	evts := drainAckEvents(t, d.rec, events.SessionDrainAckedWithAssignedWork)
+	if len(evts) != 1 {
+		t.Fatalf("%s events = %d, want exactly 1", events.SessionDrainAckedWithAssignedWork, len(evts))
+	}
+	if !strings.Contains(string(evts[0].Payload), d.session.ID) || !strings.Contains(string(evts[0].Payload), d.work.ID) {
+		t.Fatalf("event payload does not name the session %q and step %q: %s", d.session.ID, d.work.ID, evts[0].Payload)
+	}
+}
+
+func (d *drainAckDesiredSeat) mustGet(t *testing.T, id string) beads.Bead {
+	t.Helper()
+	got, err := d.env.store.Get(id)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", id, err)
+	}
+	return got
+}
+
+// tick runs one reconcile over the re-read seat and its claim, with no drain
+// ack pending: the post-finalize lanes see a desired pool seat asleep on its
+// drain, holding its claim.
+func (d *drainAckDesiredSeat) tick(t *testing.T) int {
+	t.Helper()
+	session := d.mustGet(t, d.session.ID)
+	work := d.mustGet(t, d.work.ID)
+	return reconcileSessionBeadsAtPath(
+		context.Background(),
+		d.env.city,
+		[]beads.Bead{session},
+		d.env.desiredState,
+		map[string]bool{"worker": true},
+		d.env.cfg,
+		d.env.sp,
+		d.env.store,
+		newFakeDrainOps(),
+		[]beads.Bead{work},
+		nil,
+		nil,
+		d.env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		d.env.clk,
+		d.env.rec,
+		0,
+		0,
+		&d.env.stdout,
+		&d.env.stderr,
+		withAsyncDrainAckStopTracker(d.env.stops),
+	)
+}
+
+// TestDrainAckHeldClaim_DesiredSeatWithUnblockedClaimWakesInPlace pins the
+// desired-seat recovery: after the finalize, the assigned-work wake restarts
+// the SAME session bead for its unblocked in_progress claim — the claim keeps
+// its status and assignee, the seat is not closed, and no dead-assignee
+// release fires.
+func TestDrainAckHeldClaim_DesiredSeatWithUnblockedClaimWakesInPlace(t *testing.T) {
+	d := newDrainAckDesiredSeat(t, false)
+	d.assertFinalized(t)
+
+	woken := d.tick(t)
+	if woken != 1 {
+		t.Fatalf("woken = %d, want 1 — a desired seat with an unblocked in_progress claim is demand", woken)
+	}
+	if !d.env.sp.IsRunning("worker") {
+		t.Fatal("provider reports the seat stopped after the wake tick")
+	}
+	work := d.mustGet(t, d.work.ID)
+	if work.Status != "in_progress" || work.Assignee != d.session.ID {
+		t.Fatalf("step = status %q assignee %q, want kept on its seat across the wake", work.Status, work.Assignee)
+	}
+	session := d.mustGet(t, d.session.ID)
+	if session.Status == "closed" {
+		t.Fatal("seat closed while holding its claim — the wake lane restarts the same bead, it does not retire it")
+	}
+	if dead := drainAckEvents(t, d.rec, events.BeadDeadAssigneeReopened); len(dead) != 0 {
+		t.Fatalf("%s events = %d, want 0 — the wake lane never releases the claim", events.BeadDeadAssigneeReopened, len(dead))
+	}
+}
