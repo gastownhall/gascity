@@ -220,10 +220,12 @@ func materializeSkillsIntoWorkdir(cfg *config.City, agent *config.Agent, cityPat
 		return nil
 	}
 
+	owned := union.OwnedRoots()
 	res, err := materialize.Run(materialize.Request{
 		SinkDir:          sinkDir,
 		Desired:          union.Desired(),
-		OwnedRoots:       union.OwnedRoots(),
+		OwnedRoots:       owned,
+		ForeignRoots:     stage2ForeignRoots(cfg, cityPath, sinkDir, owned),
 		LegacyNames:      materialize.LegacyStubNames(),
 		LegacyOwnedRoots: materialize.LegacyOwnedRootsFor(cityPath),
 	})

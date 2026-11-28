@@ -1443,6 +1443,7 @@ go_test(
         "cmd_init_empty_bootstrap_warn_test.go",
         "cmd_init_empty_test.go",
         "cmd_init_gascity_test.go",
+        "cmd_internal_materialize_skills_shared_sink_test.go",
         "cmd_internal_materialize_skills_test.go",
         "cmd_internal_project_mcp_test.go",
         "cmd_lint_test.go",

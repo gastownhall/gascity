@@ -1640,3 +1640,178 @@ func TestRunDryRunPlansMissingSinkAndLegacyStub(t *testing.T) {
 		t.Fatalf("DryRun created the sink, stat err = %v", err)
 	}
 }
+
+// TestRunKeepsLiveLinkUnderForeignRoot covers the writer-isolation half
+// of the foreign-root rule: a live sink link whose target lies under a
+// gc-managed root this pass does not reconcile belongs to another
+// writer's pass, so this pass keeps it — and its ownership-manifest
+// entry — even though the manifest records the target and the name is
+// not desired here.
+func TestRunKeepsLiveLinkUnderForeignRoot(t *testing.T) {
+	t.Parallel()
+	mine := t.TempDir()
+	theirs := t.TempDir()
+	mkSkill(t, mine, "my-skill")
+	mkSkill(t, theirs, "their-skill")
+	sink := filepath.Join(t.TempDir(), "skills")
+	if err := os.MkdirAll(sink, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Another writer's pass materialized its skill here first.
+	if _, err := Run(Request{
+		SinkDir:    sink,
+		Desired:    []SkillEntry{{Name: "their-skill", Source: filepath.Join(theirs, "their-skill"), Origin: "agent"}},
+		OwnedRoots: []string{theirs},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	checkSymlink(t, filepath.Join(sink, "their-skill"), filepath.Join(theirs, "their-skill"))
+
+	res, err := Run(Request{
+		SinkDir:      sink,
+		Desired:      []SkillEntry{{Name: "my-skill", Source: filepath.Join(mine, "my-skill"), Origin: "agent"}},
+		OwnedRoots:   []string{mine},
+		ForeignRoots: []string{theirs},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkSymlink(t, filepath.Join(sink, "their-skill"), filepath.Join(theirs, "their-skill"))
+	if len(res.Removed) != 0 || len(res.Relinked) != 0 {
+		t.Errorf("Removed=%v Relinked=%v, want the foreign link untouched", res.Removed, res.Relinked)
+	}
+	manifest := loadOwnershipManifest(sink)
+	if manifest.Targets["their-skill"] == "" {
+		t.Errorf("manifest entry for their-skill was dropped: %v", manifest.Targets)
+	}
+}
+
+// TestRunRemovesDanglingLinkUnderForeignRoot covers the collection half
+// of the foreign-root rule: once a foreign-rooted link dangles it is
+// gc's own stranded property, so the pass removes it and its
+// ownership-manifest entry.
+func TestRunRemovesDanglingLinkUnderForeignRoot(t *testing.T) {
+	t.Parallel()
+	mine := t.TempDir()
+	theirs := t.TempDir()
+	mkSkill(t, mine, "my-skill")
+	mkSkill(t, theirs, "their-skill")
+	sink := filepath.Join(t.TempDir(), "skills")
+	if err := os.MkdirAll(sink, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Run(Request{
+		SinkDir:    sink,
+		Desired:    []SkillEntry{{Name: "their-skill", Source: filepath.Join(theirs, "their-skill"), Origin: "agent"}},
+		OwnedRoots: []string{theirs},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(theirs); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Run(Request{
+		SinkDir:      sink,
+		Desired:      []SkillEntry{{Name: "my-skill", Source: filepath.Join(mine, "my-skill"), Origin: "agent"}},
+		OwnedRoots:   []string{mine},
+		ForeignRoots: []string{theirs},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(res.Removed, []string{"their-skill"}) {
+		t.Errorf("Removed = %v, want the dangling foreign link", res.Removed)
+	}
+	if manifest := loadOwnershipManifest(sink); manifest.Targets["their-skill"] != "" {
+		t.Errorf("manifest entry for their-skill survived the removal: %v", manifest.Targets)
+	}
+}
+
+// TestRunForeignRootsDoNotBlockManifestCleanup guards the owned half of
+// the walk: listing foreign roots must not shield this pass's own
+// cleanup — a manifest-recorded link under an owned root still prunes
+// when its name stops being desired.
+func TestRunForeignRootsDoNotBlockManifestCleanup(t *testing.T) {
+	t.Parallel()
+	mine := t.TempDir()
+	theirs := t.TempDir()
+	mkSkill(t, mine, "my-old")
+	mkSkill(t, mine, "my-kept")
+	sink := filepath.Join(t.TempDir(), "skills")
+	if err := os.MkdirAll(sink, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Run(Request{
+		SinkDir: sink,
+		Desired: []SkillEntry{
+			{Name: "my-old", Source: filepath.Join(mine, "my-old"), Origin: "agent"},
+			{Name: "my-kept", Source: filepath.Join(mine, "my-kept"), Origin: "agent"},
+		},
+		OwnedRoots: []string{mine},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Run(Request{
+		SinkDir:      sink,
+		Desired:      []SkillEntry{{Name: "my-kept", Source: filepath.Join(mine, "my-kept"), Origin: "agent"}},
+		OwnedRoots:   []string{mine},
+		ForeignRoots: []string{theirs},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(res.Removed, []string{"my-old"}) {
+		t.Errorf("Removed = %v, want the owned undesired link pruned", res.Removed)
+	}
+	if manifest := loadOwnershipManifest(sink); manifest.Targets["my-old"] != "" {
+		t.Errorf("manifest entry for my-old survived the pruning: %v", manifest.Targets)
+	}
+	checkSymlink(t, filepath.Join(sink, "my-kept"), filepath.Join(mine, "my-kept"))
+}
+
+// TestRunForeignRootDesiredNameIsSkippedNotTaken covers a name both a
+// foreign writer and this pass desire from different sources: the live
+// foreign link holds it, this pass reports the conflict in Skipped with
+// the holding target instead of re-pointing the link.
+func TestRunForeignRootDesiredNameIsSkippedNotTaken(t *testing.T) {
+	t.Parallel()
+	mine := t.TempDir()
+	theirs := t.TempDir()
+	mkSkill(t, mine, "shared-name")
+	mkSkill(t, theirs, "shared-name")
+	sink := filepath.Join(t.TempDir(), "skills")
+	if err := os.MkdirAll(sink, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Run(Request{
+		SinkDir:    sink,
+		Desired:    []SkillEntry{{Name: "shared-name", Source: filepath.Join(theirs, "shared-name"), Origin: "agent"}},
+		OwnedRoots: []string{theirs},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Run(Request{
+		SinkDir:      sink,
+		Desired:      []SkillEntry{{Name: "shared-name", Source: filepath.Join(mine, "shared-name"), Origin: "agent"}},
+		OwnedRoots:   []string{mine},
+		ForeignRoots: []string{theirs},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkSymlink(t, filepath.Join(sink, "shared-name"), filepath.Join(theirs, "shared-name"))
+	if len(res.Skipped) != 1 || res.Skipped[0].Name != "shared-name" {
+		t.Fatalf("Skipped = %+v, want shared-name held by the foreign link", res.Skipped)
+	}
+	if !strings.Contains(res.Skipped[0].Reason, filepath.Join(theirs, "shared-name")) {
+		t.Errorf("Skipped reason %q does not name the holding target", res.Skipped[0].Reason)
+	}
+	for _, name := range res.Materialized {
+		if name == "shared-name" {
+			t.Errorf("shared-name reported materialized while held by a foreign link")
+		}
+	}
+}

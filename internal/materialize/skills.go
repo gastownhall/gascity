@@ -382,6 +382,18 @@ type Request struct {
 	// Use LegacyOwnedRootsFor for the canonical list. Pass nil to keep
 	// the historical behavior.
 	LegacyOwnedRoots []string
+	// ForeignRoots lists gc-managed source roots that belong to writers
+	// this pass does not reconcile — roots another agent's
+	// materialization pass owns. A live sink link whose target lies
+	// under one is that writer's: this pass keeps it, and its
+	// ownership-manifest entry, even when the name is also desired here
+	// (reported in Skipped with the holding target, the desired entry
+	// left unmaterialized); it is removed only once it dangles. Roots
+	// already under OwnedRoots are not foreign — a pass that folded
+	// every writer of the sink lists them there. Pass nil for the
+	// historical behavior (manifest-recorded links are prunable by any
+	// later pass).
+	ForeignRoots []string
 	// DryRun computes the pass without touching the filesystem: no sink
 	// directory, symlink, removal, or ownership manifest. The Result
 	// reports what a real pass would do.
@@ -562,6 +574,19 @@ func Run(req Request) (Result, error) {
 		legacyOwned = append(legacyOwned, canon)
 	}
 
+	foreign := make([]string, 0, len(req.ForeignRoots))
+	for _, root := range req.ForeignRoots {
+		if root == "" {
+			continue
+		}
+		canon, err := canonicalizePath(root)
+		if err != nil {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("canonicalize foreign root %q: %v", root, err))
+			continue
+		}
+		foreign = append(foreign, canon)
+	}
+
 	// Step 2: legacy stub migration.
 	for _, name := range req.LegacyNames {
 		path := filepath.Join(absSink, name)
@@ -608,6 +633,43 @@ func Run(req Request) (Result, error) {
 		if terr != nil {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("canonicalize target %q: %v", target, terr))
 			continue
+		}
+		if !targetUnderOwnedRoot(canonTarget, owned) {
+			if root := foreignRootFor(canonTarget, foreign); root != "" {
+				// A link whose target lies under another writer's
+				// gc-managed root: this pass did not fold that writer,
+				// so the link is that writer's pass's to manage, not
+				// this one's — even though the sink's shared manifest
+				// records the target. Keep it while it resolves (a name
+				// it holds that this pass also desires is reported in
+				// Skipped, not taken); collect it once it dangles.
+				if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
+					if req.DryRun {
+						result.Removed = append(result.Removed, name)
+						continue
+					}
+					if rmErr := os.Remove(path); rmErr != nil {
+						result.Warnings = append(result.Warnings, fmt.Sprintf("removing dangling foreign symlink %q: %v", path, rmErr))
+						continue
+					}
+					result.Removed = append(result.Removed, name)
+					if _, had := manifest.Targets[name]; had {
+						delete(manifest.Targets, name)
+						manifestDirty = true
+					}
+					continue
+				}
+				if _, want := desiredByName[name]; want {
+					result.Skipped = append(result.Skipped, SkippedConflict{
+						Name: name,
+						Path: path,
+						Reason: fmt.Sprintf("held by a live link to %s under another writer's skill root %s",
+							target, root),
+					})
+					delete(desiredByName, name)
+				}
+				continue
+			}
 		}
 		legacyTarget := false
 		if !targetUnderOwnedRoot(canonTarget, owned) && !manifestRecordsTarget(manifest, name, canonTarget) {
@@ -1021,6 +1083,22 @@ func targetUnderOwnedRoot(target string, ownedRoots []string) bool {
 		}
 	}
 	return false
+}
+
+// foreignRootFor returns the canonical foreign root the given canonical
+// symlink target falls under, or "" when it falls under none. Both are
+// canonicalized by the caller (Run prepares `foreign` from
+// Request.ForeignRoots the same way it prepares `owned`).
+func foreignRootFor(target string, foreignRoots []string) string {
+	if !filepath.IsAbs(target) {
+		return ""
+	}
+	for _, root := range foreignRoots {
+		if target == root || strings.HasPrefix(target, root+string(os.PathSeparator)) {
+			return root
+		}
+	}
+	return ""
 }
 
 // canonicalizePath returns path with all symlinks resolved, walking up to

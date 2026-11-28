@@ -387,3 +387,53 @@ func TestCmdWorktreeEnsureDryRunJSONContract(t *testing.T) {
 		}
 	}
 }
+
+// TestWorktreeEnsureAgentSkillsKeepOtherAgentLinks covers issue #7549 on
+// the worktree ensure path: two agents ensured into the same worktree
+// each materialize their skills into the worktree's sink, and the
+// second ensure must keep the first agent's links — they live under the
+// first agent's skill root, which the second agent's pass does not
+// reconcile.
+func TestWorktreeEnsureAgentSkillsKeepOtherAgentLinks(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_HOME", t.TempDir())
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+	writeMaterializeTestCityFile(t, cityDir, "city.toml", "[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n")
+	writeMaterializeTestCityFile(t, cityDir, "pack.toml", "[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n")
+	for _, name := range []string{"alpha", "beta"} {
+		if err := os.MkdirAll(filepath.Join(cityDir, "agents", name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeMaterializeTestCityFile(t, cityDir, filepath.Join("agents", name, "agent.toml"), "provider = \"claude\"\nstart_command = \"echo\"\n")
+		writeSkillSource(t, filepath.Join(cityDir, "agents", name, "skills", name+"-skill"))
+	}
+
+	repo, base := worktreeTestRepo(t)
+	root := t.TempDir()
+	wt := filepath.Join(root, "wt")
+	for _, agent := range []string{"alpha", "beta"} {
+		opts := managedWorktreeCmdOpts(repo, root, wt, base)
+		opts.Agent = agent
+		var stdout, stderr bytes.Buffer
+		if code := runWorktreeEnsure(opts, &stdout, &stderr); code != 0 {
+			t.Fatalf("%s's ensure exited %d: stderr=%q", agent, code, stderr.String())
+		}
+	}
+	sink := filepath.Join(wt, ".claude", "skills")
+	for _, agent := range []string{"alpha", "beta"} {
+		name := agent + "-skill"
+		target, err := os.Readlink(filepath.Join(sink, name))
+		if err != nil {
+			t.Errorf("%s missing from the worktree sink: %v; ensure stderr above", name, err)
+			continue
+		}
+		want := filepath.Join(cityDir, "agents", agent, "skills", name)
+		if target != want {
+			t.Errorf("%s -> %s, want %s", name, target, want)
+		}
+	}
+}

@@ -216,3 +216,72 @@ func stage2SinkWriters(cfg *config.City, invoker *config.Agent, cityPath, sinkDi
 	}
 	return union
 }
+
+// stage2ForeignRoots lists the gc-managed source roots a stage-2 pass
+// does not reconcile: every configured agent's skills dir and every
+// scope's shared-catalog source roots, minus the pass's owned roots
+// (the union's — a root the pass folds is owned, not foreign). It is
+// passed only when the target sink is no stage-1 writer's scope-root
+// sink: a sink a stage-1 pass reconciles folds those writers into its
+// union, so their roots are already owned there. Roots the pass
+// overlooks this way are what lets one writer's pass prune another's
+// live links out of a sink only the other writer is configured for
+// (issue #7549) — the materializer keeps live foreign links alone.
+func stage2ForeignRoots(cfg *config.City, cityPath, sinkDir string, owned []string) []string {
+	if cfg == nil {
+		return nil
+	}
+	rt := cityMaterializationRuntime(cfg, cityPath)
+	key := pathutil.NormalizePathForCompare(sinkDir)
+	for i := range cfg.Agents {
+		a := &cfg.Agents[i]
+		if !canStage1Materialize(rt, a) {
+			continue
+		}
+		provider := effectiveAgentProviderFamily(a, cfg.Workspace.Provider, cfg.Providers)
+		vendor, ok := materialize.VendorSink(provider)
+		if !ok {
+			continue
+		}
+		scopeRoot := resolveAgentScopeRoot(a, cityPath, cfg.Rigs)
+		if !filepath.IsAbs(scopeRoot) {
+			scopeRoot = filepath.Join(cityPath, scopeRoot)
+		}
+		if pathutil.NormalizePathForCompare(filepath.Join(scopeRoot, vendor)) == key {
+			return nil
+		}
+	}
+
+	ownedSet := make(map[string]bool, len(owned))
+	for _, root := range owned {
+		ownedSet[root] = true
+	}
+	var roots []string
+	add := func(root string) {
+		if root == "" {
+			return
+		}
+		abs, err := filepath.Abs(root)
+		if err != nil {
+			return
+		}
+		if ownedSet[abs] {
+			return
+		}
+		ownedSet[abs] = true // also dedupes the accumulated list
+		roots = append(roots, abs)
+	}
+	for i := range cfg.Agents {
+		add(cfg.Agents[i].SkillsDir)
+	}
+	add(cfg.PackSkillsDir)
+	for _, catalog := range cfg.PackSkills {
+		add(catalog.SourceDir)
+	}
+	for _, rigCatalogs := range cfg.RigPackSkills {
+		for _, catalog := range rigCatalogs {
+			add(catalog.SourceDir)
+		}
+	}
+	return roots
+}
