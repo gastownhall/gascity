@@ -3033,6 +3033,12 @@ func deleteWorkflowBeadsBatchGuarded(store beads.Store, ids []string) error {
 		// Already guarded at the set level above; the per-bead guard would
 		// re-walk the same closure once per member.
 		if err := deleteWorkflowBeadUnguarded(store, id); err != nil {
+			// As DeleteBatch has it, an id that is already gone is deleted:
+			// an orphaned row a listing still returns, or one another
+			// sweeper removed first, must not fail the rest of the batch.
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
 			return err
 		}
 	}
