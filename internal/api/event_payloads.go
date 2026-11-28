@@ -513,9 +513,12 @@ func (WorkerOperationEventPayload) IsEventPayload() {}
 
 // SessionDrainAckedWithAssignedWorkPayload carries the bead-side context for
 // a session that drain-acked while still holding the assignee on an open or
-// in-progress work bead. The reconciler emits this as a mechanism-only
-// signal (per gastownhall/gascity#2293) so pack-level subscribers can apply
-// recovery policy without baking pack-specific knowledge into the SDK.
+// in-progress work bead. The event is diagnostic (per
+// gastownhall/gascity#2293): the finalize keeps the claim, and the
+// controller's recovery lanes — the orphan release (SESS-082), the stranded
+// repair (SESS-625) or the assigned-work wake (SESS-583) — make the claim
+// claimable again. Pack-level subscribers may layer content policy on the
+// signal without baking pack-specific knowledge into the SDK.
 type SessionDrainAckedWithAssignedWorkPayload struct {
 	SessionID  string `json:"session_id" doc:"Canonical session bead ID for the session that drain-acked."`
 	BeadID     string `json:"bead_id" doc:"ID of the work bead still holding this session as its assignee."`

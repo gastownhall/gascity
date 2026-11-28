@@ -185,10 +185,13 @@ const (
 	// on an open or in-progress work bead. Distinguishes a worker that
 	// exited mid-task (e.g., per-turn cap, crash) from a worker that
 	// performed a clean phase handoff (the latter null the bead's
-	// assignee before drain-acking). The reconciler emits this as a
-	// mechanism-only signal; pack-level subscribers own the recovery
-	// policy (commit-and-push, clear-assignee-and-respawn, or escalate).
-	// See gastownhall/gascity#2293.
+	// assignee before drain-acking). The event is diagnostic: the
+	// reconciler's finalize sleeps the seat without touching the claim,
+	// and the controller's recovery lanes make the claim claimable again —
+	// the undesired seat's orphan release (SESS-082), the stranded repair
+	// (SESS-625), or the assigned-work wake (SESS-583). Pack-level
+	// subscribers may layer content policy on the signal, but the release
+	// is not theirs to own. See gastownhall/gascity#2293.
 	SessionDrainAckedWithAssignedWork = "session.drain_acked_with_assigned_work"
 	// SessionDrainStopEscalated fires when the reconciler gives up waiting for a
 	// drain-ack stop-pending session to exit on its own and escalates to a

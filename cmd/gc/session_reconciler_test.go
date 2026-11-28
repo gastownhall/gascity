@@ -2036,9 +2036,11 @@ func TestReconcileSessionBeads_DrainAckWithAssignedOpenWorkSleepsInsteadOfDraini
 // while still holding the assignee on an in-progress work bead (the cap-hit
 // shape — worker exited mid-task without nulling assignee), the reconciler
 // MUST emit events.SessionDrainAckedWithAssignedWork carrying the session
-// and bead IDs exactly once after the provider stop has completed so pack-side
-// subscribers can apply recovery policy. The SDK reconciler stops at the event;
-// it does not commit, push, or clear assignee.
+// and bead IDs exactly once after the provider stop has completed. The
+// finalize stops at the event and sleeps the seat without touching the
+// claim; making the claim claimable again belongs to the later recovery
+// lanes (the orphan release, the stranded repair, the assigned-work wake),
+// pinned in drain_ack_held_claim_recovery_test.go.
 func TestReconcileSessionBeads_DrainAckMidPhaseEmitsAssignedWorkEvent(t *testing.T) {
 	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
