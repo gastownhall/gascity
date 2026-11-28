@@ -240,3 +240,37 @@ func TestPoolDemandFilterStillDropsAClosedHoldersCityStoreClaim(t *testing.T) {
 		t.Fatalf("filtered work = %#v, want the closed session's claim dropped", kept)
 	}
 }
+
+// The widening is ownership, not scope: rows the rig-reach test rejects that
+// are NOT the live holder's own matching claim stay dropped. A bead assigned
+// to the live holder but routed to another template belongs to that other
+// template's pool; a bead under another rig's ref sits in a store this
+// holder's hook cannot claim from; unassigned city-store work reaches no rig
+// pool on a single-store city; and an assignee that is only the template
+// identity is a scope statement, not an ownership one, so it grants nothing.
+func TestPoolDemandFilterStillDropsRowsTheHolderDoesNotOwn(t *testing.T) {
+	toRigb := routedPoolWorkBead()
+	toRigb.Metadata = map[string]string{"gc.routed_to": "rigb/worker"}
+	foreignRef := routedPoolWorkBead()
+	unassigned := routedPoolWorkBead()
+	unassigned.Assignee = ""
+	templateIdentity := routedPoolWorkBead()
+	templateIdentity.Assignee = "riga/worker"
+	for _, tc := range []struct {
+		name string
+		work []beads.Bead
+		refs []string
+	}{
+		{name: "assigned to the holder, routed to another template", work: []beads.Bead{toRigb}, refs: []string{""}},
+		{name: "assigned to the holder under another rig's ref", work: []beads.Bead{foreignRef}, refs: []string{"rigb"}},
+		{name: "unassigned city-store work", work: []beads.Bead{unassigned}, refs: []string{""}},
+		{name: "assigned only to the template identity", work: []beads.Bead{templateIdentity}, refs: []string{""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			kept, _ := liveHolderRows(t, "active", tc.work, tc.refs)
+			if len(kept) != 0 {
+				t.Fatalf("filtered work = %#v, want dropped: %s", kept, tc.name)
+			}
+		})
+	}
+}
