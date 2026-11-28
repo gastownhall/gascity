@@ -511,6 +511,12 @@ func lifecycleWakeConflictState(view LifecycleView) (string, bool) {
 	}
 }
 
+// LifecycleClosed reports whether a session row with the given persisted
+// status and metadata projects to the closed base state.
+func LifecycleClosed(status string, metadata map[string]string) bool {
+	return ProjectLifecycle(LifecycleInputFromMetadata(status, metadata)).BaseState == BaseStateClosed
+}
+
 // LifecycleRetired reports whether a session row is retired for good: its
 // lifecycle projects closed and it is not a configured named row the
 // reconciler may still reopen (ClosedNamedSessionReopenEligibleMetadata).
@@ -519,8 +525,7 @@ func lifecycleWakeConflictState(view LifecycleView) (string, bool) {
 // not retired. Callers that know the named row's identity is no longer
 // configured treat that closed row as retired too.
 func LifecycleRetired(status string, metadata map[string]string) bool {
-	view := ProjectLifecycle(LifecycleInputFromMetadata(status, metadata))
-	if view.BaseState != BaseStateClosed {
+	if !LifecycleClosed(status, metadata) {
 		return false
 	}
 	if strings.TrimSpace(metadata[NamedSessionIdentityMetadata]) == "" {

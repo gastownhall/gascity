@@ -74,7 +74,7 @@ func nudgeFenceRetired(cfg *config.City, persisted session.PersistedResponse) bo
 	if session.LifecycleRetired(persisted.Status, persisted.Metadata) {
 		return true
 	}
-	if strings.TrimSpace(persisted.Status) != "closed" {
+	if !session.LifecycleClosed(persisted.Status, persisted.Metadata) {
 		return false
 	}
 	identity := strings.TrimSpace(persisted.Metadata[session.NamedSessionIdentityMetadata])
