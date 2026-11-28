@@ -430,6 +430,62 @@ func TestRetiredSessionNudgeSweepFailuresLeaveItemsAlone(t *testing.T) {
 			t.Fatalf("queue pending/inFlight/dead = %d/%d/%d, want 0/1/0", len(pending), len(inFlight), len(dead))
 		}
 	})
+	t.Run("fence-row-read-error", func(t *testing.T) {
+		dir, mgr, _, info := retiredNudgeTestCity(t)
+		store := openNudgeBeadStore(dir)
+		cfg := &config.City{Agents: []config.Agent{{Name: "worker", Provider: "claude"}}}
+		closeSweepRow(t, mgr, dir, info.ID)
+		enqueueSweepItem(t, dir, store, "worker-7", info.ID, "n-read-error")
+		moved, err := sweepRetiredSessionNudges(dir, cfg, store, beads.SessionStore{Store: failingSessionGetStore{Store: store}}, time.Now())
+		if moved != 0 || err == nil || !strings.Contains(err.Error(), `reading session "`+info.ID+`"`) || !strings.Contains(err.Error(), "session store unavailable") {
+			t.Fatalf("sweep = (%d, %v), want (0, the read error naming %s)", moved, err, info.ID)
+		}
+		pending, _, dead := sweepQueueBuckets(t, dir)
+		if len(pending) != 1 || len(dead) != 0 {
+			t.Fatalf("queue pending/dead = %d/%d, want 1/0", len(pending), len(dead))
+		}
+		var controllerStderr bytes.Buffer
+		cr := &CityRuntime{cityName: "test-city", cityPath: dir, cfg: cfg, standaloneCityStore: failingSessionGetStore{Store: store}, stdout: io.Discard, stderr: &controllerStderr, logPrefix: "gc test"}
+		cr.runNudgeMailSweepWatchdog(cfg, time.Now())
+		if !strings.Contains(controllerStderr.String(), `retired-session sweep: reading session "`+info.ID+`"`) {
+			t.Fatalf("controller stderr = %q, want the row read error", controllerStderr.String())
+		}
+		pending, _, dead = sweepQueueBuckets(t, dir)
+		if len(pending) != 1 || len(dead) != 0 {
+			t.Fatalf("after watchdog queue pending/dead = %d/%d, want 1/0", len(pending), len(dead))
+		}
+	})
+	for _, tc := range []struct {
+		name      string
+		sessionID func(closedID string) string
+	}{
+		{name: "re-fenced-to-another-session", sessionID: func(string) string { return "gc-successor" }},
+		{name: "re-fenced-to-a-new-epoch", sessionID: func(closedID string) string { return closedID }},
+	} {
+		t.Run(tc.name+"-between-the-snapshot-and-the-locked-run", func(t *testing.T) {
+			dir, mgr, _, info := retiredNudgeTestCity(t)
+			store := openNudgeBeadStore(dir)
+			cfg := &config.City{Agents: []config.Agent{{Name: "worker", Provider: "claude"}}}
+			closeSweepRow(t, mgr, dir, info.ID)
+			enqueueSweepItem(t, dir, store, "worker-7", info.ID, "n-refenced")
+			prev := retiredSweepBeforeLock
+			t.Cleanup(func() { retiredSweepBeforeLock = prev })
+			retiredSweepBeforeLock = func() {
+				if err := updateNudgeQueueState(dir, "test-refence", func(state *nudgeQueueState) error {
+					for i := range state.Pending {
+						if state.Pending[i].ID == "n-refenced" {
+							state.Pending[i].SessionID = tc.sessionID(info.ID)
+							state.Pending[i].ContinuationEpoch = "2"
+						}
+					}
+					return nil
+				}); err != nil {
+					t.Errorf("re-fencing: %v", err)
+				}
+			}
+			wantSweepKeepsPending(t, dir, cfg, store, 1)
+		})
+	}
 	t.Run("fence-changed-under-the-lock", func(t *testing.T) {
 		// The plan came from the snapshot; the locked run must only move the
 		// item whose fence still matches it.

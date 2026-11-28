@@ -110,12 +110,18 @@ func sweepRetiredSessionNudges(cityPath string, cfg *config.City, nudges beads.N
 	// (e) Locked run, on the fence the snapshot planned from, through the
 	// queue seam — the same dead-letter pattern the other terminal paths
 	// run, with the shadow debts paid after the lock.
+	retiredSweepBeforeLock()
 	moved, err := openNudgeQueue(cityPath, nudges).RetiredFence.DeadLetterRetiredFence(planned, now)
 	if err != nil {
 		return 0, errors.Join(append(readErrs, fmt.Errorf("moving retired-fence nudges to dead: %w", err))...)
 	}
 	return moved, errors.Join(readErrs...)
 }
+
+// retiredSweepBeforeLock runs between the retired-session sweep's unlocked
+// planning and its locked run. Tests replace it to change the queue in that
+// window.
+var retiredSweepBeforeLock = func() {}
 
 // sweepRetiredSessionNudgesFromList is the maintaining list's best-effort
 // pass of the retired-fence sweep: the same convergence the controller's
