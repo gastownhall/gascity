@@ -206,3 +206,73 @@ func TestReconcileSessionBeads_WaitParkedSeatWakesInPlaceOnWaitReady(t *testing.
 		t.Errorf("session beads = %v, want exactly the parked bead %s woken in place", ids, session.ID)
 	}
 }
+
+// TestReconcileSessionBeads_WaitParkedSeatFreesWhenItsWaitEnds bounds the
+// park: once the wait ends without waking the seat (a cancel or expiry
+// clears the hold), the gate reads the idle row freeable again and the next
+// reconcile treats the seat exactly as base treats an unheld asleep-idle
+// seat holding started work — the assigned-work wake restarts it in place on
+// its own bead, claim intact (the control test below pins that base outcome).
+func TestReconcileSessionBeads_WaitParkedSeatFreesWhenItsWaitEnds(t *testing.T) {
+	env, session, task, _ := newWaitParkedSeatEnv(t, config.SessionSleepConfig{}, true)
+	drainAckAndWaitPark(t, env, session)
+
+	// While the wait stands the seat is parked: no marker.
+	env.clk.Time = env.clk.Now().Add(time.Minute)
+	row, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	reconcileSessionBeadsAtPath(
+		context.Background(), env.city, []beads.Bead{row}, env.desiredState, map[string]bool{"worker": true},
+		env.cfg, env.sp, env.store, nil, []beads.Bead{task}, nil, nil, env.dt,
+		map[string]int{"worker": 1}, false, nil, "",
+		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr, env.startOptions...)
+	if got, _ := env.store.Get(session.ID); strings.TrimSpace(got.Metadata[strandedEventEmittedKey]) != "" {
+		t.Fatalf("while the wait stands the seat was marked stranded: %q", got.Metadata[strandedEventEmittedKey])
+	}
+
+	// The wait ends without waking it. Legacy's end-of-wait clear applies the
+	// same WaitEnd cell the v2 wait step's clearSessionWaitHoldFenced does.
+	if err := clearSessionWaitHoldIfIdle(sessionFrontDoor(env.store), session.ID); err != nil {
+		t.Fatalf("clearSessionWaitHoldIfIdle: %v", err)
+	}
+	info := env.sessionInfo(session.ID)
+	if info.WaitHold != "" || info.SleepIntent != "" {
+		t.Fatalf("the clear left wait_hold=%q sleep_intent=%q, want both gone", info.WaitHold, info.SleepIntent)
+	}
+	if !isPoolSessionSlotFreeableInfo(info, env.clk.Now()) {
+		t.Errorf("after the wait ended the gate must read the idle row freeable again")
+	}
+
+	// Base handling resumes on the next reconcile: the wake the wait had
+	// suppressed fires, and the seat restarts in place on its claimed work.
+	row, err = env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	var out, errw strings.Builder
+	reconcileSessionBeadsAtPath(
+		context.Background(), env.city, []beads.Bead{row}, env.desiredState, map[string]bool{"worker": true},
+		env.cfg, env.sp, env.store, nil, []beads.Bead{task}, nil, nil, env.dt,
+		map[string]int{"worker": 1}, false, nil, "",
+		nil, env.clk, env.rec, 0, 0, &out, &errw, env.startOptions...)
+	if !env.sp.IsRunning("worker") {
+		after, _ := env.store.Get(session.ID)
+		t.Errorf("after the wait ended the seat was not restarted on its assigned work; state=%q; stderr=%s", after.Metadata["state"], errw.String())
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Status == "closed" {
+		t.Errorf("the restarted seat's bead is closed")
+	}
+	work, err := env.store.Get(task.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", task.ID, err)
+	}
+	if work.Assignee != session.ID || work.Status != "in_progress" {
+		t.Errorf("work = %s/%q, want still in_progress claimed by the restarted seat", work.Status, work.Assignee)
+	}
+}
