@@ -1,12 +1,18 @@
 package main
 
 import (
+	"context"
+	"io"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -84,5 +90,105 @@ func TestPoolDemandFilterKeepsALiveHoldersClaimAlignedInAMixedSlice(t *testing.T
 	}
 	if !slices.Equal(keptRefs, []string{"riga", ""}) {
 		t.Fatalf("kept refs = %q, want [riga \"\"] aligned with the kept rows", keptRefs)
+	}
+}
+
+// liveHolderDesiredName is the busy holder's session name in the
+// desired-state scenarios.
+const liveHolderDesiredName = "worker-gc-1"
+
+// rigPoolLiveHolderDesired builds desired state for the reported shape: a
+// single-store city whose rig pool riga/worker (max 5, scale_check 1) has one
+// active session holding in-progress city-store bead A, beside open unassigned
+// city-store bead B. It returns the riga/worker desired session names, sorted.
+func rigPoolLiveHolderDesired(t *testing.T, heldPriority, queuedPriority int) []string {
+	t.Helper()
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "riga")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("create rig dir: %v", err)
+	}
+	cityStore := beads.NewMemStore()
+	if _, err := cityStore.Create(beads.Bead{
+		Title:  "working rig worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:riga/worker"},
+		Metadata: map[string]string{
+			"template":     "riga/worker",
+			"session_name": liveHolderDesiredName,
+			"state":        "active",
+			"pool_managed": "true",
+		},
+	}); err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	held, err := cityStore.Create(beads.Bead{
+		Title:    "held city work",
+		Type:     "task",
+		Priority: intPtr(heldPriority),
+		Assignee: liveHolderDesiredName,
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "riga/worker"},
+	})
+	if err != nil {
+		t.Fatalf("create held bead: %v", err)
+	}
+	if err := cityStore.Update(held.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("set held in_progress: %v", err)
+	}
+	if _, err := cityStore.Create(beads.Bead{
+		Title:    "queued city work",
+		Type:     "task",
+		Priority: intPtr(queuedPriority),
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "riga/worker"},
+	}); err != nil {
+		t.Fatalf("create queued bead: %v", err)
+	}
+	sessionSnapshot, err := loadSessionBeadSnapshot(cityStore)
+	if err != nil {
+		t.Fatalf("load session snapshot: %v", err)
+	}
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), liveHolderDesiredName, runtime.Config{}); err != nil {
+		t.Fatalf("start fake holder: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "riga", Path: rigPath}},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "riga",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(5),
+			ScaleCheck:        printCountCommand(1),
+		}},
+	}
+
+	dsResult := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), cfg, sp,
+		cityStore, map[string]beads.Store{"riga": beads.NewMemStore()}, sessionSnapshot, nil, io.Discard,
+	)
+	var names []string
+	for name, tp := range dsResult.State {
+		if tp.TemplateName == "riga/worker" {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	return names
+}
+
+func TestBuildDesiredState_RigPoolCountsALiveHoldersCityStoreClaim(t *testing.T) {
+	names := rigPoolLiveHolderDesired(t, 2, 2)
+
+	if len(names) != 2 || !slices.Contains(names, liveHolderDesiredName) {
+		t.Fatalf("riga/worker desired sessions = %v, want 2: the busy holder %q plus a fresh session for the queued bead", names, liveHolderDesiredName)
+	}
+}
+
+func TestBuildDesiredState_RigPoolHigherPriorityQueuedWorkDoesNotTakeTheBusyHolder(t *testing.T) {
+	names := rigPoolLiveHolderDesired(t, 4, 0)
+
+	if len(names) != 2 || !slices.Contains(names, liveHolderDesiredName) {
+		t.Fatalf("riga/worker desired sessions = %v, want 2: the P0 queued bead must get a fresh session, not the busy holder %q holding P4 work", names, liveHolderDesiredName)
 	}
 }
