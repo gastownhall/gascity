@@ -574,3 +574,66 @@ func TestDrainAckHeldClaim_V2CloseReleasesBindingStep(t *testing.T) {
 		}
 	}
 }
+
+// TestDrainAckHeldClaim_ClosedSeatFreesPoolSlotForFreshSeat pins the
+// downstream pool effect: a seat closed by a held-claim recovery lane no
+// longer fills its slot, so pool demand on a later tick plans a FRESH seat
+// for the freed slot instead of counting the closed bead.
+func TestDrainAckHeldClaim_ClosedSeatFreesPoolSlotForFreshSeat(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+
+	// The seat a recovery lane already closed on slot 1.
+	closed, err := store.Create(beads.Bead{
+		Title:  "rig/claude-1",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:rig/claude-1"},
+		Metadata: map[string]string{
+			"template":     "rig/claude",
+			"agent_name":   "rig/claude-1",
+			"session_name": "rig/claude-1",
+			"pool_managed": "true",
+			"pool_slot":    "1",
+			"state":        "asleep",
+			"sleep_reason": "idle",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create closed seat: %v", err)
+	}
+	closedStatus := "closed"
+	if err := store.Update(closed.ID, beads.UpdateOpts{Status: &closedStatus}); err != nil {
+		t.Fatalf("close seat: %v", err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "claude",
+			Dir:               "rig",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(3),
+			ScaleCheck:        printCountCommand(1),
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	if len(dsResult.State) != 1 {
+		t.Fatalf("desired sessions = %d, want 1 — a closed seat must not count as a filled slot", len(dsResult.State))
+	}
+
+	sessionBeads, err := loadSessionBeads(store)
+	if err != nil {
+		t.Fatalf("load session beads: %v", err)
+	}
+	if len(sessionBeads) != 1 {
+		t.Fatalf("session beads = %d, want 1 fresh seat planned", len(sessionBeads))
+	}
+	fresh := sessionBeads[0]
+	if fresh.ID == closed.ID {
+		t.Fatalf("the closed seat %q was reused as the desired seat, want a fresh bead", closed.ID)
+	}
+	if fresh.Metadata["pool_slot"] != "1" {
+		t.Fatalf("fresh seat pool_slot = %q, want the freed slot 1", fresh.Metadata["pool_slot"])
+	}
+}
