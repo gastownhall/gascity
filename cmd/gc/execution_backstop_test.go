@@ -2078,3 +2078,74 @@ func TestExecutionBackstopWaitsTheGraceWithoutOverloadEvidence(t *testing.T) {
 		})
 	}
 }
+
+// An overload skips only the observe-first grace: once the immediate attempt
+// is spent, attempts 2 and 3 each wait the full backoff, and after the third
+// attempt's backoff the terminal action is the one any stall gets. An
+// unstarted seat is drained (execution_stalled); a started seat is held as
+// executing. The turns are read only while the grace is still to wait.
+func TestExecutionBackstopOverloadSkipsOnlyTheFirstGrace(t *testing.T) {
+	for _, started := range []bool{false, true} {
+		t.Run(fmt.Sprintf("started=%v", started), func(t *testing.T) {
+			f := newExecutionBackstopFixture(t)
+			if started {
+				f.startedSinceWake(t)
+			} else {
+				f.wokeAgo(t, 10*time.Minute)
+			}
+			f.turns = overloadedTurns(f.now.Add(-91 * time.Second))
+			start := f.now
+			tickAt := func(after time.Duration) {
+				t.Helper()
+				f.now = start.Add(after)
+				f.idleFor(t, 10*time.Minute)
+				f.tick(t)
+			}
+
+			tickAt(0)
+			if got := f.nudgeCount(); got != 1 {
+				t.Fatalf("nudges on the first quiet tick = %d, want the immediate attempt; stdout=%s", got, f.stdout.String())
+			}
+			for _, step := range []struct {
+				after time.Duration
+				want  int
+			}{
+				{after: time.Minute, want: 1},
+				{after: idleClaimNudgeBackoff - time.Second, want: 1},
+				{after: idleClaimNudgeBackoff, want: 2},
+				{after: 2*idleClaimNudgeBackoff - time.Second, want: 2},
+				{after: 2 * idleClaimNudgeBackoff, want: 3},
+				{after: 3*idleClaimNudgeBackoff - time.Second, want: 3},
+			} {
+				tickAt(step.after)
+				if got := f.nudgeCount(); got != step.want {
+					t.Fatalf("nudges at +%v = %d, want %d; stdout=%s", step.after, got, step.want, f.stdout.String())
+				}
+				if len(f.drained) != 0 {
+					t.Fatalf("drains at +%v = %v, want none before the last backoff has run", step.after, f.drained)
+				}
+			}
+			if got := f.sessionMeta(t, executionClaimNudgeCountKey); got != "3" {
+				t.Fatalf("persisted attempt count = %q, want 3", got)
+			}
+
+			tickAt(3 * idleClaimNudgeBackoff)
+			if got := f.nudgeCount(); got != idleClaimNudgeMaxAttempts {
+				t.Fatalf("nudges after the cap = %d, want %d", got, idleClaimNudgeMaxAttempts)
+			}
+			if started {
+				if len(f.drained) != 0 || f.stalledEvents() != 0 {
+					t.Fatalf("drains %v, step_stalled %d; want neither for a started seat", f.drained, f.stalledEvents())
+				}
+				if got := f.sessionMeta(t, executionClaimHoldKey); !strings.HasPrefix(got, executionHoldExecuting) {
+					t.Fatalf("hold breadcrumb = %q, want %q", got, executionHoldExecuting)
+				}
+			} else if len(f.drained) != 1 || f.drained[0] != f.sessName || f.stalledEvents() != 1 {
+				t.Fatalf("drains %v, step_stalled %d; want one drain of %s and one event", f.drained, f.stalledEvents(), f.sessName)
+			}
+			if f.turnReads != 1 {
+				t.Fatalf("turn reads = %d, want 1: only the tick the grace was still to wait", f.turnReads)
+			}
+		})
+	}
+}
