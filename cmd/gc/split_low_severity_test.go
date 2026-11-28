@@ -32,7 +32,7 @@ func TestRunTargetBackfillCheckFindsWorkflowRootsInTheGraphBinding(t *testing.T)
 	work := splittest.NewWorkStore(t, "gc")
 	check := newRunTargetRoutedToBackfillCheck(nil, cityPath, func(string) (beads.Store, error) { return work, nil })
 
-	targets, skipped := check.collect()
+	targets, skipped := check.collect(nil)
 	if len(skipped) != 0 {
 		t.Fatalf("skipped = %v", skipped)
 	}

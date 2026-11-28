@@ -106,3 +106,34 @@ func TestHoldLabelRoutedToSweepsScopesConcurrently(t *testing.T) {
 		t.Fatalf("message = %q, want %q", res.Message, want)
 	}
 }
+
+// TestRunTargetBackfillSweepsScopesConcurrently (AC-2): the backfill check
+// reads its rig scopes concurrently and reports every rig's unrouted root.
+func TestRunTargetBackfillSweepsScopesConcurrently(t *testing.T) {
+	cityDir, rigA, rigB := t.TempDir(), t.TempDir(), t.TempDir()
+	cfg := &config.City{Rigs: []config.Rig{{Name: "a", Path: rigA}, {Name: "b", Path: rigB}}}
+	probe := newInFlightProbe(t, 2, 5*time.Second)
+	root := func(id string) []beads.Bead {
+		return []beads.Bead{{ID: id, Title: "root", Type: "task", Status: "open", Metadata: map[string]string{
+			"gc.kind": "workflow", "gc.run_target": "worker",
+		}}}
+	}
+	stores := map[string]beads.Store{
+		cityDir: inFlightStore{Store: beads.NewMemStore(), probe: probe},
+		rigA:    inFlightStore{Store: beads.NewMemStoreFrom(0, root("A-1"), nil), probe: probe},
+		rigB:    inFlightStore{Store: beads.NewMemStoreFrom(0, root("B-1"), nil), probe: probe},
+	}
+
+	res := newRunTargetRoutedToBackfillCheck(cfg, cityDir, holdLabelStores(stores)).Run(&doctor.CheckContext{})
+
+	if got := probe.peak.Load(); got < 2 {
+		t.Fatalf("max in-flight scope reads = %d, want >= 2", got)
+	}
+	want := []string{
+		`rig a bead A-1 has gc.run_target="worker" with empty gc.routed_to`,
+		`rig b bead B-1 has gc.run_target="worker" with empty gc.routed_to`,
+	}
+	if res.Status != doctor.StatusWarning || !slices.Equal(res.Details, want) {
+		t.Fatalf("Run = %v %q\ndetails %q\nwant    %q", res.Status, res.Message, res.Details, want)
+	}
+}
