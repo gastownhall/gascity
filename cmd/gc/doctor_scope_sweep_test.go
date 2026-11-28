@@ -341,6 +341,44 @@ func TestDoctorScopeSweepStopsWhenDoneClosesMidSweep(t *testing.T) {
 	}
 }
 
+// setMetadataRecorder records, across every store it wraps, the bead IDs
+// SetMetadata wrote, in the order they were written.
+type setMetadataRecorder struct {
+	mu  sync.Mutex
+	ids []string
+}
+
+// wrap returns factory with every store it opens recording its writes in r.
+func (r *setMetadataRecorder) wrap(factory func(string) (beads.Store, error)) func(string) (beads.Store, error) {
+	return func(path string) (beads.Store, error) {
+		store, err := factory(path)
+		if err != nil {
+			return nil, err
+		}
+		return setMetadataRecordingStore{Store: store, rec: r}, nil
+	}
+}
+
+func (r *setMetadataRecorder) written() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.ids)
+}
+
+// setMetadataRecordingStore records each SetMetadata bead ID in rec before
+// writing through.
+type setMetadataRecordingStore struct {
+	beads.Store
+	rec *setMetadataRecorder
+}
+
+func (s setMetadataRecordingStore) SetMetadata(id, key, value string) error {
+	s.rec.mu.Lock()
+	s.rec.ids = append(s.rec.ids, id)
+	s.rec.mu.Unlock()
+	return s.Store.SetMetadata(id, key, value)
+}
+
 // failingScopeFixture is four scopes: the city and rig d readable with one
 // target each, rig b's store failing to open and rig c's failing its List.
 type failingScopeFixture struct {
@@ -382,7 +420,8 @@ func newFailingScopeFixture(t *testing.T, bead func(id string) beads.Bead, check
 
 // TestDoctorScopeSweepReportsFailuresPerScope (AC-5): a scope that fails to
 // open or to list is reported in the existing skip-line format with its
-// label, and the other scopes' targets are still reported and repaired.
+// label, and the other scopes' targets are still reported and repaired, in
+// scope order.
 func TestDoctorScopeSweepReportsFailuresPerScope(t *testing.T) {
 	t.Run("sweep", func(t *testing.T) {
 		fx := newFailingScopeFixture(t, func(id string) beads.Bead { return beads.Bead{ID: id, Title: "x", Type: "task", Status: "open"} }, "")
@@ -406,7 +445,8 @@ func TestDoctorScopeSweepReportsFailuresPerScope(t *testing.T) {
 		fx := newFailingScopeFixture(t, func(id string) beads.Bead {
 			return beads.Bead{ID: id, Title: "held", Type: "task", Status: "open", Labels: []string{"hold:qa"}}
 		}, "hold-label-routed-to")
-		check := newHoldLabelRoutedToCheck(fx.cfg, fx.cityDir, fx.factory)
+		rec := &setMetadataRecorder{}
+		check := newHoldLabelRoutedToCheck(fx.cfg, fx.cityDir, rec.wrap(fx.factory))
 		want := append([]string{
 			`city bead C-1 has hold:qa but gc.routed_to=""; use "qa"`,
 			`rig d bead D-1 has hold:qa but gc.routed_to=""; use "qa"`,
@@ -420,6 +460,9 @@ func TestDoctorScopeSweepReportsFailuresPerScope(t *testing.T) {
 		}
 		if got := holdLabelRoute(t, fx.city, "C-1") + "," + holdLabelRoute(t, fx.rigD, "D-1"); got != "qa,qa" {
 			t.Fatalf("repaired routes = %q, want qa,qa", got)
+		}
+		if got := rec.written(); !slices.Equal(got, []string{"C-1", "D-1"}) {
+			t.Fatalf("Fix wrote %q, want scope order [C-1 D-1]", got)
 		}
 	})
 
