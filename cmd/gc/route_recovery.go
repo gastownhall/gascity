@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -71,9 +72,22 @@ func carriedPoolRoute(b beads.Bead) string {
 
 // routeRecoveryLaneOf returns this runtime's lane, creating it on first use so a
 // directly-constructed CityRuntime (every test, every one-shot) needs no wiring.
+//
+// The lane starts with the adoption policy of the config it was created under,
+// so the journal feed can name adoptable beads before the first pass runs.
 func (cr *CityRuntime) routeRecoveryLaneOf() *routeRecoveryLane {
-	cr.routeRecoveryOnce.Do(func() { cr.routeRecovery = newRouteRecoveryLane() })
+	cr.routeRecoveryOnce.Do(func() {
+		cr.routeRecovery = newRouteRecoveryLane()
+		cr.refreshRouteAdoptionPolicy(cr.routeRecovery)
+	})
 	return cr.routeRecovery
+}
+
+// refreshRouteAdoptionPolicy republishes the adoption policy from the current
+// config snapshot. Every pass calls it first, so a reload's
+// unrouted_work_target takes effect on the next pass.
+func (cr *CityRuntime) refreshRouteAdoptionPolicy(lane *routeRecoveryLane) {
+	lane.setAdoptionPolicy(unroutedAdoptionPolicyFor(cr.serviceConfigSnapshot(), cr.cityPath))
 }
 
 // claimLoopGuardOf is the runtime's claim-loop guard, created on first use. Its
@@ -189,6 +203,7 @@ func (cr *CityRuntime) runRouteRecoveryBackstop(reason string) routeRecoveryRepo
 		return routeRecoveryReport{lane: "backstop", reason: reason}
 	}
 	lane := cr.routeRecoveryLaneOf()
+	cr.refreshRouteAdoptionPolicy(lane)
 	if !lane.beginBackstop() {
 		// Another pass is already reading the same state. On a large city the
 		// startup scan outlives several poller ticks, and stacking scans would
@@ -214,8 +229,8 @@ func (cr *CityRuntime) runRouteRecoveryBackstop(reason string) routeRecoveryRepo
 	// The convergence lane always says it ran. A clean pass that logs nothing is
 	// indistinguishable from a lane that stopped running, and this one runs on a
 	// background goroutine where nothing else would notice.
-	summary := fmt.Sprintf("pass reason=%s legs=%d reads=%d candidates=%d restored=%d quarantined=%d off_plane_routed=%d partial=%t took=%s",
-		reason, report.legs, report.legReads, report.candidates, report.restored, report.quarantined, report.offPlaneRouted, report.partial,
+	summary := fmt.Sprintf("pass reason=%s legs=%d reads=%d candidates=%d restored=%d adopted=%d quarantined=%d off_plane_routed=%d partial=%t took=%s",
+		reason, report.legs, report.legReads, report.candidates, report.restored, report.adopted, report.quarantined, report.offPlaneRouted, report.partial,
 		report.duration.Round(time.Millisecond))
 	fmt.Fprintf(cr.stderr, "%s: route recovery (backstop): %s\n", cr.logPrefix, summary) //nolint:errcheck // best-effort stderr
 	return report
@@ -226,6 +241,7 @@ func (cr *CityRuntime) runRouteRecoveryBackstop(reason string) routeRecoveryRepo
 // no plan, and issues no store read.
 func (cr *CityRuntime) recoverUnroutedWorkRoutesDelta() routeRecoveryReport {
 	lane := cr.routeRecoveryLaneOf()
+	cr.refreshRouteAdoptionPolicy(lane)
 	candidates := lane.takePending()
 	if len(candidates) == 0 {
 		// deltaPass guards this too, and deliberately: that guard is its API
@@ -329,6 +345,7 @@ func (cr *CityRuntime) runRouteRecoveryLedgerDeferred() routeRecoveryReport {
 		return routeRecoveryReport{lane: "ledger-delta"}
 	}
 	lane := cr.routeRecoveryLaneOf()
+	cr.refreshRouteAdoptionPolicy(lane)
 	candidates := lane.takeLedgerPending()
 	if len(candidates) == 0 {
 		return routeRecoveryReport{lane: "ledger-delta"}
@@ -363,6 +380,12 @@ func (cr *CityRuntime) logRouteRecovery(report routeRecoveryReport) {
 	}
 	if report.restored > 0 {
 		fmt.Fprintf(cr.stderr, "%s: route recovery (%s): restored gc.routed_to on %d ready bead(s) from gc.run_target\n", cr.logPrefix, report.lane, report.restored) //nolint:errcheck // best-effort stderr
+	}
+	if report.adopted > 0 {
+		fmt.Fprintf(cr.stderr, "%s: route recovery (%s): adopted %d unrouted bead(s) (%s)\n", cr.logPrefix, report.lane, report.adopted, report.adoptedSummary()) //nolint:errcheck // best-effort stderr
+	}
+	for _, scope := range slices.Sorted(maps.Keys(report.unroutedBacklog)) {
+		fmt.Fprintf(cr.stderr, "%s: route recovery (%s): %d open bead(s) in %s carry no gc.routed_to and the scope sets no unrouted_work_target; no pool will claim them (see gc doctor: unrouted-ready-work)\n", cr.logPrefix, report.lane, report.unroutedBacklog[scope], scope) //nolint:errcheck // best-effort stderr
 	}
 	if len(report.flapping) > 0 {
 		// The loud half of the flap bound: a route that keeps needing restoring

@@ -3124,7 +3124,10 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 
 	// Validate agents.
 	if err := runStep("validating_agents", func() error {
-		return config.ValidateAgents(cfg.Agents)
+		if err := config.ValidateAgents(cfg.Agents); err != nil {
+			return err
+		}
+		return validateUnroutedWorkTargets(cfg, cityPath)
 	}); err != nil {
 		return fmt.Errorf("validate agents: %w", err)
 	}

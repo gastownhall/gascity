@@ -655,6 +655,16 @@ type Rig struct {
 	// resolved the same way as DefaultSlingTarget. Example:
 	//   default_sling_targets = ["rig/polecat-a", "rig/polecat-b"]
 	DefaultSlingTargets []string `toml:"default_sling_targets,omitempty"`
+	// UnroutedWorkTarget names the agent that open, unassigned work in this
+	// rig's bead store adopts when it carries no gc.routed_to, such as a bead
+	// made with plain `bd create`. The controller stamps the same gc.routed_to
+	// `gc sling <target> <id>` would write. Empty (the default) adopts
+	// nothing; the workspace unrouted_work_target does not apply to rigs. The
+	// target must resolve to a configured agent with built-in sling routing
+	// (no custom sling_query) that reads this rig's bead store, as gc sling
+	// requires: one of the rig's own agents, or one with scope = "city".
+	// Example: "rig/polecat"
+	UnroutedWorkTarget string `toml:"unrouted_work_target,omitempty"`
 	// Federation selects which of this city's agents may act on the rig's bead
 	// store. "city" (the default) keeps today's behavior: city-scoped agents
 	// read every rig, and any agent whose identity matches a row may serve,
@@ -1357,6 +1367,17 @@ type Workspace struct {
 	Prefix string `toml:"prefix,omitempty"`
 	// Provider is the default provider name used by agents that don't specify one.
 	Provider string `toml:"provider,omitempty"`
+	// UnroutedWorkTarget names the agent that open, unassigned work in the
+	// city (HQ) store adopts when it carries no gc.routed_to, such as a bead
+	// made with plain `bd create`. The controller stamps the same gc.routed_to
+	// `gc sling <target> <id>` would write. Empty (the default) adopts
+	// nothing, so such work stays unrouted until something routes it. It
+	// governs the city store only; a rig adopts through its own
+	// unrouted_work_target. The target must resolve to a configured agent
+	// with built-in sling routing (no custom sling_query) that reads the
+	// city store, as gc sling requires: an agent outside every rig, or one
+	// with scope = "city".
+	UnroutedWorkTarget string `toml:"unrouted_work_target,omitempty"`
 	// Timezone is the city-default IANA time zone (e.g. "America/New_York")
 	// in which cron order schedules are evaluated when an order does not set
 	// its own tz. Empty means the controller's process-local zone. Invalid

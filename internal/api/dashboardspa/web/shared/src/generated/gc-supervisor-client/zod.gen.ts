@@ -1803,7 +1803,8 @@ export const zRigPatch = z.object({
     Path: z.string().nullable(),
     Prefix: z.string().nullable(),
     Suspended: z.boolean().nullable(),
-    SuspendedOnStart: z.boolean().nullable()
+    SuspendedOnStart: z.boolean().nullable(),
+    UnroutedWorkTarget: z.string().nullable()
 });
 
 export const zListBodyRigPatch = z.object({

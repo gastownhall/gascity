@@ -5109,6 +5109,7 @@ type RigPatch struct {
 	Prefix                  *string            `json:"Prefix"`
 	Suspended               *bool              `json:"Suspended"`
 	SuspendedOnStart        *bool              `json:"SuspendedOnStart"`
+	UnroutedWorkTarget      *string            `json:"UnroutedWorkTarget"`
 }
 
 // RigPatchSetInputBody defines model for RigPatchSetInputBody.

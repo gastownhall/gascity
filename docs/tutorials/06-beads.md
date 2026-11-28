@@ -459,6 +459,25 @@ readiness barrier is gone, though `mc-xp7` would also need
 sets. Routing decides _which_ queue a bead appears in; readiness decides
 _whether_ it appears at all.
 
+A bead made with plain `bd create` carries no `gc.routed_to`, so no pool claims
+it. Route it yourself with `gc sling my-project/worker mc-xp7`, or let the
+orchestrator route a store's open unrouted work, including what is already in
+the store, by naming an **`unrouted_work_target`** for that scope:
+
+```toml
+[[rigs]]
+name = "my-project"
+# ...
+unrouted_work_target = "my-project/worker"  # route plain-created work here
+```
+
+Before you set one, preview what it would route: `gc doctor` lists the open work
+still waiting without a route under its `unrouted-ready-work` check. The
+workspace sets its own target for the city store; a rig without one adopts
+nothing. The target must be an agent that reads the scope's store: for a rig,
+one of the rig's own agents or one with `scope = "city"`. A hold label such as
+`hold:external` keeps a bead out until you remove it.
+
 This is the "pull" model: agents check for work instead of having it pushed.
 
 ## The bead store

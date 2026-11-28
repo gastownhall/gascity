@@ -8275,6 +8275,12 @@
               "boolean",
               "null"
             ]
+          },
+          "UnroutedWorkTarget": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -8285,7 +8291,8 @@
           "DefaultMergeStrategy",
           "Suspended",
           "SuspendedOnStart",
-          "BeadsProxiedIdleTimeout"
+          "BeadsProxiedIdleTimeout",
+          "UnroutedWorkTarget"
         ],
         "type": "object"
       },
