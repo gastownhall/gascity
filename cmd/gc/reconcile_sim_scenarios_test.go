@@ -1869,6 +1869,91 @@ func TestSimRigRestartRevivesTheFloor(t *testing.T) {
 	}
 }
 
+// Kills a `gc rig restart` that starves routed demand on an unfloored pool
+// under v2 (ga-4xbxwl): the sweep soft-suspends every seat of an agent with
+// no min_active_sessions floor, and each heals asleep with no sleep_reason
+// and no slept_at, only suspended_at. The pool is at its max of three and one
+// seat holds work, so the template stays desired; unless the two workless
+// healed rows free their slots, the routed work that arrives with the
+// restart can never get a fresh seat.
+func TestSimRigRestartFreesUnflooredSeatsForRoutedDemand(t *testing.T) {
+	var rows []beads.Bead
+	var live []string
+	for i := 1; i <= 3; i++ {
+		id := fmt.Sprintf("gc-%d", i)
+		rows = append(rows, poolRow(id, "worker", i, "awake", "instance_token", "tok-"+id, "last_woke_at", rowAt(-10*time.Minute)))
+		live = append(live, id)
+	}
+	rows = append(rows, beads.Bead{ID: "gw-gc-1", Title: "w", Type: "task", Status: "open", Assignee: "gc-1", Metadata: map[string]string{"gc.routed_to": "worker"}})
+	s := scripted(t, live, rows...)
+	if got := *s.cfg.Agents[0].MaxActiveSessions; got != 3 {
+		t.Fatalf("max_active_sessions = %d, want 3", got)
+	}
+	for range 3 {
+		s.settle()
+		s.advance(simPatrol)
+	}
+	first, err := s.legs[0].backing.Get("gc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	code := -1
+	s.outside("gc rig restart", s.legs[0], first, func(l *simLeg, _ beads.Bead) {
+		code = doRigRestart(s.sp, events.Discard, l.backing, s.cfg, s.cfg.Agents, "", "test-city", "", &bytes.Buffer{}, &stderr)
+		// The sweep stamps the wall clock; restamp its times on the sim's,
+		// or quiescence waits out the gap as a timer.
+		rows, _ := l.backing.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+		for _, b := range rows {
+			for _, key := range []string{"slept_at", "suspended_at"} {
+				if b.Metadata[key] != "" {
+					_ = l.backing.SetMetadata(b.ID, key, s.rel(0))
+				}
+			}
+		}
+		// Routed work arrives with the restart, assigned to no seat.
+		if _, err := l.backing.Create(beads.Bead{Title: "routed", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if code != 0 {
+		t.Fatalf("gc rig restart exited %d: %s", code, stderr.String())
+	}
+	for range 12 {
+		s.settle()
+		s.advance(simPatrol)
+	}
+	s.quiesce()
+	all, err := s.legs[0].backing.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := 0
+	var seats []string
+	for _, b := range all {
+		if b.Metadata["template"] != "worker" {
+			continue
+		}
+		if b.Status != "closed" && s.object(b.Metadata["session_name"]) != 0 {
+			got++
+		}
+		seats = append(seats, fmt.Sprintf("%s:%s/%s/%s", b.ID, b.Status, b.Metadata["state"], b.Metadata["sleep_reason"]))
+	}
+	for _, id := range []string{"gc-2", "gc-3"} {
+		b, err := s.legs[0].backing.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b.Status != "closed" {
+			t.Errorf("%s: %s/%s, want closed: a workless healed seat frees its slot: %v", id, b.Status, b.Metadata["state"], seats)
+		}
+	}
+	if got != 2 {
+		t.Errorf("live seats after the restart = %d, want 2 (gc-1 for its work, a fresh seat for the routed work): %v", got, seats)
+	}
+	s.noViolations(t)
+}
+
 // Scenario J21 C / mc-sqdv6 (CONTRACT v5.7 D7 rule 2, §12.2 #26): an
 // operator wakes an asleep seat and attaches, so its runtime comes up
 // outside the controller, the wake request still on the row. A6's
