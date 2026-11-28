@@ -14801,3 +14801,117 @@ func TestRealizePoolDesiredSessionsSeatShellCarriesNoTriggerBeadID(t *testing.T)
 		})
 	}
 }
+
+// TestCollectAssignedWorkBeads_ExcludesInProgressMessageBeads pins the
+// controller half of #6211: an in_progress message bead is mail, not assigned
+// work — mail reaches a session through the mail hooks — so the assigned-work
+// snapshot keeps real work (an in_progress task, an open molecule root) and
+// drops the wisp that otherwise anchored its seat awake forever.
+func TestCollectAssignedWorkBeads_ExcludesInProgressMessageBeads(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+	// Create forces Status "open" (MemStore.Create), so in_progress beads are
+	// made the way production makes them: create, then transition.
+	msg, err := store.Create(beads.Bead{
+		Title:    "context cycle",
+		Type:     "message",
+		Assignee: "worker-1",
+		Labels:   []string{"gc:auto-handoff", "gc:archive-after-inject"},
+	})
+	if err != nil {
+		t.Fatalf("create message bead: %v", err)
+	}
+	if err := store.Update(msg.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("set message in_progress: %v", err)
+	}
+	task, err := store.Create(beads.Bead{
+		Title:    "do the thing",
+		Type:     "task",
+		Assignee: "worker-1",
+	})
+	if err != nil {
+		t.Fatalf("create task bead: %v", err)
+	}
+	if err := store.Update(task.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("set task in_progress: %v", err)
+	}
+	root, err := store.Create(beads.Bead{
+		Title:     "workflow root",
+		Type:      "wisp",
+		Status:    "open",
+		Assignee:  "worker-1",
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("create molecule root bead: %v", err)
+	}
+	got, _ := collectAssignedWorkBeads(&config.City{}, store)
+	if len(got) != 2 {
+		t.Fatalf("collectAssignedWorkBeads returned %d beads, want 2 (task + molecule root, no mail): %#v", len(got), got)
+	}
+	seen := map[string]bool{}
+	for _, b := range got {
+		seen[b.ID] = true
+	}
+	if !seen[task.ID] || !seen[root.ID] {
+		t.Fatalf("snapshot = %#v, want the in_progress task %s and the molecule root %s", got, task.ID, root.ID)
+	}
+}
+
+// TestComputeAwakeSetFromCollectedSnapshotIgnoresInProgressMail feeds the
+// collector's real output through newAwakeInputFromSnapshot: a session whose
+// only non-closed assigned bead is an in_progress message gets no
+// assigned-work wake, no claim anchor and no fresh-cycle flag, while real
+// assigned work still wakes it (#6211).
+func TestComputeAwakeSetFromCollectedSnapshotIgnoresInProgressMail(t *testing.T) {
+	now := time.Date(2026, 11, 28, 7, 0, 0, 0, time.UTC)
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	decide := func(t *testing.T, work beads.Bead) AwakeDecision {
+		t.Helper()
+		store := beads.NewMemStore()
+		sessionBead, err := store.Create(beads.Bead{
+			Title:  "city--worker-1",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel, "agent:worker"},
+			Metadata: map[string]string{
+				"agent_name":   "worker",
+				"session_name": "city--worker-1",
+				"state":        "active",
+				"template":     "worker",
+			},
+		})
+		if err != nil {
+			t.Fatalf("create session bead: %v", err)
+		}
+		work.Assignee = sessionBead.ID
+		created, err := store.Create(work)
+		if err != nil {
+			t.Fatalf("create work bead: %v", err)
+		}
+		// Create forces Status "open" (MemStore.Create); production
+		// in_progress work is a transition, not a create-time status.
+		if err := store.Update(created.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+			t.Fatalf("set work in_progress: %v", err)
+		}
+		collected, _ := collectAssignedWorkBeads(cfg, store)
+		infos, err := loadOpenSessionInfos(store)
+		if err != nil {
+			t.Fatalf("loadOpenSessionInfos: %v", err)
+		}
+		input := newAwakeInputFromSnapshot(cfg, func(*config.Agent) bool { return false }, infos, nil, nil, nil, nil, nil, collected, nil, now)
+		return ComputeAwakeSet(input)["city--worker-1"]
+	}
+
+	t.Run("in_progress mail is not assigned work", func(t *testing.T) {
+		d := decide(t, beads.Bead{Title: "context cycle", Type: "message"})
+		if d.ShouldWake || d.Reason == "assigned-work" || d.HasAssignedWork || d.AssignedWorkBeadID != "" || d.AssignedWorkClaimed || d.RequiresFreshCycle {
+			t.Fatalf("decision for mail-only session = %+v; want no assigned-work wake, no claim anchor, no fresh-cycle flag", d)
+		}
+	})
+	t.Run("in_progress task still wakes", func(t *testing.T) {
+		d := decide(t, beads.Bead{Title: "do the thing", Type: "task"})
+		if !d.ShouldWake || d.Reason != "assigned-work" || !d.HasAssignedWork || !d.AssignedWorkClaimed {
+			t.Fatalf("decision for task-holding session = %+v; want an assigned-work wake with a claimed anchor", d)
+		}
+	})
+}
