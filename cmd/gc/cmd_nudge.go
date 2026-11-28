@@ -495,6 +495,31 @@ func cmdNudgeStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) in
 	inFlight = append(inFlight, laneInFlight...)
 	dead = append(dead, laneDead...)
 
+	// Status answers by fence as well as by key (#4534): an item fenced to
+	// this session whose queue key the session no longer serves — a moved
+	// identity, a renamed alias — is still this session's nudge in the
+	// operator's view, so it is unioned in from a lock-free snapshot read
+	// instead of disappearing from the counts. A fence read that fails fails
+	// the command like a lane read does: stderr always, exit 1 under --json,
+	// where ok promises the whole view.
+	var fenceErr error
+	if target.sessionID != "" {
+		var fencePending, fenceInFlight, fenceDead []queuedNudge
+		fencePending, fenceInFlight, fenceDead, fenceErr = listQueuedNudgesSnapshotMatching(target.cityPath, func(item queuedNudge) bool {
+			return item.SessionID == target.sessionID
+		}, now)
+		if fenceErr == nil {
+			pending = unionQueuedNudges(pending, fencePending)
+			inFlight = unionQueuedNudges(inFlight, fenceInFlight)
+			dead = unionQueuedNudges(dead, fenceDead)
+		} else {
+			fmt.Fprintf(stderr, "gc nudge status: fenced items not read: %v\n", fenceErr) //nolint:errcheck
+			if jsonOutput {
+				return 1
+			}
+		}
+	}
+
 	// City-wide (not agent-scoped) skip-reason totals from the supervisor
 	// dispatch tick, read directly off the persisted queue state — a raw
 	// read so this doesn't re-run the maintenance sweep listQueuedNudgesForTarget
@@ -563,7 +588,7 @@ func cmdNudgeStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) in
 			_, _ = fmt.Fprintf(stdout, "  %s=%d\n", reason, dispatchSkips[reason])
 		}
 	}
-	if laneErr != nil {
+	if laneErr != nil || fenceErr != nil {
 		return 1
 	}
 	return 0
@@ -3904,13 +3929,24 @@ func claimDueQueuedNudgeBatchForTarget(cityPath string, target nudgeTarget, laun
 // mirrored: it depends on the bead store, and treating a not-yet-swept dead
 // letter as still dead is harmless for a liveness check.
 func listQueuedNudgesForTargetSnapshot(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, []queuedNudge, []queuedNudge, error) {
+	return listQueuedNudgesSnapshotMatching(cityPath, func(item queuedNudge) bool {
+		return target.matchesQueueAgent(item.Agent)
+	}, now)
+}
+
+// listQueuedNudgesSnapshotMatching is the bucket walk behind
+// listQueuedNudgesForTargetSnapshot with the keep-rule as a predicate, so a
+// caller can select by fence (item.SessionID) as the status view does (#4534)
+// instead of by the target's queue keys. The same mirroring of the
+// recover/prune passes and the same lock-free read apply.
+func listQueuedNudgesSnapshotMatching(cityPath string, match func(queuedNudge) bool, now time.Time) ([]queuedNudge, []queuedNudge, []queuedNudge, error) {
 	state, err := openNudgeQueue(cityPath, beads.NudgesStore{}).Queue.Snapshot()
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	var pending, inFlight, dead []queuedNudge
 	add := func(bucket *[]queuedNudge, item queuedNudge) {
-		if target.matchesQueueAgent(item.Agent) {
+		if match(item) {
 			*bucket = append(*bucket, item)
 		}
 	}
@@ -3951,6 +3987,27 @@ func listQueuedNudgesForTargetSnapshot(cityPath string, target nudgeTarget, now 
 
 func listQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, []queuedNudge, []queuedNudge, error) {
 	return openNudgeQueue(cityPath, beads.NudgesStore{}).Queue.ListFor(target.claimTarget(cityPath, nil), now)
+}
+
+// unionQueuedNudges concatenates more onto items keeping the first occurrence
+// of each ID, so a fence-matched item a key-matched list already carries is
+// not doubled when the two views are unioned (#4534).
+func unionQueuedNudges(items, more []queuedNudge) []queuedNudge {
+	if len(more) == 0 {
+		return items
+	}
+	seen := make(map[string]struct{}, len(items)+len(more))
+	for _, item := range items {
+		seen[item.ID] = struct{}{}
+	}
+	for _, item := range more {
+		if _, ok := seen[item.ID]; ok {
+			continue
+		}
+		seen[item.ID] = struct{}{}
+		items = append(items, item)
+	}
+	return items
 }
 
 func enqueueQueuedNudge(cityPath string, item queuedNudge) error {
