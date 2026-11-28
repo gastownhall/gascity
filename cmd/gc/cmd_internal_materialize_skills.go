@@ -198,23 +198,32 @@ func materializeSkillsIntoWorkdir(cfg *config.City, agent *config.Agent, cityPat
 		fmt.Fprintf(stderr, "gc internal materialize-skills: %v\n", err) //nolint:errcheck // best-effort stderr
 		return errExit
 	}
-	desired := materialize.EffectiveSet(cityCat, agentCat)
-
-	owned := append([]string{}, cityCat.OwnedRoots...)
-	if agentCat.OwnedRoot != "" {
-		owned = append(owned, agentCat.OwnedRoot)
-	}
 
 	absWorkdir, err := filepath.Abs(workdir)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc internal materialize-skills: resolving workdir %q: %v\n", workdir, err) //nolint:errcheck // best-effort stderr
 		return errExit
 	}
+	sinkDir := filepath.Join(absWorkdir, vendorSink)
+
+	// The sink may have other configured writers — the agents scoped
+	// where this work dir sits, or other sessions working in it — so
+	// reconcile it over all of them rather than this agent alone, or
+	// this pass prunes their links through the ownership manifest
+	// (#7549). A sink whose writers cannot be folded is held: reported,
+	// left as it is, and not fatal to the session this pass prepares.
+	union := stage2SinkWriters(cfg, agent, cityPath, sinkDir, cityCat, agentCat)
+	if problems := union.Problems(); len(problems) > 0 {
+		for _, p := range problems {
+			fmt.Fprintf(stderr, "gc: stage-2 materialize-skills at %s: %s; sink not reconciled this pass (existing links kept, additions and removals wait until it is resolved)\n", sinkDir, p) //nolint:errcheck // best-effort stderr
+		}
+		return nil
+	}
 
 	res, err := materialize.Run(materialize.Request{
-		SinkDir:          filepath.Join(absWorkdir, vendorSink),
-		Desired:          desired,
-		OwnedRoots:       owned,
+		SinkDir:          sinkDir,
+		Desired:          union.Desired(),
+		OwnedRoots:       union.OwnedRoots(),
 		LegacyNames:      materialize.LegacyStubNames(),
 		LegacyOwnedRoots: materialize.LegacyOwnedRootsFor(cityPath),
 	})

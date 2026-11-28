@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -1345,5 +1347,211 @@ func TestStage1PrunesDepartedWorkDirWriterLinks(t *testing.T) {
 		if _, err := os.Lstat(filepath.Join(sink, name)); err != nil {
 			t.Errorf("%s pruned with r's links: %v; stderr=%q", name, err, stderr.String())
 		}
+	}
+}
+
+// sharedWorkDirCity returns two rig agents whose configured work dirs
+// are the same directory outside both rigs, each with one agent-local
+// skill — the co-writer shape a shared session work dir produces.
+func sharedWorkDirCity(t *testing.T) (string, *config.City, string) {
+	t.Helper()
+	cityPath := t.TempDir()
+	rigA := filepath.Join(cityPath, "rigs", "alpha")
+	rigB := filepath.Join(cityPath, "rigs", "beta")
+	for _, rig := range []string{rigA, rigB} {
+		if err := os.MkdirAll(rig, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	shared := filepath.Join(cityPath, "shared-work")
+	if err := os.MkdirAll(shared, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	skillsA := filepath.Join(rigA, "agents", "wa", "skills")
+	writeSkillSource(t, filepath.Join(skillsA, "wa-skill"))
+	skillsB := filepath.Join(rigB, "agents", "wb", "skills")
+	writeSkillSource(t, filepath.Join(skillsB, "wb-skill"))
+	cfg := &config.City{
+		Session: config.SessionConfig{Provider: "tmux"},
+		Rigs:    []config.Rig{{Name: "alpha", Path: rigA}, {Name: "beta", Path: rigB}},
+		Agents: []config.Agent{
+			{Name: "wa", Scope: "rig", Dir: "alpha", Provider: "claude", SkillsDir: skillsA, WorkDir: shared},
+			{Name: "wb", Scope: "rig", Dir: "beta", Provider: "claude", SkillsDir: skillsB, WorkDir: shared},
+		},
+	}
+	return cityPath, cfg, shared
+}
+
+// TestMaterializeSkillsIntoWorkdirKeepsScopeRootAgentsSkills covers
+// issue #7549 direction 2: r's stage-2 pass runs at a directory that is
+// the mayor's scope root, into a sink the supervisor's stage-1 pass
+// also writes. The stage-2 pass must reconcile the sink over all its
+// writers — keeping the scope-root agent's links while adding its own —
+// or it prunes what stage 1 linked through the ownership manifest.
+func TestMaterializeSkillsIntoWorkdirKeepsScopeRootAgentsSkills(t *testing.T) {
+	clearGCEnv(t)
+	cityPath, cfg := workDirWriterCity(t)
+	sink := filepath.Join(cityPath, ".claude", "skills")
+
+	var planStderr bytes.Buffer
+	if err := runStage1SkillMaterialization(cityPath, cfg, &planStderr); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"plan", "notes"} {
+		if _, err := os.Lstat(filepath.Join(sink, name)); err != nil {
+			t.Fatalf("precondition: %s missing after stage 1: %v; stderr=%q", name, err, planStderr.String())
+		}
+	}
+
+	var so, se bytes.Buffer
+	if err := materializeSkillsIntoWorkdir(cfg, &cfg.Agents[1], cityPath, cityPath, nil, &so, &se); err != nil {
+		t.Fatalf("r's stage 2: %v; stderr=%q", err, se.String())
+	}
+	for _, name := range []string{"plan", "notes", "rig-notes"} {
+		if _, err := os.Lstat(filepath.Join(sink, name)); err != nil {
+			t.Errorf("%s missing after r's stage-2 pass: %v; stderr=%q", name, err, se.String())
+		}
+	}
+}
+
+// TestMaterializeSkillsIntoWorkdirSharedWorkDirKeepsCoWriterSkills
+// covers two stage-2 writers sharing one session work dir: each pass
+// must count the other configured writer, in either start order, or
+// the later pass prunes the earlier one's links.
+func TestMaterializeSkillsIntoWorkdirSharedWorkDirKeepsCoWriterSkills(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		first int
+	}{
+		{"config order", 0},
+		{"reverse config order", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearGCEnv(t)
+			cityPath, cfg, shared := sharedWorkDirCity(t)
+			sink := filepath.Join(shared, ".claude", "skills")
+
+			for _, i := range []int{tc.first, 1 - tc.first} {
+				var so, se bytes.Buffer
+				if err := materializeSkillsIntoWorkdir(cfg, &cfg.Agents[i], cityPath, shared, nil, &so, &se); err != nil {
+					t.Fatalf("agent %d's stage 2: %v; stderr=%q", i, err, se.String())
+				}
+			}
+			for _, name := range []string{"wa-skill", "wb-skill"} {
+				if _, err := os.Lstat(filepath.Join(sink, name)); err != nil {
+					t.Errorf("%s missing after both passes: %v", name, err)
+				}
+			}
+		})
+	}
+}
+
+// TestMaterializeSkillsSharedSinkClashExitsZero covers a sink two
+// writers want the same skill name from different sources for: the
+// stage-2 pass holds the sink (nothing written, existing links kept)
+// and exits zero — the session still starts; the problem is reported
+// for the operator, not the session.
+func TestMaterializeSkillsSharedSinkClashExitsZero(t *testing.T) {
+	clearGCEnv(t)
+	cityPath, cfg, shared := sharedWorkDirCity(t)
+	// Both co-writers provide the same name from their own skill roots.
+	writeSkillSource(t, filepath.Join(cfg.Agents[0].SkillsDir, "clash-skill"))
+	writeSkillSource(t, filepath.Join(cfg.Agents[1].SkillsDir, "clash-skill"))
+	sink := filepath.Join(shared, ".claude", "skills")
+
+	var so, se bytes.Buffer
+	if err := materializeSkillsIntoWorkdir(cfg, &cfg.Agents[0], cityPath, shared, nil, &so, &se); err != nil {
+		t.Fatalf("held sink failed the pass: %v; stderr=%q", err, se.String())
+	}
+	if !strings.Contains(se.String(), `"alpha/wa"`) || !strings.Contains(se.String(), `"beta/wb"`) {
+		t.Errorf("stderr does not name both writers: %q", se.String())
+	}
+	if !strings.Contains(se.String(), "clash-skill") {
+		t.Errorf("stderr does not name the clashing skill: %q", se.String())
+	}
+	if strings.Contains(so.String(), "materialized") {
+		t.Errorf("held sink still materialized: %q", so.String())
+	}
+	if _, err := os.Lstat(filepath.Join(sink, "clash-skill")); !os.IsNotExist(err) {
+		t.Errorf("held sink wrote a link for the clashing name (lstat err=%v)", err)
+	}
+}
+
+// TestSharedSinkConvergesAcrossStages runs stage-1 and stage-2 passes
+// over the same shared sink in several orders and asserts they
+// converge: the final links are exactly the union's desired set, each
+// pointing at its own source, and a stage-2 pass that follows another
+// pass has nothing left to materialize.
+func TestSharedSinkConvergesAcrossStages(t *testing.T) {
+	type pass func(t *testing.T, cityPath string, cfg *config.City, so, se *bytes.Buffer)
+	stage1 := func(t *testing.T, cityPath string, cfg *config.City, _, se *bytes.Buffer) {
+		if err := runStage1SkillMaterialization(cityPath, cfg, se); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stage2 := func(t *testing.T, cityPath string, cfg *config.City, so, se *bytes.Buffer) {
+		if err := materializeSkillsIntoWorkdir(cfg, &cfg.Agents[1], cityPath, cityPath, nil, so, se); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name   string
+		passes []pass
+	}{
+		{"stage 1 then stage 2", []pass{stage1, stage2}},
+		{"stage 2 then stage 1 then stage 2", []pass{stage2, stage1, stage2}},
+		{"stage 2 twice", []pass{stage2, stage2}},
+		{"stage 1 twice then stage 2", []pass{stage1, stage1, stage2}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearGCEnv(t)
+			cityPath, cfg := workDirWriterCity(t)
+			sink := filepath.Join(cityPath, ".claude", "skills")
+			// Snapshot the sink's link targets before the final pass;
+			// convergence means that pass changes nothing (the
+			// materializer reports kept links as materialized, so the
+			// stdout summary is not a churn signal).
+			snapshot := func() map[string]string {
+				t.Helper()
+				entries, err := os.ReadDir(sink)
+				if err != nil {
+					t.Fatal(err)
+				}
+				links := map[string]string{}
+				for _, e := range entries {
+					if e.Type()&fs.ModeSymlink != 0 {
+						target, err := os.Readlink(filepath.Join(sink, e.Name()))
+						if err != nil {
+							t.Fatal(err)
+						}
+						links[e.Name()] = target
+					}
+				}
+				return links
+			}
+			for _, p := range tc.passes[:len(tc.passes)-1] {
+				p(t, cityPath, cfg, &bytes.Buffer{}, &bytes.Buffer{})
+			}
+			before := snapshot()
+			tc.passes[len(tc.passes)-1](t, cityPath, cfg, &bytes.Buffer{}, &bytes.Buffer{})
+			after := snapshot()
+
+			want := map[string]string{
+				"plan":      filepath.Join(cityPath, "skills", "plan"),
+				"notes":     filepath.Join(cityPath, "agents", "mayor", "skills", "notes"),
+				"rig-notes": filepath.Join(cityPath, "rigs", "fe", "agents", "r", "skills", "rig-notes"),
+			}
+			if len(after) != len(want) {
+				t.Fatalf("sink holds %d skill links (%v), want %d", len(after), after, len(want))
+			}
+			for name, source := range want {
+				if after[name] != source {
+					t.Errorf("link %s -> %q, want %s", name, after[name], source)
+				}
+			}
+			if len(before) > 0 && !reflect.DeepEqual(before, after) {
+				t.Errorf("the final pass changed the sink (not converged): before=%v after=%v", before, after)
+			}
+		})
 	}
 }
