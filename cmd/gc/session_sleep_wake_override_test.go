@@ -255,3 +255,42 @@ func TestReconcileSessionBeads_WaitParkedPoolSeatKeepsSlotAndClaim(t *testing.T)
 		t.Errorf("session.stranded recorded %d times for a wait-parked seat, want 0", len(evts))
 	}
 }
+
+// TestReconcileSessionBeads_WaitParkedPoolSeatWakesInPlace: a pool seat
+// parked on a wait while it holds its claim, under an enabled sleep policy,
+// stays down until its wait turns ready and then wakes on that same bead, its
+// context intact, with no new seat for the pool (gastownhall/gascity#5561).
+func TestReconcileSessionBeads_WaitParkedPoolSeatWakesInPlace(t *testing.T) {
+	env, rec, id, task := waitParkedPoolSeat(t)
+	if b, err := env.store.Get(id); err != nil || b.Status == "closed" {
+		t.Fatalf("precondition: the wait-parked seat is gone (status=%q err=%v); stderr=%s", b.Status, err, env.stderr.String())
+	}
+	// A tick persists the sleep policy (the fingerprint), as every tick does.
+	policy := resolveSessionSleepPolicyInfo(env.sessionInfo(id), env.cfg, env.sp)
+	if !policy.enabled() {
+		t.Fatalf("precondition: the seat's sleep policy is off (%+v), want sleep_after_idle on", policy)
+	}
+	if err := env.store.SetMetadata(id, "sleep_policy_fingerprint", policy.Fingerprint); err != nil {
+		t.Fatal(err)
+	}
+
+	if woken := waitParkedPoolSeatTick(t, env, id, task, nil); woken != 0 || env.sp.IsRunning("worker") {
+		t.Fatalf("woken = %d before the wait turned ready, want 0 (the wait suppresses the claim's wake)", woken)
+	}
+	if woken := waitParkedPoolSeatTick(t, env, id, task, map[string]bool{id: true}); woken != 1 || !env.sp.IsRunning("worker") {
+		t.Fatalf("woken = %d on the ready wait, want the parked seat woken; stderr=%s", woken, env.stderr.String())
+	}
+	woke, _ := rec.List(events.Filter{Type: events.SessionWoke})
+	if len(woke) != 1 || woke[0].SessionID != id {
+		t.Errorf("session.woke = %+v, want one wake of the parked bead %s", woke, id)
+	}
+	open, err := env.store.List(beads.ListQuery{Type: sessionBeadType})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range open {
+		if b.Status != "closed" && b.ID != id && b.Metadata["template"] == "worker" {
+			t.Errorf("a new worker seat %s was created; want the parked seat %s woken in place", b.ID, id)
+		}
+	}
+}
