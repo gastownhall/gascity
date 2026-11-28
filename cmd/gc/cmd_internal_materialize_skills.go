@@ -162,10 +162,34 @@ func decodeSharedCatalogSnapshot(encoded string) (materialize.CityCatalog, error
 	return cat, nil
 }
 
+// materializeSkillsIntoWorkdir reconciles the vendor sink under workdir
+// for agent's session. See materializeSkillSinkForSession.
 func materializeSkillsIntoWorkdir(cfg *config.City, agent *config.Agent, cityPath, workdir string, sharedCatalog *materialize.CityCatalog, stdout, stderr io.Writer) error {
+	_, err := materializeSkillSinkForSession(cfg, agent, cityPath, workdir, sharedCatalog, stdout, stderr)
+	return err
+}
+
+// materializeSkillSinkForSession reconciles the vendor sink under workdir
+// over every configured writer of that sink, not agent alone: the sink
+// holds one link per name and one ownership manifest, so a pass that
+// wanted only agent's skills would prune its co-writers' links. The
+// writers are the agents buildSkillSinkIndex lists for the sink (the
+// scope-root agents stage 1 materializes there and the agents whose
+// sessions' work dir is there) plus agent itself, folded into one
+// materialize.SinkUnion exactly as stage 1 folds a scope-root sink, so
+// every pass over the sink agrees on what it holds.
+//
+// sharedCatalog, when non-nil, is the controller's snapshot of agent's
+// scope catalog. Co-writers in other scopes load their scope's catalog
+// live, once per scope; a co-writer whose catalog cannot be loaded leaves
+// the union incomplete. A sink whose union is incomplete or has a clash
+// is held: the problems are reported on stderr, no link is added,
+// removed or re-pointed, and the pass succeeds so the session still
+// starts.
+func materializeSkillSinkForSession(cfg *config.City, agent *config.Agent, cityPath, workdir string, sharedCatalog *materialize.CityCatalog, stdout, stderr io.Writer) (materialize.Result, error) {
 	if cfg == nil || agent == nil {
 		fmt.Fprintln(stderr, "gc internal materialize-skills: missing city config or agent") //nolint:errcheck // best-effort stderr
-		return errExit
+		return materialize.Result{}, errExit
 	}
 
 	provider := effectiveAgentProviderFamily(agent, cfg.Workspace.Provider, cfg.Providers)
@@ -176,51 +200,49 @@ func materializeSkillsIntoWorkdir(cfg *config.City, agent *config.Agent, cityPat
 		// Log once per session spawn per the spec and exit
 		// successfully — this is not an error condition.
 		fmt.Fprintf(stdout, "gc internal materialize-skills: provider %q has no skill sink in v0.15.1; skipping\n", provider) //nolint:errcheck // best-effort stdout
-		return nil
-	}
-
-	var cityCat materialize.CityCatalog
-	if sharedCatalog != nil {
-		cityCat = cloneCityCatalog(*sharedCatalog)
-	} else {
-		rigName := agentRigScopeName(agent, cfg.Rigs)
-		cat, err := loadSharedSkillCatalog(cfg, rigName)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc internal materialize-skills: shared skill catalog unavailable for %q: %v\n", agent.QualifiedName(), err) //nolint:errcheck // best-effort stderr
-			cat.Entries = nil
-			cat.Shadowed = nil
-		}
-		cityCat = cat
-	}
-
-	agentCat, err := materialize.LoadAgentCatalog(agent.SkillsDir)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc internal materialize-skills: %v\n", err) //nolint:errcheck // best-effort stderr
-		return errExit
-	}
-	desired := materialize.EffectiveSet(cityCat, agentCat)
-
-	owned := append([]string{}, cityCat.OwnedRoots...)
-	if agentCat.OwnedRoot != "" {
-		owned = append(owned, agentCat.OwnedRoot)
+		return materialize.Result{}, nil
 	}
 
 	absWorkdir, err := filepath.Abs(workdir)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc internal materialize-skills: resolving workdir %q: %v\n", workdir, err) //nolint:errcheck // best-effort stderr
-		return errExit
+		return materialize.Result{}, errExit
+	}
+	sinkDir := filepath.Join(absWorkdir, vendorSink)
+
+	agentCat, err := materialize.LoadAgentCatalog(agent.SkillsDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc internal materialize-skills: %v\n", err) //nolint:errcheck // best-effort stderr
+		return materialize.Result{}, errExit
+	}
+
+	union := materialize.NewSinkUnion()
+	catalogs := stage2SkillScopeCatalogs(cfg, agent, sharedCatalog, union, stderr)
+	if sink := buildSkillSinkIndex(cityPath, cfg).lookup(sinkDir); sink != nil {
+		for _, w := range sink.Writers {
+			if w.Name == agent.QualifiedName() {
+				continue
+			}
+			addSkillSinkWriter(union, w.Agent, w.Name, catalogs.load(agentRigScopeName(w.Agent, cfg.Rigs)))
+		}
+	}
+	union.Add(agent.QualifiedName(), catalogs.load(agentRigScopeName(agent, cfg.Rigs)), agentCat)
+
+	if problems := union.Problems(); len(problems) > 0 {
+		reportHeldSkillSink(stderr, "gc internal materialize-skills", sinkDir, problems)
+		return materialize.Result{}, nil
 	}
 
 	res, err := materialize.Run(materialize.Request{
-		SinkDir:          filepath.Join(absWorkdir, vendorSink),
-		Desired:          desired,
-		OwnedRoots:       owned,
+		SinkDir:          sinkDir,
+		Desired:          union.Desired(),
+		OwnedRoots:       union.OwnedRoots(),
 		LegacyNames:      materialize.LegacyStubNames(),
 		LegacyOwnedRoots: materialize.LegacyOwnedRootsFor(cityPath),
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc internal materialize-skills: %v\n", err) //nolint:errcheck // best-effort stderr
-		return errExit
+		return materialize.Result{}, errExit
 	}
 
 	// Log summary to stdout for diagnostic capture. Skipped and
@@ -230,7 +252,7 @@ func materializeSkillsIntoWorkdir(cfg *config.City, agent *config.Agent, cityPat
 	if len(res.Materialized) > 0 {
 		fmt.Fprintf(stdout, "materialized %d skill(s) into %s: %s\n", //nolint:errcheck // best-effort stdout
 			len(res.Materialized),
-			filepath.Join(absWorkdir, vendorSink),
+			sinkDir,
 			strings.Join(res.Materialized, ", "),
 		)
 	}
@@ -243,5 +265,37 @@ func materializeSkillsIntoWorkdir(cfg *config.City, agent *config.Agent, cityPat
 	for _, w := range res.Warnings {
 		fmt.Fprintf(stderr, "warning: %s\n", w) //nolint:errcheck // best-effort stderr
 	}
-	return nil
+	return res, nil
+}
+
+// stage2SkillScopeCatalogs loads the shared catalogs of a stage-2 sink's
+// writers, once per scope. agent's own scope uses sharedCatalog when the
+// controller supplied one; otherwise it loads live, and a load failure
+// degrades to no shared entries (its owned roots kept) so stale shared
+// links are pruned. Any other scope loads live, and a load failure marks
+// union incomplete, since this pass cannot tell that scope's links from
+// stale ones.
+func stage2SkillScopeCatalogs(cfg *config.City, agent *config.Agent, sharedCatalog *materialize.CityCatalog, union *materialize.SinkUnion, stderr io.Writer) *skillScopeCatalogs {
+	ownScope := agentRigScopeName(agent, cfg.Rigs)
+	return newSkillScopeCatalogs(func(rigName string) materialize.CityCatalog {
+		if rigName == ownScope && sharedCatalog != nil {
+			return cloneCityCatalog(*sharedCatalog)
+		}
+		cat, err := loadSharedSkillCatalog(cfg, rigName)
+		if err == nil {
+			return cat
+		}
+		if rigName != ownScope {
+			scope := "city scope"
+			if rigName != "" {
+				scope = fmt.Sprintf("rig %q", rigName)
+			}
+			union.MarkUnreadable(fmt.Sprintf("load shared skill catalog for %s: %v", scope, err))
+			return cat
+		}
+		fmt.Fprintf(stderr, "gc internal materialize-skills: shared skill catalog unavailable for %q: %v\n", agent.QualifiedName(), err) //nolint:errcheck // best-effort stderr
+		cat.Entries = nil
+		cat.Shadowed = nil
+		return cat
+	})
 }

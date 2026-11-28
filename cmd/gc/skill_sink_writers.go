@@ -63,6 +63,12 @@ func (x *skillSinkIndex) add(dir, name string, agent *config.Agent, scopeRoot bo
 	sink.Writers = append(sink.Writers, skillSinkWriter{Name: name, Agent: agent})
 }
 
+// lookup returns the indexed sink at dir, or nil when no configured agent
+// writes it.
+func (x *skillSinkIndex) lookup(dir string) *skillSink {
+	return x.sinks[pathutil.NormalizePathForCompare(dir)]
+}
+
 // sorted returns the sinks ordered by key.
 func (x *skillSinkIndex) sorted() []*skillSink {
 	keys := make([]string, 0, len(x.sinks))
