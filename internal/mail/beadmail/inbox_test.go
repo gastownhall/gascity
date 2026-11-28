@@ -802,3 +802,33 @@ func TestArchiveFromInboxRetiresInProgressHandoff(t *testing.T) {
 		t.Fatalf("archived handoff = status %q metadata %v, want closed, read, retention close_reason", b.Status, b.Metadata)
 	}
 }
+
+// The session inbox and CheckAutoHandoffs both offer an unread in_progress
+// auto handoff for SessionStart delivery, as they do an open one.
+func TestInboxUnreadAutoHandoffsIncludesInProgressHandoff(t *testing.T) {
+	store := beads.NewMemStore()
+	p := newTestProvider(store)
+	handoff, _, err := p.SendHandoff(mail.HandoffIntent{
+		From: "worker", To: "worker", Subject: "context cycle", ThreadID: "t1",
+		ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+	})
+	if err != nil {
+		t.Fatalf("SendHandoff: %v", err)
+	}
+	setInProgress(t, store, handoff.ID)
+
+	inbox, err := p.InboxForRoutes([]string{"worker"})
+	if err != nil {
+		t.Fatalf("InboxForRoutes: %v", err)
+	}
+	if got := messageIDs(inbox.UnreadAutoHandoffs()); !slices.Equal(got, []string{handoff.ID}) {
+		t.Fatalf("UnreadAutoHandoffs = %v, want the in_progress handoff %s", got, handoff.ID)
+	}
+	checked, err := p.CheckAutoHandoffs([]string{"worker"})
+	if err != nil {
+		t.Fatalf("CheckAutoHandoffs: %v", err)
+	}
+	if got := messageIDs(checked); !slices.Equal(got, []string{handoff.ID}) {
+		t.Fatalf("CheckAutoHandoffs = %v, want the in_progress handoff %s", got, handoff.ID)
+	}
+}

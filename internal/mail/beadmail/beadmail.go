@@ -830,7 +830,7 @@ func (p *Provider) CheckAutoHandoffs(recipients []string) ([]mail.Message, error
 	}
 	var messages []mail.Message
 	for _, b := range candidates {
-		if b.Status != "open" ||
+		if !isLiveMail(b) ||
 			(len(routes) > 0 && !matchesRecipientRoute(routes, b.Assignee)) ||
 			hasLabel(b.Labels, "read") ||
 			!hasLabel(b.Labels, mail.AutoHandoffLabel) ||
