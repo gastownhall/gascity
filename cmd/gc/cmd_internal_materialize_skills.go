@@ -7,9 +7,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/gastownhall/gascity/internal/pathutil"
@@ -220,12 +220,14 @@ func materializeSkillSinkForSession(cfg *config.City, agent *config.Agent, cityP
 
 	union := materialize.NewSinkUnion()
 	catalogs := stage2SkillScopeCatalogs(cfg, agent, sharedCatalog, union, stderr)
+	writers := []*config.Agent{agent}
 	sink := buildSkillSinkIndex(cityPath, cfg).lookup(sinkDir)
 	if sink != nil {
 		for _, w := range sink.Writers {
 			if w.Name == agent.QualifiedName() {
 				continue
 			}
+			writers = append(writers, w.Agent)
 			addSkillSinkWriter(union, w.Agent, w.Name, catalogs.load(agentRigScopeName(w.Agent, cfg.Rigs)))
 		}
 	}
@@ -247,8 +249,8 @@ func materializeSkillSinkForSession(cfg *config.City, agent *config.Agent, cityP
 		// No stage-1 pass reconciles this sink, and the index may miss a
 		// writer (a worktree no configured work_dir resolves to, or a
 		// session whose environment resolved its work dir differently),
-		// so leave live links into other writers' skill roots alone.
-		req.ForeignRoots = foreignSkillRoots(cfg, req.OwnedRoots)
+		// so leave live links into other agents' skills dirs alone.
+		req.ForeignRoots = foreignSkillRoots(cfg, req.OwnedRoots, writers...)
 	}
 	res, err := materialize.Run(req)
 	if err != nil {
@@ -279,42 +281,39 @@ func materializeSkillSinkForSession(cfg *config.City, agent *config.Agent, cityP
 	return res, nil
 }
 
-// foreignSkillRoots returns every configured skill root (each agent's
-// skills dir, the city pack's skills dir, and every imported or rig pack
-// catalog) that is not one of owned.
-func foreignSkillRoots(cfg *config.City, owned []string) []string {
-	skip := make(map[string]bool, len(owned))
+// foreignSkillRoots returns the skills dir of every configured agent that
+// is not one of writers (the agents a stage-2 pass folds), except the dirs
+// in owned. An agent is one of writers when it has a writer's
+// binding-qualified name, a pool slot matching through its template: the
+// same agent bound in another rig has its skills dir at that rig's pin of
+// the pack that defines it, where the writer's own links pointed before
+// its rig moved to another pin. Pack catalogs (the city pack's skills dir,
+// city and rig imports) are never foreign either: another scope may import
+// the very pack root a pass's own stale link still points at. Either way
+// the ownership manifest must still let the pass re-point or prune the
+// link.
+func foreignSkillRoots(cfg *config.City, owned []string, writers ...*config.Agent) []string {
+	seen := make(map[string]bool, len(owned))
 	for _, root := range owned {
-		skip[pathutil.NormalizePathForCompare(root)] = true
+		seen[pathutil.NormalizePathForCompare(root)] = true
+	}
+	writerNames := make(map[string]bool, len(writers))
+	for _, w := range writers {
+		_, name := config.ParseQualifiedName(agentutil.RoutedToIdentity(w))
+		writerNames[name] = true
 	}
 	var out []string
-	add := func(root string) {
-		if root == "" {
-			return
+	for i := range cfg.Agents {
+		root := cfg.Agents[i].SkillsDir
+		if root == "" || writerNames[cfg.Agents[i].BindingQualifiedName()] {
+			continue
 		}
 		key := pathutil.NormalizePathForCompare(root)
-		if skip[key] {
-			return
+		if seen[key] {
+			continue
 		}
-		skip[key] = true
+		seen[key] = true
 		out = append(out, root)
-	}
-	for i := range cfg.Agents {
-		add(cfg.Agents[i].SkillsDir)
-	}
-	add(cfg.PackSkillsDir)
-	for _, cat := range cfg.PackSkills {
-		add(cat.SourceDir)
-	}
-	rigs := make([]string, 0, len(cfg.RigPackSkills))
-	for rig := range cfg.RigPackSkills {
-		rigs = append(rigs, rig)
-	}
-	sort.Strings(rigs)
-	for _, rig := range rigs {
-		for _, cat := range cfg.RigPackSkills[rig] {
-			add(cat.SourceDir)
-		}
 	}
 	return out
 }

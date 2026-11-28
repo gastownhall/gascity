@@ -383,13 +383,16 @@ type Request struct {
 	// the historical behavior.
 	LegacyOwnedRoots []string
 	// ForeignRoots lists skill roots of other configured writers this
-	// pass does not fold (another agent's skills dir, another scope's
-	// shared catalog). A live link whose target is under one of them and
-	// under none of OwnedRoots belongs to a writer this pass cannot see:
-	// it is neither pruned nor re-pointed, its manifest entry is kept, and
-	// a desired name it occupies is reported in Result.Skipped. A dangling
-	// link under a foreign root serves no writer and is removed. Pass nil
-	// when the request folds every writer of the sink.
+	// pass does not fold (another agent's skills dir). A live link whose
+	// target is under one of them and under none of OwnedRoots belongs to
+	// a writer this pass cannot see: it is neither pruned nor re-pointed,
+	// its manifest entry is kept, and a desired name it occupies is
+	// reported in Result.Skipped. A dangling link under a foreign root
+	// serves no writer and is removed. The check runs before the
+	// ownership manifest's, so list no root this pass's own writers may
+	// have linked from before (a pack catalog another scope also
+	// imports): their stale links would never be re-pointed or pruned.
+	// Pass nil when the request folds every writer of the sink.
 	ForeignRoots []string
 	// DryRun computes the pass without touching the filesystem: no sink
 	// directory, symlink, removal, or ownership manifest. The Result

@@ -1152,3 +1152,245 @@ func TestSharedSinkConvergesAcrossStages(t *testing.T) {
 		})
 	}
 }
+
+// TestMaterializeSkillsIntoWorkdirFollowsPackChangeAnotherRigStillPins:
+// rigs fe and be both import pack ops from ops-v1, and fe's polecat runs
+// its sessions in a per-session worktree, a sink no stage-1 pass owns.
+// When fe bumps the import to ops-v2, or drops it, while be still pins
+// ops-v1, polecat's next pass re-points or prunes the link its manifest
+// recorded: another rig's pack catalog does not make polecat's own stale
+// link another writer's.
+func TestMaterializeSkillsIntoWorkdirFollowsPackChangeAnotherRigStillPins(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		bump bool
+	}{{"bump", true}, {"drop", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearGCEnv(t)
+			cityPath := t.TempDir()
+			t.Setenv("GC_HOME", t.TempDir())
+			opsV1 := filepath.Join(cityPath, "packs", "ops-v1", "skills")
+			opsV2 := filepath.Join(cityPath, "packs", "ops-v2", "skills")
+			writeSkillSource(t, filepath.Join(opsV1, "review"))
+			writeSkillSource(t, filepath.Join(opsV2, "review"))
+			ops := func(dir string) []config.DiscoveredSkillCatalog {
+				return []config.DiscoveredSkillCatalog{{SourceDir: dir, PackName: "ops", BindingName: "ops"}}
+			}
+			c := workDirWriterCity{cityPath: cityPath, cfg: &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Session:   config.SessionConfig{Provider: "tmux"},
+				Rigs: []config.Rig{
+					{Name: "fe", Path: filepath.Join(cityPath, "rigs", "fe")},
+					{Name: "be", Path: filepath.Join(cityPath, "rigs", "be")},
+				},
+				RigPackSkills: map[string][]config.DiscoveredSkillCatalog{"fe": ops(opsV1), "be": ops(opsV1)},
+				Agents: []config.Agent{
+					{Name: "polecat", Scope: "rig", Dir: "fe", Provider: "claude", WorkDir: "{{.CityRoot}}/.gc/worktrees/fe/polecat"},
+				},
+			}}
+			workdir := filepath.Join(cityPath, ".gc", "worktrees", "fe", "polecat")
+			sink := filepath.Join(workdir, ".claude", "skills")
+			if s := buildSkillSinkIndex(cityPath, c.cfg).lookup(sink); s == nil || s.ScopeRoot {
+				t.Fatalf("index entry for %s = %+v, want a stage-2 writer sink that is no scope root", sink, s)
+			}
+			c.stage2(t, "polecat", workdir)
+			requireLinkTarget(t, filepath.Join(sink, "ops.review"), filepath.Join(opsV1, "review"))
+
+			if tc.bump {
+				c.cfg.RigPackSkills["fe"] = ops(opsV2)
+			} else {
+				delete(c.cfg.RigPackSkills, "fe")
+			}
+			_, stderr := c.stage2Result(t, "polecat", workdir)
+			if tc.bump {
+				requireLinkTarget(t, filepath.Join(sink, "ops.review"), filepath.Join(opsV2, "review"))
+			} else {
+				requireSinkLinks(t, sink, "after fe dropped its ops import", nil, []string{"ops.review"})
+			}
+			if strings.Contains(stderr, "held by a live link") {
+				t.Errorf("polecat's pass held its own stale link as another writer's: %q", stderr)
+			}
+		})
+	}
+}
+
+// TestMaterializeSkillsIntoWorkdirFollowsPackAgentBumpAnotherRigStillPins:
+// rigs fe and be both run pack ops's polecat, whose agent-local skills dir
+// lies under the pack (ops-v1/agents/polecat/skills: notes and old-only).
+// fe's polecat links both into a sink no stage-1 pass owns. Then fe bumps
+// ops to ops-v2, which keeps notes and drops old-only, while be still pins
+// ops-v1. The next pass over the sink re-points notes and prunes old-only,
+// be's copy of the same agent being no other writer: polecat's own pass
+// into its indexed worktree or into a path the index does not list, and
+// the pass of helper, a co-writer of polecat's worktree.
+func TestMaterializeSkillsIntoWorkdirFollowsPackAgentBumpAnotherRigStillPins(t *testing.T) {
+	for _, tc := range []struct {
+		name, workdir, runner string
+		indexed               bool
+	}{
+		{"indexed", ".gc/worktrees/fe/polecat", "fe/ops.polecat", true},
+		{"unindexed", "scratch/fe-polecat", "fe/ops.polecat", false},
+		{"co-writer", ".gc/worktrees/fe/polecat", "fe/helper", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearGCEnv(t)
+			cityPath := t.TempDir()
+			t.Setenv("GC_HOME", t.TempDir())
+			opsV1 := filepath.Join(cityPath, "packs", "ops-v1", "agents", "polecat", "skills")
+			opsV2 := filepath.Join(cityPath, "packs", "ops-v2", "agents", "polecat", "skills")
+			for _, src := range []string{filepath.Join(opsV1, "notes"), filepath.Join(opsV1, "old-only"), filepath.Join(opsV2, "notes")} {
+				writeSkillSource(t, src)
+			}
+			worktree := "{{.CityRoot}}/.gc/worktrees/{{.Rig}}/polecat"
+			polecat := func(rig string) config.Agent {
+				return config.Agent{Name: "polecat", BindingName: "ops", Scope: "rig", Dir: rig, Provider: "claude", SkillsDir: opsV1, WorkDir: worktree}
+			}
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Session:   config.SessionConfig{Provider: "tmux"},
+				Rigs: []config.Rig{
+					{Name: "fe", Path: filepath.Join(cityPath, "rigs", "fe")},
+					{Name: "be", Path: filepath.Join(cityPath, "rigs", "be")},
+				},
+				Agents: []config.Agent{
+					polecat("fe"),
+					polecat("be"),
+					{Name: "helper", Scope: "rig", Dir: "fe", Provider: "claude", WorkDir: worktree},
+				},
+			}
+			agent := func(qualified string) *config.Agent {
+				for i := range cfg.Agents {
+					if cfg.Agents[i].QualifiedName() == qualified {
+						return &cfg.Agents[i]
+					}
+				}
+				t.Fatalf("agent %q not configured", qualified)
+				return nil
+			}
+			workdir := filepath.Join(cityPath, filepath.FromSlash(tc.workdir))
+			sink := filepath.Join(workdir, ".claude", "skills")
+			if s := buildSkillSinkIndex(cityPath, cfg).lookup(sink); (s != nil) != tc.indexed || (s != nil && s.ScopeRoot) {
+				t.Fatalf("index entry for %s = %+v, want indexed=%t and no scope root", sink, s, tc.indexed)
+			}
+			run := func(name string) string {
+				t.Helper()
+				var stdout, stderr bytes.Buffer
+				if err := materializeSkillsIntoWorkdir(cfg, agent(name), cityPath, workdir, nil, &stdout, &stderr); err != nil {
+					t.Fatalf("stage 2 for %s into %s: %v; stderr=%q", name, workdir, err, stderr.String())
+				}
+				return stderr.String()
+			}
+			run("fe/ops.polecat")
+			requireLinkTarget(t, filepath.Join(sink, "notes"), filepath.Join(opsV1, "notes"))
+			requireLinkTarget(t, filepath.Join(sink, "old-only"), filepath.Join(opsV1, "old-only"))
+
+			agent("fe/ops.polecat").SkillsDir = opsV2
+			stderr := run(tc.runner)
+			requireLinkTarget(t, filepath.Join(sink, "notes"), filepath.Join(opsV2, "notes"))
+			requireSinkLinks(t, sink, "after fe bumped ops", nil, []string{"old-only"})
+			if strings.Contains(stderr, "held by a live link") {
+				t.Errorf("%s's pass held polecat's stale link as another writer's: %q", tc.runner, stderr)
+			}
+		})
+	}
+}
+
+// TestForeignSkillRootsListsOtherAgentsSkillsDirsOnly: the roots a stage-2
+// pass leaves alone are the skills dirs of configured agents other than
+// its writers, each once. Pack catalogs (the city pack's skills dir, city
+// and rig imports) are never foreign, so the ownership manifest still lets
+// a pass re-point or prune a pack link it wrote, whichever other scope
+// still imports the pack. Nor is a writer's own agent bound in another rig
+// (be/ops.polecat for writer fe/ops.polecat, or for a pool slot of it):
+// its skills dir is that rig's pin of the pack, where the writer's links
+// pointed before fe moved to another pin. An agent of the same name from
+// another binding (be/gt.polecat) is another agent.
+func TestForeignSkillRootsListsOtherAgentsSkillsDirsOnly(t *testing.T) {
+	root := t.TempDir()
+	dir := func(parts ...string) string { return filepath.Join(append([]string{root}, parts...)...) }
+	cfg := &config.City{
+		PackSkillsDir: dir("skills"),
+		PackSkills:    []config.DiscoveredSkillCatalog{{SourceDir: dir("packs", "city-import", "skills"), BindingName: "ci"}},
+		RigPackSkills: map[string][]config.DiscoveredSkillCatalog{
+			"fe": {{SourceDir: dir("packs", "ops-v2", "skills"), BindingName: "ops"}},
+			"be": {{SourceDir: dir("packs", "ops-v1", "skills"), BindingName: "ops"}},
+		},
+		Agents: []config.Agent{
+			{Name: "a", SkillsDir: dir("agents", "a", "skills")},
+			{Name: "b", SkillsDir: dir("agents", "b", "skills")},
+			{Name: "b-twin", SkillsDir: dir("agents", "b", "skills")},
+			{Name: "no-local-skills"},
+			{Name: "c", SkillsDir: dir("agents", "c", "skills")},
+			{Name: "polecat", BindingName: "ops", Dir: "fe", SkillsDir: dir("packs", "ops-v2", "agents", "polecat", "skills")},
+			{Name: "polecat", BindingName: "ops", Dir: "be", SkillsDir: dir("packs", "ops-v1", "agents", "polecat", "skills")},
+			{Name: "polecat", BindingName: "gt", Dir: "be", SkillsDir: dir("packs", "gt", "agents", "polecat", "skills")},
+		},
+	}
+	a, fePolecat := &cfg.Agents[0], &cfg.Agents[5]
+	slot := deepCopyAgent(fePolecat, "polecat-2", "fe")
+	owned := []string{dir("agents", "a", "skills"), dir("packs", "ops-v2", "agents", "polecat", "skills"), dir("skills"), dir("packs", "ops-v2", "skills")}
+	want := []string{dir("agents", "b", "skills"), dir("agents", "c", "skills"), dir("packs", "gt", "agents", "polecat", "skills")}
+	for _, tc := range []struct {
+		name    string
+		writers []*config.Agent
+	}{
+		{"template", []*config.Agent{a, fePolecat}},
+		{"pool slot", []*config.Agent{a, &slot}},
+	} {
+		if got := foreignSkillRoots(cfg, owned, tc.writers...); !reflect.DeepEqual(got, want) {
+			t.Errorf("%s writers: foreignSkillRoots = %v, want %v", tc.name, got, want)
+		}
+	}
+}
+
+// TestMaterializeSkillsIntoWorkdirHoldsSinkWhenCoWriterCatalogUnreadable:
+// rig agents fa (rig fe) and ba (rig be) share one work_dir. ba's session
+// linked bp.deploy from be's pack import; then be gains an unreadable
+// import ahead of it, so loading be's catalog fails before it reads bp
+// while bp's root stays owned. fa's pass cannot tell ba's link from a
+// stale one, so it holds the sink: the link survives, nothing changes,
+// and stderr names the catalog it could not load.
+func TestMaterializeSkillsIntoWorkdirHoldsSinkWhenCoWriterCatalogUnreadable(t *testing.T) {
+	clearGCEnv(t)
+	cityPath := t.TempDir()
+	t.Setenv("GC_HOME", t.TempDir())
+	bpSkills := filepath.Join(cityPath, "packs", "bp", "skills")
+	writeSkillSource(t, filepath.Join(bpSkills, "deploy"))
+	notADir := filepath.Join(cityPath, "packs", "broken")
+	if err := os.WriteFile(notADir, []byte("a regular file\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bp := config.DiscoveredSkillCatalog{SourceDir: bpSkills, PackName: "bp", BindingName: "bp"}
+	broken := config.DiscoveredSkillCatalog{SourceDir: filepath.Join(notADir, "skills"), PackName: "broken", BindingName: "broken"}
+	workDir := "{{.CityRoot}}/shared"
+	c := workDirWriterCity{cityPath: cityPath, cfg: &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Session:   config.SessionConfig{Provider: "tmux"},
+		Rigs: []config.Rig{
+			{Name: "fe", Path: filepath.Join(cityPath, "rigs", "fe")},
+			{Name: "be", Path: filepath.Join(cityPath, "rigs", "be")},
+		},
+		RigPackSkills: map[string][]config.DiscoveredSkillCatalog{"be": {bp}},
+		Agents: []config.Agent{
+			{Name: "fa", Scope: "rig", Dir: "fe", Provider: "claude", WorkDir: workDir},
+			{Name: "ba", Scope: "rig", Dir: "be", Provider: "claude", WorkDir: workDir},
+		},
+	}}
+	shared := filepath.Join(cityPath, "shared")
+	sink := filepath.Join(shared, ".claude", "skills")
+	c.stage2(t, "ba", shared)
+	requireLinkTarget(t, filepath.Join(sink, "bp.deploy"), filepath.Join(bpSkills, "deploy"))
+	before := sinkLinkTargets(t, sink)
+
+	c.cfg.RigPackSkills["be"] = []config.DiscoveredSkillCatalog{broken, bp}
+	res, stderr := c.stage2Result(t, "fa", shared)
+	if !strings.Contains(stderr, `load shared skill catalog for rig "be"`) {
+		t.Errorf("held-sink report does not name be's catalog: %q", stderr)
+	}
+	if len(res.Created)+len(res.Removed)+len(res.Relinked) != 0 {
+		t.Errorf("held sink pass changed links: %+v", res)
+	}
+	if after := sinkLinkTargets(t, sink); !reflect.DeepEqual(after, before) {
+		t.Errorf("held sink changed:\nbefore %v\nafter  %v", before, after)
+	}
+}
