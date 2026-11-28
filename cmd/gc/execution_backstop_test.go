@@ -1985,3 +1985,96 @@ func TestExecutionBackstopRetriesAProviderOverloadWithoutGenericGrace(t *testing
 		t.Fatalf("stdout = %q, want the delivery named attempt 1/3, immediate", out)
 	}
 }
+
+// turnsFailing is a turn source whose every read fails with err.
+func turnsFailing(err error) ladderTurnReader {
+	return func(context.Context, beads.Bead) (runtime.TurnHistory, error) {
+		return runtime.TurnHistory{}, err
+	}
+}
+
+// Without structural evidence that the provider refused the seat's newest
+// turn this incarnation for lack of capacity, the first sighting of a quiet
+// claim writes the observe marker and sends nothing until the grace has run,
+// exactly as before ga-fo294b: a completed turn, another failure class, a turn
+// still open, an overload from before the wake, no wake time, no turn source,
+// or a read that fails. An overload ending exactly at the wake counts.
+func TestExecutionBackstopWaitsTheGraceWithoutOverloadEvidence(t *testing.T) {
+	failed := func(endedAgo time.Duration, failure runtime.TurnFailure) func(time.Time) ladderTurnReader {
+		return func(now time.Time) ladderTurnReader {
+			return endedTurns(runtime.EndedTurn{TurnID: "t1", EndedAt: now.Add(-endedAgo), Status: runtime.TurnStatusFailed, Failure: failure})
+		}
+	}
+	overload := runtime.TurnFailure{Code: "server_overloaded", Overloaded: true}
+	for _, tc := range []struct {
+		name      string
+		woke      bool // stamp last_woke_at 10 minutes ago
+		turns     func(now time.Time) ladderTurnReader
+		immediate bool
+		logged    bool // the tick logs that it could not read the turns
+	}{
+		{name: "completed", woke: true, turns: func(now time.Time) ladderTurnReader {
+			return endedTurns(runtime.EndedTurn{TurnID: "t1", EndedAt: now.Add(-91 * time.Second), Status: runtime.TurnStatusCompleted})
+		}},
+		{name: "failed 429 rate_limit", woke: true, turns: failed(91*time.Second, runtime.TurnFailure{Code: "rate_limit", HTTPStatus: 429, RateLimited: true})},
+		{name: "failed usage_limit_exceeded", woke: true, turns: failed(91*time.Second, runtime.TurnFailure{Code: "usage_limit_exceeded", RateLimited: true, Quota: true})},
+		{name: "failed Claude 503 server_error", woke: true, turns: failed(91*time.Second, runtime.TurnFailure{Code: "server_error", HTTPStatus: 503})},
+		{name: "overloaded but a turn open", woke: true, turns: func(now time.Time) ladderTurnReader {
+			return func(context.Context, beads.Bead) (runtime.TurnHistory, error) {
+				return runtime.TurnHistory{
+					Current: runtime.TurnState{TurnID: "t2"},
+					Recent:  []runtime.EndedTurn{{TurnID: "t1", EndedAt: now.Add(-91 * time.Second), Status: runtime.TurnStatusFailed, Failure: overload}},
+				}, nil
+			}
+		}},
+		{name: "overloaded before last_woke_at", woke: true, turns: failed(11*time.Minute, overload)},
+		{name: "overloaded at last_woke_at counts", woke: true, immediate: true, turns: func(now time.Time) ladderTurnReader {
+			woke := now.Add(-10 * time.Minute).Truncate(time.Second) // last_woke_at as RFC3339 stores it
+			return endedTurns(runtime.EndedTurn{TurnID: "t1", EndedAt: woke, Status: runtime.TurnStatusFailed, Failure: overload})
+		}},
+		{name: "last_woke_at unset", turns: failed(91*time.Second, overload)},
+		{name: "reader fails", woke: true, logged: true, turns: func(time.Time) ladderTurnReader { return turnsFailing(runtime.ErrRuntimeUnavailable) }},
+		{name: "family records no turns", woke: true, turns: func(time.Time) ladderTurnReader { return turnsFailing(runtime.ErrTurnIdentityUnsupported) }},
+		{name: "no turn source", woke: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExecutionBackstopFixture(t)
+			if tc.woke {
+				f.wokeAgo(t, 10*time.Minute)
+			}
+			if tc.turns != nil {
+				f.turns = tc.turns(f.now)
+			}
+			f.idleFor(t, idleClaimNudgeGrace+time.Second)
+
+			f.tick(t)
+
+			if got := f.sessionMeta(t, executionClaimNudgeWorkKey); got != f.work.ID {
+				t.Fatalf("observe marker = %q, want %q", got, f.work.ID)
+			}
+			want := 0
+			if tc.immediate {
+				want = 1
+			}
+			if got := f.nudgeCount(); got != want {
+				t.Fatalf("nudges on the first quiet tick = %d, want %d; stdout=%s", got, want, f.stdout.String())
+			}
+			if got := strings.Contains(f.stdout.String(), "reading its turns:"); got != tc.logged {
+				t.Fatalf("logged a failed turn read = %v, want %v; stdout=%s", got, tc.logged, f.stdout.String())
+			}
+			if tc.immediate {
+				return
+			}
+
+			f.now = f.now.Add(idleClaimNudgeGrace + time.Second)
+			f.idleFor(t, 2*idleClaimNudgeGrace)
+			f.tick(t)
+			if got := f.nudgeCount(); got != 1 {
+				t.Fatalf("nudges once the grace has run = %d, want 1; stdout=%s", got, f.stdout.String())
+			}
+			if strings.Contains(f.stdout.String(), "immediate") {
+				t.Fatalf("stdout = %q, want no immediate delivery", f.stdout.String())
+			}
+		})
+	}
+}
