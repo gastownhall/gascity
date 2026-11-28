@@ -7,9 +7,11 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/fanout"
+	"github.com/gastownhall/gascity/internal/inputadmission"
 )
 
 // Cross-store blockers: one rule on a split city, bd's answer everywhere else.
@@ -126,7 +128,7 @@ func verdictOfCopies(id string, copies []heldCopy) blockerVerdict {
 	var held *heldCopy
 	for i, c := range copies {
 		holders = append(holders, c.label)
-		if beads.DependencySatisfied(c.bead.Status, beads.ReadinessWorkOutcome(c.bead.Metadata)) {
+		if beads.DependencyCopySatisfied(c.bead) {
 			continue
 		}
 		if held == nil || (held.bead.Status == "closed" && c.bead.Status != "closed") {
@@ -193,16 +195,6 @@ func newCrossStore(legs []Leg) *crossStore {
 		stranded: make(map[legRow]bool),
 		verdicts: make(map[string]blockerVerdict),
 	}
-}
-
-// legIndex returns the index of the leg serving store, or -1.
-func (cs *crossStore) legIndex(store beads.Store) int {
-	for i, leg := range cs.legs {
-		if leg.Store == store {
-			return i
-		}
-	}
-	return -1
 }
 
 // strands reports whether a leg's store reads an absent target as a blocker,
@@ -388,12 +380,18 @@ func judgeEdge(leg Leg, stranding, stranded bool, id string, dep beads.Dep) (str
 	}
 }
 
-// OwnVerdictStands reports whether the cross-store rule settles row id of leg,
-// whose edges are deps, by leg's own ready verdict alone: leg is a class
-// binding whose store strands absent targets, and every blocking edge names a
-// target in its own reserved namespace, which no other store holds. The gate
-// (LegGate.Gate) then verifies nothing for the row and serves it exactly when
-// leg's own Ready does.
+// OwnVerdictStands reports whether the gate settles row of leg, whose edges
+// are deps, by leg's own ready verdict alone. The cross-store rule settles it
+// so when leg is a class binding whose store strands absent targets and every
+// blocking edge names a target in its own reserved namespace, which no other
+// store holds. Input admission settles it so when judging the row reads no
+// input (inputadmission.ReadsInput): the row is not subject to it, or its
+// workflow root, which root finds by id in leg's store, names no input convoy.
+// A root that names one keeps the row with the federation, because the
+// convoy and its members live in whichever store the input does (on a split
+// city, the work store, not the binding), and so does a root root cannot
+// find (#8832). The gate (LegGate.Gate) then verifies nothing for the row and
+// serves it exactly when leg's own Ready does.
 //
 // held says which targets the caller's verdict judged. A reader standing in
 // for leg's Ready (a cache, whose readiness reads a target it does not hold
@@ -402,10 +400,14 @@ func judgeEdge(leg Leg, stranding, stranded bool, id string, dep beads.Dep) (str
 // the store's own verdict, which judged every target. A capability-ref edge
 // keeps the row with the federation too: the store strands the row behind it
 // and the gate serves the row from its absent-blocker listing.
-func OwnVerdictStands(leg Leg, id string, deps []beads.Dep, held func(id string) bool) bool {
+func OwnVerdictStands(leg Leg, row beads.Bead, deps []beads.Dep, held func(id string) bool, root func(id string) (beads.Bead, bool)) bool {
 	if !leg.ClassBinding || leg.Store == nil || !strands(leg) {
 		return false
 	}
+	if inputadmission.ReadsInput(row, root) {
+		return false
+	}
+	id := row.ID
 	for _, dep := range deps {
 		target, need := judgeEdge(leg, true, false, id, dep)
 		switch need {
@@ -558,61 +560,6 @@ func legDeps(ctx context.Context, leg Leg, ids []string) (map[string][]beads.Dep
 	return out, nil
 }
 
-// gate returns the rows of items no blocker holds, in their order, judging
-// only as many as the bound needs: rows are judged a chunk at a time, grouped
-// by the leg that served them, until limit rows are kept or items run out.
-func (cs *crossStore) gate(ctx context.Context, owners map[string]int, items []beads.Bead, limit int) ([]beads.Bead, error) {
-	if cs == nil || len(items) == 0 {
-		if limit > 0 && len(items) > limit {
-			items = items[:limit]
-		}
-		return items, nil
-	}
-	chunk := len(items)
-	if limit > 0 {
-		chunk = limit + boundedSlack
-	}
-	var kept []beads.Bead
-	for start := 0; start < len(items) && (limit <= 0 || len(kept) < limit); start += chunk {
-		part := items[start:min(start+chunk, len(items))]
-		byLeg := make(map[int][]beads.Bead)
-		var order []int
-		for _, row := range part {
-			idx, ok := owners[row.ID]
-			if !ok {
-				continue
-			}
-			if _, seen := byLeg[idx]; !seen {
-				order = append(order, idx)
-			}
-			byLeg[idx] = append(byLeg[idx], row)
-		}
-		blocked := make(map[string]bool, len(part))
-		errs := make([]error, len(order))
-		results := make([]map[string]bool, len(order))
-		fanout.Bounded(len(order), LegFanOut, func(i int) {
-			results[i], errs[i] = cs.blockedRows(ctx, order[i], byLeg[order[i]])
-		})
-		for i, err := range errs {
-			if err != nil {
-				return nil, err
-			}
-			for id, b := range results[i] {
-				blocked[id] = b
-			}
-		}
-		for _, row := range part {
-			if !blocked[row.ID] {
-				kept = append(kept, row)
-			}
-		}
-	}
-	if limit > 0 && len(kept) > limit {
-		kept = kept[:limit]
-	}
-	return kept, nil
-}
-
 // blockerStatuses resolves, for the in-progress tier, each target of a row
 // served by legs[own], keyed by the target as written. A target with no entry
 // is not a blocker of the row and is omitted from blocked_by.
@@ -672,12 +619,14 @@ func blockerStatuses(ctx context.Context, cs *crossStore, legs []Leg, own int, t
 	return out, nil
 }
 
-// LegGate applies the split-city cross-store rule to ready rows read one leg
-// at a time (pool demand, the API's cached ready read): to the rows one leg
+// LegGate applies the ready reader's row gate to ready rows read one leg at a
+// time (pool demand on every city, and the API's cached ready read, which
+// applies it on a split city only). On a split city, to the rows one leg
 // served from its own Ready it adds the rows that leg strands behind an absent
 // blocker (its query selects them as Ready would), and it drops every row a
-// blocker holds. A nil *LegGate is a city with no binding, and returns every
-// row as read, so such a city's answer is the store's own.
+// blocker holds. On every city it drops every row native input admission
+// withholds (internal/inputadmission). A nil *LegGate returns every row as
+// read.
 //
 // It is the same rule `gc ready` applies, through the same code, so the
 // controller's demand and the worker's serve cannot disagree about a row.
@@ -688,8 +637,10 @@ func blockerStatuses(ctx context.Context, cs *crossStore, legs []Leg, own int, t
 // cached snapshot of each store) so reads each of them once, not once per
 // snapshot. Build one for each pass.
 type LegGate struct {
-	cs *crossStore
-	q  beads.ReadyQuery
+	legs []Leg
+	cs   *crossStore
+	rows *rowGate
+	q    beads.ReadyQuery
 
 	mu       sync.Mutex
 	listings map[int]*legListing
@@ -701,20 +652,17 @@ type legListing struct {
 	res  legResult
 }
 
-// NewLegGate returns the gate over legs, whose stranded rows are listed as
-// Ready would select them for q, or nil when legs are not a split city's.
+// NewLegGate returns the gate over legs, whose stranded rows, on a split city,
+// are listed as Ready would select them for q.
 func NewLegGate(legs []Leg, q beads.ReadyQuery) *LegGate {
 	cs := newCrossStore(legs)
-	if cs == nil {
-		return nil
-	}
-	return &LegGate{cs: cs, q: q, listings: make(map[int]*legListing)}
+	return &LegGate{legs: legs, cs: cs, rows: newRowGate(legs, cs, time.Now()), q: q, listings: make(map[int]*legListing)}
 }
 
 // Gate gates rows, which legs[own] served from its own Ready. An own outside
 // the legs returns rows as they are.
 func (g *LegGate) Gate(ctx context.Context, own int, rows []beads.Bead) ([]beads.Bead, error) {
-	if g == nil || own < 0 || own >= len(g.cs.legs) {
+	if g == nil || own < 0 || own >= len(g.legs) {
 		return rows, nil
 	}
 	if err := ctx.Err(); err != nil {
@@ -729,12 +677,14 @@ func (g *LegGate) Gate(ctx context.Context, own int, rows []beads.Bead) ([]beads
 		owners[b.ID] = own
 		items = append(items, b)
 	}
-	listed := g.listing(ctx, own)
-	if listed.err != nil {
-		return nil, fmt.Errorf("%s store: %w", g.cs.legs[own].Label, listed.err)
+	if g.cs != nil {
+		listed := g.listing(ctx, own)
+		if listed.err != nil {
+			return nil, fmt.Errorf("%s store: %w", g.legs[own].Label, listed.err)
+		}
+		items = g.cs.mergeStranded(own, listed.rows, items, owners)
 	}
-	items = g.cs.mergeStranded(own, listed.rows, items, owners)
-	return g.cs.gate(ctx, owners, items, 0)
+	return g.rows.gate(ctx, owners, items, 0)
 }
 
 // listing reads legs[own]'s absent-blocker listing, once for the gate's life.
@@ -746,6 +696,6 @@ func (g *LegGate) listing(ctx context.Context, own int) legResult {
 		g.listings[own] = l
 	}
 	g.mu.Unlock()
-	l.once.Do(func() { l.res = listStranded(ctx, g.cs.legs[own], g.q) })
+	l.once.Do(func() { l.res = listStranded(ctx, g.legs[own], g.q) })
 	return l.res
 }

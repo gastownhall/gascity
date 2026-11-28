@@ -8,20 +8,22 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/inputadmission"
 	"github.com/gastownhall/gascity/internal/readywork"
 )
 
-// The cross-store gate on pool demand (#8360): on a split city every ready
-// snapshot demand counts is passed through the rule `gc ready` applies
-// (readywork.LegGate), so the controller and a seat agree row for row. Judging
-// a row reads the stores that may hold its blockers, so it is remote I/O.
-// Legacy judges inside its demand pass under crossStoreGateDeadline
-// (readyDemandCache.gateSnapshot). The v2 pass does no remote I/O (CONTRACT v5
-// R4): the external-reads lane judges each leg's snapshot off the pass and
-// records it gated (allocator_backstop_lane.go), and the pass serves a gate
-// leg's Ready from that recording, except for the rows of an exact leg whose
-// readiness the rule leaves to the leg's own verdict, which it judges from the
-// leg's cache (v2DemandReads.ReadyAll).
+// The ready gate on pool demand (#8360, #8832): every ready snapshot demand
+// counts is passed through the rule `gc ready` applies (readywork.LegGate), so
+// the controller and a seat agree row for row — on a split city the
+// cross-store blocker rule, on every city input admission. Judging a row
+// reads the stores that may hold its blockers and its workflow's input, so it
+// is remote I/O. Legacy judges inside its demand pass under
+// crossStoreGateDeadline (readyDemandCache.gateSnapshot). The v2 pass does no
+// remote I/O (CONTRACT v5 R4): the external-reads lane judges each leg's
+// snapshot off the pass and records it gated (allocator_backstop_lane.go), and
+// the pass serves a gate leg's Ready from that recording, except for the rows
+// of an exact leg whose readiness the rule leaves to the leg's own verdict,
+// which it judges from the leg's cache (v2DemandReads.ReadyAll).
 
 // crossStoreGateDeadline bounds how long one judgment of a store's ready
 // snapshot may take. The gate's reads take no context, so a read still in
@@ -30,9 +32,12 @@ import (
 // rather than under-counting demand (see readyDemandCache).
 const crossStoreGateDeadline = 10 * time.Second
 
-// crossStoreGateLegs returns the ready legs a split city's demand is gated
-// over, or nil for a city that relocates nothing (or whose topology cannot be
-// planned, which its readers report themselves).
+// crossStoreGateLegs returns the ready legs a city's demand is gated over, or
+// nil when its topology cannot be planned (which its readers report
+// themselves). Every city gets its legs (#8832): on a split city the gate also
+// applies the cross-store blocker rule, and on every city it applies input
+// admission, so the controller counts as demand exactly the rows `gc ready`
+// serves.
 //
 // The legs are planned over the city's registered WORK store
 // (censusWorkLeg), not the store handed in: every caller hands the sessions
@@ -45,7 +50,7 @@ func crossStoreGateLegs(cityPath string, cfg *config.City, cityStore beads.Store
 		return nil
 	}
 	legs, err := readyLegsForTopology(residencyTopologyForCity(cityPath, cfg, censusWorkLeg(cityPath, cityStore), servingRigStores(cfg, rigStores, suspendedRigPaths))) // residency:allow — the same planned legs `gc ready` federates, so demand gates exactly as serve does
-	if err != nil || !readywork.IsSplit(legs) {
+	if err != nil {
 		return nil
 	}
 	return legs
@@ -104,6 +109,59 @@ func gateReadyRows(gate *readywork.LegGate, own int, rows []beads.Bead, readErr 
 	}
 	return rows, &beads.PartialResultError{Op: "controller ready demand cross-store gate", Err: gateErr}
 }
+
+// inputVerdicts is input admission's judgment of a set of rows (#8832): every
+// row it judged (Judged), the ones it withheld with their verdicts (Withheld),
+// and the judgment's own failure (Err), which judged none of them. A row
+// outside Judged has no verdict, which a reader must not read as admitted.
+type inputVerdicts struct {
+	Judged   map[string]bool
+	Withheld map[string]inputadmission.Withhold
+	Err      error
+}
+
+// judgeInputVerdicts judges rows, which legs[own] holds, for input admission
+// with gate's own judge (readywork.LegGate.JudgeInput), waiting at most
+// deadline, as gateReadyRows waits for the same gate. A judgment that fails
+// or outlives deadline is recorded as its failure and judges no row; so does
+// an own outside the gate's legs, which no judge covers. No rows record
+// nothing.
+func judgeInputVerdicts(gate *readywork.LegGate, own int, rows []beads.Bead, deadline time.Duration) inputVerdicts {
+	if len(rows) == 0 {
+		return inputVerdicts{}
+	}
+	if gate == nil || own < 0 {
+		return inputVerdicts{Err: errInputAdmissionUngated}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), deadline)
+	defer cancel()
+	type judged struct {
+		withheld map[string]inputadmission.Withhold
+		err      error
+	}
+	done := make(chan judged, 1)
+	go func() {
+		withheld, err := guardedRead(func() (map[string]inputadmission.Withhold, error) { return gate.JudgeInput(ctx, own, rows) })
+		done <- judged{withheld, err}
+	}()
+	select {
+	case j := <-done:
+		if j.err != nil {
+			return inputVerdicts{Err: j.err}
+		}
+		v := inputVerdicts{Judged: make(map[string]bool, len(rows)), Withheld: j.withheld}
+		for _, row := range rows {
+			v.Judged[row.ID] = true
+		}
+		return v
+	case <-ctx.Done():
+		return inputVerdicts{Err: fmt.Errorf("%w (%s)", errCrossStoreGateDeadline, deadline)}
+	}
+}
+
+// errInputAdmissionUngated: rows that need an input-admission verdict on a leg
+// no gate covers.
+var errInputAdmissionUngated = errors.New("no ready gate covers the leg, so input admission judged none of its rows")
 
 // joinGateErr adds a gate failure to a snapshot read's own error, keeping the
 // read's error as it is when the gate did not fail.

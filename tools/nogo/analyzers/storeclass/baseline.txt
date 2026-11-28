@@ -1759,7 +1759,6 @@ internal/orders/store.go	Store.mixedLegStores	unwrap	6
 internal/orders/store_reads.go	Store.HasOpenWork	raw-param	1
 internal/orders/store_reads.go	Store.LastRun	read-marker	1
 internal/orders/store_reads.go	lastRunRecords	raw-param	1
-internal/readywork/crossstore.go	crossStore.legIndex	raw-param	1
 internal/readywork/read.go	Leg	raw-field	1
 internal/runtime/t3bridge/provider.go	Provider.refreshAssignmentProjection	raw-param	1
 internal/runtime/t3bridge/provider.go	beadStoreForWatcher	raw-result	1

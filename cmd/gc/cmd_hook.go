@@ -603,6 +603,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	routeTargets := hookClaimRouteTargets(hookClaimPrimaryRouteTarget(&a), resolvedAgentName, strings.TrimSpace(overrides["GC_TEMPLATE"]))
 	strictDrainAck := func() bool { return cityRunsV2(cityPath, cfg) }
 	if opts.Claim {
+		admissionFallback, admissionBlind := admissionFallbackHookWorkQuery(cityPath, cityName, cfg, &a, topo, stderr)
 		claimOpts := hookClaimOptions{
 			Assignee:           assignee,
 			SessionID:          sessionID,
@@ -617,7 +618,9 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			// queryEnv has GC_INSTANCE_TOKEN filtered out.
 			StartedFence: hookStartedFenceOf(os.Environ()),
 			// The fenced row, so the worktree check costs no extra read.
-			PoolSeat: hookClaimPoolSeatFor(cityPath, cityName, cfg.Rigs, fencedSession, &a),
+			PoolSeat:               hookClaimPoolSeatFor(cityPath, cityName, cfg.Rigs, fencedSession, &a),
+			AdmissionFallbackQuery: admissionFallback,
+			AdmissionBlindQuery:    admissionBlind,
 		}
 		var provisionWorktree hookProvisionWorktreeFunc
 		if opts.Worktree {
@@ -985,6 +988,9 @@ func routedHookClaimOps(base hookClaimOps, opened *hookClaimClassRoute, err erro
 // remaining stores. It writes the shared drain exactly once, after every store
 // has been exhausted; the drain reason is claims_errored when any exhausted
 // store's eligible claims errored rather than merely lost the race, else no_work.
+// A store whose federated re-ask could not be read (hookClaimResult.reAskFailed)
+// leaves "no work" unknown, so then it writes no drain at all
+// (reportHookClaimReAskUnsettled).
 // emitFailure surfaces a work-query timeout on the event bus when eligible.
 //
 // The store set is also what the claim-time class escalation is measured
@@ -1023,6 +1029,11 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 	// another directory. It is named once, on the shared drain, so a later
 	// store's claim keeps the invocation quiet about it.
 	var left []beads.Bead
+	// reAskFailed records that a store's federated re-ask could not be read
+	// (hookClaimResult.reAskFailed). That store claimed only what its own
+	// screen admitted and the loop went on, but with no claim anywhere "no
+	// work" is then not known, so the invocation ends without a drain.
+	reAskFailed := false
 	for len(remaining) > 0 {
 		discovered, selected, err := selectStoreWithWorkRetrying(workQuery, remaining, primary, run, &ops, noteStoreFailure)
 		if err != nil {
@@ -1055,8 +1066,21 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 			storeDir = dir
 		}
 		storeOps := ops
-		storeOps.Runner = func(string, string) (string, error) { return claimOutput, nil }
+		// The claim reads the answer already fetched; any other command is
+		// the admission fallback (AdmissionFallbackQuery), run from the same
+		// leg. Its answer spans the city, and the claim keeps the rows this
+		// leg's store holds (keepHookRowsTheLegHolds).
+		storeOps.Runner = func(command, dir string) (string, error) {
+			if command == workQuery {
+				return claimOutput, nil
+			}
+			return run(command, dir, storeOpts.Env)
+		}
 		res := tryHookClaim(workQuery, storeDir, &storeOpts, &storeOps, stdout, stderr)
+		if res.reAskFailed != nil {
+			report.reAskFailed(storeOpts.AdmissionFallbackQuery, hookStore{dir: storeDir, rig: claimStore.rig}, res.reAskFailed)
+			reAskFailed = true
+		}
 		if res.terminal {
 			return res.code
 		}
@@ -1073,7 +1097,25 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		remaining = removeHookStore(remaining, claimStore)
 	}
 	reportHookClaimLeftToAnotherSession(left, claimOpts.PoolSeat, stderr)
+	if reAskFailed {
+		return reportHookClaimReAskUnsettled(stderr)
+	}
 	return writeHookClaimNoWork(claimOpts, ops, claimsErrored, workDir, stdout, stderr)
+}
+
+// reportHookClaimReAskUnsettled ends an invocation that claimed nothing after
+// a federated re-ask failed (hookClaimResult.reAskFailed). The re-ask was
+// asked for a store whose answer input admission withheld or deferred, so
+// whether admissible work waits behind those rows is not known. As with a
+// failed secondary store and no work anywhere (hookSecondaryStoreFailure),
+// that is a failed query: no drain result and no drain-ack. Each failed
+// re-ask was already named on stderr and recorded
+// (hookStoreFailureReport.reAskFailed). The exit is 1, without the
+// store-unavailable token, which speaks for the stores the hook searches
+// (hookStoreUnavailableToken).
+func reportHookClaimReAskUnsettled(stderr io.Writer) int {
+	fmt.Fprintln(stderr, "gc hook --claim: nothing claimed, and the failed federated re-ask leaves the withheld or deferred work it was to settle unknown; not draining") //nolint:errcheck // best-effort stderr
+	return 1
 }
 
 // reportClaimWorkQueryFailure reports a failed claim-path work query on stderr
@@ -1222,6 +1264,28 @@ func singleStoreHookWorkQuery(cityPath, cityName string, cfg *config.City, a *co
 		return ""
 	}
 	return expandAgentCommandTemplate(cityPath, cityName, a, cfg.Rigs, "work_query", command, stderr)
+}
+
+// admissionFallbackHookWorkQuery returns the agent's work query built with the
+// federated reader on, for a claim whose own query reads single-store tiers:
+// those tiers bound before input admission can drop a row, and the claim
+// judges them over one store, while the federated form reads through gc
+// ready, which admits first and judges every store. It returns "" when the
+// hook already runs the federated form. blind reports a custom work_query,
+// which reads through no admission at all.
+func admissionFallbackHookWorkQuery(cityPath, cityName string, cfg *config.City, a *config.Agent, topo config.QueryTopology, stderr io.Writer) (query string, blind bool) {
+	if cfg == nil || a == nil {
+		return "", false
+	}
+	if strings.TrimSpace(a.WorkQuery) != "" {
+		return "", true
+	}
+	if topo.FederatedReady {
+		return "", false
+	}
+	federated := topo
+	federated.FederatedReady = true
+	return expandAgentCommandTemplate(cityPath, cityName, a, cfg.Rigs, "work_query", a.EffectiveWorkQueryFor(federated), stderr), false
 }
 
 func hookSessionAgentForQuery() string {
@@ -1482,7 +1546,12 @@ func (v hookVisibility) leavesToAnotherSession(candidate beads.Bead) bool {
 // served work, or a rig whose managed Dolt runtime is not running, is named on
 // stderr, not reported as a failed query. A federated reader (`gc ready`) is
 // not one of those: it runs as the primary store's query, so a leg it cannot
-// read fails the primary read.
+// read fails the primary read. Nor is the federated form a claim re-asks to
+// settle what input admission withheld or deferred in one store's answer
+// (reAskFederatedHookClaim): it is no store the hook searches, so its failure
+// is a read elsewhere, named on stderr and recorded, and a claim that then
+// finds nothing exits 1 without a drain and without the token
+// (reportHookClaimReAskUnsettled).
 const hookStoreUnavailableToken = "GC_HOOK_STORE_UNAVAILABLE"
 
 // bdConnectionErrorMarkers mirrors the messages bd's Dolt store counts as the

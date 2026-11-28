@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
+	"github.com/gastownhall/gascity/internal/inputadmission"
 	"github.com/gastownhall/gascity/internal/poolplan"
 	"github.com/gastownhall/gascity/internal/readywork"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -1978,12 +1979,20 @@ func collectAssignedWorkBeadsWithStores(
 			start = pass.now()
 			openDemand, err := reads.RawOpen(source.store)
 			pass.read(read("list_open", demandReadTierLive), start, len(openDemand), err)
+			// The open rows input admission withholds (#8832): the hook will
+			// not serve them, so an assigned root among them is no wake demand
+			// while its input is not admissible. One no judgment covers is
+			// no wake demand either, and leaves the whole read partial.
+			openWithheld, admitErr := cache.openInputWithheld(readywork.Leg{Store: source.store}, openDemand)
+			if admitErr != nil {
+				errs = append(errs, fmt.Errorf("input admission of open assigned work: %w", admitErr))
+			}
 			if err == nil {
-				appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, readyIDs, openDemand, seen, source.store, source.ref)
+				appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, readyIDs, openWithheld, openDemand, seen, source.store, source.ref)
 			} else {
 				errs = append(errs, fmt.Errorf("List(open, live demand): %w", err))
 				if beads.IsPartialResult(err) && len(openDemand) > 0 {
-					appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, readyIDs, openDemand, seen, source.store, source.ref)
+					appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, readyIDs, openWithheld, openDemand, seen, source.store, source.ref)
 				}
 			}
 			// Open pool-routed beads that still carry an assignee. These are
@@ -2099,6 +2108,10 @@ func collectAssignedWorkBeadsWithStores(
 			var readyStoreRefs []string
 			readyIDs := make(map[string]bool)
 			seen := make(map[string]struct{})
+			// Every ready snapshot is gated (#8832): the v2 pass's from the
+			// lane's gated recording (v2DemandReads.ReadyAll), legacy's by its
+			// own gate (gateSnapshot), so a row input admission withholds is
+			// not among them. A gate that failed left the leg partial.
 			appendAssignedUnique(&readyBeads, &readyStores, &readyStoreRefs, readyIDs, ready, seen, source.store, source.ref)
 			readyResults[idx] = storeAssignedWorkResult{ref: source.ref, beads: readyBeads, stores: readyStores, storeRefs: readyStoreRefs, readyIDs: readyIDs, errs: errs}
 		}()
@@ -3297,9 +3310,10 @@ func (c *readyDemandCache) withSessionsStore(sessions beads.SessionStore) *ready
 	return c
 }
 
-// withCrossStoreGate arms the cache with the city's ready legs when the city
-// is split (crossStoreGateLegs), and returns it. A city that relocates nothing
-// (or one whose topology cannot be planned, which its readers report
+// withCrossStoreGate arms the cache with the city's ready legs
+// (crossStoreGateLegs), and returns it: every city's snapshots are gated for
+// input admission, and a split city's also for cross-store blockers (#8832).
+// A city whose topology cannot be planned (which its readers report
 // themselves) is left ungated. Only a pass that may read remotely arms it:
 // the v2 gather serves snapshots the external-reads lane already gated
 // (gatherDemand).
@@ -3576,7 +3590,7 @@ func appendInProgressWorkUnique(cfg *config.City, dst *[]beads.Bead, stores *[]b
 			continue
 		}
 		if appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef) {
-			markReadyAssigned(readyIDs, b)
+			markReadyAssigned(readyIDs, nil, b)
 		}
 	}
 }
@@ -3587,7 +3601,7 @@ func appendAssignedUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[
 			continue
 		}
 		if appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef) {
-			markReadyAssigned(readyIDs, b)
+			markReadyAssigned(readyIDs, nil, b)
 		}
 	}
 }
@@ -3598,7 +3612,7 @@ func appendAssignedUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[
 // for on-demand named sessions such as the Gas Town refinery patrol — so these
 // beads contribute to readyIDs (their assigned turn is genuinely actionable),
 // unlike the open-routed orphan-release pass.
-func appendOpenAssignedMoleculeWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, readyIDs map[string]bool, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) {
+func appendOpenAssignedMoleculeWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, readyIDs map[string]bool, inputWithheld map[string]bool, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) {
 	now := time.Now()
 	for _, b := range beadList {
 		if !isOpenAssignedMoleculeWork(b) {
@@ -3614,10 +3628,77 @@ func appendOpenAssignedMoleculeWorkUnique(dst *[]beads.Bead, stores *[]beads.Sto
 			continue
 		}
 		if appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef) {
-			markReadyAssigned(readyIDs, b)
+			markReadyAssigned(readyIDs, inputWithheld, b)
 		}
 	}
 }
+
+// openArmAdmissionSubject reports whether b is open work the open arm may
+// count as wake demand (isOpenAssignedMoleculeWork) that input admission
+// judges (inputadmission.Subject): the rows whose verdict the open arm needs,
+// and so the rows the external-reads lane judges for a v2 pass
+// (legRecording.OpenInput).
+func openArmAdmissionSubject(b beads.Bead) bool {
+	return isOpenAssignedMoleculeWork(b) && inputadmission.Subject(b)
+}
+
+// openInputWithheld returns which of rows, leg's open rows, the open arm must
+// not mark wake-ready on input admission's account (#8832), and an error when
+// some open-arm subject (openArmAdmissionSubject) has no verdict. The map
+// holds the subjects input admission withholds and the ones no judgment
+// covers: neither is wake demand, since the hook refuses the first and
+// nothing vouches for the second. The error is a PartialResultError. The
+// caller (collectAssignedWorkBeadsWithStores) keeps one partial flag for all
+// its legs, so it makes the pass's whole assigned-work read partial (retain,
+// block create), not this leg's alone, rather than count demand from a row
+// the pass could not judge.
+//
+// A v2 pass reads only the external-reads lane's recorded verdicts
+// (demandReads.OpenInput) and reads no store (CONTRACT v5 R4). Legacy judges
+// with its pass's own gate (gate), the one that gates its ready snapshots,
+// inside crossStoreGateDeadline; a pass with no gate judges nothing.
+func (c *readyDemandCache) openInputWithheld(leg readywork.Leg, rows []beads.Bead) (map[string]bool, error) {
+	var subjects []beads.Bead
+	for _, row := range rows {
+		if openArmAdmissionSubject(row) {
+			subjects = append(subjects, row)
+		}
+	}
+	if len(subjects) == 0 {
+		return nil, nil
+	}
+	verdicts, recorded := c.demandReads().OpenInput(leg)
+	if !recorded {
+		if c == nil || c.gate == nil {
+			return nil, nil
+		}
+		verdicts = judgeInputVerdicts(c.gate, crossStoreGateLeg(c.gateLegs, leg.Store), subjects, crossStoreGateDeadline)
+	}
+	out := make(map[string]bool, len(subjects))
+	var unjudged []string
+	for _, row := range subjects {
+		_, withheld := verdicts.Withheld[row.ID]
+		switch {
+		case withheld:
+			out[row.ID] = true
+		case !verdicts.Judged[row.ID]:
+			out[row.ID] = true
+			unjudged = append(unjudged, row.ID)
+		}
+	}
+	if len(unjudged) == 0 {
+		return out, nil
+	}
+	why := verdicts.Err
+	if why == nil {
+		why = errInputAdmissionUnrecorded
+	}
+	return out, &beads.PartialResultError{Op: "input admission of " + strings.Join(unjudged, ", "), Err: why}
+}
+
+// errInputAdmissionUnrecorded: an open-arm subject the recording's judgment
+// does not cover, one it read before the row appeared.
+var errInputAdmissionUnrecorded = errors.New("the external-reads lane's recording has no input-admission verdict for the row")
 
 // markReadyAssigned records a bead ID as wake-demand-ready. It is called only
 // by the assigned-work passes that establish real readiness (in-progress,
@@ -3627,15 +3708,19 @@ func appendOpenAssignedMoleculeWorkUnique(dst *[]beads.Bead, stores *[]beads.Sto
 // OPEN work parked on a dispatch hold is never marked: bd's Ready() is
 // hold-transparent, but the session's own hook refuses to serve a held row
 // (isHeldHookCandidate), so counting it as wake demand woke an on-demand named
-// session that drain-acked no_work and was re-woken every tick. The bead stays
+// session that drain-acked no_work and was re-woken every tick. A row input
+// admission withholds (#8832) is never marked for the same reason: the hook
+// refuses it too, so waking for it loops exactly as a hold did. The bead stays
 // in the assigned-work snapshot — orphan release, pool accounting and crash
 // recovery still see the assignment (ga-5736js) — it just carries no wake
-// readiness. assignedOpenWorkHeld is the shared predicate.
-func markReadyAssigned(readyIDs map[string]bool, b beads.Bead) {
+// readiness. assignedOpenWorkWithheld is the shared predicate; inputWithheld
+// is the row ids of this leg the open arm may not mark on input admission's
+// account (readyDemandCache.openInputWithheld), nil when none.
+func markReadyAssigned(readyIDs map[string]bool, inputWithheld map[string]bool, b beads.Bead) {
 	if readyIDs == nil {
 		return
 	}
-	if assignedOpenWorkHeld(b) {
+	if assignedOpenWorkWithheld(b, inputWithheld) {
 		return
 	}
 	readyIDs[b.ID] = true

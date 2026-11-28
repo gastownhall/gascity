@@ -131,7 +131,7 @@ func TestSessionHasAwakeAssignedWork_HeldOpenWorkIsNotAwakeDemand(t *testing.T) 
 	}); err != nil {
 		t.Fatal(err)
 	}
-	has, err := sessionHasAwakeAssignedWorkInStoreByIdentifiers(store, []string{"olivia"})
+	has, err := sessionHasAwakeAssignedWorkInStoreByIdentifiers(store, []string{"olivia"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestSessionHasAwakeAssignedWork_HeldOpenWorkIsNotAwakeDemand(t *testing.T) 
 	if _, err := store.Create(beads.Bead{Title: "actionable", Type: "task", Status: "open", Assignee: "olivia"}); err != nil {
 		t.Fatal(err)
 	}
-	has, err = sessionHasAwakeAssignedWorkInStoreByIdentifiers(store, []string{"olivia"})
+	has, err = sessionHasAwakeAssignedWorkInStoreByIdentifiers(store, []string{"olivia"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

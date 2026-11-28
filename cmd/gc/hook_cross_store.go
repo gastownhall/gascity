@@ -624,16 +624,22 @@ func hookLegRig(stores []hookStore, dir string, env []string) string {
 // and store directory so an operator can tell WHICH leg of the fan-out could
 // not be read. Its message is bounded (workQueryFailureSummary); err keeps the
 // whole failure for errors.Is and for the store-unavailable classification.
+// federated marks a failed federated re-ask from that leg
+// (reAskFederatedHookClaim) rather than a failed read of its own work query.
 type hookStoreReadError struct {
-	dir string
-	rig string
-	err error
+	dir       string
+	rig       string
+	federated bool
+	err       error
 }
 
 func (e *hookStoreReadError) Error() string {
 	store := "store " + e.dir
 	if e.rig != "" {
 		store = fmt.Sprintf("rig %q store %s", e.rig, e.dir)
+	}
+	if e.federated {
+		return fmt.Sprintf("federated work query re-asked from %s failed: %s", store, workQueryFailureSummary(e.err))
 	}
 	return fmt.Sprintf("work query against %s failed: %s", store, workQueryFailureSummary(e.err))
 }
@@ -741,6 +747,19 @@ func (r *hookStoreFailureReport) note(failure *hookStoreReadError) {
 		consequence = "answering without that store"
 	}
 	fmt.Fprintf(r.stderr, "%s: %v; %s\n", r.label, failure, consequence) //nolint:errcheck // best-effort stderr
+}
+
+// reAskFailed reports a federated re-ask from leg st that failed
+// (hookClaimResult.reAskFailed) as a failed secondary read is reported: a line
+// on stderr and a work-query-failure event naming the leg, never as this
+// session's own read failing, so with no store-unavailable token. The claim
+// went on with what that leg's own screen admitted.
+func (r *hookStoreFailureReport) reAskFailed(command string, st hookStore, err error) {
+	failure := &hookStoreReadError{dir: st.dir, rig: st.rig, federated: true, err: err}
+	fmt.Fprintf(r.stderr, "%s: %v; claiming only what that store's own screen admitted\n", r.label, failure) //nolint:errcheck // best-effort stderr
+	if r.emit != nil {
+		r.emit(command, failure)
+	}
 }
 
 // failed records a work query that failed (err is the query's error, nil when

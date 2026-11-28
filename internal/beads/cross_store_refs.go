@@ -74,7 +74,8 @@ const getManyFanOut = 8
 //     the native Dolt store and the proxied store, through each wrapper that
 //     forwards it), one batched read per getManyChunk ids. An id the batch
 //     leaves unresolved reads as absent. bd's batch is `bd show`, which reads
-//     only the issues table, so a wisp a bd ledger holds reads as absent here.
+//     only the issues table, so a wisp a bd ledger holds reads as absent here
+//     (GetEach reads it).
 //   - Everywhere else, one Get per id, at most getManyFanOut at once. A miss
 //     (a substring collision included), a Get that answers a different bead,
 //     and a store stating it holds no row under a relocated class's reserved
@@ -88,15 +89,7 @@ func GetMany(store StoreReader, ids []string) (map[string]Bead, error) {
 	if store == nil || len(ids) == 0 {
 		return out, nil
 	}
-	seen := make(map[string]bool, len(ids))
-	unique := make([]string, 0, len(ids))
-	for _, id := range ids {
-		if id == "" || seen[id] {
-			continue
-		}
-		seen[id] = true
-		unique = append(unique, id)
-	}
+	unique := uniqueIDs(ids)
 	live := LiveFor(store)
 	getter, batched := live.(ExactBatchGetter)
 	for start := 0; start < len(unique); start += getManyChunk {
@@ -121,6 +114,41 @@ func GetMany(store StoreReader, ids []string) (map[string]Bead, error) {
 		}
 	}
 	return out, nil
+}
+
+// GetEach reads the beads ids name from store as GetMany does, but always
+// with one Get per id through the store's live handle, at most getManyFanOut
+// at once, whatever batch read the store has. A miss, a Get that answers a
+// different bead and a store stating it holds no row under a relocated
+// class's reserved prefix read as absent; any other failed read is an error.
+//
+// It settles the ids GetMany's batch read left unresolved. bd's batch is `bd
+// show`, which reads only the issues table, while Get falls back to the wisp
+// tier, so a caller for which a wisp read as absent is a wrong answer reads
+// again here the ids the batch did not find.
+func GetEach(store StoreReader, ids []string) (map[string]Bead, error) {
+	out := make(map[string]Bead, len(ids))
+	if store == nil || len(ids) == 0 {
+		return out, nil
+	}
+	if err := getEach(LiveFor(store), uniqueIDs(ids), out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// uniqueIDs is ids without empty or repeated entries, in first-seen order.
+func uniqueIDs(ids []string) []string {
+	seen := make(map[string]bool, len(ids))
+	unique := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		unique = append(unique, id)
+	}
+	return unique
 }
 
 // getEach reads ids with one Get each through live, at most getManyFanOut at

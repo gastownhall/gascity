@@ -175,24 +175,58 @@ type legRecording struct {
 	RawOpenErr  error
 	ReadyAll    []beads.Bead
 	ReadyAllErr error
-	// ReadyGated says ReadyAll went through the split city's cross-store gate
-	// when it was read (gateReady). The v2 pass serves a gate leg's Ready only
+	// ReadyGated says ReadyAll went through the city's ready gate when it was
+	// read (gateReady): the cross-store rule when the city is split, input
+	// admission always (#8832). The v2 pass serves a gate leg's Ready only
 	// from such a recording. ReadyGateErr is the gate's own failure, which
 	// keeps ReadyAll ungated and partial; it is not a failed read of the leg.
 	ReadyGated   bool
 	ReadyGateErr error
+	// OpenInput is input admission's verdict on the leg's open-arm subjects
+	// (openArmAdmissionSubject): the open assigned molecule work the pass may
+	// count as wake demand, which ReadyAll does not carry, judged by the same
+	// gate as ReadyAll (#8832). The pass reads it and never judges a row
+	// itself (CONTRACT v5 R4): a subject it does not cover carries no wake
+	// readiness and leaves the leg partial (readyDemandCache.openInputWithheld).
+	OpenInput inputVerdicts
+	// Claimed is the leg's live in_progress rows, read by the same source as
+	// its gated ReadyAll (#8832). A claim written straight to the backing —
+	// another host's hook — is invisible to the cache until its next
+	// convergence, yet the pass serves this leg's Ready from this recording,
+	// so without these rows a just-claimed bead drops out of assigned work
+	// and the seat holding it reads as idle. The pass widens its cached
+	// in_progress view with them (v2DemandReads.Cached). ClaimedErr is that
+	// read's own failure, which leaves the cache to serve alone.
+	Claimed    []beads.Bead
+	ClaimedErr error
 }
 
-// gateReady passes ReadyAll through the split city's cross-store gate when
-// the leg is one of its legs (own >= 0), and marks the recording gated. It
-// runs in the lane, off the pass: judging a row reads the other stores that
-// may hold its blockers (demand_cross_store_gate.go).
+// gateReady passes ReadyAll through the city's ready gate when the leg is one
+// of its legs (own >= 0), and marks the recording gated. It runs in the lane,
+// off the pass: judging a row reads the stores that may hold its blockers and
+// its workflow's input (demand_cross_store_gate.go).
 func (r *legRecording) gateReady(gate *readywork.LegGate, own int) {
 	if gate == nil || own < 0 {
 		return
 	}
 	r.ReadyAll, r.ReadyGateErr = gateReadyRows(gate, own, r.ReadyAll, r.ReadyAllErr, crossStoreGateDeadline)
 	r.ReadyGated = true
+}
+
+// judgeOpenInput records input admission's verdict on the open-arm subjects
+// (openArmAdmissionSubject) among open, the leg's open rows as the pass reads
+// them: a lane-fed leg's recorded RawOpen, an exact leg's cache. It judges with
+// gate, the one that gated ReadyAll, so a root or convoy both read is read
+// once, inside crossStoreGateDeadline. A leg no gate covers records the
+// subjects unjudged (judgeInputVerdicts).
+func (r *legRecording) judgeOpenInput(gate *readywork.LegGate, own int, open []beads.Bead) {
+	var subjects []beads.Bead
+	for _, row := range open {
+		if openArmAdmissionSubject(row) {
+			subjects = append(subjects, row)
+		}
+	}
+	r.OpenInput = judgeInputVerdicts(gate, own, subjects, crossStoreGateDeadline)
 }
 
 // gatedReady is the Ready a gate leg's recording serves: its rows, and its
@@ -729,11 +763,16 @@ func (l *externalReadsLane) scaleCheckOf(key sourceKey, res sourceResult, ok boo
 // suspended: legacy's demand pass returns before them, and the decide reads
 // none while it is (POOL-001).
 //
-// On a split city every gate leg's ReadyAll is recorded gated: the lane-fed
-// legs' as they are read, and each exact leg's from a Ready-only source of its
+// On every city each gate leg's ReadyAll is recorded gated (#8832): the
+// lane-fed legs' as they are read, and each exact leg's from a source of its
 // own, since the pass reads an exact leg's other demand from its cache but
-// cannot judge its rows without reading other stores. One gate serves the
-// pass, so a blocker is read once however many legs it holds back.
+// cannot judge its rows without reading other stores. That source also
+// records the leg's live in_progress rows, the claims the cache may not have
+// converged yet (legRecording.Claimed). Every gate leg's open assigned
+// molecule work, which the pass may count as wake demand outside ReadyAll, is
+// judged for input admission here too (legRecording.OpenInput). One gate
+// serves the pass, so a blocker or an input's facts are read once however
+// many legs hold them back.
 func (l *externalReadsLane) sources(env externalReadsEnv) []externalSource {
 	var out []externalSource
 	add := func(key sourceKey, read func() (sourcePayload, error)) {
@@ -755,6 +794,7 @@ func (l *externalReadsLane) sources(env externalReadsEnv) []externalSource {
 			r.RawOpen, r.RawOpenErr = guardedRead(func() ([]beads.Bead, error) { return reads.RawOpen(leg.store) })
 			r.ReadyAll, r.ReadyAllErr = guardedRead(func() ([]beads.Bead, error) { return reads.ReadyAll(leg.store) })
 			r.gateReady(gate, own)
+			r.judgeOpenInput(gate, own, r.RawOpen)
 			return sourcePayload{Leg: r}, nil
 		})
 	}
@@ -767,7 +807,25 @@ func (l *externalReadsLane) sources(env externalReadsEnv) []externalSource {
 		add(key, func() (sourcePayload, error) {
 			var r legRecording
 			r.ReadyAll, r.ReadyAllErr = guardedRead(func() ([]beads.Bead, error) { return reads.ReadyAll(leg.Store) })
+			// The live handle reads the backing directly: the cached one
+			// would miss the very claims this records (#8832).
+			r.Claimed, r.ClaimedErr = guardedRead(func() ([]beads.Bead, error) {
+				return beads.HandlesFor(leg.Store).Live.List(beads.ListQuery{Status: "in_progress"})
+			})
 			r.gateReady(gate, own)
+			// The pass reads an exact leg's open rows from its cache
+			// (v2DemandReads.RawOpen), so the open-arm subjects are judged
+			// from the same read here, off the pass (#8832).
+			open, err := guardedRead(func() ([]beads.Bead, error) {
+				cache, _ := demandLegCache(leg.Store)
+				rows, err := cache.List(exactLegRawOpenQuery)
+				return exactLegRawOpen(rows, l.now()), err
+			})
+			if err != nil {
+				r.OpenInput = inputVerdicts{Err: fmt.Errorf("reading the leg's open rows: %w", err)}
+			} else {
+				r.judgeOpenInput(gate, own, open)
+			}
 			return sourcePayload{Leg: r}, nil
 		})
 	}

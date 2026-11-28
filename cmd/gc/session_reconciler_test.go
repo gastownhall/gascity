@@ -2426,13 +2426,13 @@ func TestOpenAssignedRowStatusBlockedMakesNoDependencyRead(t *testing.T) {
 	now := time.Now()
 
 	parked := beads.Bead{ID: "wb-1", Status: "open", SourceStatus: "blocked", Type: "task"}
-	suppress, err := openAssignedRowProvablyNonClaimable(store, parked, now)
+	suppress, err := openAssignedRowProvablyNonClaimable(store, parked, now, nil)
 	if err != nil || !suppress {
 		t.Fatalf("status-blocked row: suppress, err = %v, %v; want true, nil (no dependency read)", suppress, err)
 	}
 
 	unmarked := beads.Bead{ID: "wb-2", Status: "open", Type: "task"}
-	if _, err := openAssignedRowProvablyNonClaimable(store, unmarked, now); err == nil {
+	if _, err := openAssignedRowProvablyNonClaimable(store, unmarked, now, nil); err == nil {
 		t.Fatal("unmarked row: err = nil, want the dependency read error (an unproven row still settles against dependencies)")
 	}
 }
@@ -13075,7 +13075,7 @@ func TestSessionHasAwakeAssignedWorkUsesCachedInProgressWispProbe(t *testing.T) 
 		t.Fatalf("PrimeActive: %v", err)
 	}
 
-	has, err := sessionHasAwakeAssignedWorkInStoreByIdentifiers(cache, []string{"worker-session"})
+	has, err := sessionHasAwakeAssignedWorkInStoreByIdentifiers(cache, []string{"worker-session"}, nil)
 	if err != nil {
 		t.Fatalf("sessionHasAwakeAssignedWorkInStoreByIdentifiers: %v", err)
 	}

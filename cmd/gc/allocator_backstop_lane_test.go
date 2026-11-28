@@ -1203,12 +1203,15 @@ type panickingListStore struct{ beads.Store }
 
 func (panickingListStore) List(beads.ListQuery) ([]beads.Bead, error) { panic("list exploded") }
 
-// Kills: an exact leg recorded on a city that relocates nothing, which would
-// put live reads of the sessions binding back on the lane. A pass over an
-// exact leg records no demand and never reads its backing; the same leg not
-// exact is the control. (A split city records its exact gate legs' Ready,
-// gated: TestSplitCityV2DemandIsGatedOffThePass.)
-func TestBackstopLaneNeverRecordsExactLeg(t *testing.T) {
+// Kills: a gate leg whose gated Ready went unrecorded on a city that
+// relocates nothing (#8832) — the v2 pass would read that leg's Ready
+// ungated from its cache, counting work input admission withholds. On every
+// city the lane records each leg's Ready gated; an exact leg's is a
+// Ready-only source of its own (the pass reads its other demand from its
+// cache), so its backing is read for Ready alone, never for a List. The
+// closed index is still recorded only for an on_demand named session.
+// (A split city's gate legs likewise: TestSplitCityV2DemandIsGatedOffThePass.)
+func TestBackstopLaneRecordsGatedReadyOnEveryLeg(t *testing.T) {
 	t0 := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
 	for _, exact := range []bool{true, false} {
 		cache, backing := newDemandCache(t, exact, backstopSessionBead(), routedDemandBead("gc-r1"))
@@ -1221,12 +1224,25 @@ func TestBackstopLaneNeverRecordsExactLeg(t *testing.T) {
 		at(lane, t0).pass(context.Background())
 
 		rec := lane.recording()
-		_, demandRecorded := recordedLeg(rec, cache)
+		leg, demandRecorded := recordedLeg(rec, cache)
 		_, closedRecorded := recordedClosedNamed(rec, cache)
-		backingRead := len(backing.readLog()) > 0
-		if want := !exact; demandRecorded != want || backingRead != want || closedRecorded {
-			t.Errorf("exact=%t: demand recorded=%t, closed index recorded=%t, backing read=%t; want %t, false, %t",
-				exact, demandRecorded, closedRecorded, backingRead, want, want)
+		if !demandRecorded || !leg.ReadyGated || leg.ReadyGateErr != nil {
+			t.Errorf("exact=%t: demand recorded=%t gated=%t gate err=%v, want the leg's gated Ready recorded",
+				exact, demandRecorded, leg.ReadyGated, leg.ReadyGateErr)
+		}
+		if exact && len(leg.RawOpen) > 0 {
+			t.Errorf("exact=%t: raw open recorded (%d rows), want none — the pass reads it from the cache",
+				exact, len(leg.RawOpen))
+		}
+		if closedRecorded {
+			t.Errorf("exact=%t: closed index recorded, want only for an on_demand named session", exact)
+		}
+		if exact {
+			for _, op := range backing.readLog() {
+				if !strings.HasPrefix(op, "Ready ") && op != "List status=in_progress live=true" {
+					t.Errorf("exact=%t: the lane read the backing beyond the gated Ready and its live claims: %s", exact, op)
+				}
+			}
 		}
 	}
 }
@@ -1292,8 +1308,16 @@ func TestBackstopLaneRecordsClosedNamedIndexOnEveryLeg(t *testing.T) {
 	lane.steps = nil
 	backing.armed.Store(true)
 	at(lane, now).pass(context.Background())
-	if _, ok := recordedClosedNamed(lane.recording(), cache); ok || len(backing.readLog()) > 0 {
-		t.Errorf("no on_demand named session: closed index recorded=%t backing reads=%q, want neither", ok, backing.readLog())
+	if _, ok := recordedClosedNamed(lane.recording(), cache); ok {
+		t.Errorf("no on_demand named session: closed index recorded, want none")
+	}
+	// #8832: the city leg is a gate leg on every city, so without a named
+	// session the exact leg's backing reads are its gated Ready and its live
+	// claims.
+	for _, op := range backing.readLog() {
+		if !strings.HasPrefix(op, "Ready ") && op != "List status=in_progress live=true" {
+			t.Errorf("no on_demand named session: the lane read the backing beyond the gated Ready and its live claims: %s", op)
+		}
 	}
 }
 

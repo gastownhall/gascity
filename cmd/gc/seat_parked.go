@@ -427,9 +427,11 @@ func workDirRigName(cfg *config.City, cityPath, dir string) (string, error) {
 // seat's work (collectSessionAssignedWorkInfo, readErr its error), with
 // readiness read live: every item open, unstarted and not deferred, and none
 // ready to the store's ready query for its assignee on either tier (unheld
-// non-session work, as the wake reads it). A read that failed is no answer:
-// it returns the error, and the caller must neither park nor strand on it.
-func liveParkedWork(work []strandedAssignedWork, readErr error, seat releaseSeat, now time.Time) (bool, error) {
+// non-session work that input admission does not withhold, as the wake reads
+// it; admit is that read's input-admission probe, nil judging nothing). A
+// read that failed is no answer: it returns the error, and the caller must
+// neither park nor strand on it.
+func liveParkedWork(work []strandedAssignedWork, readErr error, seat releaseSeat, now time.Time, admit *inputAdmissionProbe) (bool, error) {
 	if readErr != nil {
 		return false, fmt.Errorf("reading the seat's work: %w", readErr)
 	}
@@ -459,8 +461,13 @@ func liveParkedWork(work []strandedAssignedWork, readErr error, seat releaseSeat
 			if err != nil {
 				return false, fmt.Errorf("reading %s's ready work: %w", p.assignee, err)
 			}
+			// Ready is hold- and admission-transparent; the hook is not. A
+			// withheld row does not keep the seat out of park (#8832),
+			// judged over the city's planned ready legs, as the hook's
+			// claim reads them.
+			inputWithheld := admit.withheld(p.store, ready)
 			for _, r := range ready {
-				if assignedOpenWorkHeld(r) || !parkCountsAsWork(r) {
+				if assignedOpenWorkWithheld(r, inputWithheld) || !parkCountsAsWork(r) {
 					continue
 				}
 				if slices.ContainsFunc(work, func(item strandedAssignedWork) bool { return item.store == p.store && item.bead.ID == r.ID }) {
@@ -486,7 +493,7 @@ func holdsParkedSeat(sw *SeatWork, info sessionpkg.Info, v parkVerdict, now time
 		return false, false
 	}
 	work, readErr := collectSessionAssignedWorkInfo(sw, info)
-	parked, err := liveParkedWork(work, readErr, releaseSeatOfInfo(info), now)
+	parked, err := liveParkedWork(work, readErr, releaseSeatOfInfo(info), now, sw.inputAdmission())
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: holding %s this tick: parked check: %v\n", info.ID, err) //nolint:errcheck // best-effort stderr
 		return true, false

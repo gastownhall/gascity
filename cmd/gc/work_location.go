@@ -24,9 +24,11 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/readywork"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
@@ -98,6 +100,22 @@ func (cr *CityRuntime) workLegs() WorkLegs {
 // suspendedRigs names the open rigs this leg set leaves out because they are
 // suspended.
 func (l WorkLegs) suspendedRigs() []string { return l.suspended }
+
+// inputJudge is a judge of input admission over l's planned ready legs: the
+// stores `gc ready` federates and the demand gate judges over, the binding
+// included (readyLegsForTopology over the census topology), for a controller
+// probe that reads one seat's work live (inputAdmissionProbe, #8832). A leg
+// set l could not plan judges nothing and reports why.
+func (l WorkLegs) inputJudge(now time.Time) (*readywork.InputJudge, error) {
+	if err := l.unusable(); err != nil {
+		return nil, fmt.Errorf("planning input admission's legs: %w", err)
+	}
+	legs, err := readyLegsForTopology(l.topo)
+	if err != nil {
+		return nil, fmt.Errorf("planning input admission's legs: %w", err)
+	}
+	return readywork.NewInputJudge(legs, now), nil
+}
 
 // storeForRef resolves a source store-ref ("city:<name>", "rig:<name>", a
 // class binding ref) to the leg it names: the city work store for a city or

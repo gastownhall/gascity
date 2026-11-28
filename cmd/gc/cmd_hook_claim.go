@@ -214,6 +214,23 @@ type hookClaimOptions struct {
 	// fence did not read the row, which turns the seat checks of the
 	// fresh-claim tier off (hookClaimSeatLeaves).
 	PoolSeat hookPoolSeat
+	// AdmissionFallbackQuery is the agent's work query built with the
+	// federated reader on, when that differs from the query the claim runs.
+	// Its tiers admit before they bound, judging every store, so the claim
+	// re-asks it once, and claims only from the rows of its answer that the
+	// claim's own store holds, when input admission withheld every candidate
+	// it was handed or deferred one whose input waits on a prerequisite no
+	// store the claim's judge reads holds (hookAdmission.reAsk,
+	// reAskFederatedHookClaim). A re-ask that cannot be read leaves the claim
+	// to what the claim's own screen admitted. Empty means no form differs (a
+	// federated or custom query).
+	AdmissionFallbackQuery string
+	// AdmissionBlindQuery reports a custom work_query, which never reads
+	// through input admission: the claim still withholds what it is handed,
+	// and says so. It has no federated form to defer to, so a row whose
+	// prerequisite no store the claim's judge reads holds is served on that
+	// judge's read, and the claim says that too.
+	AdmissionBlindQuery bool
 }
 
 // continuationPinAssignee returns the identity a continuation sibling is pinned
@@ -266,6 +283,15 @@ type hookClaimOps struct {
 	// verdict's state says: gc.outcome=skipped for complete input, a hard
 	// failure with gc.failure_reason=input_purged for purged input.
 	RetireWorkflow hookRetireWorkflowFunc
+	// InputAdmission judges which candidates are input-withheld: their
+	// workflow's input is held, blocked, deferred or waiting on a prerequisite
+	// (internal/inputadmission). It also reports the ones whose prerequisite no
+	// store it reads holds (inputadmission.Unresolved), which the claim leaves
+	// to the federated reader (withholdInputGatedCandidates). A withheld
+	// candidate is never claimed or adopted, and a failed judgment fails the
+	// claim. Nil judges nothing; the production claim ops (hookCity.claimOps)
+	// install the bd-store judge.
+	InputAdmission hookInputAdmissionFunc
 	// ProveInputAbsent proves workflow input ids absent from every store of
 	// the city. Nil proves nothing, so no input is ever read as purged.
 	ProveInputAbsent workflowInputAbsenceProver
@@ -492,14 +518,27 @@ type hookClaimResult struct {
 	// it only when the whole invocation claims nothing
 	// (reportHookClaimLeftToAnotherSession).
 	left []beads.Bead
+	// reAskFailed is the read a federated re-ask of the store's answer could
+	// not make (reAskFederatedHookClaim), on a terminal or non-terminal result
+	// alike: the claim took only what the answer's own screen admitted. The
+	// caller reports it (hookStoreFailureReport.reAskFailed), and an
+	// invocation that claims nothing with one on record ends without a drain
+	// (reportHookClaimReAskUnsettled).
+	reAskFailed error
 }
 
 func doHookClaim(workQuery, dir string, opts hookClaimOptions, ops hookClaimOps, stdout, stderr io.Writer) int {
 	res := tryHookClaim(workQuery, dir, &opts, &ops, stdout, stderr)
+	if res.reAskFailed != nil {
+		newHookStoreFailureReport("gc hook --claim", stderr, nil).reAskFailed(opts.AdmissionFallbackQuery, hookStore{dir: dir}, res.reAskFailed)
+	}
 	if res.terminal {
 		return res.code
 	}
 	reportHookClaimLeftToAnotherSession(res.left, opts.PoolSeat, stderr)
+	if res.reAskFailed != nil {
+		return reportHookClaimReAskUnsettled(stderr)
+	}
 	return writeHookClaimNoWork(opts, ops, res.claimsErrored, dir, stdout, stderr)
 }
 
@@ -523,7 +562,6 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		return hookClaimResult{terminal: true, code: 1}
 	}
 	ops.applyDefaults()
-	now := ops.Now
 
 	// F-A. A provider callback is not a turn: its stdout goes to the hook
 	// runner, not to a model, so a claim minted here is parked the instant it is
@@ -600,28 +638,36 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	if err != nil {
 		return hookClaimResult{terminal: true, code: reportClaimWorkQueryFailure(err, stderr)}
 	}
+	candidates, admission, failed := screenHookClaimOutput(output, *opts, *ops, dir, stderr)
+	if failed != nil {
+		return *failed
+	}
+	// A single-store answer is not the federated reader's. Its bounded tiers
+	// stop at rows input admission then withholds (the seat's --limit=1 head,
+	// or a routed window), and its judge reads one store, so it cannot decide
+	// a prerequisite another store holds. Its federated form admits before it
+	// bounds, over every store, so the claim asks that once and claims only
+	// from the rows of its answer this store holds. When that re-ask cannot be
+	// read, the claim takes only what this answer's screen admitted, and the
+	// result carries the failure (reAskFailed).
+	var reAskErr error
+	if opts.AdmissionFallbackQuery != "" && admission.reAsk(candidates) {
+		if candidates, failed, reAskErr = reAskFederatedHookClaim(candidates, *opts, *ops, dir, stderr); failed != nil {
+			return *failed
+		}
+	}
+	res := claimHookCandidates(candidates, opts, ops, dir, stdout, stderr)
+	res.reAskFailed = reAskErr
+	return res
+}
 
-	normalized := normalizeWorkQueryOutput(strings.TrimSpace(output))
-	normalized = filterUnreadyHookCandidates(normalized, now())
-	if !workQueryHasReadyWork(normalized) {
-		return hookClaimResult{}
-	}
-	candidates, skipped, err := decodeHookClaimBeads(normalized)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc hook --claim: requires JSON work_query output to identify claim candidates: %v\n", err) //nolint:errcheck
-		return hookClaimResult{terminal: true, code: 1}
-	}
-	for _, skip := range skipped {
-		fmt.Fprintf(stderr, "gc hook --claim: skipping undecodable bead %s: %v\n", skip.ID, skip.Err) //nolint:errcheck
-	}
-	if len(candidates) == 0 {
-		return hookClaimResult{}
-	}
-
-	// Retire, before any tier looks at them, the candidates whose workflow has
-	// nothing left to do because its input convoy work is already terminal or
-	// no longer exists anywhere.
-	candidates = retireDoneWorkflowCandidates(candidates, *opts, *ops, dir, stderr)
+// claimHookCandidates claims from candidates, one store's screened answer:
+// this session's own assignment first (hookClaimExistingAssignment), then the
+// ready-assignment tier, then the first eligible routed candidate. Like
+// tryHookClaim, it returns a terminal result once a claim, existing
+// assignment, or hard error has been written, or a non-terminal result with no
+// output written.
+func claimHookCandidates(candidates []beads.Bead, opts *hookClaimOptions, ops *hookClaimOps, dir string, stdout, stderr io.Writer) hookClaimResult {
 	if len(candidates) == 0 {
 		return hookClaimResult{}
 	}

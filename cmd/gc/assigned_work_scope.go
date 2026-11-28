@@ -515,3 +515,17 @@ func readyAssignedFlagsForBeads(readyAssigned map[storeScopedBeadKey]bool, beadL
 func assignedOpenWorkHeld(b beads.Bead) bool {
 	return b.Status == "open" && beadmeta.HasDispatchHold(b.Labels)
 }
+
+// assignedOpenWorkWithheld reports whether b is OPEN assigned work the hook
+// will not serve: parked on a canonical dispatch hold (assignedOpenWorkHeld),
+// or withheld by input admission (#8832) — its workflow's input is held,
+// blocked, deferred or waiting on an unsatisfied prerequisite, the same live
+// verdict the ready reader and the claim path share. inputWithheld is the row
+// ids input admission withheld among the caller's own rows (a probe's
+// inputAdmissionProbe, the open arm's readyDemandCache.openInputWithheld);
+// nil withholds nothing. Like
+// assignedOpenWorkHeld, only OPEN rows qualify: an in_progress row is a
+// claimed ownership fact and stays transparent to the verdict.
+func assignedOpenWorkWithheld(b beads.Bead, inputWithheld map[string]bool) bool {
+	return assignedOpenWorkHeld(b) || inputWithheld[b.ID]
+}
