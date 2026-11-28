@@ -29,6 +29,7 @@ go_library(
 go_test(
     name = "t3bridge_test",
     srcs = [
+        "conformance_test.go",
         "delivery_ids_test.go",
         "delivery_lookup_test.go",
         "envelope_test.go",

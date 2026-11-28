@@ -620,11 +620,24 @@ func dirtyStatusSummary(status string) string {
 }
 
 func defaultRunRepoCacheGit(dir string, args ...string) (string, error) {
-	cmdArgs := append([]string{
+	return RunRepoCacheGit(dir, []string{
 		"-c", "core.fsmonitor=false",
 		"-c", "core.hooksPath=/dev/null",
 		"-c", "core.untrackedCache=false",
 	}, args...)
+}
+
+// RunRepoCacheGit runs `git <gitConfigArgs> <args>` in dir for a repo-cache
+// read or maintenance command and returns its stdout with trailing CR/LF
+// trimmed. It runs with gitutil.HermeticEnv minus GIT_TRACE* variables and
+// never merges stderr into the result. A command that fails to start or exits
+// non-zero returns "" and an error naming `git <args>` with git's stderr and
+// the wrapped process error. A command that exits zero but writes to stderr
+// also returns "" and an "unexpected diagnostics" error, because callers parse
+// stdout as a commit hash or porcelain records and must not act on an
+// incomplete answer.
+func RunRepoCacheGit(dir string, gitConfigArgs []string, args ...string) (string, error) {
+	cmdArgs := append(append([]string{}, gitConfigArgs...), args...)
 	cmd := exec.Command("git", cmdArgs...)
 	cmd.Dir = dir
 	cmd.Env = repoCacheGitEnv()
@@ -639,9 +652,8 @@ func defaultRunRepoCacheGit(dir string, args ...string) (string, error) {
 		}
 		return "", fmt.Errorf("%s: %s: %w", command, diagnostic, err)
 	}
-	// Callers parse stdout as a commit hash or porcelain records, so a
-	// successful command that still wrote diagnostics (such as a directory it
-	// could not read) fails closed instead of passing an incomplete answer.
+	// A successful command that still wrote diagnostics (such as a directory
+	// it could not read) fails closed instead of passing an incomplete answer.
 	if diagnostic != "" {
 		return "", fmt.Errorf("%s: unexpected diagnostics: %s", command, diagnostic)
 	}

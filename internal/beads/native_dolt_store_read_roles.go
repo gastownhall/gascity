@@ -758,6 +758,9 @@ func filterReadyByWorkOutcomeFetchBlockers(ctx context.Context, reader issueops.
 //   - TIER, because the plane knobs only ADMIT. There is no member that
 //     excludes the ephemeral rows a TierIssues read must drop, so that filter
 //     is ApplyListQuery's, as the wisp-tier filter already was.
+//   - IDS, because the request carries no ID predicate here; ApplyListQuery
+//     matches them exactly, so an ID listing never pushes a backing limit
+//     (nativeListLimitPushdown).
 func nativeListRequestFromListQuery(query ListQuery, pushableTypes map[string]bool) issueops.ListRequest {
 	req := nativeListReadRequest()
 	limit := nativeListLimitPushdown(query)
@@ -807,11 +810,13 @@ func nativeListRequestFromListQuery(query ListQuery, pushableTypes map[string]bo
 // Label + IncludeClosed + TierBoth).
 //
 // THE COST THIS BUYS, recorded rather than discovered later: a durable-tier or
-// typed or not-closed listing now fetches the whole candidate set and cuts the
-// page in Go. That is the same class of cost as the wire's own L2 (a non-created
-// display order pages to exhaustion), and it is the price of not narrowing. It
-// ends when the request can spell an ExcludeStatus, a durable-plane selector and
-// a non-validating type filter — the upstream ask this re-point files.
+// typed or not-closed or ID-filtered listing now fetches the whole candidate
+// set and cuts the page in Go; an ID listing with no other keyed predicate
+// reads unkeyed. That is the same class of cost as the wire's own L2 (a
+// non-created display order pages to exhaustion), and it is the price of not
+// narrowing. It ends when the request can spell an ExcludeStatus, a
+// durable-plane selector and a non-validating type filter — the upstream ask
+// this re-point files.
 func nativeListLimitPushdown(query ListQuery) int {
 	if query.Limit <= 0 {
 		return 0
@@ -824,9 +829,10 @@ func nativeListLimitPushdown(query ListQuery) int {
 	if query.Status != "" || !query.IncludeClosed || query.Type != "" || query.TierMode != TierBoth {
 		return 0
 	}
-	// SeekAfter, UpdatedBefore and plural Assignees are Go-side too
-	// (ListQuery.Matches), and each is a residual filter for the same reason.
-	if query.SeekAfter != nil || !query.UpdatedBefore.IsZero() || len(query.Assignees) > 0 {
+	// SeekAfter, UpdatedBefore, plural Assignees and IDs are Go-side too
+	// (ListQuery.Matches), and each is a residual filter for the same reason:
+	// an earlier nonmatching row would take a requested ID's place in the page.
+	if query.SeekAfter != nil || !query.UpdatedBefore.IsZero() || len(query.Assignees) > 0 || len(query.IDs) > 0 {
 		return 0
 	}
 	switch query.Sort {

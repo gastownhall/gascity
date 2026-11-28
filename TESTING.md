@@ -130,6 +130,29 @@ Bazel does not serve, such as the macOS jobs. Workflow jobs that still run a
 Go-native suite call these `-go` names explicitly, so each workflow says
 which engine it uses.
 
+`make check-affected` is the pre-flight sized to a branch. It diffs the
+working tree against the merge base with `AFFECTED_BASE` (default
+`origin/HEAD`), untracked files included, and runs:
+
+- `make check-go`'s shell guards, with formatting limited to the changed Go files;
+- nogo over the changed packages and every package that imports them (`make lint-targets`);
+- `go test` over the changed packages, test targets that list a changed file, importers while
+  there are at most `AFFECTED_MAX_RDEP_TESTS` (5), and test targets that read a changed file
+  through a filegroup, such as the repository-wide scanners, while there are at most
+  `AFFECTED_MAX_READER_TESTS` (5) (`make test-go-pkgs`); a selected test target that `go test`
+  cannot run goes to `make test-bazel-targets`.
+
+A diff that touches the Go module, Bazel's module or workspace configuration,
+a `.bzl` file, `tools/`, `third_party/`, the Makefile, the linter
+configuration, the root BUILD file, or a BUILD file outside a Go package runs
+the full `make check-go` instead. The same holds for a Go file outside every
+package and for any selection step that fails. A changed package without a
+BUILD file fails the run until `make bazel-sync` writes one.
+`make check-affected AFFECTED_ACTION=plan` prints the selection without
+running it. The selector is `scripts/affected-preflight`.
+`GO_TEST_BUDGET` (default `15m`) bounds the `go test` step, and a clone
+without an `origin/HEAD` symref should pass `AFFECTED_BASE=origin/main`.
+
 `//go:build integration` tests outside `test/integration` run in the
 `integration-packages` lane, the Bazel form of `go test -tags integration`
 with `GC_FAST_UNIT=0`:
@@ -2838,7 +2861,7 @@ This table is rendered from `internal/testutil/providerledger` and checked by `b
 | `runtime.builtin.acp` | production_provider | — | `runtime.Provider` | `internal/runtime/acp.NewSeamBacked` | runtime.builtin/exact:acp | `runtime.Provider` | waived by ga-80po0c.3 through 2026-12-21: TestACPDefaultDirConformance (internal/runtime/acp/conformance_test.go) calls NewSeamBacked directly through runtimetest.RunProviderTests with no dir injection, reusing the fakeacp fixture; verified clean on Linux (single run, -count=3 repeated, -race, and two concurrent OS-process runs against the shared default euid-scoped directory). The one remaining proof capability is a clean Darwin-lane run: ga-csh74h (Mac CI fleet-wide broken — setup-gascity-macos's go-version default is stale against go.mod's `go 1.26.6` requirement, failing mac-quality and skipping every downstream job including the packages-core shard this test would run in) currently blocks that evidence. Promote to proved once ga-csh74h is fixed and a clean Darwin run of TestACPDefaultDirConformance is recorded. Renewed by owner decision 2026-10-05 to unblock gc 1.5.1 validation, and again on 2026-11-07; the underlying test gap must be fixed separately. |
 | `runtime.builtin.acp` | production_provider | — | `runtime.Provider` | `internal/runtime/acp.NewSeamBackedWithDir` | runtime.builtin/exact:acp | `runtime.Provider` | proved by internal/runtime/acp/conformance_test.go#TestACPConformance |
 | `runtime.builtin.exec` | production_provider | — | `runtime.Provider` | `internal/runtime/exec.NewSeamBackedForCity` | runtime.builtin/prefix:exec: | `runtime.Provider` | proved by internal/runtime/exec/exec_test.go#TestExecConformance |
-| `runtime.builtin.exec` | production_provider | — | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/prefix:exec: | `runtime.Provider` | waived by ga-80po0c.3 through 2026-12-11: the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract. Renewed by owner decision 2026-11-07; the underlying test gap must be fixed separately. |
+| `runtime.builtin.exec` | production_provider | — | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/prefix:exec: | `runtime.Provider` | proved by internal/runtime/t3bridge/conformance_test.go#TestT3Bridge_RunProviderConformance |
 | `runtime.builtin.fail` | production_provider, reusable_double | `internal/runtime.Fake` | `runtime.Provider` | `internal/runtime.NewFailFake` | runtime.builtin/exact:fail; reusable: internal/runtime/fake.go | `runtime.Provider` | not applicable: intentional faulting double: a successful lifecycle cannot be exercised, so the successful-provider contract is not applicable |
 | `runtime.builtin.fake` | production_provider, reusable_double | `internal/runtime.Fake` | `runtime.Provider` | `internal/runtime.NewFake` | runtime.builtin/exact:fake; reusable: internal/runtime/fake.go | `runtime.Provider` | proved by internal/runtime/fake_conformance_test.go#TestFakeConformance |
 | `runtime.builtin.herdr` | production_provider | — | `runtime.Provider` | `internal/runtime/herdr.New` | runtime.builtin/exact:herdr | `runtime.Provider` | waived by ga-80po0c.3 through 2026-12-31: the full conformance run is an opt-in live journey (make test-herdr-live, or GC_FAST_UNIT=0) and skips in the unit lane, in short mode, and when the herdr executable is absent |
@@ -2847,7 +2870,7 @@ This table is rendered from `internal/testutil/providerledger` and checked by `b
 | `runtime.builtin.ssh` | production_provider | — | `runtime.Provider` | `internal/runtime/ssh.NewSeamBacked` | runtime.builtin/prefix:ssh: | `runtime.Provider` | proved by internal/runtime/ssh/conformance_integration_test.go#TestSSHConformance (hermetic ssh-client boundary; real-client transport behavior (exit-255 collapse, BatchMode/known_hosts, interactive attach) not covered) |
 | `runtime.builtin.subprocess` | production_provider | — | `runtime.Provider` | `internal/runtime/subprocess.NewSeamBacked` | runtime.builtin/exact:subprocess | `runtime.Provider` | proved by internal/runtime/subprocess/seam_conformance_test.go#TestSubprocessDefaultDirSeamConformance |
 | `runtime.builtin.subprocess` | production_provider | — | `runtime.Provider` | `internal/runtime/subprocess.NewSeamBackedWithDir` | runtime.builtin/exact:subprocess | `runtime.Provider` | proved by internal/runtime/subprocess/seam_conformance_test.go#TestSubprocessSeamConformance |
-| `runtime.builtin.t3bridge` | production_provider | — | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/exact:t3bridge | `runtime.Provider` | waived by ga-80po0c.3 through 2026-12-11: the production T3 bridge composition has focused tests but no full shared runtime contract. Renewed by owner decision 2026-11-07; the underlying test gap must be fixed separately. |
+| `runtime.builtin.t3bridge` | production_provider | — | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/exact:t3bridge | `runtime.Provider` | proved by internal/runtime/t3bridge/conformance_test.go#TestT3Bridge_RunProviderConformance |
 | `runtime.builtin.tmux` | production_provider | — | `runtime.Provider` | `internal/runtime/tmux.NewSeamBackedWithConfig` | runtime.builtin/exact:tmux | `runtime.Provider` | proved by internal/runtime/tmux/adapter_test.go#TestTmuxConformance |
 | `runtime.composition.auto` | production_provider | — | `runtime.Provider` | `internal/runtime/auto.New` | source: cmd/gc/providers.go#resolveSessionTransportProvider — conditional transport composition is outside the runtime registry | `runtime.Provider` | proved by internal/runtime/auto/conformance_test.go#TestAutoConformance (default-route conformance; ACP route covered by focused auto routing tests) |
 | `runtime.composition.hybrid` | production_provider | — | `runtime.Provider` | `internal/runtime/hybrid.New` | source: cmd/gc/providers.go#newHybridProvider — conditional local/remote composition is constructed inside the wrapper, not the runtime registry | `runtime.Provider` | proved by internal/runtime/hybrid/conformance_test.go#TestHybridConformance (local-route conformance via RunProviderTests; remote-route delegation covered separately by internal/runtime/hybrid's fake-backed unit tests) |

@@ -107,7 +107,7 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 		}
 	}
 	if shouldGuardCrossRig(opts) {
-		if err := CrossRigRouteError(opts.BeadOrFormula, a, deps.Cfg); err != nil {
+		if err := crossRigRefusal(opts, deps, opts.BeadOrFormula, a); err != nil {
 			return result, err
 		}
 	}
@@ -132,6 +132,15 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 	if shouldValidateBuiltInRouteStoreReachable(opts, deps) {
 		if err := validateBuiltInRouteStoreReachable(deps, opts.BeadOrFormula, a); err != nil {
 			return result, fmt.Errorf("%w", err)
+		}
+	}
+
+	// Refuse a formula launch whose base_branch resolves to no ref before
+	// anything is written: the reassign reopen below would otherwise leave a
+	// claimed bead open and unassigned by a sling that then fails.
+	if formulaName, beadID := slingLaunchFormula(opts, a); formulaName != "" {
+		if err := checkSlingBaseBranch(formulaName, beadID, opts, deps, a); err != nil {
+			return result, err
 		}
 	}
 
@@ -169,6 +178,36 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 	}
 
 	return result, nil
+}
+
+// checkBatchSlingBaseBranches runs checkSlingBaseBranch for every open child
+// of a container sling that launches formulaName, before any child is touched.
+// A plain-bead batch (formulaName == "") has no base_branch to check.
+func checkBatchSlingBaseBranches(formulaName string, open []beads.Bead, opts SlingOpts, deps SlingDeps, a config.Agent) error {
+	if formulaName == "" {
+		return nil
+	}
+	for _, child := range open {
+		if err := checkSlingBaseBranch(formulaName, child.ID, opts, deps, a); err != nil {
+			return fmt.Errorf("child %s: %w", child.ID, err)
+		}
+	}
+	return nil
+}
+
+// slingLaunchFormula names the formula DoSling will launch for opts and the
+// bead it attaches to ("" for a standalone formula), or "" when the sling
+// routes a plain bead. It mirrors DoSling's dispatch.
+func slingLaunchFormula(opts SlingOpts, a config.Agent) (formulaName, beadID string) {
+	switch {
+	case opts.IsFormula:
+		return opts.BeadOrFormula, ""
+	case opts.OnFormula != "":
+		return opts.OnFormula, opts.BeadOrFormula
+	case !opts.NoFormula && a.EffectiveDefaultSlingFormula() != "":
+		return a.EffectiveDefaultSlingFormula(), opts.BeadOrFormula
+	}
+	return "", ""
 }
 
 // resolveIdempotentShortCircuit runs the plain-bead pre-flight idempotency
@@ -376,6 +415,19 @@ func shouldCheckDepCycle(opts SlingOpts) bool {
 
 func shouldGuardCrossRig(opts SlingOpts) bool {
 	return !opts.IsFormula && !opts.Force && !opts.DryRun
+}
+
+// crossRigRefusal is CrossRigRouteError with ForceRefused set when the same
+// sling with --force would stop at the cross-store check instead, so the
+// refusal only offers --force where it routes the bead.
+func crossRigRefusal(opts SlingOpts, deps SlingDeps, beadID string, a config.Agent) *CrossRigError {
+	err := CrossRigRouteError(beadID, a, deps.Cfg)
+	if err == nil {
+		return nil
+	}
+	err.ForceRefused = shouldValidateBuiltInRouteStoreReachable(opts, deps) &&
+		validateBuiltInRouteStoreReachable(deps, beadID, a) != nil
+	return err
 }
 
 func shouldCheckBeadState(opts SlingOpts) bool {
@@ -1073,6 +1125,13 @@ func finalizeInStore(opts SlingOpts, deps SlingDeps, beadStore beads.MoleculeTar
 				// tracks dep is additive and does not disturb the epic
 				// rollup.
 				if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: deps.Store}, convoy.ID, beadID); err != nil {
+					// The convoy was minted for this sling and tracks nothing;
+					// leaving it open would strand a claim-attracting bead
+					// every time linking fails here (mirrors the graph.v2
+					// fix in CreateSingleItemInputConvoy, #4788). Best-effort
+					// close: the tracking error is already recorded above
+					// and sling itself still succeeds (soft failure).
+					_ = deps.Store.Close(convoy.ID) //nolint:errcheck // best-effort cleanup of this sling's own artifact
 					result.MetadataErrors = append(result.MetadataErrors,
 						fmt.Sprintf("linking bead to convoy: %v", err))
 				} else {
@@ -2233,7 +2292,7 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 
 	// Cross-rig guard on container.
 	if !opts.Force && !opts.DryRun {
-		if err := CrossRigRouteError(b.ID, a, deps.Cfg); err != nil {
+		if err := crossRigRefusal(opts, deps, b.ID, a); err != nil {
 			return SlingResult{}, err
 		}
 	}
@@ -2241,6 +2300,12 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 		if err := validateBuiltInRouteStoreReachable(deps, b.ID, a); err != nil {
 			return SlingResult{}, err
 		}
+	}
+
+	// Refuse an unresolvable base_branch for any child before the dry-run
+	// preview, so a convoy dry run reports what the real dispatch would do.
+	if err := checkBatchSlingBaseBranches(useFormula, open, opts, deps, a); err != nil {
+		return SlingResult{}, err
 	}
 
 	// Dry-run: return early with container preview info. Every child goes to

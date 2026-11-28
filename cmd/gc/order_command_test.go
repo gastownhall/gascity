@@ -19,8 +19,7 @@ func platformCommand(posix, powerShell string) string {
 
 // printCountCommand is a command that prints n under the platform's
 // interpreter: `printf n` under sh, `Write-Output n` under PowerShell.
-func printCountCommand(n int) string { //nolint:unparam // n is the count to print; callers that need other counts adopt it separately
-
+func printCountCommand(n int) string {
 	return platformCommand(fmt.Sprintf("printf %d", n), fmt.Sprintf("Write-Output %d", n))
 }
 

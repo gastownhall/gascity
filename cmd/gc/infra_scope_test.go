@@ -187,8 +187,14 @@ func waitForFile(t *testing.T, path string) {
 	}
 }
 
+// fakeDoltFinalImage is the program the marking fake dolt execs to stay up.
+const fakeDoltFinalImage = "sleep"
+
 // writeMarkingFakeDolt writes a fake dolt that records it is running, then
-// stays up like a sql-server. It returns the bin dir and the marker path.
+// stays up like a sql-server by exec'ing fakeDoltFinalImage. The marker is
+// written before that exec, so the process may still be mid-exec when the
+// marker appears; waitForFinalImage waits it out. It returns the bin dir and
+// the marker path.
 func writeMarkingFakeDolt(t *testing.T) (string, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -196,7 +202,7 @@ func writeMarkingFakeDolt(t *testing.T) (string, string) {
 	script := "#!/bin/sh\n" +
 		"[ \"$1\" = sql-server ] || { echo \"unexpected dolt args: $*\" >&2; exit 2; }\n" +
 		": > '" + marker + "'\n" +
-		"exec sleep 60\n"
+		"exec " + fakeDoltFinalImage + " 60\n"
 	if err := os.WriteFile(filepath.Join(dir, "dolt"), []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake dolt: %v", err)
 	}
@@ -628,8 +634,34 @@ func TestInfraScopeSuitsCallerElsewhereNeedsANamedSlice(t *testing.T) {
 	})
 }
 
+// waitForFinalImage polls until pid runs the program named name and its
+// environment is in place. A /proc/<pid>/environ read that overlaps the
+// process's exec returns no bytes and no error, so killFakeCgroup, which reads
+// each environment once, would pass over a live process of the scope. The
+// kernel shows a cmdline only once exec has laid out the new image's argv,
+// and stores the end of the environment last: once both are visible the
+// environment stays readable for as long as the process runs.
+func waitForFinalImage(t *testing.T, pid int, name string) {
+	t.Helper()
+	proc := filepath.Join("/proc", strconv.Itoa(pid))
+	settled := infraPollUntil(10*time.Second, func() bool {
+		cmdline, err := os.ReadFile(filepath.Join(proc, "cmdline"))
+		if err != nil || !bytes.HasPrefix(cmdline, []byte(name+"\x00")) {
+			return false
+		}
+		environ, err := os.ReadFile(filepath.Join(proc, "environ"))
+		return err == nil && len(environ) > 0
+	})
+	if !settled {
+		cmdline, _ := os.ReadFile(filepath.Join(proc, "cmdline"))
+		t.Fatalf("pid %d did not settle into %s with its environment; cmdline %q", pid, name, cmdline)
+	}
+}
+
 // killFakeCgroup kills every process in the fake cgroup scope, the way a
-// runtime's cgroup-wide stop of an agent session does.
+// runtime's cgroup-wide stop of an agent session does. It reads each
+// process's environment once: a process still exec'ing is passed over, so
+// wait for the target's final image first (waitForFinalImage).
 func killFakeCgroup(t *testing.T, scope string) {
 	t.Helper()
 	entries, err := os.ReadDir("/proc")
@@ -688,6 +720,9 @@ func TestAgentScopeKillSparesAgentStartedManagedDolt(t *testing.T) {
 			t.Setenv(fakeCgroupEnv, agentScope)
 
 			started, _ := startDirectManagedDolt(t)
+			// The fake marks itself running before it execs its final image;
+			// a kill that scans it mid-exec misses it.
+			waitForFinalImage(t, started.PID, fakeDoltFinalImage)
 			killFakeCgroup(t, agentScope)
 
 			// A process the kill reached is gone within moments; one it

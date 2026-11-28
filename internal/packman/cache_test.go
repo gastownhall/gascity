@@ -1,6 +1,7 @@
 package packman
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -8,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRepoCacheKeyDeterministic(t *testing.T) {
@@ -443,5 +445,167 @@ func TestDefaultRunGitBlocksDisallowedTransport(t *testing.T) {
 		(strings.Contains(msg, "not allowed") || strings.Contains(msg, "protocol"))
 	if !blocked {
 		t.Fatalf("error = %q; want a git transport 'ext' not allowed / protocol block", msg)
+	}
+}
+
+// useNeutralGitTestEnv isolates real-git cache tests from the host's user
+// config and locale so seeding and diagnostics are deterministic.
+func useNeutralGitTestEnv(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("LC_ALL", "C")
+}
+
+// seedCacheRepo writes a minimal pack into dir, commits it into a fresh
+// repository and returns the HEAD commit.
+func seedCacheRepo(t *testing.T, dir string) string {
+	t.Helper()
+	writeFixtureFile(t, dir, "pack.toml", "[pack]\nname = \"tools\"\nschema = 1\n", 0o644)
+	writeFixtureFile(t, dir, "formulas/build.toml", "formula = \"build\"\n", 0o644)
+	writeFixtureFile(t, dir, ".gitignore", "__pycache__/\n", 0o644)
+	fixtureGit(t, dir, "init", "-q")
+	fixtureGit(t, dir, "add", ".")
+	fixtureGit(t, dir, "commit", "-q", "-m", "seed")
+	return fixtureGit(t, dir, "rev-parse", "HEAD")
+}
+
+func TestValidateCachedRepoCheckoutIgnoresGitTrace(t *testing.T) {
+	useNeutralGitTestEnv(t)
+	dir := t.TempDir()
+	head := seedCacheRepo(t, dir)
+
+	t.Setenv("GIT_TRACE", "1")
+	t.Setenv("GIT_TRACE2_PERF", "1")
+	if err := validateCachedRepoCheckout(dir, head); err != nil {
+		t.Fatalf("validateCachedRepoCheckout with GIT_TRACE set: %v", err)
+	}
+	dirty, err := cachedRepoDirty(dir)
+	if err != nil {
+		t.Fatalf("cachedRepoDirty with GIT_TRACE set: %v", err)
+	}
+	if dirty {
+		t.Fatal("cachedRepoDirty reported a clean cache as dirty with GIT_TRACE set")
+	}
+}
+
+func TestDefaultRunGitFailureKeepsDiagnostics(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	t.Run("non-zero exit", func(t *testing.T) {
+		useNeutralGitTestEnv(t)
+		dir := t.TempDir()
+		seedCacheRepo(t, dir)
+		out, err := defaultRunGit(dir, "rev-parse", "--verify", "refs/heads/missing-revision")
+		if out != "" {
+			t.Errorf("output = %q, want empty on failure", out)
+		}
+		if err == nil {
+			t.Fatal("defaultRunGit succeeded for a missing revision")
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Errorf("error = %v, want it to wrap *exec.ExitError", err)
+		}
+		for _, want := range []string{"git rev-parse --verify refs/heads/missing-revision", "fatal:"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %q, want it to contain %q", err, want)
+			}
+		}
+	})
+	t.Run("cannot start", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Setenv("PATH", "")
+		out, err := defaultRunGit(dir, "rev-parse", "HEAD")
+		if out != "" {
+			t.Errorf("output = %q, want empty on failure", out)
+		}
+		if err == nil {
+			t.Fatal("defaultRunGit succeeded with git missing from PATH")
+		}
+		if !errors.Is(err, exec.ErrNotFound) {
+			t.Errorf("error = %v, want it to wrap exec.ErrNotFound", err)
+		}
+		if !strings.Contains(err.Error(), "git rev-parse HEAD") {
+			t.Errorf("error = %q, want it to name git rev-parse HEAD", err)
+		}
+	})
+}
+
+// TestCachedRepoDirtyIgnoresStatOnlyRewrite covers the stat-cache claim of
+// PR #8723: a tracked file re-rendered with byte-identical content but a new
+// inode and mtime reads clean through a single status call, with no index
+// refresh, while real content changes still read dirty.
+func TestCachedRepoDirtyIgnoresStatOnlyRewrite(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	rewriteFormula := func(t *testing.T, dir string) {
+		t.Helper()
+		formula := filepath.Join(dir, "formulas", "build.toml")
+		tmp := formula + ".tmp"
+		if err := os.WriteFile(tmp, []byte("formula = \"build\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(tmp, formula); err != nil {
+			t.Fatal(err)
+		}
+		future := time.Now().Add(2 * time.Hour)
+		if err := os.Chtimes(formula, future, future); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases := []struct {
+		name      string
+		setup     func(t *testing.T, dir string)
+		wantDirty bool
+	}{
+		{name: "writable index", setup: rewriteFormula},
+		{name: "held index lock", setup: func(t *testing.T, dir string) {
+			rewriteFormula(t, dir)
+			writeFixtureFile(t, dir, ".git/index.lock", "", 0o644)
+		}},
+		{name: "optional locks disabled", setup: func(t *testing.T, dir string) {
+			rewriteFormula(t, dir)
+			t.Setenv("GIT_OPTIONAL_LOCKS", "0")
+		}},
+		{name: "modified tracked file", wantDirty: true, setup: func(t *testing.T, dir string) {
+			writeFixtureFile(t, dir, "formulas/build.toml", "formula = \"changed\"\n", 0o644)
+		}},
+		{name: "untracked file", wantDirty: true, setup: func(t *testing.T, dir string) {
+			writeFixtureFile(t, dir, "extra.txt", "extra\n", 0o644)
+		}},
+		{name: "ignored artifact", setup: func(t *testing.T, dir string) {
+			writeFixtureFile(t, dir, "__pycache__/x.pyc", "bytecode", 0o644)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			useNeutralGitTestEnv(t)
+			dir := t.TempDir()
+			seedCacheRepo(t, dir)
+			tc.setup(t, dir)
+
+			var calls []string
+			prev := runGit
+			runGit = func(dir string, args ...string) (string, error) {
+				calls = append(calls, strings.Join(args, " "))
+				return defaultRunGit(dir, args...)
+			}
+			t.Cleanup(func() { runGit = prev })
+
+			dirty, err := cachedRepoDirty(dir)
+			if err != nil {
+				t.Fatalf("cachedRepoDirty: %v", err)
+			}
+			if dirty != tc.wantDirty {
+				t.Errorf("cachedRepoDirty = %v, want %v", dirty, tc.wantDirty)
+			}
+			if want := []string{"status --porcelain"}; !reflect.DeepEqual(calls, want) {
+				t.Errorf("git calls = %q, want %q", calls, want)
+			}
+		})
 	}
 }
