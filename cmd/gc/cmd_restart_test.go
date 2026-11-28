@@ -709,6 +709,17 @@ func TestDoRigRestart_MarksFloorPoolSeatsCityStop(t *testing.T) {
 			t.Errorf("%s sleep_reason = %q, want %q", b.Metadata["session_name"], got, want)
 		}
 	}
+	// The unfloored seat takes the sweep's soft suspend: suspended, no
+	// slept_at, suspended_at stamped. Once healed asleep, that stamp is what
+	// lets its pool slot free (isPoolSessionSlotFreeable).
+	b, err := store.Get(unfloored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Metadata["state"] != "suspended" || b.Metadata["slept_at"] != "" || b.Metadata["suspended_at"] == "" || b.Metadata["sleep_intent"] != "" {
+		t.Errorf("helper-1 = state %q slept_at %q suspended_at %q sleep_intent %q, want the soft suspend's shape (suspended, no slept_at, suspended_at set, no intent)",
+			b.Metadata["state"], b.Metadata["slept_at"], b.Metadata["suspended_at"], b.Metadata["sleep_intent"])
+	}
 }
 
 // Kills a min_active_sessions seat a rig restart leaves down under legacy

@@ -49,6 +49,7 @@ func TestIsPoolSessionSlotFreeable_Matrix(t *testing.T) {
 	now := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
 	recent := now.Add(-time.Minute).Format(time.RFC3339)
 	stale := now.Add(-sessionpkg.KillPendingGrace - time.Minute).Format(time.RFC3339)
+	future := now.Add(time.Hour).Format(time.RFC3339)
 	cases := []struct {
 		name string
 		meta map[string]string
@@ -75,6 +76,21 @@ func TestIsPoolSessionSlotFreeable_Matrix(t *testing.T) {
 		{"asleep+killed+fence-pending", map[string]string{"state": "asleep", "sleep_reason": "killed", "state_reason": sessionpkg.KillPendingReason, "slept_at": recent}, false},
 		{"asleep+killed+fence-stale", map[string]string{"state": "asleep", "sleep_reason": "killed", "state_reason": sessionpkg.KillPendingReason, "slept_at": stale}, true},
 		{"asleep+killed+fence-malformed", map[string]string{"state": "asleep", "sleep_reason": "killed", "state_reason": sessionpkg.KillPendingReason, "slept_at": "not-a-time"}, true},
+		// A soft suspend (the shutdown sweep) healed to asleep: no reason, no
+		// slept_at, suspended_at kept. Its writer is known, so it frees.
+		{"asleep+healed-soft-suspend", map[string]string{"state": "asleep", "suspended_at": recent}, true},
+		// A stamp the decoder cannot parse is still a stamp.
+		{"asleep+healed-soft-suspend+unreadable-stamp", map[string]string{"state": "asleep", "suspended_at": "not-a-time"}, true},
+		// A deliberate hold or any intent on that shape keeps the slot.
+		{"asleep+healed-soft-suspend+user-hold", map[string]string{"state": "asleep", "suspended_at": recent, "sleep_intent": string(sessionpkg.SleepReasonUserHold)}, false},
+		{"asleep+healed-soft-suspend+wait-hold", map[string]string{"state": "asleep", "suspended_at": recent, "wait_hold": "true"}, false},
+		{"asleep+healed-soft-suspend+wait-intent", map[string]string{"state": "asleep", "suspended_at": recent, "sleep_intent": string(sessionpkg.SleepReasonWaitHold)}, false},
+		{"asleep+healed-soft-suspend+live-hold-timer", map[string]string{"state": "asleep", "suspended_at": recent, "held_until": future}, false},
+		{"asleep+healed-soft-suspend+live-quarantine", map[string]string{"state": "asleep", "suspended_at": recent, "quarantined_until": future}, false},
+		{"asleep+healed-soft-suspend+unreadable-timer", map[string]string{"state": "asleep", "suspended_at": recent, "held_until": "not-a-time"}, false},
+		{"asleep+healed-soft-suspend+idle-stop-intent", map[string]string{"state": "asleep", "suspended_at": recent, "sleep_intent": "idle-stop-pending"}, false},
+		{"asleep+healed-soft-suspend+unknown-intent", map[string]string{"state": "asleep", "suspended_at": recent, "sleep_intent": "future-intent"}, false},
+		{"suspended+suspended_at", map[string]string{"state": "suspended", "suspended_at": recent}, false},
 		{"asleep+empty-reason", map[string]string{"state": "asleep", "sleep_reason": ""}, false},
 		{"asleep+missing-reason", map[string]string{"state": "asleep"}, false},
 		{"asleep+wait-hold", map[string]string{"state": "asleep", "sleep_reason": "wait-hold"}, false},
@@ -91,10 +107,15 @@ func TestIsPoolSessionSlotFreeable_Matrix(t *testing.T) {
 				t.Fatalf("isPoolSessionSlotFreeable(%v) = %v, want %v", tc.meta, got, tc.want)
 			}
 			info := sessionpkg.Info{
-				MetadataState: tc.meta["state"],
-				StateReason:   tc.meta["state_reason"],
-				SleepReason:   tc.meta["sleep_reason"],
-				SleptAt:       tc.meta["slept_at"],
+				MetadataState:    tc.meta["state"],
+				StateReason:      tc.meta["state_reason"],
+				SleepReason:      tc.meta["sleep_reason"],
+				SleptAt:          tc.meta["slept_at"],
+				SuspendedAt:      tc.meta["suspended_at"],
+				SleepIntent:      tc.meta["sleep_intent"],
+				WaitHold:         tc.meta["wait_hold"],
+				HeldUntil:        tc.meta["held_until"],
+				QuarantinedUntil: tc.meta["quarantined_until"],
 			}
 			if gotInfo := isPoolSessionSlotFreeableInfo(info, now); gotInfo != tc.want {
 				t.Fatalf("isPoolSessionSlotFreeableInfo(%v) = %v, want %v", tc.meta, gotInfo, tc.want)

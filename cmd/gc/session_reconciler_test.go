@@ -15954,3 +15954,142 @@ func TestReconcileSessionBeads_AsleepGenericRigNamedSessionDriftRepair(t *testin
 		t.Fatalf("pending_create_claim = %q, want cleared after asleep config-drift repair", got.Metadata["pending_create_claim"])
 	}
 }
+
+// healedSoftSuspendPoolSession seeds a pool-managed, unnamed "worker" row
+// whose template stays desired, with a dead runtime, in meta's shape.
+func healedSoftSuspendPoolSession(env *reconcilerTestEnv, meta map[string]string) beads.Bead {
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", false)
+	session := env.createSessionBead("worker", "worker")
+	kvs := map[string]string{poolManagedMetadataKey: boolMetadata(true)}
+	for k, v := range meta {
+		kvs[k] = v
+	}
+	env.setSessionMetadata(&session, kvs)
+	return session
+}
+
+// TestReconcileSessionBeads_HealedSoftSuspendPoolBeadFreesSlot pins that a
+// pool seat the shutdown sweep soft-suspended, healed to asleep with no
+// sleep_reason and no slept_at (only suspended_at), frees its slot through
+// the pool-slot close while its template stays desired, so routed demand
+// can mint a fresh seat.
+func TestReconcileSessionBeads_HealedSoftSuspendPoolBeadFreesSlot(t *testing.T) {
+	t.Run("healed", func(t *testing.T) {
+		env := newReconcilerTestEnv(t)
+		session := healedSoftSuspendPoolSession(env, map[string]string{
+			"state":        string(sessionpkg.StateAsleep),
+			"suspended_at": env.clk.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+		})
+		if got := env.reconcileFresh(t, session); got.Status != "closed" {
+			t.Fatalf("status = %q (meta %v), want closed: a healed soft-suspended pool seat must free its slot", got.Status, got.Metadata)
+		}
+	})
+	t.Run("suspended then healed", func(t *testing.T) {
+		env := newReconcilerTestEnv(t)
+		session := healedSoftSuspendPoolSession(env, map[string]string{
+			"state":        string(sessionpkg.StateSuspended),
+			"suspended_at": env.clk.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+		})
+		got := env.reconcileFresh(t, session)
+		if got.Status != "closed" {
+			got = env.reconcileFresh(t, got)
+		}
+		if got.Status != "closed" {
+			t.Fatalf("status = %q (meta %v), want closed within two ticks: the soft suspend heals to asleep, then frees its slot", got.Status, got.Metadata)
+		}
+	})
+}
+
+// TestReconcileSessionBeads_HealedSoftSuspendPoolBeadWithDemandWakes pins
+// that a healed soft-suspended pool seat holding ready assigned work, or an
+// explicit wake the sweep left for the next start, is woken in place and
+// never closed by the pool-slot close.
+func TestReconcileSessionBeads_HealedSoftSuspendPoolBeadWithDemandWakes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		meta map[string]string
+		work bool
+	}{
+		{name: "ready assigned work", work: true},
+		{name: "unserved explicit wake", meta: map[string]string{
+			"wake_request": string(sessionpkg.WakeCauseExplicit),
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newReconcilerTestEnv(t)
+			meta := map[string]string{
+				"state":        string(sessionpkg.StateAsleep),
+				"suspended_at": env.clk.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+			}
+			for k, v := range tc.meta {
+				meta[k] = v
+			}
+			session := healedSoftSuspendPoolSession(env, meta)
+			if tc.meta["wake_request"] != "" {
+				env.setSessionMetadata(&session, map[string]string{"wake_requested_at": env.clk.Now().UTC().Format(time.RFC3339)})
+			}
+			var assigned []beads.Bead
+			if tc.work {
+				work, err := env.store.Create(beads.Bead{Title: "ready work", Type: "task", Status: "open", Assignee: session.ID})
+				if err != nil {
+					t.Fatalf("Create work bead: %v", err)
+				}
+				assigned = []beads.Bead{work}
+			}
+			cur, err := env.store.Get(session.ID)
+			if err != nil {
+				t.Fatalf("Get(%s): %v", session.ID, err)
+			}
+			reconcileSessionBeadsAtPath(
+				context.Background(), env.city, []beads.Bead{cur}, env.desiredState,
+				configuredSessionNames(env.cfg, "", env.store), env.cfg, env.sp, env.store,
+				nil, assigned, nil, nil, env.dt, map[string]int{"worker": 1}, false, nil, "",
+				nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+				append(slices.Clone(env.startOptions), withReadyAssignedFlags(slices.Repeat([]bool{true}, len(assigned))))...,
+			)
+			got, err := env.store.Get(session.ID)
+			if err != nil {
+				t.Fatalf("Get(%s): %v", session.ID, err)
+			}
+			if got.Status == "closed" {
+				t.Fatalf("status = closed (meta %v), want the seat woken in place, not closed", got.Metadata)
+			}
+			if !env.sp.IsRunning("worker") {
+				t.Fatalf("runtime not started (state %q, meta %v), want the seat woken in place", got.Metadata["state"], got.Metadata)
+			}
+		})
+	}
+}
+
+// TestReconcileSessionBeads_HealedSoftSuspendNamedSessionStaysOpen pins that
+// a named session's row in the healed soft-suspend shape, whose template
+// stays desired, is never freed as a pool slot: it keeps its identity for an
+// in-place wake.
+func TestReconcileSessionBeads_HealedSoftSuspendNamedSessionStaysOpen(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	env.addDesired(sessionName, "worker", false)
+	session := env.createSessionBead(sessionName, "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "on_demand",
+		poolManagedMetadataKey:       "true",
+		"state":                      string(sessionpkg.StateAsleep),
+		"suspended_at":               env.clk.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+	})
+
+	got := env.reconcileFresh(t, session)
+	if got.Status != "open" {
+		t.Fatalf("status = %q (meta %v), want open: a named row is never freed as a pool slot", got.Status, got.Metadata)
+	}
+	if got.Metadata[namedSessionIdentityMetadata] != "worker" {
+		t.Fatalf("configured_named_identity = %q, want worker (must survive)", got.Metadata[namedSessionIdentityMetadata])
+	}
+}

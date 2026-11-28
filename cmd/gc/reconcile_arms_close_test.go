@@ -193,6 +193,19 @@ func TestArmCloseDecides(t *testing.T) {
 			},
 		},
 		{name: "a user-held slot keeps it", liveness: livenessGone, desired: desireSleep, meta: []string{"state", "asleep", "sleep_reason", "idle", "slept_at", at(-time.Hour), "sleep_intent", "user-hold"}},
+		{
+			// The shutdown sweep's soft suspend heals asleep with no reason and
+			// no slept_at, only suspended_at: a desired pool seat in that shape
+			// frees its slot, or routed demand cannot mint a fresh seat.
+			name: "a desired seat healed from a soft suspend frees its slot", liveness: livenessGone, desired: desireSleep, meta: []string{"state", "asleep", "suspended_at", at(-time.Hour)},
+			want: decideClosePoolSlot, check: func(t *testing.T, it intent) {
+				if it.Patch["state"] != "drained" || it.Patch["close_reason"] != session.CanonicalCloseReason("drained") || it.Closing.Repair || it.Closing.Killed {
+					t.Errorf("patch %v closing %+v, want a drained close, no repair, not killed", it.Patch, it.Closing)
+				}
+			},
+		},
+		{name: "a healed soft suspend under a user hold keeps its slot", liveness: livenessGone, desired: desireSleep, meta: []string{"state", "asleep", "suspended_at", at(-time.Hour), "sleep_intent", "user-hold"}},
+		{name: "a healed soft suspend the allocator wakes is not closed", liveness: livenessGone, desired: desireWake, meta: []string{"state", "asleep", "suspended_at", at(-time.Hour)}},
 		{name: "a desired floor seat asleep for no wake reason keeps its slot", liveness: livenessGone, desired: desireSleep, meta: []string{"state", "asleep", "sleep_reason", "no-wake-reason", "slept_at", at(-time.Hour)}},
 		{
 			// Unlike no-wake-reason (a genuine warm-standby: zero demand, cheap

@@ -216,15 +216,15 @@ func reusablePoolSessionInfo(bp *agentBuildParams, cfgAgent *config.Agent, templ
 	}
 	if info.MetadataState == "asleep" {
 		// A one_shot pool's own exit is expected completion, not a crash to
-		// avoid resuming: nothing closes its bead (the reconciler does not
-		// actually implement the "closes orphaned asleep beads" behavior this
-		// file's callers assume), so blanket-excluding every asleep session
-		// leaves it open forever holding the identity's runtime session_name
-		// — the next tick's fresh create then fails closed on that same name
-		// (derivePoolSessionName -> errPoolSessionNameUnavailable) until an
-		// operator manually closes it. A freeable-asleep (idle/idle-timeout/
-		// city-stop/failed-create/runtime-missing/provider-terminal-error/
-		// max-session-age/killed without an honored kill fence — see
+		// avoid resuming. Blanket-excluding every asleep session leaves the
+		// row holding the identity's runtime session_name until a close
+		// frees it (while its template stays desired, only the reconciler's
+		// pool-slot close, and only for a freeable row with no assigned work)
+		// — the next tick's fresh create fails closed on that same name
+		// (derivePoolSessionName -> errPoolSessionNameUnavailable) meanwhile.
+		// A freeable-asleep (idle/idle-timeout/city-stop/failed-create/
+		// runtime-missing/provider-terminal-error/max-session-age/killed
+		// without an honored kill fence, or a healed soft suspend — see
 		// isPoolSessionSlotFreeableInfo) one_shot exit carries no deliberate
 		// hold, so it is reused instead: the ordinary wake path retires the
 		// exit and remints the identity in place. Persistent pools keep

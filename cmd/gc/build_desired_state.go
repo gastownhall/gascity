@@ -5639,8 +5639,9 @@ func selectOrPlanPoolSessionBeadAvoiding(
 	// row holds no assigned work: a lifecycle=one_shot session whose sleep
 	// reason is freeable, and a restart handoff still waiting for its fresh
 	// start, are reused through the wake path — see reusablePoolSessionInfo.
-	// Nothing in the reconciler closes orphaned asleep beads; an earlier
-	// version of this comment claimed it did.
+	// The reconciler's pool-slot closes free a freeable asleep pool row
+	// (isPoolSessionSlotFreeableInfo), and its undesired close frees any
+	// asleep pool row whose template left the desired set.
 	for _, candidate := range reusablePoolSessionInfosForRequest(bp, cfgAgent, template, request, decisionTime, used) {
 		if desiredName := strings.TrimSpace(candidate.SessionNameMetadata); desiredName != "" {
 			if at, runsElsewhere := elsewhere[candidate.ID]; runsElsewhere {
