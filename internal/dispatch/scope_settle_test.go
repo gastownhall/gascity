@@ -474,6 +474,48 @@ func TestScopeAbortSettlesBodyWhenInFlightMemberCloses(t *testing.T) {
 	}
 }
 
+// TestScopeAbortDeferralMatchesOnNonRefusingStore runs the same abort on a store
+// that never refuses a blocked close (MemStore, matching the sqlite-beads
+// binding). The ledger must match bd's at every step: the dispatcher, not the
+// store's close policy, keeps the body open while the member runs, so
+// workflow-finalize cannot sweep the claimed member skipped under its worker.
+func TestScopeAbortDeferralMatchesOnNonRefusingStore(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range inFlightSettleCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newInFlightAbortFixture(t, beads.NewMemStore())
+
+			result := processScopeControl(t, f.store, f.checkB.ID)
+			if result.Action != "scope-fail" || result.Skipped != 1 {
+				t.Fatalf("result = %+v, want action scope-fail with Skipped 1 (member C)", result)
+			}
+			assertInFlightUntouched(t, f.store, f.a.ID)
+			assertAbortDeferred(t, f.store, f.body.ID, f.b.ID, f.checkA.ID)
+			assertBeadState(t, f.store, f.checkB.ID, "closed", beadmeta.OutcomePass)
+			assertBeadState(t, f.store, f.c.ID, "closed", beadmeta.OutcomeSkipped)
+			ready := readyIDs(t, f.store)
+			if slices.Contains(ready, f.finalize.ID) {
+				t.Fatalf("workflow-finalize %s is ready while member %s is in flight", f.finalize.ID, f.a.ID)
+			}
+			if slices.Contains(ready, f.d.ID) {
+				t.Fatalf("step outside the scope %s is ready while the member it needs is in flight", f.d.ID)
+			}
+
+			closeMember(t, f.store, f.a.ID, tc.close)
+			processScopeControl(t, f.store, f.checkA.ID)
+			a := mustGetBead(t, f.store, f.a.ID)
+			if a.Metadata[beadmeta.OutcomeMetadataKey] != tc.close[beadmeta.OutcomeMetadataKey] || a.Assignee != inFlightAbortAssignee {
+				t.Fatalf("member A = outcome %q assignee %q, want its own close %q under %q",
+					a.Metadata[beadmeta.OutcomeMetadataKey], a.Assignee, tc.close[beadmeta.OutcomeMetadataKey], inFlightAbortAssignee)
+			}
+			assertAbortSettled(t, f.store, f.body.ID, tc.culprit(f), map[string]string{"review.verdict": "blocked", "step_a.note": "done"})
+			assertBeadState(t, f.store, f.checkA.ID, "closed", beadmeta.OutcomePass)
+		})
+	}
+}
+
 // TestScopeAbortTriggeredHonorsDecidedAbort pins the predicate both settlement
 // sites (processScopeCheck and reconcileScopeForTerminalMember) share: a member
 // that passed still settles a scope whose abort is already decided as aborted.
