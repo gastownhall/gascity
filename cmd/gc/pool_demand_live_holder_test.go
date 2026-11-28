@@ -93,6 +93,34 @@ func TestPoolDemandFilterKeepsALiveHoldersClaimAlignedInAMixedSlice(t *testing.T
 	}
 }
 
+func TestPoolDemandFilterDropsANonLiveHoldersCityStoreClaim(t *testing.T) {
+	for _, tc := range []struct {
+		state  string
+		closed bool
+	}{
+		{state: "asleep"},
+		{state: "drained"},
+		{state: "suspended"},
+		{state: "active", closed: true},
+	} {
+		name := tc.state
+		if tc.closed {
+			name = "closed"
+		}
+		t.Run(name, func(t *testing.T) {
+			cfg, cityPath, infos := liveHolderFilterFixture(t, tc.state)
+			infos[0].Closed = tc.closed
+			work := []beads.Bead{liveHolderWork("gcg-1", liveHolderSessionName)}
+
+			kept, keptRefs := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, beads.NewMemStore(), infos, work, []string{""})
+
+			if len(kept) != 0 || len(keptRefs) != 0 {
+				t.Fatalf("kept = %v refs %q, want the claim dropped: only a live holder's city-store claim reaches a rig pool", beadIDs(kept), keptRefs)
+			}
+		})
+	}
+}
+
 // liveHolderDesiredName is the busy holder's session name in the
 // desired-state scenarios.
 const liveHolderDesiredName = "worker-gc-1"
