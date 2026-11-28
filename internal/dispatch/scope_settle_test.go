@@ -643,6 +643,50 @@ func TestScopeAbortReconcileDriversDeferWhileMemberInFlight(t *testing.T) {
 	}
 }
 
+// TestScopeAbortWithNoMemberInFlightClosesBodyAtOnce pins the unchanged path: an
+// abort with nothing claimed closes the body fail in the same invocation, from a
+// scope-check or a reconcile path, and writes no deferral marker.
+func TestScopeAbortWithNoMemberInFlightClosesBodyAtOnce(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		drive func(t *testing.T, f inFlightAbortFixture) error
+	}{
+		{
+			name: "scope-check",
+			drive: func(t *testing.T, f inFlightAbortFixture) error {
+				_, err := ProcessControl(beadstest.Graph(f.store), mustGetBead(t, f.store, f.checkB.ID), ProcessOptions{Work: beadstest.Work(f.store)})
+				return err
+			},
+		},
+		{
+			name: "reconcile",
+			drive: func(_ *testing.T, f inFlightAbortFixture) error {
+				_, err := reconcileClosedScopeMemberWithOptions(beadstest.Graph(f.store), f.b.ID, ProcessOptions{Work: beadstest.Work(f.store)})
+				return err
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newInFlightAbortFixture(t, newStrictCloseStore())
+			open := "open"
+			if err := f.store.Update(f.a.ID, beads.UpdateOpts{Status: &open}); err != nil {
+				t.Fatalf("unclaiming %s: %v", f.a.ID, err)
+			}
+			if err := tc.drive(t, f); err != nil {
+				t.Fatalf("abort: %v", err)
+			}
+			assertBeadState(t, f.store, f.a.ID, "closed", beadmeta.OutcomeSkipped)
+			assertAbortSettled(t, f.store, f.body.ID, f.b.ID, map[string]string{"review.verdict": "blocked"})
+			if got, ok := mustGetBead(t, f.store, f.body.ID).Metadata[scopeAbortedByKey]; ok {
+				t.Fatalf("body carries %s=%q, want no deferral marker", scopeAbortedByKey, got)
+			}
+		})
+	}
+}
+
 // TestScopeAbortTriggeredHonorsDecidedAbort pins the predicate both settlement
 // sites (processScopeCheck and reconcileScopeForTerminalMember) share: a member
 // that passed still settles a scope whose abort is already decided as aborted.

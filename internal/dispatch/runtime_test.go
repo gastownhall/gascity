@@ -11938,6 +11938,9 @@ func TestAbortScopeSharedConvergence(t *testing.T) {
 	if got := bodyAfter.Metadata["review.verdict"]; got != "blocked" {
 		t.Fatalf("body review.verdict = %q, want blocked", got)
 	}
+	if got, ok := bodyAfter.Metadata["gc.scope_aborted_by"]; ok {
+		t.Fatalf("body gc.scope_aborted_by = %q, want no deferral marker when no member is in flight", got)
+	}
 	openAfter := mustGetBead(t, store, openMember.ID)
 	if openAfter.Status != "closed" || openAfter.Metadata["gc.outcome"] != "skipped" {
 		t.Fatalf("open member = status %q outcome %q, want closed/skipped", openAfter.Status, openAfter.Metadata["gc.outcome"])
