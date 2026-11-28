@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/materialize"
 )
 
@@ -949,5 +950,205 @@ func TestSharedCatalogSnapshotFrontmatterNameCompatibility(t *testing.T) {
 	want.Entries[0].FrontmatterName = ""
 	if !reflect.DeepEqual(decoded, want) {
 		t.Fatalf("pre-FrontmatterName snapshot decoded = %+v, want %+v", decoded, want)
+	}
+}
+
+// sinkLinkTargets maps each symlink in sink to its os.Readlink target.
+func sinkLinkTargets(t *testing.T, sink string) map[string]string {
+	t.Helper()
+	entries, err := os.ReadDir(sink)
+	if err != nil {
+		t.Fatalf("ReadDir(%s): %v", sink, err)
+	}
+	out := make(map[string]string)
+	for _, e := range entries {
+		if e.Type()&os.ModeSymlink == 0 {
+			continue
+		}
+		target, err := os.Readlink(filepath.Join(sink, e.Name()))
+		if err != nil {
+			t.Fatalf("Readlink(%s): %v", e.Name(), err)
+		}
+		out[e.Name()] = target
+	}
+	return out
+}
+
+func requireLinkTarget(t *testing.T, link, want string) {
+	t.Helper()
+	got, err := os.Readlink(link)
+	if err != nil {
+		t.Errorf("Readlink(%s): %v", link, err)
+		return
+	}
+	if got != want {
+		t.Errorf("%s -> %s, want %s", link, got, want)
+	}
+}
+
+// stage2Result runs agent name's per-session pass into workdir and
+// returns what the pass did to the sink.
+func (c workDirWriterCity) stage2Result(t *testing.T, name, workdir string) (materialize.Result, string) {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	res, err := materializeSkillSinkForSession(c.cfg, c.agent(t, name), c.cityPath, workdir, nil, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("stage 2 for %s into %s: %v; stderr=%q", name, workdir, err, stderr.String())
+	}
+	return res, stderr.String()
+}
+
+func (c workDirWriterCity) stage1(t *testing.T) {
+	t.Helper()
+	var stderr bytes.Buffer
+	if err := runStage1SkillMaterialization(c.cityPath, c.cfg, &stderr); err != nil {
+		t.Fatalf("stage 1: %v; stderr=%q", err, stderr.String())
+	}
+}
+
+// TestMaterializeSkillsIntoWorkdirKeepsScopeRootAgentsSkills: r's session
+// writes the city root's sink, which stage 1 already reconciled for m and
+// r. r's stage-2 pass folds every writer of that sink, so m's agent-local
+// notes stays linked to m's source.
+func TestMaterializeSkillsIntoWorkdirKeepsScopeRootAgentsSkills(t *testing.T) {
+	c := newWorkDirWriterCity(t)
+	c.stage1(t)
+	requireSinkLinks(t, c.citySink(), "after stage 1", []string{"notes", "rig-notes", "rp.rig-plan", "plan"}, nil)
+
+	c.stage2(t, "r", c.cityPath)
+	requireSinkLinks(t, c.citySink(), "after r's stage 2", []string{"notes", "rig-notes", "rp.rig-plan", "plan"}, nil)
+	requireLinkTarget(t, filepath.Join(c.citySink(), "notes"), c.mNotes)
+	requireLinkTarget(t, filepath.Join(c.citySink(), "rig-notes"), c.rNotes)
+}
+
+// TestMaterializeSkillsIntoWorkdirSharedWorkDirKeepsCoWriterSkills: agents
+// a and b both run sessions in {{.CityRoot}}/shared, a sink no stage-1
+// pass owns. Whichever session starts first, each pass keeps the other
+// agent's agent-local link.
+func TestMaterializeSkillsIntoWorkdirSharedWorkDirKeepsCoWriterSkills(t *testing.T) {
+	for _, order := range [][]string{{"a", "b"}, {"b", "a"}} {
+		t.Run(strings.Join(order, "-then-"), func(t *testing.T) {
+			clearGCEnv(t)
+			cityPath := t.TempDir()
+			t.Setenv("GC_HOME", t.TempDir())
+			shared := filepath.Join(cityPath, "shared")
+			if err := os.MkdirAll(shared, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			workDir := "{{.CityRoot}}/shared"
+			c := workDirWriterCity{cityPath: cityPath, cfg: &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Session:   config.SessionConfig{Provider: "tmux"},
+			}}
+			sources := map[string]string{}
+			for _, name := range []string{"a", "b"} {
+				skills := filepath.Join(cityPath, "agents", name, "skills")
+				sources[name+"-notes"] = filepath.Join(skills, name+"-notes")
+				writeSkillSource(t, sources[name+"-notes"])
+				c.cfg.Agents = append(c.cfg.Agents, config.Agent{Name: name, Scope: "city", Provider: "claude", SkillsDir: skills, WorkDir: workDir})
+			}
+			sink := filepath.Join(shared, ".claude", "skills")
+			for _, name := range order {
+				c.stage2(t, name, shared)
+				requireSinkLinks(t, sink, "after "+name+"'s stage 2", []string{"a-notes", "b-notes"}, nil)
+				for skill, src := range sources {
+					requireLinkTarget(t, filepath.Join(sink, skill), src)
+				}
+			}
+		})
+	}
+}
+
+// clashingWorkDirWriterCity is newWorkDirWriterCity converged by stage 1,
+// after which r's skills dir also provides an agent-local notes, so m and
+// r want notes from different sources in the city root's sink.
+func clashingWorkDirWriterCity(t *testing.T) (workDirWriterCity, string, map[string]string) {
+	t.Helper()
+	c := newWorkDirWriterCity(t)
+	c.stage1(t)
+	before := sinkLinkTargets(t, c.citySink())
+	rClash := filepath.Join(filepath.Dir(c.rNotes), "notes")
+	writeSkillSource(t, rClash)
+	return c, rClash, before
+}
+
+func requireClashReported(t *testing.T, stderr, rClash string, c workDirWriterCity) {
+	t.Helper()
+	for _, want := range []string{`"notes"`, `"m"`, `"fe/r"`, c.mNotes, rClash} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("clash report does not name %s: %q", want, stderr)
+		}
+	}
+}
+
+// TestStage1SharedSinkClashHoldsSink: m and r both write the city root's
+// sink and both provide agent-local notes from different sources. The
+// stage-1 pass reports the clash and holds the sink unchanged.
+func TestStage1SharedSinkClashHoldsSink(t *testing.T) {
+	c, rClash, before := clashingWorkDirWriterCity(t)
+	var stderr bytes.Buffer
+	err := runStage1SkillMaterialization(c.cityPath, c.cfg, &stderr)
+	if err == nil {
+		t.Errorf("stage 1 reconciled a sink with a clash; stderr=%q", stderr.String())
+	}
+	requireClashReported(t, stderr.String(), rClash, c)
+	if after := sinkLinkTargets(t, c.citySink()); !reflect.DeepEqual(after, before) {
+		t.Errorf("held sink changed:\nbefore %v\nafter  %v", before, after)
+	}
+}
+
+// TestMaterializeSkillsSharedSinkClashExitsZero: r's stage 2 into the
+// city root meets the same clash; it reports it, holds the sink, and the
+// command exits 0 so the session still starts.
+func TestMaterializeSkillsSharedSinkClashExitsZero(t *testing.T) {
+	c, rClash, before := clashingWorkDirWriterCity(t)
+	res, stderr := c.stage2Result(t, "r", c.cityPath)
+	requireClashReported(t, stderr, rClash, c)
+	if len(res.Created)+len(res.Removed)+len(res.Relinked) != 0 {
+		t.Errorf("held sink pass changed links: %+v", res)
+	}
+	if after := sinkLinkTargets(t, c.citySink()); !reflect.DeepEqual(after, before) {
+		t.Errorf("held sink changed:\nbefore %v\nafter  %v", before, after)
+	}
+}
+
+// TestSharedSinkConvergesAcrossStages: the city root's sink has three
+// writers (m through stage 1, rig agents r and s through stage 2). Once
+// stage 1 has converged it, every order of the three passes leaves the
+// sink's links and targets unchanged and no pass removes or relinks.
+func TestSharedSinkConvergesAcrossStages(t *testing.T) {
+	ops := []string{"stage1", "r", "s"}
+	perms := [][]int{{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}}
+	for _, perm := range perms {
+		names := make([]string, len(perm))
+		for i, p := range perm {
+			names[i] = ops[p]
+		}
+		t.Run(strings.Join(names, "-"), func(t *testing.T) {
+			c := newWorkDirWriterCity(t)
+			sSkills := filepath.Join(c.cityPath, "agents", "s", "skills")
+			writeSkillSource(t, filepath.Join(sSkills, "s-notes"))
+			c.cfg.Agents = append(c.cfg.Agents, config.Agent{Name: "s", Scope: "rig", Dir: "fe", Provider: "claude", SkillsDir: sSkills, WorkDir: "{{.CityRoot}}"})
+			c.stage1(t)
+			want := sinkLinkTargets(t, c.citySink())
+			for _, name := range []string{"notes", "rig-notes", "s-notes", "rp.rig-plan", "plan"} {
+				if _, ok := want[name]; !ok {
+					t.Fatalf("stage 1 did not converge %s into the sink: %v", name, want)
+				}
+			}
+			for _, name := range names {
+				if name == "stage1" {
+					c.stage1(t)
+				} else {
+					res, _ := c.stage2Result(t, name, c.cityPath)
+					if len(res.Removed) != 0 || len(res.Relinked) != 0 {
+						t.Errorf("%s's stage 2 removed %v, relinked %v", name, res.Removed, res.Relinked)
+					}
+				}
+				if got := sinkLinkTargets(t, c.citySink()); !reflect.DeepEqual(got, want) {
+					t.Errorf("after %s:\ngot  %v\nwant %v", name, got, want)
+				}
+			}
+		})
 	}
 }
