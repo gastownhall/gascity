@@ -194,3 +194,55 @@ func TestClaimHookWorkAssignedTierOperationalErrorStaysTerminal(t *testing.T) {
 		t.Fatalf("stderr = %q, want the failed promotion named", stderr.String())
 	}
 }
+
+// assignedInProgressMailRow is the #6211 shape on the claim path: an
+// in_progress auto-handoff wisp assigned to this worker sits in the assigned
+// tier's rows alongside genuinely claimable routed work. Mail is delivered by
+// the mail hooks, never claimed as work, so the claim loop must skip it and
+// still reach the routed task.
+const assignedInProgressMailRow = `[{"id":"wisp-1","status":"in_progress","assignee":"worker-1","issue_type":"message","labels":["gc:auto-handoff","gc:archive-after-inject"]},{"id":"hw-task","status":"open","metadata":{"gc.routed_to":"worker"}}]`
+
+// TestClaimHookWorkSkipsInProgressAutoHandoffAndClaimsRoutedTask pins that an
+// in_progress auto-handoff message in the assigned tier is never sent to the
+// claim mutation: claiming it would both race the mail hooks' archive-after-
+// inject close and strand real routed work behind an unclaimable id (#6211).
+// This is a regression pin — the message-row backstop predates the fix — so it
+// holds at base by construction.
+func TestClaimHookWorkSkipsInProgressAutoHandoffAndClaimsRoutedTask(t *testing.T) {
+	stores := []hookStore{{dir: "city", env: []string{"GC_STORE=city"}}}
+	run := func(_, dir string, _ []string) (string, error) {
+		if dir != "city" {
+			t.Fatalf("unexpected store dir %q", dir)
+		}
+		return assignedInProgressMailRow, nil
+	}
+	var attempts []string
+	ops := hookClaimOps{
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			attempts = append(attempts, beadID)
+			if beadID == "wisp-1" {
+				t.Errorf("claim mutation ran for %q: mail must never be claimed as work", beadID)
+			}
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
+		},
+		EmitClaimRejected: func(string, string, string) {},
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
+		DrainAck:          func(io.Writer) error { return nil },
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := claimHookWorkWithRunner("gc ready --json", "city", stores[0].env, stores, assignedFederationClaimOpts(), ops, run, func(string, error) {}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("claimHookWorkWithRunner = %d, want 0: skipping mail must not strand the routed task; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %q", err, stdout.String())
+	}
+	if result.BeadID != "hw-task" || result.Reason != "claimed" {
+		t.Fatalf("claim result = %+v, want hw-task claimed (the in_progress auto-handoff wisp is skipped, not claimed)", result)
+	}
+	if got := strings.Join(attempts, ","); got != "hw-task" {
+		t.Fatalf("claim attempts = %q, want hw-task only (the mail row never reaches the mutation)", got)
+	}
+}
