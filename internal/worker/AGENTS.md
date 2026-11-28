@@ -158,7 +158,8 @@ transcript records once the next turn starts. So every handle reads the same
 end from the unchanged transcript, and a refusal never reads as newer than it
 is. A failed turn carries the error its transcript recorded
 (`runtime.EndedTurn.Failure`): the source's own class and HTTP status, whether
-the source classed it a rate limit, and the text, for people only. Claude and
+the source classed it a rate limit or an overload, and the text, for people
+only. Claude and
 Codex transcripts record it; a family that records none leaves it zero.
 
 ## Keyed deliveries

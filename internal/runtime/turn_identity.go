@@ -178,6 +178,11 @@ type TurnFailure struct {
 	// quota: an allowance that comes back only when the account's period
 	// resets, so a new conversation is refused too. It implies RateLimited.
 	Quota bool
+	// Overloaded reports that the source classed the error a refusal for
+	// lack of capacity to serve the turn (Codex's server_overloaded, Claude
+	// Code's HTTP 529), from its own class or status, never the text. It
+	// implies neither RateLimited nor Quota.
+	Overloaded bool
 	// Message is the error's text, bounded by its source: for people, never
 	// for a decision.
 	Message string
