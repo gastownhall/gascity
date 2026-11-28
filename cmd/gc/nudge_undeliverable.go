@@ -14,11 +14,19 @@ import (
 // session can never take it: nothing is left pending for it.
 const nudgeOutcomeUndeliverable = "undeliverable"
 
+// nudgeDeadReasonSessionTerminated is the LastError (and gc:nudge shadow
+// terminal reason) of a queued nudge dead-lettered because the session it is
+// fenced to will never run again.
+const nudgeDeadReasonSessionTerminated = "session-terminated"
+
 // nudgeUndeliverableError is a session nudge refused because its target
-// session is gone for good (retired), so nothing was queued.
+// session cannot take it: retired before anything was queued, or refused a
+// wake after its item was queued, which was then dead-lettered
+// (deadLettered).
 type nudgeUndeliverableError struct {
-	SessionID string
-	State     string
+	SessionID    string
+	State        string
+	deadLettered bool
 }
 
 // Error names the session and the state that makes the nudge undeliverable.
@@ -28,6 +36,35 @@ func (e *nudgeUndeliverableError) Error() string {
 
 // Unwrap reports the refusal as a closed session.
 func (e *nudgeUndeliverableError) Unwrap() error { return session.ErrSessionClosed }
+
+// nudgeSessionTerminatedError is a managed wake refused by a wake conflict
+// whose queued nudge was rolled back to Dead as session-terminated. Its text
+// is the conflict's, and it unwraps to the conflict.
+type nudgeSessionTerminatedError struct {
+	conflict *session.WakeConflictError
+}
+
+// Error is the wake conflict's text.
+func (e *nudgeSessionTerminatedError) Error() string { return e.conflict.Error() }
+
+// Unwrap returns the wake conflict.
+func (e *nudgeSessionTerminatedError) Unwrap() error { return e.conflict }
+
+// undeliverableWakeConflict turns a wake conflict whose queued nudge was
+// dead-lettered (nudgeSessionTerminatedError) into the session nudge's
+// undeliverable refusal, reasoned as gc session wake reasons the conflict.
+// Any other error is returned unchanged.
+func undeliverableWakeConflict(err error) error {
+	var terminated *nudgeSessionTerminatedError
+	if !errors.As(err, &terminated) {
+		return err
+	}
+	conflict := terminated.conflict
+	return &cliMessageRefusal{
+		why: cliOpWakeConflictReason(conflict.State),
+		err: &nudgeUndeliverableError{SessionID: conflict.SessionID, State: conflict.State, deadLettered: true},
+	}
+}
 
 // nudgeFenceRetired reports whether the session row a nudge is fenced to (or
 // targets) is retired for good: session.LifecycleRetired, or a closed named
@@ -77,7 +114,11 @@ func writeUndeliverableSessionNudge(target nudgeTarget, mode nudgeDeliveryMode, 
 	if errors.As(err, &refusal) {
 		reason = refusal.why
 	}
-	fmt.Fprintf(stderr, "gc session nudge: %s: session %s is %s (%s); nothing was queued\n", nudgeOutcomeUndeliverable, undeliverable.SessionID, undeliverable.State, target.agentKey()) //nolint:errcheck // best-effort stderr
+	disposition := "nothing was queued"
+	if undeliverable.deadLettered {
+		disposition = "the queued nudge was dead-lettered as " + nudgeDeadReasonSessionTerminated
+	}
+	fmt.Fprintf(stderr, "gc session nudge: %s: session %s is %s (%s); %s\n", nudgeOutcomeUndeliverable, undeliverable.SessionID, undeliverable.State, target.agentKey(), disposition) //nolint:errcheck // best-effort stderr
 	if !jsonOutput {
 		return 1, true
 	}

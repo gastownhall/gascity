@@ -8,11 +8,16 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/opjournal"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 // readNudgeStateFile is state.json's bytes, nil when the queue was never
@@ -146,6 +151,151 @@ func TestSessionNudgeToRetiredSessionIsUndeliverable(t *testing.T) {
 		}
 		if after := readNudgeStateFile(t, c.dir); !bytes.Equal(before, after) {
 			t.Fatalf("state.json changed:\nbefore=%s\nafter=%s", before, after)
+		}
+	})
+}
+
+// managedNudgeRowFixture is a suspended managed session row with state set by
+// md, whose city routes nudges through the managed reconciler and whose
+// runtime reads not running. pokes counts controller pokes.
+type managedNudgeRowFixture struct {
+	dir    string
+	store  beads.Store
+	fake   *runtime.Fake
+	target nudgeTarget
+	pokes  *int
+}
+
+func newManagedNudgeRowFixture(t *testing.T, md map[string]string) managedNudgeRowFixture {
+	t.Helper()
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: dir, Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(context.Background(), testActorIn(t, session.ActorOperator, dir), info.ID, false); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	if len(md) > 0 {
+		if err := store.SetMetadataBatch(info.ID, md); err != nil {
+			t.Fatalf("SetMetadataBatch: %v", err)
+		}
+	}
+
+	prevManaged, prevPoke, prevObserve := nudgeCityUsesManagedReconciler, nudgePokeController, nudgeObserveTarget
+	pokes := 0
+	nudgeCityUsesManagedReconciler = func(cityPath string) bool { return cityPath == dir }
+	nudgePokeController = func(string, reconcilekey.Key) error {
+		pokes++
+		return nil
+	}
+	nudgeObserveTarget = func(nudgeTarget, beads.Store, runtime.Provider) (worker.LiveObservation, error) {
+		return worker.LiveObservation{Running: false}, nil
+	}
+	t.Cleanup(func() {
+		nudgeCityUsesManagedReconciler, nudgePokeController, nudgeObserveTarget = prevManaged, prevPoke, prevObserve
+	})
+	return managedNudgeRowFixture{
+		dir:   dir,
+		store: store,
+		fake:  fake,
+		target: nudgeTarget{
+			cityPath:    dir,
+			cfg:         &config.City{Agents: []config.Agent{{Name: "worker", Provider: "claude"}}},
+			sessionID:   info.ID,
+			sessionName: info.SessionName,
+			identity:    "worker",
+			agent:       config.Agent{Name: "worker", Provider: "claude"},
+		},
+		pokes: &pokes,
+	}
+}
+
+// nudge sends testNudgeMessage to f's session in mode.
+func (f managedNudgeRowFixture) nudge(mode nudgeDeliveryMode, asJSON bool) (int, string, string) {
+	var stdout, stderr bytes.Buffer
+	code := deliverSessionNudgeKeyed(f.target, f.store, f.fake, testNudgeMessage, mode, "", asJSON, &stdout, &stderr)
+	return code, stdout.String(), stderr.String()
+}
+
+func TestSessionNudgeWakeConflictIsStructuredUndeliverable(t *testing.T) {
+	cases := []struct {
+		name  string
+		md    map[string]string
+		state string
+	}{
+		{name: "closing", md: map[string]string{"state": "closing"}, state: "closing"},
+		{name: "archived without continuity", md: map[string]string{"state": string(session.StateArchived), "continuity_eligible": "false"}, state: string(session.StateArchived)},
+	}
+	for _, tc := range cases {
+		for _, asJSON := range []bool{false, true} {
+			name := tc.name + "/text"
+			if asJSON {
+				name = tc.name + "/json"
+			}
+			t.Run(name, func(t *testing.T) {
+				f := newManagedNudgeRowFixture(t, tc.md)
+				code, stdout, stderr := f.nudge(nudgeDeliveryImmediate, asJSON)
+				if code != 1 {
+					t.Fatalf("nudge = %d, want 1; stdout=%s stderr=%s", code, stdout, stderr)
+				}
+				if asJSON {
+					wantUndeliverableLine(t, stdout, cliOpWakeConflictReason(tc.state), tc.state)
+				} else if stdout != "" {
+					t.Fatalf("stdout = %q, want empty in text mode", stdout)
+				}
+				if !strings.Contains(stderr, "undeliverable: session "+f.target.sessionID+" is "+tc.state) || !strings.Contains(stderr, "dead-lettered as "+nudgeDeadReasonSessionTerminated) {
+					t.Fatalf("stderr = %q, want the dead-lettered undeliverable line", stderr)
+				}
+				if *f.pokes != 0 {
+					t.Fatalf("pokes = %d, want 0", *f.pokes)
+				}
+				pending, inFlight, dead, err := listQueuedNudgesForTarget(f.dir, f.target, time.Now())
+				if err != nil {
+					t.Fatalf("listQueuedNudgesForTarget: %v", err)
+				}
+				if len(pending) != 0 || len(inFlight) != 0 || len(dead) != 1 {
+					t.Fatalf("pending/inFlight/dead = %d/%d/%d, want 0/0/1", len(pending), len(inFlight), len(dead))
+				}
+				if dead[0].LastError != nudgeDeadReasonSessionTerminated {
+					t.Fatalf("dead LastError = %q, want %q", dead[0].LastError, nudgeDeadReasonSessionTerminated)
+				}
+				shadow, ok, err := nudgeFrontDoor(openNudgeBeadStore(f.dir)).FindIncludingTerminal(dead[0].ID)
+				if err != nil || !ok {
+					t.Fatalf("FindIncludingTerminal(%s) = ok %v, err %v; want the shadow", dead[0].ID, ok, err)
+				}
+				if shadow.State != "failed" || shadow.TerminalReason != nudgeDeadReasonSessionTerminated {
+					t.Fatalf("shadow state/reason = %q/%q, want failed/%s", shadow.State, shadow.TerminalReason, nudgeDeadReasonSessionTerminated)
+				}
+			})
+		}
+	}
+
+	t.Run("a non-conflict wake error stays raw", func(t *testing.T) {
+		f := newManagedNudgeRowFixture(t, nil)
+		item := newQueuedNudgeWithOptions(f.target.agentKey(), testNudgeMessage, "session", time.Now(), queuedNudgeOptionsFromTarget(f.target))
+		f.target.sessionID = "gc-missing"
+		_, err := enqueueManagedNudgeThenWake(f.target, f.store, item)
+		if err == nil {
+			t.Fatal("enqueueManagedNudgeThenWake to a missing row = nil, want an error")
+		}
+		if got := undeliverableWakeConflict(err); !errors.Is(got, err) || got.Error() != err.Error() {
+			t.Fatalf("undeliverableWakeConflict(%v) = %v, want the raw error", err, got)
+		}
+		var undeliverable *nudgeUndeliverableError
+		if errors.As(err, &undeliverable) {
+			t.Fatalf("err = %v, a non-conflict wake error must not read as undeliverable", err)
+		}
+		state, loadErr := nudgequeue.LoadState(f.dir)
+		if loadErr != nil {
+			t.Fatalf("LoadState: %v", loadErr)
+		}
+		if len(state.Pending) != 0 || len(state.Dead) != 1 || state.Dead[0].ID != item.ID || !strings.HasPrefix(state.Dead[0].LastError, "managed wake failed: ") {
+			t.Fatalf("pending %+v dead %+v, want only item %s dead with the managed-wake-failed reason", state.Pending, state.Dead, item.ID)
 		}
 	})
 }

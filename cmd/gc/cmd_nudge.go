@@ -1835,7 +1835,7 @@ func queueManagedSessionNudgeWake(target nudgeTarget, store beads.Store, message
 	item := newQueuedNudgeWithOptions(target.agentKey(), message, "session", time.Now(), queuedNudgeOptionsFromTarget(target))
 	outcome, err := enqueueManagedNudgeThenWake(target, store, item)
 	if err != nil {
-		return sessionNudgeResult{}, err
+		return sessionNudgeResult{}, undeliverableWakeConflict(err)
 	}
 	var undelivered worker.NudgeUndeliveredReason
 	if outcome == session.WakeHeld {
@@ -1858,8 +1858,19 @@ func enqueueManagedNudgeThenWake(target nudgeTarget, store beads.Store, item que
 	}
 	outcome, err := requestManagedNudgeWake(target, cliSessionFrontDoor(store, target.cfg, target.cityPath))
 	if err != nil {
-		if rollbackErr := rollbackQueuedNudge(target.cityPath, nudges, item, "managed wake failed: "+err.Error()); rollbackErr != nil {
+		// A wake conflict (closing, closed, archived without continuity) means
+		// the session will not run this nudge: it is dead-lettered as
+		// session-terminated and reported as nudgeSessionTerminatedError.
+		var conflict *session.WakeConflictError
+		reason := "managed wake failed: " + err.Error()
+		if errors.As(err, &conflict) {
+			reason = nudgeDeadReasonSessionTerminated
+		}
+		if rollbackErr := rollbackQueuedNudge(target.cityPath, nudges, item, reason); rollbackErr != nil {
 			return 0, managedWakeRollbackError(item.ID, err, rollbackErr)
+		}
+		if conflict != nil {
+			return 0, &nudgeSessionTerminatedError{conflict: conflict}
 		}
 		return 0, err
 	}
