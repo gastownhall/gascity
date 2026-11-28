@@ -6,7 +6,7 @@ description: Authoritative specification for the formulas v2 contract.
 | Field | Value |
 |---|---|
 | Status | Authoritative specification |
-| Last verified | 2026-06-12 |
+| Last verified | 2026-11-28 |
 | Contract | `formula_compiler >=2.0.0` (deprecated alias: `contract = "graph.v2"`) |
 | Primary implementation | `internal/formula`, `internal/graphv2`, `internal/dispatch`, `internal/molecule` |
 | Concept model | [How Gas City Works](/getting-started/how-gas-city-works) — where a formula (the HOW) sits among the six primitives |
@@ -729,7 +729,7 @@ step as failed.
 |---|---|
 | `max_attempts` | Total run/check attempts including the first (≥ 1); an integer, or a `"{{name}}"` var placeholder resolved at compile time |
 | `check.mode` | Checker implementation; only `"exec"` is supported |
-| `check.path` | Repo-relative or absolute script path to execute |
+| `check.path` | Script to execute: `../assets/<relative-path>` for a script a formula layer ships (see below), a path relative to the step's working directory (falling back to the store root), or an absolute path |
 | `check.timeout` | Script execution bound (e.g. `"2m"`); takes precedence over the step's `timeout` |
 
 ```toml
@@ -781,6 +781,44 @@ The step `timeout` applies as a general bound on the check script; a
 `check.timeout` takes precedence when both are set. A check step with
 `children` wraps each iteration in a scope bead whose members default to
 `gc.on_fail = "abort_scope"` (section 3.5).
+
+**Where the check script lives.** A pack ships its check scripts in its
+`assets/scripts/checks/<name>`, and a step names one as
+`../assets/scripts/checks/<name>`. That path resolves through the formula
+layers exactly like a `description_file` asset (section 1.8): each layer's
+sibling `assets/` directory is a candidate, and the highest-priority layer
+that ships the script wins. A city or higher-priority pack can therefore
+shadow a pack's check script, and a pack that imports another can name the
+imported pack's script without copying it. The step records the resolved
+absolute path. In a v2 formula, a literal `../assets/` check path that no
+layer ships fails compilation with
+`check path "…" not found in any formula layer`. A path that carries an
+expansion placeholder, such as `../assets/scripts/checks/{target}.sh`,
+resolves the same way once expansion substitutes it.
+
+```toml
+formula = "checked-by-pack"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[[steps]]
+id = "implement"
+title = "Implement the feature"
+
+[steps.check]
+max_attempts = 3
+
+[steps.check.check]
+mode = "exec"
+path = "../assets/scripts/checks/verify.sh"
+timeout = "2m"
+```
+
+The city's `.gc/` directory holds runtime state. Gas City never fills it
+from a pack's `assets/`, so a `check.path` under `.gc/` names a script no
+pack ships, and the step is held open as unlaunchable, as "A check that
+cannot be launched" below describes.
 
 **A hard failure ends the loop.** When an iteration closes
 `gc.outcome = fail` with `gc.failure_class = hard` — the iteration's own work
