@@ -524,3 +524,53 @@ func TestDrainAckHeldClaim_DesiredSeatWithBlockedClaimStrandsThenRepairs(t *test
 		t.Fatalf("close_reason = %q, want %q", session.Metadata["close_reason"], want)
 	}
 }
+
+// TestDrainAckHeldClaim_V2CloseReleasesBindingStep pins the AC-1 split-store
+// recovery on the v2 close arm: an orphaned drain of a row holding an
+// in_progress step that lives ONLY in the graph-class binding (its route names
+// the rig store, which does not hold it) releases the step through the close's
+// binding work leg, lands the close, and reports exactly one
+// bead.dead_assignee_reopened naming the step. The clock is the harness's
+// fixed gatherNow, never advanced.
+func TestDrainAckHeldClaim_V2CloseReleasesBindingStep(t *testing.T) {
+	c := newCloseCase(t, livenessGone, desireDrain,
+		"state", "asleep", "sleep_reason", "idle",
+		"slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339))
+	c.entry().DrainReason = drainOrphaned
+
+	// The binding numbers its beads apart from the row store so a lookup in
+	// the wrong store cannot alias the step.
+	binding := beads.NewMemStoreFrom(100, nil, nil)
+	seedSplitRoutes(t, c.w.CityPath, binding)
+	rig := beads.NewMemStore()
+	c.cfg.Rigs = []config.Rig{{Name: "repo", Path: filepath.Join(c.w.CityPath, "repo")}}
+	c.w.WorkLegs = testWorkLegs(c.w.CityPath, c.cfg, c.store, map[string]beads.Store{"repo": rig})
+	step := createWork(t, binding, "in_progress", c.k.ID, routedClaim())
+
+	s := c.run(t, gone().tmux())
+
+	if s.Outcome != settledLanded {
+		t.Fatalf("settlement = %+v, want the close landed", s)
+	}
+	if b := c.row(t); b.Status != "closed" {
+		t.Fatalf("row status = %q, want closed", b.Status)
+	}
+	if len(s.Facts.Events) != 1 || s.Facts.Events[0].Type != events.BeadDeadAssigneeReopened {
+		t.Fatalf("facts events = %+v, want exactly one %s", s.Facts.Events, events.BeadDeadAssigneeReopened)
+	}
+	if !strings.Contains(string(s.Facts.Events[0].Payload), step.ID) {
+		t.Fatalf("dead-assignee payload does not name the step %q: %s", step.ID, s.Facts.Events[0].Payload)
+	}
+	got, err := binding.Get(step.ID)
+	if err != nil {
+		t.Fatalf("binding.Get(%s): %v", step.ID, err)
+	}
+	if got.Status != "open" || got.Assignee != "" {
+		t.Fatalf("step = status %q assignee %q, want open/unassigned — the close must release the binding-resident step", got.Status, got.Assignee)
+	}
+	for name, other := range map[string]beads.Store{"row": c.store, "rig": rig} {
+		if _, err := other.Get(step.ID); err == nil {
+			t.Fatalf("step %s found in the %s store, want it resident only in the binding", step.ID, name)
+		}
+	}
+}
