@@ -245,3 +245,32 @@ func TestBuildDesiredState_RigPoolHigherPriorityQueuedWorkDoesNotTakeTheBusyHold
 		t.Fatalf("riga/worker desired sessions = %v, want 2: the P0 queued bead must get a fresh session, not the busy holder %q holding P4 work", names, liveHolderDesiredName)
 	}
 }
+
+// liveRigHolderDiffCity is the reported shape for the allocation differential:
+// a rig-scoped custom-count pool on a single-store city, one active row holding
+// an in-progress city-store claim, and scale_check reporting one more.
+func liveRigHolderDiffCity(t *testing.T) diffCity {
+	t.Helper()
+	worker := customPool("worker", "echo 1", 4)
+	worker.Dir = "riga"
+	cfg := diffConfig(worker)
+	cfg.Rigs = []config.Rig{{Name: "riga", Path: t.TempDir()}}
+	return diffCity{
+		name: "a live rig-pool holder's city-store claim is demand beside a custom count",
+		cfg:  cfg,
+		beads: []beads.Bead{
+			poolRow("dr-1", "riga/worker", 1, "active"),
+			{ID: "dw-1", Title: "dw-1", Type: "task", Status: "in_progress", Assignee: "s-dr-1", CreatedAt: diffNow.Add(-time.Hour), Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "riga/worker"}},
+		},
+		alive:      []string{"s-dr-1"},
+		scaleCheck: true,
+	}
+}
+
+func TestV2AllocationCountsALiveRigHoldersCityStoreClaim(t *testing.T) {
+	out := v2Allocation(t, liveRigHolderDiffCity(t))
+
+	if got := out.accepted["riga/worker"]; got != 2 {
+		t.Fatalf("v2 accepted riga/worker = %d, want 2: the holder's resume plus the scale_check's new request (accepted %v)", got, out.accepted)
+	}
+}
