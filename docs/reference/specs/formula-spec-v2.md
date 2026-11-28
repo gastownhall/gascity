@@ -6,7 +6,7 @@ description: Authoritative specification for the formulas v2 contract.
 | Field | Value |
 |---|---|
 | Status | Authoritative specification |
-| Last verified | 2026-06-12 |
+| Last verified | 2026-11-28 |
 | Contract | `formula_compiler >=2.0.0` (deprecated alias: `contract = "graph.v2"`) |
 | Primary implementation | `internal/formula`, `internal/graphv2`, `internal/dispatch`, `internal/molecule` |
 | Concept model | [How Gas City Works](/getting-started/how-gas-city-works) — where a formula (the HOW) sits among the six primitives |
@@ -729,7 +729,7 @@ step as failed.
 |---|---|
 | `max_attempts` | Total run/check attempts including the first (≥ 1); an integer, or a `"{{name}}"` var placeholder resolved at compile time |
 | `check.mode` | Checker implementation; only `"exec"` is supported |
-| `check.path` | Repo-relative or absolute script path to execute |
+| `check.path` | Script path to execute: `../assets/<relative-path>` for a script shipped by a formula layer, a path relative to the step's working directory (falling back to the store root), or an absolute path |
 | `check.timeout` | Script execution bound (e.g. `"2m"`); takes precedence over the step's `timeout` |
 
 ```toml
@@ -761,6 +761,42 @@ formula's; when one expansion invokes another, the outer expansion's vars come
 before the root formula's. The value must be an integer ≥ 1; a missing,
 non-integer, or smaller value fails compilation, unless the step's `condition`
 (section 1.5) excludes the check. Any other string is a parse error.
+
+**Where the check script lives.** A check script shipped by a pack belongs in
+the layer's `assets/scripts/checks/` directory and is declared as
+`path = "../assets/scripts/checks/<name>"`. Resolution follows the same
+formula-layer order as a `description_file` asset (section 1.8): the
+highest-priority layer that ships the script wins, so a city or importing
+pack can use — or shadow — another pack's validator without copying it. The
+step records the resolved absolute path, so the orchestrator runs the shipped
+file rather than a relative reference. In a v2 formula a literal `../assets/`
+path that no layer ships fails compilation with
+`check path "…" not found in any formula layer`; a path that still carries an
+expansion placeholder is resolved once expansion substitutes it.
+
+```toml
+formula = "checked-by-pack"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[[steps]]
+id = "implement"
+title = "Implement the feature"
+
+[steps.check]
+max_attempts = 3
+
+[steps.check.check]
+mode = "exec"
+path = "../assets/scripts/checks/verify.sh"
+timeout = "2m"
+```
+
+`.gc/` is runtime state, not a pack staging area: Gas City never fills it
+from pack `assets/`, so a check whose path points there has no backing file
+on any layer and the step is held open as unlaunchable (see
+**A check that cannot be launched**, below).
 
 Materialization: the compiler emits a spec sidecar (`<step>.spec`, kind
 `spec`, carrying the serialized step definition), the first iteration

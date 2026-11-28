@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/formula"
 )
 
 // Formula examples in docs/ teach check script paths. The form that resolves
@@ -45,7 +47,40 @@ var (
 	tomlCheckInlineRE = regexp.MustCompile(`^check\s*=\s*\{(.*)\}\s*$`)
 	// inlinePathRE extracts a `path = "…"` pair inside an inline table.
 	inlinePathRE = regexp.MustCompile(`\bpath\s*=\s*"([^"]*)"`)
+	// tomlFormulaNameRE captures a `formula = "…"` declaration.
+	tomlFormulaNameRE = regexp.MustCompile(`^formula\s*=\s*"([^"]*)"`)
 )
+
+// specSection returns the body of the spec section whose heading starts with
+// headingPrefix (e.g. "### 3.1."), from the heading to the next heading of
+// the same level.
+func specSection(content, headingPrefix string) (string, bool) {
+	var out []string
+	in := false
+	for _, line := range strings.Split(content, "\n") {
+		if in && strings.HasPrefix(line, "### ") {
+			break
+		}
+		if !in && strings.HasPrefix(line, headingPrefix) {
+			in = true
+			continue
+		}
+		if in {
+			out = append(out, line)
+		}
+	}
+	return strings.Join(out, "\n"), in
+}
+
+// specTableRow returns the table row whose first cell is key.
+func specTableRow(section, key string) (string, bool) {
+	for _, line := range strings.Split(section, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "| "+key+" ") {
+			return line, true
+		}
+	}
+	return "", false
+}
 
 // fencedTOMLBlocks returns the ```toml fenced blocks of a markdown document.
 // Any other fence (```sh, ```text, …) is skipped, so TOML-looking text inside
@@ -294,4 +329,98 @@ Offending declarations:`)
 			t.Errorf("  %s", f)
 		}
 	}
+}
+
+// TestFormulaSpecAssetCheckPathExampleCompiles loads formula-spec-v2 §3.1's
+// layer-asset check example through the real formula parser, so the spec's
+// example cannot drift from what actually compiles: with the script shipped
+// by a formula layer the check path resolves to that layer's absolute path,
+// and with no layer shipping it a v2 formula fails to compile with
+// "not found in any formula layer".
+func TestFormulaSpecAssetCheckPathExampleCompiles(t *testing.T) {
+	root := repoRoot()
+	data, err := os.ReadFile(filepath.Join(root, "docs", "reference", "specs", "formula-spec-v2.md"))
+	if err != nil {
+		t.Fatalf("reading formula-spec-v2.md: %v", err)
+	}
+	section, ok := specSection(string(data), "### 3.1.")
+	if !ok {
+		t.Fatal("formula-spec-v2.md has no §3.1 section")
+	}
+
+	// The check.path field row must name the ../assets/ layer-asset form.
+	row, ok := specTableRow(section, "`check.path`")
+	if !ok || !strings.Contains(row, "../assets/") {
+		t.Errorf("§3.1 check.path row = %q, want it to name the ../assets/ layer-asset form", row)
+	}
+
+	blocks, err := fencedTOMLBlocks(section)
+	if err != nil {
+		t.Fatalf("scanning §3.1 fences: %v", err)
+	}
+	var example *tomlBlock
+	var assetPath string
+	var name string
+	for i := range blocks {
+		for _, cp := range checkPathsInTOML(blocks[i]) {
+			if strings.HasPrefix(cp.path, "../assets/") {
+				example = &blocks[i]
+				assetPath = cp.path
+			}
+		}
+	}
+	if example == nil {
+		t.Fatal(`§3.1 has no TOML example whose check path uses the "../assets/" form`)
+	}
+	for _, line := range example.lines {
+		if m := tomlFormulaNameRE.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
+			name = m[1]
+		}
+	}
+	if name == "" {
+		t.Fatalf("§3.1 asset-path example has no formula name: %q", strings.Join(example.lines, "\n"))
+	}
+
+	writeExample := func(t *testing.T) string {
+		t.Helper()
+		formulas := filepath.Join(t.TempDir(), "pack", "formulas")
+		if err := os.MkdirAll(formulas, 0o755); err != nil {
+			t.Fatalf("mkdir formulas: %v", err)
+		}
+		content := strings.Join(example.lines, "\n") + "\n"
+		if err := os.WriteFile(filepath.Join(formulas, name+".toml"), []byte(content), 0o644); err != nil {
+			t.Fatalf("write example formula: %v", err)
+		}
+		return formulas
+	}
+
+	t.Run("shipped script resolves to layer asset", func(t *testing.T) {
+		formulas := writeExample(t)
+		script := filepath.Join(filepath.Dir(formulas), "assets", filepath.FromSlash(strings.TrimPrefix(assetPath, "../assets/")))
+		if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+			t.Fatalf("mkdir assets: %v", err)
+		}
+		if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatalf("write check script: %v", err)
+		}
+
+		f, err := formula.NewParser(formulas).LoadByName(name)
+		if err != nil {
+			t.Fatalf("LoadByName(%q): %v", name, err)
+		}
+		if len(f.Steps) == 0 || f.Steps[0].Ralph == nil || f.Steps[0].Ralph.Check == nil {
+			t.Fatalf("formula %q declares no check on Steps[0]", name)
+		}
+		if got := f.Steps[0].Ralph.Check.Path; got != script {
+			t.Fatalf("Steps[0].Ralph.Check.Path = %q, want layer asset %q", got, script)
+		}
+	})
+
+	t.Run("unshipped script fails compilation", func(t *testing.T) {
+		formulas := writeExample(t)
+		_, err := formula.NewParser(formulas).LoadByName(name)
+		if err == nil || !strings.Contains(err.Error(), "not found in any formula layer") {
+			t.Fatalf("LoadByName(%q) error = %v, want %q", name, err, "not found in any formula layer")
+		}
+	})
 }
