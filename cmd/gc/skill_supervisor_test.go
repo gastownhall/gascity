@@ -1250,3 +1250,100 @@ func TestRunStage1AliasedCatalogPathsAreNotAConflict(t *testing.T) {
 		t.Errorf("ops.review not linked: %v; stderr=%q", err, stderr.String())
 	}
 }
+
+// workDirWriterCity returns the AC-2 city: city agent mayor (claude) with
+// agent-local notes, and rig agent r (claude, rig fe) with agent-local
+// rig-notes and work_dir = "{{.CityRoot}}", so r's per-session stage-2
+// pass writes the city root's shared sink alongside mayor's stage-1 pass.
+func workDirWriterCity(t *testing.T) (string, *config.City) {
+	t.Helper()
+	cityPath := t.TempDir()
+	writeSkillSource(t, filepath.Join(cityPath, "skills", "plan"))
+	rigRoot := filepath.Join(cityPath, "rigs", "fe")
+	if err := os.MkdirAll(rigRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mayorSkills := filepath.Join(cityPath, "agents", "mayor", "skills")
+	writeSkillSource(t, filepath.Join(mayorSkills, "notes"))
+	rigSkills := filepath.Join(rigRoot, "agents", "r", "skills")
+	writeSkillSource(t, filepath.Join(rigSkills, "rig-notes"))
+	return cityPath, &config.City{
+		PackSkillsDir: filepath.Join(cityPath, "skills"),
+		Session:       config.SessionConfig{Provider: "tmux"},
+		Rigs:          []config.Rig{{Name: "fe", Path: rigRoot}},
+		Agents: []config.Agent{
+			{Name: "mayor", Scope: "city", Provider: "claude", SkillsDir: mayorSkills},
+			{Name: "r", Scope: "rig", Dir: "fe", Provider: "claude", SkillsDir: rigSkills, WorkDir: "{{.CityRoot}}"},
+		},
+	}
+}
+
+// TestStage1KeepsWorkDirWriterSkillsInScopeRootSink covers issue #7549
+// direction 1: rig agent r's work_dir is the city root, so r's stage-2
+// pass writes r's skills into the city root's sink — a sink whose
+// stage-1 pass groups only the agents scoped there. The stage-1 union
+// must count r as a writer of that sink through its configured work
+// dir, or the pass finds r's links owned-but-undesired and prunes them.
+func TestStage1KeepsWorkDirWriterSkillsInScopeRootSink(t *testing.T) {
+	clearGCEnv(t)
+	t.Setenv("GC_HOME", t.TempDir())
+	cityPath, cfg := workDirWriterCity(t)
+	sink := filepath.Join(cityPath, ".claude", "skills")
+
+	// r's stage-2 pass runs into the city root (its configured work dir).
+	var so, se bytes.Buffer
+	if err := materializeSkillsIntoWorkdir(cfg, &cfg.Agents[1], cityPath, cityPath, nil, &so, &se); err != nil {
+		t.Fatalf("r's stage 2: %v; stderr=%q", err, se.String())
+	}
+	if _, err := os.Lstat(filepath.Join(sink, "rig-notes")); err != nil {
+		t.Fatalf("precondition: r's stage 2 did not link rig-notes: %v; stderr=%q", err, se.String())
+	}
+
+	var stderr bytes.Buffer
+	if err := runStage1SkillMaterialization(cityPath, cfg, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"plan", "notes", "rig-notes"} {
+		if _, err := os.Lstat(filepath.Join(sink, name)); err != nil {
+			t.Errorf("%s missing from the city-root sink after the stage-1 pass: %v; stderr=%q", name, err, stderr.String())
+		}
+	}
+}
+
+// TestStage1PrunesDepartedWorkDirWriterLinks covers the other side of the
+// reverse lookup: once r's work_dir no longer resolves to the city root,
+// r is no longer a writer of the city-root sink, and the stage-1 pass
+// prunes r's links through the ownership manifest while keeping the
+// city's own skills.
+func TestStage1PrunesDepartedWorkDirWriterLinks(t *testing.T) {
+	clearGCEnv(t)
+	t.Setenv("GC_HOME", t.TempDir())
+	cityPath, cfg := workDirWriterCity(t)
+	sink := filepath.Join(cityPath, ".claude", "skills")
+
+	var stderr bytes.Buffer
+	if err := runStage1SkillMaterialization(cityPath, cfg, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"plan", "notes", "rig-notes"} {
+		if _, err := os.Lstat(filepath.Join(sink, name)); err != nil {
+			t.Fatalf("precondition: %s missing after the first pass: %v; stderr=%q", name, err, stderr.String())
+		}
+	}
+
+	// r's work_dir changes to its rig root (the default when work_dir is
+	// unset), so r stops writing the city-root sink.
+	cfg.Agents[1].WorkDir = ""
+	stderr.Reset()
+	if err := runStage1SkillMaterialization(cityPath, cfg, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(sink, "rig-notes")); !os.IsNotExist(err) {
+		t.Errorf("r's rig-notes survived r's departure from the city-root sink (lstat err=%v); stderr=%q", err, stderr.String())
+	}
+	for _, name := range []string{"plan", "notes"} {
+		if _, err := os.Lstat(filepath.Join(sink, name)); err != nil {
+			t.Errorf("%s pruned with r's links: %v; stderr=%q", name, err, stderr.String())
+		}
+	}
+}

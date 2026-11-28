@@ -174,8 +174,9 @@ func stage1SkillRequests(cityPath string, cfg *config.City, stderr io.Writer) []
 	}
 
 	type sinkState struct {
-		dir   string
-		union *materialize.SinkUnion
+		dir    string
+		union  *materialize.SinkUnion
+		folded map[string]bool
 	}
 	sinks := make(map[string]*sinkState)
 	var sinkOrder []string
@@ -211,10 +212,11 @@ func stage1SkillRequests(cityPath string, cfg *config.City, stderr io.Writer) []
 		sinkKey := pathutil.NormalizePathForCompare(sinkDir)
 		sink := sinks[sinkKey]
 		if sink == nil {
-			sink = &sinkState{dir: sinkDir, union: materialize.NewSinkUnion()}
+			sink = &sinkState{dir: sinkDir, union: materialize.NewSinkUnion(), folded: map[string]bool{}}
 			sinks[sinkKey] = sink
 			sinkOrder = append(sinkOrder, sinkKey)
 		}
+		sink.folded[agent.QualifiedName()] = true
 		sink.union.AddAgent(agent.QualifiedName(), cityCat, agentCat)
 		if lerr != nil {
 			// Fail closed: without this agent's catalog the pass cannot
@@ -222,6 +224,45 @@ func stage1SkillRequests(cityPath string, cfg *config.City, stderr io.Writer) []
 			// is rather than pruning them.
 			sink.union.MarkUnreadable(fmt.Sprintf("agent %q: LoadAgentCatalog %q: %v",
 				agent.QualifiedName(), agent.SkillsDir, lerr))
+		}
+	}
+
+	// Fold in the stage-2 writers each sink gains through configured
+	// work dirs outside the writer's scope root (skill_sink_writers.go):
+	// a session whose work_dir resolves into another scope's root
+	// materializes into that scope's sink, so the union must count that
+	// writer or the pass finds its links owned-but-undesired and prunes
+	// them (#7549). Sinks only writers reach stay out: their passes run
+	// per-session (stage 2), so stage 1 has no request for them.
+	index := buildSkillSinkWriterIndex(cityPath, cfg, rt)
+	writerKeys := make([]string, 0, len(index))
+	for key := range index {
+		writerKeys = append(writerKeys, key)
+	}
+	sort.Strings(writerKeys)
+	for _, key := range writerKeys {
+		sink := sinks[key]
+		if sink == nil {
+			continue
+		}
+		for _, w := range index[key] {
+			if sink.folded[w.Qualified] {
+				continue
+			}
+			agentCat, lerr := materialize.LoadAgentCatalog(w.Agent.SkillsDir)
+			cityCat := loadCatalog(agentRigScopeName(&w.Agent, cfg.Rigs))
+			if lerr == nil && len(materialize.EffectiveSet(cityCat, agentCat)) == 0 {
+				// The PreStart this writer's materialization rides on is
+				// injected only while the agent has skills (template_resolve
+				// Step 11b); with none, the agent writes nothing here.
+				continue
+			}
+			sink.folded[w.Qualified] = true
+			sink.union.AddAgent(w.Qualified, cityCat, agentCat)
+			if lerr != nil {
+				sink.union.MarkUnreadable(fmt.Sprintf("agent %q: LoadAgentCatalog %q: %v",
+					w.Qualified, w.Agent.SkillsDir, lerr))
+			}
 		}
 	}
 
