@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	sessionhybrid "github.com/gastownhall/gascity/internal/runtime/hybrid"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/pkg/eventexport"
 )
 
@@ -2218,6 +2219,93 @@ func TestExecutionBackstopOverloadWithNothingToSendKeepsTheGrace(t *testing.T) {
 			}
 			if len(f.drained) != 1 || f.drained[0] != f.sessName {
 				t.Fatalf("drains once the grace has run = %v, want one of %s; stdout=%s", f.drained, f.sessName, f.stdout.String())
+			}
+		})
+	}
+}
+
+// closedLiveStore is a work store whose live read finds the claim closed.
+type closedLiveStore struct {
+	beads.Store
+}
+
+func (c closedLiveStore) Get(id string) (beads.Bead, error) {
+	b, err := c.Store.Get(id)
+	b.Status = "closed"
+	return b, err
+}
+
+// An immediate verdict passes every gate a due nudge passes. A live claim no
+// longer this seat's in-progress bead clears; a live read that fails, a
+// pending interaction and an operator's content hold hold; a busy session
+// refunds the reservation. None spends an attempt or delivers anything, and a
+// refunded seat is nudged on the next quiet tick.
+func TestExecutionBackstopOverloadKeepsThePreDeliveryGates(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		setup   func(t *testing.T, f *executionBackstopFixture)
+		cleared bool   // the tick clears the work marker
+		hold    string // the hold the tick records, timestamp aside
+		log     string // a line the tick writes
+		retries bool   // a later quiet tick, with the gate gone, nudges at once
+	}{
+		{name: "live claim closed", cleared: true, setup: func(_ *testing.T, f *executionBackstopFixture) {
+			f.workStore = closedLiveStore{Store: f.store}
+		}},
+		{name: "live read fails", hold: backstopHoldRevalidate, setup: func(_ *testing.T, f *executionBackstopFixture) {
+			f.workStore = unreadableStore{Store: f.store}
+		}},
+		{name: "pending interaction", hold: backstopHoldPendingInteraction, setup: func(_ *testing.T, f *executionBackstopFixture) {
+			f.sp.SetPendingInteraction(f.sessName, &runtime.PendingInteraction{RequestID: "req-1", Kind: "approval"})
+		}},
+		{name: "content hold", hold: backstopHoldContentHeld, setup: func(t *testing.T, f *executionBackstopFixture) {
+			f.setSessionMeta(t, map[string]string{session.ContentHoldKey: "operator"})
+		}},
+		{name: "session busy", log: "is busy; deferred the nudge", retries: true, setup: func(_ *testing.T, f *executionBackstopFixture) {
+			f.sp.NudgeErrors = map[string]error{f.sessName: runtime.ErrSessionBusy}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExecutionBackstopFixture(t)
+			f.wokeAgo(t)
+			f.turns = overloadedTurns(f.now.Add(-91 * time.Second))
+			f.idleFor(t, idleClaimNudgeGrace+time.Second)
+			tc.setup(t, f)
+
+			f.tick(t)
+
+			if got := f.nudgeCount(); got != 0 {
+				t.Fatalf("nudges past a refusing gate = %d, want 0; stdout=%s", got, f.stdout.String())
+			}
+			if got := atoiOr0(f.sessionMeta(t, executionClaimNudgeCountKey)); got != 0 {
+				t.Fatalf("persisted attempt count = %d, want 0: no attempt spent; stdout=%s", got, f.stdout.String())
+			}
+			wantMarker := f.work.ID
+			if tc.cleared {
+				wantMarker = ""
+			}
+			if got := f.sessionMeta(t, executionClaimNudgeWorkKey); got != wantMarker {
+				t.Fatalf("work marker = %q, want %q", got, wantMarker)
+			}
+			if got := f.sessionMeta(t, executionClaimHoldKey); (tc.hold == "") != (got == "") || !strings.HasPrefix(got, tc.hold) {
+				t.Fatalf("hold breadcrumb = %q, want %q; stdout=%s", got, tc.hold, f.stdout.String())
+			}
+			if tc.log != "" && !strings.Contains(f.stdout.String(), tc.log) {
+				t.Fatalf("stdout = %q, want it to name %q", f.stdout.String(), tc.log)
+			}
+			if !tc.retries {
+				if got := f.nudgesDelivered(); len(got) != 0 {
+					t.Fatalf("nudges handed to the runtime = %q, want none", got)
+				}
+				return
+			}
+
+			f.sp.NudgeErrors = nil
+			f.now = f.now.Add(30 * time.Second)
+			f.idleFor(t, idleClaimNudgeGrace+time.Second)
+			f.tick(t)
+			if got := f.nudgeCount(); got != 1 || !strings.Contains(f.stdout.String(), "(attempt 1/3, immediate)") {
+				t.Fatalf("nudges on the next quiet tick = %d, want the immediate attempt; stdout=%s", got, f.stdout.String())
 			}
 		})
 	}
