@@ -15,10 +15,17 @@ package main
 // template the bead routes to, and the session claims a live runtime.
 
 import (
+	"context"
+	"io"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // liveHolderRows runs the v1 wrapper over one work row on the single-store
@@ -73,5 +80,122 @@ func TestPoolDemandFilterKeepsALiveHolderClaimBesideARigRow(t *testing.T) {
 	}
 	if !slices.Equal(keptRefs, []string{"riga", ""}) {
 		t.Fatalf("kept refs = %q, want [riga \"\"] aligned with the kept beads", keptRefs)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// buildDesiredState rows: the reported trace.
+// ---------------------------------------------------------------------------
+
+// liveHolderCity builds the reported shape: a single-store city with rig pool
+// riga/worker (max_active_sessions 5, scale_check reporting 1), an active
+// riga/worker session holding in_progress city-store bead A (assigned by its
+// session_name) routed to riga/worker, and open unassigned city-store bead B
+// routed to riga/worker. It returns the desired state's riga/worker session
+// names.
+func liveHolderCity(t *testing.T, heldPriority, queuedPriority *int) []string {
+	t.Helper()
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "riga")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("create rig dir: %v", err)
+	}
+	cityStore := beads.NewMemStore()
+	if _, err := cityStore.Create(beads.Bead{
+		Title:  "working rig worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:riga/worker"},
+		Metadata: map[string]string{
+			"template":     "riga/worker",
+			"session_name": "worker-gc-1",
+			"state":        "active",
+			"pool_managed": "true",
+		},
+	}); err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	held, err := cityStore.Create(beads.Bead{
+		Title:    "held city work",
+		Type:     "task",
+		Assignee: "worker-gc-1",
+		Priority: heldPriority,
+		Metadata: map[string]string{"gc.routed_to": "riga/worker"},
+	})
+	if err != nil {
+		t.Fatalf("create held bead: %v", err)
+	}
+	if err := cityStore.Update(held.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("set held in_progress: %v", err)
+	}
+	if _, err := cityStore.Create(beads.Bead{
+		Title:    "queued city work",
+		Type:     "task",
+		Priority: queuedPriority,
+		Metadata: map[string]string{"gc.routed_to": "riga/worker"},
+	}); err != nil {
+		t.Fatalf("create queued bead: %v", err)
+	}
+	sessionSnapshot, err := loadSessionBeadSnapshot(cityStore)
+	if err != nil {
+		t.Fatalf("load session snapshot: %v", err)
+	}
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker-gc-1", runtime.Config{}); err != nil {
+		t.Fatalf("start fake holder: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "riga", Path: rigPath}},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "riga",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(5),
+			ScaleCheck:        printCountCommand(1),
+		}},
+	}
+	dsResult := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), cfg, sp,
+		cityStore, map[string]beads.Store{"riga": beads.NewMemStore()}, sessionSnapshot, nil, io.Discard,
+	)
+	var names []string
+	for name, tp := range dsResult.State {
+		if tp.TemplateName == "riga/worker" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// The reported shape end to end: the holder's counted claim yields its resume
+// request and the queued bead's scale_check count a fresh session, so the
+// desired state holds two riga/worker sessions — the holder by its
+// session_name plus one fresh session. On the base the holder's claim is
+// dropped, the holder counts as reusable, and the queued bead's tier=new
+// request is realized onto it: one session, no create.
+func TestBuildDesiredState_RigPoolCountsALiveHoldersCityStoreClaim(t *testing.T) {
+	names := liveHolderCity(t, nil, nil)
+
+	if len(names) != 2 {
+		t.Fatalf("riga/worker desired sessions = %v (%d), want 2: the busy holder plus a fresh session for the queued bead", names, len(names))
+	}
+	if !slices.Contains(names, "worker-gc-1") {
+		t.Fatalf("riga/worker desired sessions = %v, want the holder's own session_name among them", names)
+	}
+}
+
+// The same shape with the queued bead at P0 and the held one at P4: the
+// concrete resume request is admitted before anonymous new demand whatever the
+// bead priorities, and the used holder is refused to the queued bead's
+// tier=new request, so the outcome is still the holder plus a fresh session —
+// the queued bead never takes the busy holder.
+func TestBuildDesiredState_RigPoolHigherPriorityQueuedWorkDoesNotTakeTheBusyHolder(t *testing.T) {
+	names := liveHolderCity(t, intPtr(4), intPtr(0))
+
+	if len(names) != 2 {
+		t.Fatalf("riga/worker desired sessions = %v (%d), want 2: the busy holder plus a fresh session for the queued bead", names, len(names))
+	}
+	if !slices.Contains(names, "worker-gc-1") {
+		t.Fatalf("riga/worker desired sessions = %v, want the holder's own session_name among them", names)
 	}
 }
