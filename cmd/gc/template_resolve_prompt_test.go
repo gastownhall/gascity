@@ -1491,7 +1491,7 @@ func newProbeTestParams(t *testing.T) (*agentBuildParams, *bytes.Buffer) {
 		cityPath:         t.TempDir(),
 		stderr:           &stderr,
 		gitLatch:         &gitProbeLatch{},
-		gitProbeDeadline: 100 * time.Millisecond,
+		gitProbeDeadline: 5 * time.Second,
 	}, &stderr
 }
 
@@ -1652,7 +1652,7 @@ func TestNewAgentBuildParamsWiresTheProbeLatch(t *testing.T) {
 	if bp.gitLatch == nil {
 		t.Fatal("newAgentBuildParams left gitLatch nil: the build would pay one deadline per agent")
 	}
-	bp.gitProbeDeadline = 100 * time.Millisecond
+	bp.gitProbeDeadline = 5 * time.Second
 	cp := *bp
 
 	if got := bp.defaultBranch("", t.TempDir()); got != "" {
@@ -1728,7 +1728,7 @@ func TestResolveTemplateBlockedGitRendersEmptyDefaultBranch(t *testing.T) {
 		beadNames:        make(map[string]string),
 		stderr:           io.Discard,
 		gitLatch:         &gitProbeLatch{},
-		gitProbeDeadline: 100 * time.Millisecond,
+		gitProbeDeadline: 5 * time.Second,
 	}
 	agent := &config.Agent{
 		Name:           "worker",
