@@ -49,6 +49,43 @@ func retiredNudgeTestCity(t *testing.T) (string, *session.Manager, *runtime.Fake
 	return dir, mgr, fake, info
 }
 
+// createSweepRow creates one more worker session row in the city the manager
+// serves, with extra metadata.
+func createSweepRow(t *testing.T, mgr *session.Manager, dir string, extra map[string]string) session.Info {
+	t.Helper()
+	md := map[string]string{"session_origin": "manual"}
+	for k, v := range extra {
+		md[k] = v
+	}
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "worker", Command: "claude", WorkDir: dir, Provider: "claude", ExtraMeta: md})
+	if err != nil {
+		t.Fatalf("Create worker: %v", err)
+	}
+	return info
+}
+
+// closeSweepRow closes the session row id.
+func closeSweepRow(t *testing.T, mgr *session.Manager, dir, id string) {
+	t.Helper()
+	if err := mgr.Close(context.Background(), testActorIn(t, session.ActorOperator, dir), id); err != nil {
+		t.Fatalf("Close(%s): %v", id, err)
+	}
+}
+
+// wantSweepKeepsPending runs the sweep and fails unless it moved nothing and
+// the queue still holds want pending items and nothing dead.
+func wantSweepKeepsPending(t *testing.T, dir string, cfg *config.City, store beads.Store, want int) {
+	t.Helper()
+	moved, err := sweepRetiredSessionNudges(dir, cfg, beads.NudgesStore{Store: store}, beads.SessionStore{Store: store}, time.Now())
+	if err != nil || moved != 0 {
+		t.Fatalf("sweep = (%d, %v), want (0, nil)", moved, err)
+	}
+	pending, _, dead := sweepQueueBuckets(t, dir)
+	if len(pending) != want || len(dead) != 0 {
+		t.Fatalf("queue pending/dead = %d/%d, want %d/0", len(pending), len(dead), want)
+	}
+}
+
 // sweepQueueBuckets reads the queue's raw state so a test can assert bucket
 // membership without the maintaining list's own sweep running first.
 func sweepQueueBuckets(t *testing.T, dir string) (pending, inFlight, dead []nudgequeue.Item) {
@@ -277,6 +314,50 @@ func TestRetiredSessionNudgeSweepKeepsSeatedItems(t *testing.T) {
 		if len(pending) != 1 || len(dead) != 0 {
 			t.Fatalf("queue pending/dead = %d/%d, want 1/0", len(pending), len(dead))
 		}
+	})
+}
+
+// TestRetiredSessionNudgeSweepKeepsServedSeatsAcrossSuccession covers the
+// AC-5 seat cases that turn on the row lifecycle rather than the key alone: a
+// closed named row the reconciler may still reopen, an open drained row, and a
+// named identity whose retired predecessor already has an open successor.
+func TestRetiredSessionNudgeSweepKeepsServedSeatsAcrossSuccession(t *testing.T) {
+	t.Run("closed-reopen-eligible-named-row-still-in-config", func(t *testing.T) {
+		dir, mgr, _, _ := retiredNudgeTestCity(t)
+		store := openNudgeBeadStore(dir)
+		cfg := &config.City{
+			Agents:        []config.Agent{{Name: "worker", Provider: "claude"}},
+			NamedSessions: []config.NamedSession{{Name: "lead", Template: "worker"}},
+		}
+		row := createSweepRow(t, mgr, dir, map[string]string{session.NamedSessionIdentityMetadata: "lead"})
+		closeSweepRow(t, mgr, dir, row.ID)
+		enqueueSweepItem(t, dir, store, "lead", row.ID, "n-lead-key")
+		enqueueSweepItem(t, dir, store, row.ID, row.ID, "n-lead-id")
+		wantSweepKeepsPending(t, dir, cfg, store, 2)
+	})
+	t.Run("open-drained-row", func(t *testing.T) {
+		dir, mgr, _, _ := retiredNudgeTestCity(t)
+		store := openNudgeBeadStore(dir)
+		cfg := &config.City{Agents: []config.Agent{{Name: "worker", Provider: "claude"}}}
+		row := createSweepRow(t, mgr, dir, map[string]string{"pool_slot": "7"})
+		if err := store.SetMetadata(row.ID, "state", string(session.StateDrained)); err != nil {
+			t.Fatalf("SetMetadata: %v", err)
+		}
+		enqueueSweepItem(t, dir, store, row.ID, row.ID, "n-drained")
+		wantSweepKeepsPending(t, dir, cfg, store, 1)
+	})
+	t.Run("named-identity-whose-retired-predecessor-has-an-open-successor", func(t *testing.T) {
+		dir, mgr, _, _ := retiredNudgeTestCity(t)
+		store := openNudgeBeadStore(dir)
+		cfg := &config.City{
+			Agents:        []config.Agent{{Name: "worker", Provider: "claude"}},
+			NamedSessions: []config.NamedSession{{Name: "lead", Template: "worker"}},
+		}
+		prev := createSweepRow(t, mgr, dir, map[string]string{session.NamedSessionIdentityMetadata: "lead", "continuity_eligible": "false"})
+		closeSweepRow(t, mgr, dir, prev.ID)
+		enqueueSweepItem(t, dir, store, "lead", prev.ID, "n-lead-successor")
+		createSweepRow(t, mgr, dir, map[string]string{session.NamedSessionIdentityMetadata: "lead"})
+		wantSweepKeepsPending(t, dir, cfg, store, 1)
 	})
 }
 
