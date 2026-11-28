@@ -106,7 +106,11 @@ func (l *externalReadsLane) legacyBackstops(ctx context.Context, env externalRea
 	if ctx.Err() != nil {
 		return
 	}
-	nudgeStalledPoolExecution(env.SP, env.Cfg, sessStore, raw, s.AssignedWork, s.AssignedStores, s.AssignedStoreRefs, s.Partial, now, l.events, l.requestExecutionStalled(env), l.stderr)
+	var turns ladderTurnReader
+	if l.turnReaderFor != nil {
+		turns = l.turnReaderFor(env)
+	}
+	nudgeStalledPoolExecution(ctx, turns, env.SP, env.Cfg, sessStore, raw, s.AssignedWork, s.AssignedStores, s.AssignedStoreRefs, s.Partial, now, l.events, l.requestExecutionStalled(env), l.stderr)
 }
 
 // requestExecutionStalled is the execution backstop's requestDrain: it reads

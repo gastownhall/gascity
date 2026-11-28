@@ -62,6 +62,14 @@ package main
 // seat that ended its turn on purpose, waiting on a human approval, re-checks
 // and waits again.
 //
+// A seat whose newest turn since its wake its provider refused for lack of
+// capacity (runtime.TurnFailure.Overloaded, the source's own class, never its
+// text), with no turn open, will not answer the grace: nothing is coming
+// back. It skips the observe-first grace (backstopResolutionImmediate) once
+// its pane reads quiet and its nudge has content; the cap, the backoff, the
+// terminal action and every delivery gate stand. Its turns are read through
+// the worker boundary; a read that fails waits out the grace.
+//
 // The activity clock is pane output, so output that is not a turn (a wall(1)
 // broadcast into every tty, a repaint) can hold a pass as not_quiet. Such a
 // hold never touches the pacing: it delays the next action by at most one
@@ -87,6 +95,7 @@ package main
 // a backstop that is holding can be told apart from one that is broken.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -189,7 +198,12 @@ const executionStalledLatchRetryAfter = 30 * time.Minute
 // snapshot; requestDrain is the existing drain request (drainOps.setDrain), taken
 // as a function so this file needs no reconciler wiring of its own. A partial
 // snapshot is not evidence of a stall, so it disables the predicate for that tick.
+// turns reads a seat's own turns (workerTurnReader), each read bounded by
+// ladderTurnReadBound under ctx; nil means no turn evidence, so every first
+// sighting waits out the observe-first grace.
 func nudgeStalledPoolExecution(
+	ctx context.Context,
+	turns ladderTurnReader,
 	sp runtime.Provider,
 	cfg *config.City,
 	store beads.Store,
@@ -210,6 +224,7 @@ func nudgeStalledPoolExecution(
 		return
 	}
 	runNudgeBackstop(sp, store, sessionBeads, nil, now, stdout, executionClaimNudgeLabel, poolExecutionBackstop{
+		turnHistory:  boundedTurnHistory(ctx, turns),
 		cfg:          cfg,
 		sp:           sp,
 		now:          now,
@@ -219,6 +234,20 @@ func nudgeStalledPoolExecution(
 		store:        store,
 		stdout:       stdout,
 	})
+}
+
+// boundedTurnHistory binds turns to ctx, each read bounded by
+// ladderTurnReadBound, so the predicate stores no context. A nil turns reads
+// nothing.
+func boundedTurnHistory(ctx context.Context, turns ladderTurnReader) func(beads.Bead) (runtime.TurnHistory, error) {
+	if turns == nil {
+		return nil
+	}
+	return func(row beads.Bead) (runtime.TurnHistory, error) {
+		readCtx, cancel := context.WithTimeout(ctx, ladderTurnReadBound)
+		defer cancel()
+		return turns(readCtx, row)
+	}
 }
 
 // executionClaim is one in-progress claim from the assigned-work snapshot, kept
@@ -323,6 +352,9 @@ func (s executionClaimSnapshot) forIdentities(identities []string) []executionCl
 // poolExecutionBackstop is the backstopPredicate for a pool slot that claimed a
 // bead and never executed it.
 type poolExecutionBackstop struct {
+	// turnHistory reads the seat's own turns; nil when the caller has no
+	// turn source.
+	turnHistory  func(beads.Bead) (runtime.TurnHistory, error)
 	cfg          *config.City
 	sp           runtime.Provider
 	now          time.Time
@@ -400,11 +432,48 @@ func (p poolExecutionBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, se
 	// Execution evidence vetoes the escalation, never the nudge (ga-ba7k1f):
 	// a seat that started its step is not drained, but a seat whose turn
 	// ended while it still holds the claim is nudged like any other.
-	if same, attempts, last := p.state(s, target); same && started && p.escalatesNext(s, attempts, last) {
+	same, attempts, last := p.state(s, target)
+	verdict := backstopResolutionOutstanding
+	if p.overloadedSinceWake(s, sessName, claim.BeadID, same, attempts, last) {
+		verdict = backstopResolutionImmediate
+	}
+	if same && started && p.escalatesNext(s, verdict, attempts, last) {
 		p.holdExecuting(&s, sessName, claim.BeadID, attempts)
 		return backstopTarget{}, backstopResolutionHold
 	}
-	return target, backstopResolutionOutstanding
+	return target, verdict
+}
+
+// overloadedSinceWake reports whether s's claim beadID may skip the
+// observe-first grace: the grace is still to wait (a first observation, or
+// one inside its window with no attempt spent), its nudge has content, and
+// the seat's turns, read since its last_woke_at, show no turn open and a
+// newest turn its provider failed as overloaded at or after the wake. Any
+// other reading, no turn source, no wake time or a read that fails is no
+// evidence; a failed read is logged unless the family records no turns.
+func (p poolExecutionBackstop) overloadedSinceWake(s beads.Bead, sessName, beadID string, same bool, attempts int, last time.Time) bool {
+	if same && (attempts != 0 || decideBackstopAction(0, last, p.now) != backstopActionWait) {
+		return false
+	}
+	if p.turnHistory == nil || p.contentFor(s, beadID) == "" {
+		return false
+	}
+	woke := parseRFC3339OrZero(s.Metadata["last_woke_at"])
+	if woke.IsZero() {
+		return false
+	}
+	hist, err := p.turnHistory(s)
+	if err != nil {
+		if !errors.Is(err, runtime.ErrTurnIdentityUnsupported) {
+			fmt.Fprintf(p.stdout, "execution-claim-nudge: %s: reading its turns: %v; waiting out the grace\n", sessName, err) //nolint:errcheck // best-effort
+		}
+		return false
+	}
+	if hist.Current.Active() || len(hist.Recent) == 0 {
+		return false
+	}
+	newest := hist.Recent[0]
+	return newest.Status == runtime.TurnStatusFailed && newest.Failure.Overloaded && !newest.EndedAt.Before(woke)
 }
 
 // holdExecuting records the executing hold on s, the escalation of its
@@ -429,13 +498,14 @@ func holdIs(s beads.Bead, reason string) bool {
 }
 
 // escalatesNext reports whether the engine's next action on s, given its
-// pacing, is the terminal escalation (exhausted): the attempts are spent and
+// pacing and its resolution verdict (decideBackstopActionFor), is the
+// terminal escalation (exhausted): the attempts are spent and
 // the last one's backoff has passed, or a nudge is due with no content to
 // deliver, which the engine escalates at once.
 // The second mirrors runNudgeBackstop's empty-content shortcut; change the two
 // in lockstep.
-func (p poolExecutionBackstop) escalatesNext(s beads.Bead, attempts int, last time.Time) bool {
-	switch decideBackstopAction(attempts, last, p.now) {
+func (p poolExecutionBackstop) escalatesNext(s beads.Bead, verdict backstopResolution, attempts int, last time.Time) bool {
+	switch decideBackstopActionFor(verdict, attempts, last, p.now) {
 	case backstopActionExhausted:
 		return true
 	case backstopActionNudge:
@@ -537,8 +607,14 @@ func (p poolExecutionBackstop) state(s beads.Bead, target backstopTarget) (same 
 // template names no configured agent gets no default either, and is held as
 // executing, as in the stamp-failure case.
 func (p poolExecutionBackstop) content(s beads.Bead) string {
-	if p.markedStarted(s, s.Metadata[executionClaimNudgeWorkKey]) {
-		return heldClaimNudgeFor(p.cfg, s, s.Metadata[executionClaimNudgeWorkKey])
+	return p.contentFor(s, s.Metadata[executionClaimNudgeWorkKey])
+}
+
+// contentFor is content for the marker's claim beadID, which resolve reads
+// before the marker names it.
+func (p poolExecutionBackstop) contentFor(s beads.Bead, beadID string) string {
+	if p.markedStarted(s, beadID) {
+		return heldClaimNudgeFor(p.cfg, s, beadID)
 	}
 	return claimNudgeFor(p.cfg, s)
 }

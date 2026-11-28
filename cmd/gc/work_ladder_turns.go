@@ -206,28 +206,9 @@ func (p *ladderPass) turns(row beads.Bead, rt ladderRuntime, gate workladder.Gat
 }
 
 // workerLadderTurns is the production turn source for one pass over env:
-// each seat's turns read through its worker handle (the transcript of its
-// current conversation, or its runtime's own turn record). The worker
-// factory is built on the first read, so a pass with nothing to read builds
-// none.
+// each seat's turns read through its worker handle (workerTurnReader).
 func workerLadderTurns(env externalReadsEnv) ladderTurnReader {
-	var (
-		factory *worker.Factory
-		err     error
-		built   bool
-	)
-	return func(ctx context.Context, row beads.Bead) (runtime.TurnHistory, error) {
-		if !built {
-			built = true
-			factory, err = workerFactoryWithConfig(env.CityPath, env.CityStore, env.SP, env.Cfg)
-		}
-		if err != nil {
-			return runtime.TurnHistory{}, fmt.Errorf("worker factory: %w", err)
-		}
-		h, err := factory.SessionByID(row.ID)
-		if err != nil {
-			return runtime.TurnHistory{}, err
-		}
-		return h.CurrentTurn(ctx)
-	}
+	return workerTurnReader(func() (*worker.Factory, error) {
+		return workerFactoryWithConfig(env.CityPath, env.CityStore, env.SP, env.Cfg)
+	})
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -134,7 +135,7 @@ func (h *stalledConvergenceHarness) runBackstopToExhaustion(t *testing.T) {
 		for j := range work {
 			stores[j] = h.env.store
 		}
-		nudgeStalledPoolExecution(h.env.sp, h.env.cfg, h.env.store, sessions, work, stores, refs, false,
+		nudgeStalledPoolExecution(context.Background(), nil, h.env.sp, h.env.cfg, h.env.store, sessions, work, stores, refs, false,
 			now, h.env.rec, h.drainRequester(t), &h.env.stdout)
 		now = now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
 	}
@@ -289,7 +290,7 @@ func TestExecutionStalledDrainDoesNotStrandAMidDrainWake(t *testing.T) {
 	for j := range work {
 		stores[j] = h.env.store
 	}
-	nudgeStalledPoolExecution(h.env.sp, h.env.cfg, h.env.store, sessions, work, stores, refs, false,
+	nudgeStalledPoolExecution(context.Background(), nil, h.env.sp, h.env.cfg, h.env.store, sessions, work, stores, refs, false,
 		h.env.clk.Now(), h.env.rec, func(beads.Bead) error { drains++; return nil }, &h.env.stdout)
 
 	if got := strings.Count(h.env.stdout.String(), "execution-claim-nudge: nudged"); got != before {

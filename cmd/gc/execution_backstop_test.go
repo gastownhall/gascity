@@ -52,6 +52,10 @@ type executionBackstopFixture struct {
 	// sessionStore, when set, is the store the backstop reads and writes the
 	// session row through, in place of store.
 	sessionStore beads.Store
+	// turns, when set, is the seat's turn source the tick hands the
+	// backstop; nil hands it none. turnReads counts its reads.
+	turns     ladderTurnReader
+	turnReads int
 }
 
 func newExecutionBackstopFixture(t *testing.T) *executionBackstopFixture {
@@ -149,7 +153,14 @@ func (f *executionBackstopFixture) tick(t *testing.T) {
 	if f.sessionStore != nil {
 		sessionStore = f.sessionStore
 	}
-	nudgeStalledPoolExecution(sp, f.cfg, sessionStore, sessions, work, stores, refs, false, f.now, rec,
+	var turns ladderTurnReader
+	if f.turns != nil {
+		turns = func(ctx context.Context, row beads.Bead) (runtime.TurnHistory, error) {
+			f.turnReads++
+			return f.turns(ctx, row)
+		}
+	}
+	nudgeStalledPoolExecution(context.Background(), turns, sp, f.cfg, sessionStore, sessions, work, stores, refs, false, f.now, rec,
 		func(sessionBead beads.Bead) error {
 			f.drained = append(f.drained, strings.TrimSpace(sessionBead.Metadata["session_name"]))
 			return nil
@@ -1919,5 +1930,58 @@ func TestExecutionBackstopANewClaimStartsWithoutTheOldLatch(t *testing.T) {
 	}
 	if got := f.sessionMeta(t, executionClaimNudgeStalledTokenKey); got != "incarnation-1" {
 		t.Fatalf("latch token after B's escalation = %q, want incarnation-1", got)
+	}
+}
+
+// overloadedTurns is a turn source whose seat has no turn open and whose
+// newest turn ended at endedAt, failed on a provider overload.
+func overloadedTurns(endedAt time.Time) ladderTurnReader {
+	return endedTurns(runtime.EndedTurn{
+		TurnID: "t1", EndedAt: endedAt, Status: runtime.TurnStatusFailed,
+		Failure: runtime.TurnFailure{Code: "server_overloaded", Overloaded: true, Message: "Selected model is at capacity."},
+	})
+}
+
+// endedTurns is a turn source whose seat has no turn open and whose newest
+// turns are recent, newest first.
+func endedTurns(recent ...runtime.EndedTurn) ladderTurnReader {
+	return func(context.Context, beads.Bead) (runtime.TurnHistory, error) {
+		return runtime.TurnHistory{Recent: recent}, nil
+	}
+}
+
+// wokeAgo stamps the session row's last_woke_at d before the fixture's clock:
+// the fence a turn's end must not precede to count for this incarnation.
+func (f *executionBackstopFixture) wokeAgo(t *testing.T, d time.Duration) {
+	t.Helper()
+	f.setSessionMeta(t, map[string]string{"last_woke_at": f.now.Add(-d).UTC().Format(time.RFC3339)})
+}
+
+// A quiet seat whose own turns show the provider ended its newest turn
+// overloaded, this incarnation, has nothing left for the observe-first grace
+// to wait for: the backstop delivers the claim nudge on the tick that first
+// sees the claim, as attempt 1/3 (ga-fo294b).
+func TestExecutionBackstopRetriesAProviderOverloadWithoutGenericGrace(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.wokeAgo(t, 10*time.Minute)
+	f.idleFor(t, idleClaimNudgeGrace+time.Second)
+	f.turns = overloadedTurns(f.now.Add(-91 * time.Second))
+
+	f.tick(t)
+
+	if got := f.nudgeCount(); got != 1 {
+		t.Fatalf("nudges after an explicit provider overload = %d, want 1 immediately; stdout=%s", got, f.stdout.String())
+	}
+	if got := f.nudgesDelivered(); len(got) != 1 || got[0] != "gc hook --claim --drain-ack --json" {
+		t.Fatalf("delivered nudges = %q, want the configured claim nudge once", got)
+	}
+	if got := f.sessionMeta(t, executionClaimNudgeCountKey); got != "1" {
+		t.Fatalf("persisted attempt count = %q, want 1", got)
+	}
+	if got := f.sessionMeta(t, executionClaimNudgeWorkKey); got != f.work.ID {
+		t.Fatalf("persisted work marker = %q, want %q", got, f.work.ID)
+	}
+	if out := f.stdout.String(); !strings.Contains(out, "(attempt 1/3, immediate)") {
+		t.Fatalf("stdout = %q, want the delivery named attempt 1/3, immediate", out)
 	}
 }

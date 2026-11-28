@@ -194,6 +194,13 @@ const (
 	backstopResolutionClear backstopResolution = iota
 	backstopResolutionHold
 	backstopResolutionOutstanding
+	// backstopResolutionImmediate is outstanding work whose seat the
+	// predicate has structural evidence will not answer the grace: its
+	// newest turn since the wake was refused by the provider for lack of
+	// capacity. The engine skips only the observe-first grace for it
+	// (decideBackstopActionFor); the attempt cap, the backoff, the terminal
+	// action and every delivery gate stand.
+	backstopResolutionImmediate
 )
 
 // backstopAction is the shared timing engine's verdict for one session on one
@@ -233,6 +240,17 @@ func decideBackstopAction(attempts int, last, now time.Time) backstopAction {
 	return backstopActionNudge
 }
 
+// decideBackstopActionFor is decideBackstopAction for an assignment resolved
+// as res: an immediate one (backstopResolutionImmediate) is nudged with no
+// attempt yet spent without waiting out the observe-first grace. Every later
+// step, the backoffs and the give-up included, is decideBackstopAction's.
+func decideBackstopActionFor(res backstopResolution, attempts int, last, now time.Time) backstopAction {
+	if res == backstopResolutionImmediate && attempts == 0 {
+		return backstopActionNudge
+	}
+	return decideBackstopAction(attempts, last, now)
+}
+
 // runNudgeBackstop drives pred over sessionBeads: for each session it governs
 // that is running and has outstanding work, it paces re-delivery of pred's
 // nudge content through the shared grace → nudge → backoff → give-up engine,
@@ -249,6 +267,11 @@ func decideBackstopAction(attempts int, last, now time.Time) backstopAction {
 // so the hold spends none of a seat's reminders. Its pacing stands as it was
 // and resumes once the hold clears; an attempt spent before the hold still
 // counts, even when the lane then holds its notice undelivered.
+//
+// An assignment pred resolves immediate (backstopResolutionImmediate) is
+// nudged on the tick that first observes it, or within its grace, rather than
+// after the grace: its first attempt is spent at once and logged as
+// immediate. Every gate before a delivery applies to it unchanged.
 func runNudgeBackstop(
 	sp runtime.Provider,
 	store beads.Store,
@@ -278,14 +301,14 @@ func runNudgeBackstop(
 			continue
 		}
 
-		target, resolution := pred.resolve(*s, workByID, sessName)
-		switch resolution {
+		target, verdict := pred.resolve(*s, workByID, sessName)
+		switch verdict {
 		case backstopResolutionHold:
 			continue
 		case backstopResolutionClear:
 			clearBackstop(pred, store, s, label, stdout)
 			continue
-		case backstopResolutionOutstanding:
+		case backstopResolutionOutstanding, backstopResolutionImmediate:
 			// Continue below. The hold breadcrumb is cleared where the engine
 			// actually advances, not here: clearing on every outstanding tick
 			// would flap it against a standing revalidate hold, costing two
@@ -306,10 +329,17 @@ func runNudgeBackstop(
 			clearBackstopHold(pred, store, s, stdout)
 			withdrawBackstopNotices(store, s, label, "the reminder's target changed", stdout)
 			pred.observe(store, s, target, now, stdout)
-			continue
+			if verdict != backstopResolutionImmediate {
+				continue
+			}
+			// An immediate assignment proceeds on the marker it just wrote;
+			// one whose marker did not land waits for the next tick.
+			if same, attempts, last = pred.state(*s, target); !same || attempts != 0 {
+				continue
+			}
 		}
 
-		action := decideBackstopAction(attempts, last, now)
+		action := decideBackstopActionFor(verdict, attempts, last, now)
 		if action != backstopActionWait && backstopContentHeld(*s) {
 			observeBackstopHold(pred, store, s, backstopHoldContentHeld, stdout)
 			continue
@@ -406,6 +436,10 @@ func runNudgeBackstop(
 					continue
 				}
 				fmt.Fprintf(stdout, "%s: %s failed: %v\n", label, sessName, err) //nolint:errcheck // best-effort
+				continue
+			}
+			if verdict == backstopResolutionImmediate {
+				fmt.Fprintf(stdout, "%s: nudged %s for %s (attempt %d/%d, immediate)\n", label, sessName, target.ID, attempts+1, idleClaimNudgeMaxAttempts) //nolint:errcheck // best-effort
 				continue
 			}
 			fmt.Fprintf(stdout, "%s: nudged %s for %s (attempt %d/%d)\n", label, sessName, target.ID, attempts+1, idleClaimNudgeMaxAttempts) //nolint:errcheck // best-effort
