@@ -461,3 +461,66 @@ func TestDrainAckHeldClaim_DesiredSeatWithUnblockedClaimWakesInPlace(t *testing.
 		t.Fatalf("%s events = %d, want 0 — the wake lane never releases the claim", events.BeadDeadAssigneeReopened, len(dead))
 	}
 }
+
+// TestDrainAckHeldClaim_DesiredSeatWithBlockedClaimStrandsThenRepairs pins the
+// blocked-claim recovery: the finalize's sleep leaves the claim blocked, so
+// the seat is not demand. The next tick stamps exactly one session.stranded
+// (SESS-624) and starts the confirmation window; the claim stays assigned on
+// every tick inside strandedRepairConfirmGrace; the first tick past the grace
+// releases the claim (open, unassigned) and closes the seat
+// close_reason=stranded-repair (SESS-625).
+func TestDrainAckHeldClaim_DesiredSeatWithBlockedClaimStrandsThenRepairs(t *testing.T) {
+	d := newDrainAckDesiredSeat(t, true)
+	d.assertFinalized(t)
+
+	// The stranded tick: one diagnostic, the window opens, nothing is released.
+	if woken := d.tick(t); woken != 0 {
+		t.Fatalf("woken = %d, want 0 — a blocked in_progress claim is not demand", woken)
+	}
+	stranded := drainAckEvents(t, d.rec, events.SessionStranded)
+	if len(stranded) != 1 {
+		t.Fatalf("%s events = %d, want exactly 1 on the first stranded tick", events.SessionStranded, len(stranded))
+	}
+	session := d.mustGet(t, d.session.ID)
+	if session.Metadata[strandedEventEmittedKey] == "" {
+		t.Fatalf("seat metadata lacks %s after the stranded tick: %v", strandedEventEmittedKey, session.Metadata)
+	}
+	if session.Status == "closed" {
+		t.Fatal("seat closed on the stranded tick — the confirmation window must run first")
+	}
+	if work := d.mustGet(t, d.work.ID); work.Assignee != d.session.ID || work.Status != "in_progress" {
+		t.Fatalf("step = status %q assignee %q, want still held inside the confirmation window", work.Status, work.Assignee)
+	}
+
+	// Inside the grace: the marker is aged but not past it — nothing changes.
+	d.env.clk.Advance(time.Minute)
+	if woken := d.tick(t); woken != 0 {
+		t.Fatalf("woken inside the grace = %d, want 0", woken)
+	}
+	if work := d.mustGet(t, d.work.ID); work.Assignee != d.session.ID {
+		t.Fatalf("step assignee %q inside the grace, want still held", work.Assignee)
+	}
+	if session := d.mustGet(t, d.session.ID); session.Status == "closed" {
+		t.Fatal("seat closed inside the confirmation window")
+	}
+	if n := len(drainAckEvents(t, d.rec, events.SessionStranded)); n != 1 {
+		t.Fatalf("%s events = %d inside the grace, want the single stamped diagnostic", events.SessionStranded, n)
+	}
+
+	// Past the grace: the repair releases the claim and retires the seat.
+	d.env.clk.Advance(2 * time.Minute)
+	if woken := d.tick(t); woken != 0 {
+		t.Fatalf("woken on the repair tick = %d, want 0", woken)
+	}
+	work := d.mustGet(t, d.work.ID)
+	if work.Status != "open" || work.Assignee != "" {
+		t.Fatalf("step = status %q assignee %q after the grace, want open/unassigned — the stranded repair reclaims blocked work", work.Status, work.Assignee)
+	}
+	session = d.mustGet(t, d.session.ID)
+	if session.Status != "closed" {
+		t.Fatalf("seat status = %q after the grace, want closed by the stranded repair", session.Status)
+	}
+	if want := sessionpkg.CanonicalCloseReason(strandedRepairCloseReason); session.Metadata["close_reason"] != want {
+		t.Fatalf("close_reason = %q, want %q", session.Metadata["close_reason"], want)
+	}
+}
