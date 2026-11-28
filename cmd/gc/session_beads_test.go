@@ -9293,6 +9293,216 @@ func nextLineContaining(lines []string, after int, needle string) int {
 // hand-off corpse: a live runtime is still stamped with a closed bead's
 // GC_SESSION_ID while its session_name now belongs to a different, open bead.
 // The corpse must be reaped so the live owner can rebind the name.
+// reapLandingProvider lets a simulated start land at one chosen point of the
+// closed-bead reap's proof-to-Stop section: just after the n-th GC_SESSION_ID
+// read of the name answers, at the exact-name listing, or at Stop entry, where
+// it also records the binding the runtime still carries as the Stop begins.
+type reapLandingProvider struct {
+	*runtime.Fake
+	afterIDRead  int // fire land after this GC_SESSION_ID read of named-1
+	atListing    bool
+	atStopEntry  bool
+	land         func()
+	idReads      int
+	stopBindings []string
+}
+
+func (p *reapLandingProvider) GetMeta(name, key string) (string, error) {
+	value, err := p.Fake.GetMeta(name, key)
+	if name == "named-1" && key == "GC_SESSION_ID" {
+		p.idReads++
+		if p.afterIDRead == p.idReads && p.land != nil {
+			p.land()
+			p.land = nil
+		}
+	}
+	return value, err
+}
+
+func (p *reapLandingProvider) ListRunning(prefix string) ([]string, error) {
+	names, err := p.Fake.ListRunning(prefix)
+	if prefix == "named-1" && p.atListing && p.land != nil {
+		p.land()
+		p.land = nil
+	}
+	return names, err
+}
+
+func (p *reapLandingProvider) Stop(name string) error {
+	if p.atStopEntry && p.land != nil {
+		p.land()
+		p.land = nil
+	}
+	if binding, err := p.Fake.GetMeta(name, "GC_SESSION_ID"); err == nil {
+		p.stopBindings = append(p.stopBindings, binding)
+	}
+	return p.Fake.Stop(name)
+}
+
+// reapLandingStore fires the landing at the n-th live Get of the closed row,
+// so the lease code's reads of an owner row cannot shift the count.
+type reapLandingStore struct {
+	beads.Store
+	closedID string
+	onNthGet int
+	gets     int
+	land     func()
+}
+
+func (s *reapLandingStore) Get(id string) (beads.Bead, error) {
+	bead, err := s.Store.Get(id)
+	if id == s.closedID {
+		s.gets++
+		if s.onNthGet == s.gets && s.land != nil {
+			s.land()
+			s.land = nil
+		}
+	}
+	return bead, err
+}
+
+// landAStartOnNamed1 is the interleaving issue #6111 reported: a start takes
+// named-1's runtime lease and, once taken, rebinds the name before releasing
+// it. It reports whether the start landed or was refused as busy.
+func landAStartOnNamed1(t *testing.T, city string, sp runtime.Provider) (landed bool) {
+	t.Helper()
+	lease, err := session.TryRuntimeLease(nil, session.RuntimeLeaseRequest{City: city, Name: "named-1"})
+	if errors.Is(err, session.ErrRuntimeLeaseBusy) {
+		return false
+	}
+	if err != nil {
+		t.Fatalf("taking named-1's runtime lease: %v", err)
+	}
+	if err := sp.SetMeta("named-1", "GC_SESSION_ID", "gc-rebound"); err != nil {
+		t.Fatalf("rebinding named-1 to a fresh bead: %v", err)
+	}
+	lease.Release()
+	return true
+}
+
+// TestReapRuntimesBoundToClosedBeadsExcludesStartsFromProofToStop pins the
+// lease's critical section, the fence that answers issue #6111: a start of
+// the reaped name either lands before the reaper takes the runtime lease —
+// the under-lease GC_SESSION_ID re-read then sees the rebound name and
+// nothing is stopped — or is refused as busy at every point inside the
+// section (the binding re-read, the status re-read, the exact-name listing,
+// Stop entry), and the single Stop hits the runtime still bound to the closed
+// row. The lease is free again once the reap returns, both with no open row
+// owning the name and with one (the reaper then stops under the owner's
+// record, not its flock alone).
+func TestReapRuntimesBoundToClosedBeadsExcludesStartsFromProofToStop(t *testing.T) {
+	for _, variant := range []struct {
+		name  string
+		setup func(t *testing.T) (store *reapLandingStore, snapshot *sessionBeadSnapshot, ownerID, closedID string)
+	}{
+		{"with no open row owning the name", func(_ *testing.T) (*reapLandingStore, *sessionBeadSnapshot, string, string) {
+			return &reapLandingStore{
+				Store:    beads.NewMemStoreFrom(0, []beads.Bead{{ID: "gc-closed", Status: "closed"}}, nil),
+				closedID: "gc-closed",
+			}, newSessionBeadSnapshot(nil), "", "gc-closed"
+		}},
+		{"with an open owner row", func(t *testing.T) (*reapLandingStore, *sessionBeadSnapshot, string, string) {
+			base := beads.NewMemStore()
+			mk := func(status string) beads.Bead {
+				b, err := base.Create(beads.Bead{
+					Type: sessionBeadType, Labels: []string{sessionBeadLabel},
+					Metadata: map[string]string{"session_name": "named-1", "state": "awake"},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if status == "closed" {
+					if err := base.Close(b.ID); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return b
+			}
+			old, owner := mk("closed"), mk("open")
+			return &reapLandingStore{Store: base, closedID: old.ID}, newSessionBeadSnapshot([]beads.Bead{owner}), owner.ID, old.ID
+		}},
+	} {
+		t.Run(variant.name, func(t *testing.T) {
+			city := t.TempDir()
+			t.Run("a start before the lease rebinds the name", func(t *testing.T) {
+				store, snapshot, _, closedID := variant.setup(t)
+				sp := &reapLandingProvider{Fake: boundFake(t, closedID)}
+				var landed bool
+				store.onNthGet = 1 // the sweep's closed-row read, before the lease
+				store.land = func() { landed = landAStartOnNamed1(t, city, sp) }
+				var stderr bytes.Buffer
+				if got := reapRuntimesBoundToClosedBeads(store, snapshot, nil, sp, nil, city, &stderr); got != 0 {
+					t.Fatalf("reaped %d under a name a start rebound, want 0; stderr=%q", got, stderr.String())
+				}
+				if !landed || len(sp.stopBindings) != 0 {
+					t.Fatalf("the start landed = %v, stops = %q; want the rebind to spare the runtime", landed, sp.stopBindings)
+				}
+				if nameHeld(t, city, "named-1") {
+					t.Fatal("the name lock is still held after the reap")
+				}
+			})
+
+			refusedInside := func(t *testing.T, arm func(sp *reapLandingProvider, store *reapLandingStore, land func()), drive func(store *reapLandingStore, snapshot *sessionBeadSnapshot, ownerID, closedID string, sp *reapLandingProvider, city string, stderr *bytes.Buffer) (reaped int, stopped bool, err error)) {
+				t.Helper()
+				store, snapshot, ownerID, closedID := variant.setup(t)
+				sp := &reapLandingProvider{Fake: boundFake(t, closedID)}
+				var landed bool
+				land := func() { landed = landAStartOnNamed1(t, city, sp) }
+				arm(sp, store, land)
+				var stderr bytes.Buffer
+				reaped, stopped, err := drive(store, snapshot, ownerID, closedID, sp, city, &stderr)
+				if err != nil {
+					t.Fatalf("the reap errored: %v; stderr=%q", err, stderr.String())
+				}
+				if reaped != 1 && !stopped {
+					t.Fatalf("reaped %d, stopped %v, want the one still-bound runtime; stderr=%q", reaped, stopped, stderr.String())
+				}
+				if landed || len(sp.stopBindings) != 1 || sp.stopBindings[0] != closedID {
+					t.Fatalf("the start landed = %v, bindings at Stop = %q; want the start refused busy and the still-bound runtime stopped; stderr=%q", landed, sp.stopBindings, stderr.String())
+				}
+				if strings.Contains(stderr.String(), "under its flock alone") {
+					t.Fatalf("stderr = %q, want the stop without a flock-alone fallback", stderr.String())
+				}
+				if nameHeld(t, city, "named-1") {
+					t.Fatal("the name lock is still held after the reap")
+				}
+			}
+			sweep := func(store *reapLandingStore, snapshot *sessionBeadSnapshot, _, _ string, sp *reapLandingProvider, city string, stderr *bytes.Buffer) (int, bool, error) {
+				return reapRuntimesBoundToClosedBeads(store, snapshot, nil, sp, nil, city, stderr), false, nil
+			}
+			directListed := func(store *reapLandingStore, _ *sessionBeadSnapshot, ownerID, closedID string, sp *reapLandingProvider, city string, stderr *bytes.Buffer) (int, bool, error) {
+				stopped, err := stopStillBoundClosedRuntimeLeased(store, city, "named-1", ownerID, closedID, sp, true, stderr)
+				return 0, stopped, err
+			}
+
+			t.Run("a start at the under-lease binding re-read is refused", func(t *testing.T) {
+				refusedInside(t,
+					func(sp *reapLandingProvider, _ *reapLandingStore, land func()) { sp.afterIDRead, sp.land = 2, land },
+					sweep)
+			})
+			t.Run("a start at the under-lease status re-read is refused", func(t *testing.T) {
+				refusedInside(t,
+					func(_ *reapLandingProvider, store *reapLandingStore, land func()) {
+						store.onNthGet, store.land = 2, land
+					},
+					sweep)
+			})
+			t.Run("a start at the exact-name listing is refused", func(t *testing.T) {
+				// The sweep lists only with a lane inventory, so the listing is
+				// driven through the leased stop itself.
+				refusedInside(t,
+					func(sp *reapLandingProvider, _ *reapLandingStore, land func()) { sp.atListing, sp.land = true, land },
+					directListed)
+			})
+			t.Run("a start at Stop entry is refused", func(t *testing.T) {
+				refusedInside(t,
+					func(sp *reapLandingProvider, _ *reapLandingStore, land func()) { sp.atStopEntry, sp.land = true, land },
+					sweep)
+			})
+		})
+	}
+}
+
 func TestReapRuntimesBoundToClosedBeadsStopsLiveRuntime(t *testing.T) {
 	testCity := t.TempDir()
 	sp := newDeadRuntimeArtifactProvider()
