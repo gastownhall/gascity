@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -180,47 +181,51 @@ func TestPerRunStoreFactoryOpensDistinctScopesConcurrently(t *testing.T) {
 		{name: "one path fails", openErr: errors.New("no store")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			want := beads.NewMemStore()
-			var calls, observed atomic.Int32
-			entered, release := make(chan struct{}), make(chan struct{})
-			open := perRunStoreFactory(func(string) (beads.Store, error) {
-				if calls.Add(1) == 1 {
-					close(entered)
+			// synctest.Wait returns once every caller is parked: one inside the
+			// open, the others waiting for its result.
+			synctest.Test(t, func(t *testing.T) {
+				want := beads.NewMemStore()
+				var calls, observed atomic.Int32
+				release := make(chan struct{})
+				open := perRunStoreFactory(func(string) (beads.Store, error) {
+					calls.Add(1)
+					<-release
+					if tc.openErr != nil {
+						return nil, tc.openErr
+					}
+					return want, nil
+				}, func(string) { observed.Add(1) })
+
+				const callers = 8
+				stores := make([]beads.Store, callers)
+				errs := make([]error, callers)
+				var wg sync.WaitGroup
+				for i := range callers {
+					wg.Go(func() { stores[i], errs[i] = open("same") })
 				}
-				<-release
+				synctest.Wait()
+				if got := calls.Load(); got != 1 {
+					t.Errorf("with all %d callers waiting, %d opens are running, want 1", callers, got)
+				}
+				close(release)
+				wg.Wait()
+
+				if got := calls.Load(); got != 1 {
+					t.Fatalf("open ran %d times, want 1", got)
+				}
+				for i := range callers {
+					if !errors.Is(errs[i], tc.openErr) || (tc.openErr == nil && stores[i] != want) {
+						t.Fatalf("caller %d got (%v, %v), want (%v, %v)", i, stores[i], errs[i], want, tc.openErr)
+					}
+				}
+				wantObserved := int32(1)
 				if tc.openErr != nil {
-					return nil, tc.openErr
+					wantObserved = 0
 				}
-				return want, nil
-			}, func(string) { observed.Add(1) })
-
-			const callers = 8
-			stores := make([]beads.Store, callers)
-			errs := make([]error, callers)
-			var wg sync.WaitGroup
-			for i := range callers {
-				wg.Go(func() { stores[i], errs[i] = open("same") })
-			}
-			<-entered
-			time.Sleep(50 * time.Millisecond) // let the other callers queue behind the open
-			close(release)
-			wg.Wait()
-
-			if got := calls.Load(); got != 1 {
-				t.Fatalf("open ran %d times, want 1", got)
-			}
-			for i := range callers {
-				if !errors.Is(errs[i], tc.openErr) || (tc.openErr == nil && stores[i] != want) {
-					t.Fatalf("caller %d got (%v, %v), want (%v, %v)", i, stores[i], errs[i], want, tc.openErr)
+				if got := observed.Load(); got != wantObserved {
+					t.Fatalf("observer called %d times, want %d", got, wantObserved)
 				}
-			}
-			wantObserved := int32(1)
-			if tc.openErr != nil {
-				wantObserved = 0
-			}
-			if got := observed.Load(); got != wantObserved {
-				t.Fatalf("observer called %d times, want %d", got, wantObserved)
-			}
+			})
 		})
 	}
 }
@@ -338,6 +343,27 @@ func TestDoctorScopeSweepStopsWhenDoneClosesMidSweep(t *testing.T) {
 		if want := sc.label + " skipped: check abandoned at its timeout"; sc.read || sc.skipped != want {
 			t.Fatalf("scope %s = read %v skipped %q, want skipped %q", sc.label, sc.read, sc.skipped, want)
 		}
+	}
+}
+
+// TestDoctorScopeSweepStopsBetweenOpenAndList (AC-4): when Done closes while
+// a scope's store is opening, the sweep never lists that store and reports
+// the scope as abandoned.
+func TestDoctorScopeSweepStopsBetweenOpenAndList(t *testing.T) {
+	done := make(chan struct{})
+	f := &countingFactory{stores: map[string]beads.Store{"c": beads.NewMemStore()}}
+	open := func(path string) (beads.Store, error) {
+		defer close(done)
+		return f.open(path)
+	}
+
+	got := sweepDoctorScopeLists(&doctor.CheckContext{Done: done}, []doctorWorkScope{{"city", "c"}}, open, beads.ListQuery{AllowScan: true})
+
+	if opened, lists := f.calls(); !slices.Equal(opened, []string{"c"}) || lists != 0 {
+		t.Fatalf("opened %v and listed %d time(s), want the store opened and never listed", opened, lists)
+	}
+	if want := "city skipped: check abandoned at its timeout"; got[0].read || got[0].skipped != want {
+		t.Fatalf("scope = read %v skipped %q, want skipped %q", got[0].read, got[0].skipped, want)
 	}
 }
 
@@ -573,6 +599,132 @@ func TestDoctorScopeSweepBoundsConcurrency(t *testing.T) {
 		if serial[i].label != parallel[i].label || serial[i].skipped != parallel[i].skipped || serial[i].read != parallel[i].read ||
 			!slices.EqualFunc(serial[i].items, parallel[i].items, func(a, b beads.Bead) bool { return a.ID == b.ID }) {
 			t.Fatalf("scope %d: limit 1 = %+v, default = %+v", i, serial[i], parallel[i])
+		}
+	}
+}
+
+// panicValue runs fn and returns the value it panicked with, or nil when it
+// returned.
+func panicValue(fn func()) (v any) {
+	defer func() { v = recover() }()
+	fn()
+	return nil
+}
+
+// TestDoctorScopeSweepPanicsOnItsCaller: a panic in a scope's open or List
+// reaches the goroutine that called the sweep, with the same value, and the
+// sweep starts no read after it.
+func TestDoctorScopeSweepPanicsOnItsCaller(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		boom      beads.Store // the store the first scope opens; nil when its open panics
+		wantPanic string
+	}{
+		{name: "open panics", wantPanic: "open exploded"},
+		{name: "List panics", boom: panickingListStore{Store: beads.NewMemStore()}, wantPanic: "list exploded"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &countingFactory{stores: map[string]beads.Store{"a": beads.NewMemStore()}}
+			factory := func(path string) (beads.Store, error) {
+				if path != "boom" {
+					return f.open(path)
+				}
+				if tc.boom == nil {
+					panic("open exploded")
+				}
+				return tc.boom, nil
+			}
+			scopes := []doctorWorkScope{{"city", "boom"}, {"rig a", "a"}}
+
+			got := panicValue(func() {
+				sweepDoctorScopeListsLimit(&doctor.CheckContext{}, scopes, factory, beads.ListQuery{AllowScan: true}, 1)
+			})
+
+			if got != tc.wantPanic {
+				t.Fatalf("sweep panic value = %v, want %q", got, tc.wantPanic)
+			}
+			if opened, lists := f.calls(); len(opened) != 0 || lists != 0 {
+				t.Fatalf("after the panic the sweep opened %v and listed %d time(s), want no further read", opened, lists)
+			}
+		})
+	}
+}
+
+// ranCheck is a passing doctor check that records that it ran.
+type ranCheck struct{ ran atomic.Bool }
+
+func (c *ranCheck) Name() string { return "ran" }
+
+func (c *ranCheck) Run(*doctor.CheckContext) *doctor.CheckResult {
+	c.ran.Store(true)
+	return okCheck(c.Name(), "ran")
+}
+
+func (c *ranCheck) CanFix() bool { return false }
+
+func (c *ranCheck) Fix(*doctor.CheckContext) error { return nil }
+
+func (c *ranCheck) WarmupEligible() bool { return false }
+
+// TestSweptCheckPanicFailsOnlyThatCheck: a store whose open or List panics
+// fails only the check whose sweep read it, in Run and in Fix, through the
+// doctor runner's per-check recovery, and the check registered after it
+// still runs.
+func TestSweptCheckPanicFailsOnlyThatCheck(t *testing.T) {
+	type newCheck func(cfg *config.City, cityDir string, factory func(string) (beads.Store, error)) doctor.Check
+	checks := []struct {
+		name string
+		new  newCheck
+	}{
+		{"hold-label-routed-to", func(cfg *config.City, cityDir string, factory func(string) (beads.Store, error)) doctor.Check {
+			return newHoldLabelRoutedToCheck(cfg, cityDir, factory)
+		}},
+		{"run-target-routed-to-backfill", func(cfg *config.City, cityDir string, factory func(string) (beads.Store, error)) doctor.Check {
+			return newRunTargetRoutedToBackfillCheck(cfg, cityDir, factory)
+		}},
+	}
+	for _, check := range checks {
+		for _, tc := range []struct {
+			panicIn, value string
+		}{
+			{panicIn: "open", value: "open exploded"},
+			{panicIn: "List", value: "list exploded"},
+		} {
+			t.Run(check.name+"/"+tc.panicIn, func(t *testing.T) {
+				cityDir, rigDir := t.TempDir(), t.TempDir()
+				cfg := &config.City{Rigs: []config.Rig{{Name: "repo", Path: rigDir}}}
+				factory := func(path string) (beads.Store, error) {
+					switch {
+					case path != rigDir:
+						return beads.NewMemStore(), nil
+					case tc.panicIn == "open":
+						panic(tc.value)
+					default:
+						return panickingListStore{Store: beads.NewMemStore()}, nil
+					}
+				}
+				later := &ranCheck{}
+				d := &doctor.Doctor{CheckTimeout: time.Minute}
+				d.Register(check.new(cfg, cityDir, factory))
+				d.Register(later)
+
+				report := d.RunCollect(&doctor.CheckContext{}, true)
+				d.Wait()
+
+				if len(report.Results) != 2 {
+					t.Fatalf("results = %+v, want the panicking check and the one after it", report.Results)
+				}
+				res := report.Results[0]
+				if want := "panic: " + tc.value; res.Status != doctor.StatusError || res.Severity != doctor.SeverityBlocking || res.Message != want {
+					t.Fatalf("Run result = %v %v %q, want the runner's blocking %q", res.Status, res.Severity, res.Message, want)
+				}
+				if want := "fix for " + check.name + " panicked: " + tc.value; !res.FixAttempted || res.FixError != want {
+					t.Fatalf("Fix attempted %v error %q, want %q", res.FixAttempted, res.FixError, want)
+				}
+				if !later.ran.Load() || report.Results[1].Status != doctor.StatusOK {
+					t.Fatalf("later check ran %v with %+v, want it run and passing", later.ran.Load(), report.Results[1])
+				}
+			})
 		}
 	}
 }

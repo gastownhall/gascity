@@ -1,8 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"golang.org/x/sync/errgroup"
 
@@ -68,6 +70,12 @@ type doctorScopeList[S doctorScopeLister] struct {
 // open or List: every scope not yet opened or listed is reported as
 // abandoned, and the sweep returns when the calls already in flight finish.
 // A store's List takes no context, so a call in flight runs to completion.
+//
+// A panic in a scope's open or List stops the sweep the same way. Once the
+// calls in flight finish, the sweep panics again with the same value on its
+// caller's goroutine, where the doctor runner's per-check recovery reports it
+// as that check's failure; a panic left on a sweep goroutine would end the
+// whole doctor run.
 func sweepDoctorScopeLists[S doctorScopeLister](ctx *doctor.CheckContext, scopes []doctorWorkScope, newStore func(string) (S, error), query beads.ListQuery) []doctorScopeList[S] {
 	return sweepDoctorScopeListsLimit(ctx, scopes, newStore, query, doctorScopeSweepConcurrency)
 }
@@ -78,44 +86,71 @@ func sweepDoctorScopeListsLimit[S doctorScopeLister](ctx *doctor.CheckContext, s
 	results := make([]doctorScopeList[S], len(scopes))
 	var g errgroup.Group
 	g.SetLimit(limit)
+	var panicked atomic.Bool
+	// stopped reports that the sweep starts no new open or List. A scope
+	// stopped by a panic gets the abandoned skip line, which nothing reads:
+	// the sweep panics instead of returning its results.
+	stopped := func() bool { return ctx.Canceled() || panicked.Load() }
 	for i, sc := range scopes {
 		results[i].label = sc.label
 		if newStore == nil || strings.TrimSpace(sc.path) == "" {
 			continue
 		}
-		if ctx.Canceled() {
+		if stopped() {
 			results[i].skipped = doctorScopeAbandoned(sc.label)
 			continue
 		}
-		g.Go(func() error {
-			res := &results[i]
-			if ctx.Canceled() {
-				res.skipped = doctorScopeAbandoned(sc.label)
-				return nil
-			}
-			store, err := newStore(sc.path)
-			if err != nil {
-				res.skipped = fmt.Sprintf("%s skipped: opening bead store: %v", sc.label, err)
-				return nil
-			}
-			res.store = store
-			if ctx.Canceled() {
-				res.skipped = doctorScopeAbandoned(sc.label)
-				return nil
-			}
-			items, err := store.List(query)
-			if err != nil {
-				res.skipped = fmt.Sprintf("%s skipped: listing beads: %v", sc.label, err)
-				return nil
-			}
-			res.items = items
-			res.read = true
+		g.Go(func() (err error) {
+			defer func() {
+				if r := recover(); r != nil {
+					panicked.Store(true)
+					err = doctorScopeReadPanic{value: r}
+				}
+			}()
+			readDoctorScope(&results[i], sc, newStore, query, stopped)
 			return nil
 		})
 	}
-	_ = g.Wait() // workers record their failures in their own slot and never return an error
+	// A worker returns an error only for a panic it recovered.
+	var p doctorScopeReadPanic
+	if errors.As(g.Wait(), &p) {
+		panic(p.value)
+	}
 	return results
 }
+
+// readDoctorScope opens one scope and lists it into res, unless stopped
+// reports before the open or before the List that the sweep has stopped. A
+// scope that fails to open or to list gets its skip line.
+func readDoctorScope[S doctorScopeLister](res *doctorScopeList[S], sc doctorWorkScope, newStore func(string) (S, error), query beads.ListQuery, stopped func() bool) {
+	if stopped() {
+		res.skipped = doctorScopeAbandoned(sc.label)
+		return
+	}
+	store, err := newStore(sc.path)
+	if err != nil {
+		res.skipped = fmt.Sprintf("%s skipped: opening bead store: %v", sc.label, err)
+		return
+	}
+	res.store = store
+	if stopped() {
+		res.skipped = doctorScopeAbandoned(sc.label)
+		return
+	}
+	items, err := store.List(query)
+	if err != nil {
+		res.skipped = fmt.Sprintf("%s skipped: listing beads: %v", sc.label, err)
+		return
+	}
+	res.items = items
+	res.read = true
+}
+
+// doctorScopeReadPanic carries a panic recovered on a sweep goroutine back to
+// the sweep, which panics again with value on its caller's goroutine.
+type doctorScopeReadPanic struct{ value any }
+
+func (p doctorScopeReadPanic) Error() string { return fmt.Sprintf("scope read panicked: %v", p.value) }
 
 // doctorScopeAbandoned is the skip line of a scope a check stopped reading
 // because the runner abandoned it at its timeout.
