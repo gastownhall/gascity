@@ -3,7 +3,6 @@ package dispatch
 import (
 	"context"
 	"encoding/json"
-	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -262,8 +261,8 @@ func drainClaimed(t *testing.T, store beads.Store, b beads.Bead) {
 }
 
 // drainServeHeld serves cycles until one makes no progress and no errors. The
-// abort that closes the body is progress; the held verdict (an ErrControlPending
-// pass, then the control parked behind its drain edge) is idle. The control
+// abort that marks the body is progress; the held verdict (the control parked
+// behind the open, abort-decided body) is idle. The control
 // stays open with no attempt spent, so the hold state is the first idle cycle.
 func drainServeHeld(t *testing.T, fx crashFixture) {
 	t.Helper()
@@ -282,8 +281,10 @@ func drainServeHeld(t *testing.T, fx crashFixture) {
 
 // TestCompiledRalphIterationDrainControlBlocksLiveMember pins AC-2: through
 // the hold, the ralph control stays open with no attempt spent — no
-// gc.attempt_log, no check has fired — parked behind a blocks edge on the
-// claimed member, which keeps running with its assignee.
+// gc.attempt_log, no check has fired — while the claimed member keeps running
+// with its assignee. The abort is decided but deferred: the iteration body
+// stays open, marked gc.scope_aborted_by the failed worker, so the control is
+// parked behind the open body until the claimed member's close settles it.
 func TestCompiledRalphIterationDrainControlBlocksLiveMember(t *testing.T) {
 	t.Parallel()
 	for _, tc := range drainUnforcedAbortStores() {
@@ -312,8 +313,15 @@ func TestCompiledRalphIterationDrainControlBlocksLiveMember(t *testing.T) {
 			if bAfter.Status != "in_progress" || bAfter.Assignee != "pool-worker" {
 				t.Errorf("worker B = %s/%s, want still claimed in_progress by pool-worker", bAfter.Status, bAfter.Assignee)
 			}
-			if !drainBlocksOn(t, fx.store, control, bAfter.ID) {
-				t.Errorf("ralph control %s has no blocks edge on the live member %s", control.ID, bAfter.ID)
+			body := drainBeadByRefSuffix(t, all, "loop.iteration.1")
+			if body.Status != "open" {
+				t.Errorf("iteration body = %s, want open: its abort waits for worker B", body.Status)
+			}
+			if got, want := body.Metadata[beadmeta.ScopeAbortedByMetadataKey], drainBeadByRefSuffix(t, all, "loop.iteration.1.a").ID; got != want {
+				t.Errorf("iteration body gc.scope_aborted_by = %q, want the failed worker %s", got, want)
+			}
+			if !drainBlocksOn(t, fx.store, control, body.ID) {
+				t.Errorf("ralph control %s has no blocks edge on the open iteration body %s", control.ID, body.ID)
 			}
 		})
 	}
@@ -459,10 +467,10 @@ func TestCompiledRalphIterationDrainHardFailAfterMemberCloses(t *testing.T) {
 
 // TestCompiledRalphIterationDrainForcedSettleHoldsNextIteration pins the
 // forced-settle route to the same defect: an on_complete fanout on the failed
-// worker settles the iteration scope through the forced close every store
-// takes — the bd close policy included — so the body closes failed while the
-// claimed sibling runs. The drain gate still holds the verdict, and exactly
-// one iteration 2 exists once the sibling closes.
+// worker settles the iteration scope through the close every store takes —
+// the bd close policy included. The abort defers while the claimed sibling
+// runs: the body stays open, marked gc.scope_aborted_by, so no verdict fires,
+// and exactly one iteration 2 exists once the sibling closes.
 func TestCompiledRalphIterationDrainForcedSettleHoldsNextIteration(t *testing.T) {
 	t.Parallel()
 	for _, tc := range drainForcedSettleStores() {
@@ -483,8 +491,8 @@ func TestCompiledRalphIterationDrainForcedSettleHoldsNextIteration(t *testing.T)
 				t.Fatalf("worker A's fanout = %s/%s, want closed/fail: the settle this control drove is the route that closed the body", fanout.Status, fanout.Metadata[beadmeta.OutcomeMetadataKey])
 			}
 			body := drainBeadByRefSuffix(t, all, "loop.iteration.1")
-			if body.Status != "closed" || body.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail {
-				t.Fatalf("iteration body = %s/%s, want settled closed/fail while worker B still runs", body.Status, body.Metadata[beadmeta.OutcomeMetadataKey])
+			if body.Status != "open" || body.Metadata[beadmeta.ScopeAbortedByMetadataKey] == "" {
+				t.Fatalf("iteration body = %s gc.scope_aborted_by=%q, want open with its abort decided while worker B still runs", body.Status, body.Metadata[beadmeta.ScopeAbortedByMetadataKey])
 			}
 			drainRequireNoIteration(t, all, 2)
 
@@ -701,8 +709,9 @@ func TestCompiledRalphIterationDrainHoldsNextIteration(t *testing.T) {
 // crash-safe and idempotent over its own write window: a dispatcher killed
 // at, or failing, any store write of the abort that closes the body, the gate
 // pass that parks the control, and the verdict that ends iteration 1
-// converges on the uninterrupted end state — the aborted iteration drains,
-// exactly one iteration 2 follows, the control carries its drain edge, and
+// converges on the uninterrupted end state — the aborted iteration drains
+// and its body closes failed under the deferred-abort marker, exactly one
+// iteration 2 follows, and
 // the loop exhausts as before the gate. The unforced route (MemStore) and the
 // forced-settle route (the bd close-policy double) are both covered.
 //
@@ -765,9 +774,10 @@ func iterationDrainCrashScenario(t *testing.T, name string, tc drainStoreCase, f
 			if got := control.Metadata[beadmeta.FailedAttemptMetadataKey]; got != "3" {
 				t.Fatalf("uninterrupted run: ralph gc.failed_attempt = %q, want 3", got)
 			}
-			b := ledgerBeadByRefSuffix(t, ledger, "loop.iteration.1.b")
-			if !slices.Contains(control.Blocks, "blocks:"+b.ID) {
-				t.Errorf("uninterrupted run: ralph control has no drain edge on %s", b.ID)
+			body1 := ledgerBeadByRefSuffix(t, ledger, "loop.iteration.1")
+			if body1.Status != "closed" || body1.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail || body1.Metadata[beadmeta.ScopeAbortedByMetadataKey] == "" {
+				t.Errorf("uninterrupted run: iteration 1 = %s/%s gc.scope_aborted_by=%q, want closed/fail by the deferred abort",
+					body1.Status, body1.Metadata[beadmeta.OutcomeMetadataKey], body1.Metadata[beadmeta.ScopeAbortedByMetadataKey])
 			}
 			body2 := ledgerBeadByRefSuffix(t, ledger, "loop.iteration.2")
 			if body2.Status != "closed" {

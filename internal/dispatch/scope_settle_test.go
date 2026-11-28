@@ -363,6 +363,24 @@ func assertAbortDeferred(t *testing.T, store beads.Store, bodyID, decider, liveC
 	assertBeadState(t, store, liveCheckID, "open", "")
 }
 
+// assertAbortSettled pins the body closing fail with the propagated member
+// metadata and the failure stamp of the first hard-failed member.
+func assertAbortSettled(t *testing.T, store beads.Store, bodyID string, culpritID string, wantMeta map[string]string) {
+	t.Helper()
+	body := assertBeadState(t, store, bodyID, "closed", beadmeta.OutcomeFail)
+	for k, v := range wantMeta {
+		if body.Metadata[k] != v {
+			t.Fatalf("body %s = %q, want %q (propagated member metadata)", k, body.Metadata[k], v)
+		}
+	}
+	if got := body.Metadata[beadmeta.FailureSubjectMetadataKey]; got != culpritID {
+		t.Fatalf("body gc.failure_subject = %q, want %q", got, culpritID)
+	}
+	if got := body.Metadata[beadmeta.FailureClassMetadataKey]; got != beadmeta.FailureClassHard {
+		t.Fatalf("body gc.failure_class = %q, want hard", got)
+	}
+}
+
 // TestScopeAbortDefersBodyCloseWhileMemberInFlight is issue #9507 on bd's close
 // policy: an abort decided while a sibling member is claimed must not try to
 // close the body past it (bd refuses, the control retries until quarantine) nor
@@ -384,5 +402,107 @@ func TestScopeAbortDefersBodyCloseWhileMemberInFlight(t *testing.T) {
 	assertBeadState(t, f.store, f.checkB.ID, "closed", beadmeta.OutcomePass)
 	if slices.Contains(readyIDs(t, f.store), f.d.ID) {
 		t.Fatalf("step outside the scope %s is ready while the member it needs is in flight", f.d.ID)
+	}
+}
+
+// inFlightSettleCase is one way the in-flight member of a deferred abort ends.
+// Either way the decided abort stands: the body closes fail, never pass.
+type inFlightSettleCase struct {
+	name  string
+	close map[string]string
+}
+
+var inFlightSettleCases = []inFlightSettleCase{
+	{
+		name:  "A closes pass",
+		close: map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass, "step_a.note": "done"},
+	},
+	{
+		name: "A closes fail hard",
+		close: map[string]string{
+			beadmeta.OutcomeMetadataKey:       beadmeta.OutcomeFail,
+			beadmeta.FailureClassMetadataKey:  beadmeta.FailureClassHard,
+			beadmeta.FailureReasonMetadataKey: "step-a broke",
+			"step_a.note":                     "done",
+		},
+	},
+}
+
+// culprit is the member whose hard failure the settled body must name: the
+// first hard-failed member in bead-ID order.
+func (c inFlightSettleCase) culprit(f inFlightAbortFixture) string {
+	if c.close[beadmeta.FailureClassMetadataKey] == beadmeta.FailureClassHard {
+		return min(f.a.ID, f.b.ID)
+	}
+	return f.b.ID
+}
+
+// TestScopeAbortSettlesBodyWhenInFlightMemberCloses covers the second half of
+// issue #9507: when the in-flight member of a deferred abort closes, however it
+// ends, its own scope-check (ready because its blocker closed, whoever closed
+// it) closes the body fail and only then releases the steps rewritten onto it.
+func TestScopeAbortSettlesBodyWhenInFlightMemberCloses(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range inFlightSettleCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newInFlightAbortFixture(t, newStrictCloseStore())
+			processScopeControl(t, f.store, f.checkB.ID)
+			assertAbortDeferred(t, f.store, f.body.ID, f.b.ID, f.checkA.ID)
+
+			closeMember(t, f.store, f.a.ID, tc.close)
+			if !slices.Contains(readyIDs(t, f.store), f.checkA.ID) {
+				t.Fatalf("A's scope-check %s is not ready after A closed; nothing would re-drive the scope", f.checkA.ID)
+			}
+			result := processScopeControl(t, f.store, f.checkA.ID)
+			if result.Action != "scope-fail" {
+				t.Fatalf("A's scope-check action = %q, want scope-fail", result.Action)
+			}
+			assertAbortSettled(t, f.store, f.body.ID, tc.culprit(f), map[string]string{
+				"review.verdict": "blocked",
+				"step_a.note":    "done",
+			})
+			assertBeadState(t, f.store, f.checkA.ID, "closed", beadmeta.OutcomePass)
+			if !slices.Contains(readyIDs(t, f.store), f.d.ID) {
+				t.Fatalf("step outside the scope %s is not ready after the in-flight member settled", f.d.ID)
+			}
+			if !slices.Contains(readyIDs(t, f.store), f.finalize.ID) {
+				t.Fatalf("workflow-finalize %s is not ready after the body closed", f.finalize.ID)
+			}
+		})
+	}
+}
+
+// TestScopeAbortTriggeredHonorsDecidedAbort pins the predicate both settlement
+// sites (processScopeCheck and reconcileScopeForTerminalMember) share: a member
+// that passed still settles a scope whose abort is already decided as aborted.
+func TestScopeAbortTriggeredHonorsDecidedAbort(t *testing.T) {
+	t.Parallel()
+
+	passed := beads.Bead{ID: "m-1", Status: "closed", Metadata: map[string]string{
+		beadmeta.OnFailMetadataKey:  "abort_scope",
+		beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass,
+	}}
+	failed := beads.Bead{ID: "m-2", Status: "closed", Metadata: map[string]string{
+		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail,
+	}}
+	unmarked := beads.Bead{ID: "body", Metadata: map[string]string{}}
+	marked := beads.Bead{ID: "body", Metadata: map[string]string{scopeAbortedByKey: "m-2"}}
+
+	for _, tc := range []struct {
+		name   string
+		member beads.Bead
+		body   beads.Bead
+		want   bool
+	}{
+		{name: "passed member, open scope", member: passed, body: unmarked, want: false},
+		{name: "passed member, decided abort", member: passed, body: marked, want: true},
+		{name: "failed member, open scope", member: failed, body: unmarked, want: true},
+		{name: "failed member, decided abort", member: failed, body: marked, want: true},
+	} {
+		if got := scopeAbortTriggered(tc.member, tc.body); got != tc.want {
+			t.Errorf("%s: scopeAbortTriggered = %t, want %t", tc.name, got, tc.want)
+		}
 	}
 }

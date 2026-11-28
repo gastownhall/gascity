@@ -524,6 +524,9 @@ func processScopeCheck(store beads.GraphStore, bead beads.Bead, opts ProcessOpti
 			opts.tracef("scope-check bead=%s subject=%s pending status=%s", bead.ID, subject.ID, subject.Status)
 			return ControlResult{}, ErrControlPending
 		}
+		if scopeAbortDecided(body) {
+			return completeScopeAbort(store, bead, subject, body, opts)
+		}
 		remainingOpen, err := tracePhase(opts, bead.ID, "check-open-members", func() (bool, error) {
 			return hasOpenScopeMembersInView(store, rootID, scopeRef, opts, bead.ID)
 		})
@@ -563,21 +566,8 @@ func processScopeCheck(store beads.GraphStore, bead beads.Bead, opts ProcessOpti
 		return ControlResult{}, ErrControlPending
 	}
 
-	if beadOutcomeFailed(subject) {
-		snapshot, err := loadScopeSnapshotForControl(store, rootID, scopeRef, body, subject, bead.ID, opts)
-		if err != nil {
-			return ControlResult{}, err
-		}
-		skipped, err := abortScope(store, snapshot, opts, bead.ID, subject.ID)
-		if err != nil {
-			return ControlResult{}, err
-		}
-		if err := tracePhaseErr(opts, bead.ID, "close-control", func() error {
-			return setOutcomeAndClose(store, bead.ID, beadmeta.OutcomePass)
-		}); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: completing control bead: %w", bead.ID, err)
-		}
-		return ControlResult{Processed: true, Action: "scope-fail", Skipped: skipped}, nil
+	if scopeAbortTriggered(subject, body) {
+		return completeScopeAbort(store, bead, subject, body, opts)
 	}
 
 	remainingOpen, err := tracePhase(opts, bead.ID, "check-open-members", func() (bool, error) {
@@ -609,6 +599,28 @@ func processScopeCheck(store beads.GraphStore, bead beads.Bead, opts ProcessOpti
 	}
 
 	return ControlResult{Processed: true, Action: "continue"}, nil
+}
+
+// completeScopeAbort runs a scope-check's abort of its scope, then closes the
+// scope-check pass: the abort is the scope-check's whole job, whether its
+// subject failed or a claimed subject settled after the abort was decided.
+func completeScopeAbort(store beads.GraphStore, bead, subject, body beads.Bead, opts ProcessOptions) (ControlResult, error) {
+	rootID := bead.Metadata[beadmeta.RootBeadIDMetadataKey]
+	scopeRef := bead.Metadata[beadmeta.ScopeRefMetadataKey]
+	snapshot, err := loadScopeSnapshotForControl(store, rootID, scopeRef, body, subject, bead.ID, opts)
+	if err != nil {
+		return ControlResult{}, err
+	}
+	skipped, err := abortScope(store, snapshot, opts, bead.ID, subject.ID)
+	if err != nil {
+		return ControlResult{}, err
+	}
+	if err := tracePhaseErr(opts, bead.ID, "close-control", func() error {
+		return setOutcomeAndClose(store, bead.ID, beadmeta.OutcomePass)
+	}); err != nil {
+		return ControlResult{}, fmt.Errorf("%s: completing control bead: %w", bead.ID, err)
+	}
+	return ControlResult{Processed: true, Action: "scope-fail", Skipped: skipped}, nil
 }
 
 func loadScopeSnapshotForControl(store beads.GraphStore, rootID, scopeRef string, body, subject beads.Bead, controlID string, opts ProcessOptions) (scopeSnapshot, error) {
@@ -743,6 +755,15 @@ func abortScopeWith(store beads.GraphStore, snapshot scopeSnapshot, opts Process
 // waits for a claimed member to settle.
 func scopeAbortDecided(body beads.Bead) bool {
 	return strings.TrimSpace(body.Metadata[beadmeta.ScopeAbortedByMetadataKey]) != ""
+}
+
+// scopeAbortTriggered reports whether member reaching a terminal state settles
+// its scope as aborted: member failed, or the scope's abort is already decided
+// and only waited for claimed members. Every scope settlement site decides
+// through it, so a member that settles after a decided abort can never close
+// the body pass.
+func scopeAbortTriggered(member, body beads.Bead) bool {
+	return beadOutcomeFailed(member) || scopeAbortDecided(body)
 }
 
 // closedWithHardFailure reports whether a bead closed with gc.outcome=fail and

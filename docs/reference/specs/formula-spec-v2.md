@@ -1090,7 +1090,12 @@ onto the scope body (so diagnostics survive), and closes the body with
 `gc.outcome = fail`. When the failing member closed with
 `gc.failure_class = hard`, the body also keeps that failure record:
 `gc.failure_class = hard`, the member's `gc.failure_reason`, and
-`gc.failure_subject` naming the member. The worker-result contract for `abort_scope` members
+`gc.failure_subject` naming the member. A member a worker has already
+claimed is neither skipped nor closed by the abort, and its scope-check
+stays open: the body then stays open, marked `gc.scope_aborted_by` with the
+failed member's ID, and that scope-check closes it `gc.outcome = fail` once
+the claimed member closes, whatever that member's own outcome. The
+worker-result contract for `abort_scope` members
 is **fail-closed**: a member that closes with `gc.outcome = fail` counts
 as failed, and so does a member that declared `abort_scope` and closed
 with a missing or unknown `gc.outcome` — only `pass` and `skipped` do not
