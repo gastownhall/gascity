@@ -513,9 +513,13 @@ func (WorkerOperationEventPayload) IsEventPayload() {}
 
 // SessionDrainAckedWithAssignedWorkPayload carries the bead-side context for
 // a session that drain-acked while still holding the assignee on an open or
-// in-progress work bead. The reconciler emits this as a mechanism-only
-// signal (per gastownhall/gascity#2293) so pack-level subscribers can apply
-// recovery policy without baking pack-specific knowledge into the SDK.
+// in-progress work bead. The event is diagnostic (per
+// gastownhall/gascity#2293): the finalize keeps the claim, and the
+// controller's recovery lanes — the orphan release (SESS-082), the stranded
+// repair (SESS-625) or the assigned-work wake (POOL-073, with POOL-022's
+// resume) — release the claim or restart its holder on it. Pack-level
+// subscribers may layer content policy on the signal without baking
+// pack-specific knowledge into the SDK.
 type SessionDrainAckedWithAssignedWorkPayload struct {
 	SessionID  string `json:"session_id" doc:"Canonical session bead ID for the session that drain-acked."`
 	BeadID     string `json:"bead_id" doc:"ID of the work bead still holding this session as its assignee."`
@@ -545,8 +549,11 @@ func SessionDrainAckedWithAssignedWorkPayloadJSON(sessionID, beadID, template, b
 // session.stranded event: a pool session whose runtime exited while open or
 // in-progress work beads still held it as assignee. The envelope Message
 // renders the same facts as operator text (ID list truncated past ten);
-// this payload is the untruncated machine contract so pack-level recovery
-// subscribers can act on the stranded work without parsing message text.
+// this payload is the untruncated machine contract so pack-level
+// subscribers can observe or escalate the stranded work without parsing
+// message text. The controller's stranded repair releases that work once
+// the stranding outlives its confirmation window; the release is not the
+// subscribers' to own.
 type SessionStrandedPayload struct {
 	SessionID   string   `json:"session_id" doc:"Canonical session bead ID for the stranded pool session (also the envelope Subject)."`
 	SessionName string   `json:"session_name,omitempty" doc:"Runtime session name from the session bead metadata, when set."`

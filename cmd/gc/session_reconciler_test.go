@@ -2036,9 +2036,11 @@ func TestReconcileSessionBeads_DrainAckWithAssignedOpenWorkSleepsInsteadOfDraini
 // while still holding the assignee on an in-progress work bead (the cap-hit
 // shape — worker exited mid-task without nulling assignee), the reconciler
 // MUST emit events.SessionDrainAckedWithAssignedWork carrying the session
-// and bead IDs exactly once after the provider stop has completed so pack-side
-// subscribers can apply recovery policy. The SDK reconciler stops at the event;
-// it does not commit, push, or clear assignee.
+// and bead IDs exactly once after the provider stop has completed. The
+// finalize stops at the event and sleeps the seat without touching the
+// claim; the later recovery lanes release the claim or restart its holder
+// on it (the orphan release, the stranded repair, the assigned-work wake),
+// pinned in drain_ack_held_claim_recovery_test.go.
 func TestReconcileSessionBeads_DrainAckMidPhaseEmitsAssignedWorkEvent(t *testing.T) {
 	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
@@ -2124,14 +2126,14 @@ func TestReconcileSessionBeads_DrainAckMidPhaseEmitsAssignedWorkEvent(t *testing
 		t.Errorf("event payload does not reference stranded bead ID %q: %s", stranded.ID, matched.Payload)
 	}
 
-	// Verify the SDK did NOT mutate the bead's assignee — recovery policy
-	// must live in pack-side subscribers, not the reconciler.
+	// The finalize must not clear the assignee: a later controller lane
+	// releases the claim or restarts its holder on it.
 	got, err := env.store.Get(stranded.ID)
 	if err != nil {
 		t.Fatalf("Get(stranded): %v", err)
 	}
 	if got.Assignee != session.ID {
-		t.Errorf("stranded bead assignee = %q, want %q (SDK must not clear assignee — pack-side recovery)", got.Assignee, session.ID)
+		t.Errorf("stranded bead assignee = %q, want %q (the finalize must not clear the assignee; a later controller lane recovers the claim)", got.Assignee, session.ID)
 	}
 	if got.Status == "closed" {
 		t.Errorf("stranded bead status = %q, SDK must not close the bead", got.Status)
@@ -3698,8 +3700,8 @@ func (c *capturingRecorder) unknownStateEvents() []events.Event {
 
 // session.stranded must carry a typed payload with the stranded work
 // bead IDs and session identity, not just the human-readable Message —
-// machine consumers (pack-level recovery subscribers) act on the
-// payload, not on message text. Regression test for ga-kmoj9c.
+// machine consumers (pack-level subscribers) act on the payload, not on
+// message text. Regression test for ga-kmoj9c.
 func TestEmitSessionStrandedDiagnostic_CarriesTypedPayload(t *testing.T) {
 	store := beads.NewMemStore()
 	session, work := createDetachedStrandedWork(t, store, "")

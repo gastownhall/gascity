@@ -1946,6 +1946,34 @@ func parityFixtures() []parityFixture {
 				"event:session.woke worker-1 []": "rollback-replacement-slot", "event:session.woke worker-2 []": "rollback-replacement-slot",
 			}),
 		},
+		// The drain-ack held-claim recovery (#2293's follow-up): the seat is
+		// asleep on its drain-ack finalize and still holds its claim. An
+		// UNBLOCKED in_progress claim is awake demand: the resume tier keeps
+		// the seat desired (POOL-022) and the assigned-work wake (POOL-073)
+		// restarts the same row with the claim kept.
+		{
+			Name: "a drain-acked asleep seat with an unblocked claim wakes in place", Behaviors: []string{"POOL-022", "POOL-073"},
+			Rows:    []parityRow{poolRow("gc-1", "worker", 1, "asleep", "instance_token", "tok-gc-1", "sleep_reason", "idle", "slept_at", at(-time.Hour), "last_woke_at", at(-2*time.Hour))},
+			Work:    assigned,
+			Explain: started("gc-1", "s-gc-1", "worker-1", nil),
+		},
+		// A claim BLOCKED on an open dependency is not demand: the seat
+		// strands (SESS-624, the marker aged past its confirmation window)
+		// and the stranded repair (SESS-625) unclaims the blocked step and
+		// closes the row. The step carries both bd's is_blocked projection,
+		// which an in_progress claim's demand reads, and its real blocker
+		// gb-1, which an open step's readiness reads, so the reopened step
+		// stays not ready and neither copy starts a replacement seat for it.
+		{
+			Name: "a drain-acked asleep seat with a blocked claim is repaired", Behaviors: []string{"SESS-624", "SESS-625"},
+			Rows: []parityRow{poolRow("gc-1", "worker", 1, "asleep", "instance_token", "tok-gc-1", "sleep_reason", "idle", "slept_at", at(-2*time.Hour), "last_woke_at", at(-3*time.Hour), "stranded_event_emitted_at", at(-time.Hour))},
+			Work: []parityRow{
+				{ID: "gb-1", Title: "gb-1", Type: "task", Status: "open"},
+				{ID: "gw-1", Title: "gw-1", Type: "task", Status: "in_progress", Assignee: "gc-1", IsBlocked: boolPtr(true), Metadata: map[string]string{"gc.routed_to": "worker"}},
+			},
+			Deps:    []beads.Dep{{IssueID: "gw-1", DependsOnID: "gb-1", Type: "blocks"}},
+			Explain: map[string]string{"row:gc-1:*policy": "sleep-policy-keys"},
+		},
 	}
 }
 

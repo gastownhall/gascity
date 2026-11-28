@@ -185,10 +185,14 @@ const (
 	// on an open or in-progress work bead. Distinguishes a worker that
 	// exited mid-task (e.g., per-turn cap, crash) from a worker that
 	// performed a clean phase handoff (the latter null the bead's
-	// assignee before drain-acking). The reconciler emits this as a
-	// mechanism-only signal; pack-level subscribers own the recovery
-	// policy (commit-and-push, clear-assignee-and-respawn, or escalate).
-	// See gastownhall/gascity#2293.
+	// assignee before drain-acking). The event is diagnostic: the
+	// reconciler's finalize sleeps the seat without touching the claim,
+	// and the controller's recovery lanes release the claim or restart its
+	// holder on it — the undesired seat's orphan release (SESS-082), the
+	// stranded repair (SESS-625), or the assigned-work wake (POOL-073, with
+	// the resume tier, POOL-022, keeping the seat desired). Pack-level
+	// subscribers may layer content policy on the signal, but the release
+	// is not theirs to own. See gastownhall/gascity#2293.
 	SessionDrainAckedWithAssignedWork = "session.drain_acked_with_assigned_work"
 	// SessionDrainStopEscalated fires when the reconciler gives up waiting for a
 	// drain-ack stop-pending session to exit on its own and escalates to a
@@ -226,12 +230,16 @@ const (
 	SessionDrainStopEscalated = "session.drain_stop_escalated"
 	// SessionStranded fires when a pool slot retains an in-progress work
 	// bead after its runtime has exited — i.e., the worker process is
-	// gone but the bead's assignee/state still references it. Surfaces
-	// the reconciler-detected leak so pack-level subscribers can decide
-	// whether to clear-assignee-and-respawn or escalate. A pool seat parked
-	// on pre-assigned blocked work (cmd/gc/seat_parked.go) does not fire it;
-	// one that stops parking (past its bound, or crowded out of a full
-	// slot-bounded pool) fires it though its work is an open, unstarted pin.
+	// gone but the bead's assignee/state still references it. It surfaces
+	// the reconciler-detected leak, which the controller repairs itself:
+	// once the stranding outlives its confirmation window
+	// (strandedRepairConfirmGrace in cmd/gc/session_beads.go), the stranded
+	// repair (SESS-625) releases the claim and closes the seat. Pack-level
+	// subscribers observe or escalate; the release is not theirs to own. A
+	// pool seat parked on pre-assigned blocked work (cmd/gc/seat_parked.go)
+	// does not fire it; one that stops parking (past its bound, or crowded
+	// out of a full slot-bounded pool) fires it though its work is an open,
+	// unstarted pin.
 	SessionStranded = "session.stranded"
 	// SessionPoolSlotRetiredAtDrainDeadline fires when the reconciler force-
 	// retires a pool-managed session bead that entered drain and never
