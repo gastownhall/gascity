@@ -1124,6 +1124,82 @@ prompt_template = "prompts/worker.md"
 	}
 }
 
+// TestDoPrimeWithHook_SessionStartInjectsAndArchivesInProgressAutoHandoff pins
+// that an auto-handoff wisp a bd claim moved to in_progress is still delivered
+// at SessionStart and archived after delivery, exactly as an open one (#6211).
+func TestDoPrimeWithHook_SessionStartInjectsAndArchivesInProgressAutoHandoff(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	promptDir := filepath.Join(cityDir, "prompts")
+	if err := os.MkdirAll(promptDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(promptDir): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(promptDir, "worker.md"), []byte("launch-only startup prompt\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(prompt): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+[workspace]
+name = "gastown"
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.md"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_AGENT", "worker")
+	t.Setenv("GC_ALIAS", "worker")
+	t.Setenv("GC_TEMPLATE", "worker")
+	t.Setenv("GC_SESSION_NAME", "gastown--worker")
+	sessionID := createPrimeHookSession(t, cityDir, "gastown--worker", "worker")
+	auto, ok := createHandoffMail(store, store, events.Discard, sessionID, sessionID,
+		[]string{"context cycle", "continue the durable task"}, "context cycle",
+		[]string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel}, &bytes.Buffer{})
+	if !ok {
+		t.Fatal("createHandoffMail(auto) failed")
+	}
+	inProgress := "in_progress"
+	if err := store.Update(auto.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("set auto handoff in_progress: %v", err)
+	}
+	t.Setenv("GC_SESSION_ID", sessionID)
+	t.Setenv(managedSessionHookEnv, "1")
+	t.Setenv("GC_HOOK_SOURCE", "startup")
+	t.Setenv("GC_HOOK_EVENT_NAME", "SessionStart")
+	t.Setenv(startupPromptDeliveredEnv, "1")
+	withPrimeHookStdin(t)
+
+	var stdout, stderr bytes.Buffer
+	if code := doPrimeWithHookFormat(nil, &stdout, &stderr, true, hookOutputFormatCodex, false); code != 0 {
+		t.Fatalf("doPrimeWithHookFormat() = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	var got struct {
+		HookSpecificOutput struct {
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("hook output is not JSON: %v; stdout=%q", err, stdout.String())
+	}
+	context := got.HookSpecificOutput.AdditionalContext
+	for _, want := range []string{auto.ID, auto.Subject, auto.Body} {
+		if !strings.Contains(context, want) {
+			t.Fatalf("additionalContext = %q, want in_progress auto-handoff substring %q", context, want)
+		}
+	}
+	assertAutoHandoffRetainedAddressable(t, store, auto.ID)
+}
+
 // TestDoPrimeWithHook_JSONModeDoesNotArchiveAutoHandoff pins the preview
 // contract of `gc prime --hook --json`: it renders exactly what the hook would
 // emit, including durable auto-handoff mail, but must not consume it. The
