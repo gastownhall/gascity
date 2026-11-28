@@ -276,3 +276,51 @@ func TestReconcileSessionBeads_WaitParkedSeatFreesWhenItsWaitEnds(t *testing.T) 
 		t.Errorf("work = %s/%q, want still in_progress claimed by the restarted seat", work.Status, work.Assignee)
 	}
 }
+
+// TestReconcileSessionBeads_UnheldIdlePoolSeatBehavesAsBase is the control
+// for the gate's wait read: with no wait hold, a pool seat that drain-acks
+// holding started work gets base handling unchanged — asleep idle after the
+// finalize, then the assigned-work wake restarting it in place on its own
+// bead with its claim intact. Nothing the wait read changed may touch this
+// path (the same outcome the wait-ended seat above must return to).
+func TestReconcileSessionBeads_UnheldIdlePoolSeatBehavesAsBase(t *testing.T) {
+	env, session, task, rec := newWaitParkedSeatEnv(t, config.SessionSleepConfig{}, false)
+	final := drainAckAndWaitPark(t, env, session)
+	if m := final.Metadata; final.Status == "closed" || m["state"] != "asleep" || m["sleep_reason"] != string(sessionpkg.SleepReasonIdle) || m["wait_hold"] != "" {
+		t.Fatalf("after the drain-ack: status=%s state=%q sleep_reason=%q wait_hold=%q, want an open asleep-idle seat with no wait",
+			final.Status, m["state"], m["sleep_reason"], m["wait_hold"])
+	}
+
+	env.clk.Time = env.clk.Now().Add(time.Minute)
+	row, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	var out, errw strings.Builder
+	reconcileSessionBeadsAtPath(
+		context.Background(), env.city, []beads.Bead{row}, env.desiredState, map[string]bool{"worker": true},
+		env.cfg, env.sp, env.store, nil, []beads.Bead{task}, nil, nil, env.dt,
+		map[string]int{"worker": 1}, false, nil, "",
+		nil, env.clk, env.rec, 0, 0, &out, &errw, env.startOptions...)
+	if !env.sp.IsRunning("worker") {
+		after, _ := env.store.Get(session.ID)
+		t.Errorf("the unheld idle seat holding work was not restarted in place; state=%q; stderr=%s", after.Metadata["state"], errw.String())
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Status == "closed" {
+		t.Errorf("the restarted seat's bead is closed")
+	}
+	work, err := env.store.Get(task.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", task.ID, err)
+	}
+	if work.Assignee != session.ID || work.Status != "in_progress" {
+		t.Errorf("work = %s/%q, want still in_progress claimed by the restarted seat", work.Status, work.Assignee)
+	}
+	if evts := rec.ofType(events.SessionStranded); len(evts) != 0 {
+		t.Errorf("recorded %d session.stranded events for a seat base wakes in place, want none", len(evts))
+	}
+}
