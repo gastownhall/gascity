@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 219,
+  "next_id": 221,
   "permanent_ids": [
     {
       "name": "help",
@@ -3194,6 +3194,21 @@
       "id": 115
     },
     {
+      "path": "gc pool-admission-probe",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "pool-admission-probe",
+      "owner": "immediate",
+      "id": 220
+    },
+    {
       "path": "gc prime",
       "aliases": [],
       "conditional_modes": [
@@ -3704,6 +3719,36 @@
       "classification": "session-attach",
       "owner": "immediate",
       "id": 140
+    },
+    {
+      "path": "gc session capacity-contract",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "session-capacity-contract",
+      "owner": "immediate",
+      "id": 219
+    },
+    {
+      "path": "gc session capacity-enter",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": true,
+      "effective_hidden": true,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "classification": "excluded",
+      "notice_policy": "ineligible",
+      "recording_policy": "excluded",
+      "owner": "excluded",
+      "mode": "hidden-private",
+      "exclusion": "hidden-private"
     },
     {
       "path": "gc session close",

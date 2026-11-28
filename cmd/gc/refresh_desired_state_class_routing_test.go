@@ -243,3 +243,83 @@ func TestRefreshDesiredStateDefersFreshSessionCreationOnSingleStoreCity(t *testi
 		t.Fatalf("city store holds %d bead(s), want only the seeded root until the next full census", len(all))
 	}
 }
+
+// TestFullBuildReadsPoolDemandFromRoutedWorkBindingOnSplitCity guards the
+// production split: routed graph work lives in the infra binding, while the
+// retained work ledger is deliberately outside the runtime demand plane. The
+// full build must read pool demand from the same narrowed Plan(RoutedWork) that
+// gc ready/claim uses, while writing the pool's session bead via sessions class.
+func TestFullBuildReadsPoolDemandFromRoutedWorkBindingOnSplitCity(t *testing.T) {
+	cityPath := t.TempDir()
+	workStore := beads.NewMemStore()
+	bindingStore := beads.NewMemStore()
+	bindingStore.HonorExplicitIDs = true
+	routes := splitRoutes(bindingStore)
+	registerResidencyRoutes(cityPath, routes, func() beads.Store { return workStore })
+	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
+	if _, err := bindingStore.Create(beads.Bead{
+		ID:       "gcg-work-1",
+		Title:    "routed business work",
+		Status:   "open",
+		Type:     "task",
+		Metadata: map[string]string{"gc.routed_to": "accountant"},
+	}); err != nil {
+		t.Fatalf("seed work demand: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Agents: []config.Agent{{
+			Name:              "accountant",
+			Scope:             "city",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+	cr := &CityRuntime{
+		cs: &controllerState{
+			cfg:           cfg,
+			cityBeadStore: workStore,
+			cityName:      "demo",
+			cityPath:      cityPath,
+		},
+		cfg:           cfg,
+		sp:            runtime.NewFake(),
+		cityName:      "demo",
+		cityPath:      cityPath,
+		stderr:        io.Discard,
+		storageRoutes: routes,
+	}
+	cr.buildFnWithSessionBeads = supervisorBuildAgentsFnWithSessionBeads(cityPath, "demo", io.Discard)
+
+	result := cr.buildDesiredState(cr.loadSessionBeadSnapshot(), nil)
+	if got := result.ScaleCheckCounts["accountant"]; got != 1 {
+		t.Fatalf("accountant demand = %d, want 1 from the routed-work binding", got)
+	}
+	if len(result.ReadyUnassignedRoutedWorkBeads) != 1 || result.ReadyUnassignedRoutedWorkBeads[0].ID != "gcg-work-1" {
+		t.Fatalf("ready routed demand = %#v, want binding bead gcg-work-1", result.ReadyUnassignedRoutedWorkBeads)
+	}
+	if got := result.ReadyUnassignedRoutedWorkStoreRefs; len(got) != 1 || !strings.HasPrefix(got[0], "class:") {
+		t.Fatalf("ready routed demand refs = %v, want one class binding ref", got)
+	}
+	sessions, err := bindingStore.List(beads.ListQuery{IncludeClosed: true, AllowScan: true})
+	if err != nil {
+		t.Fatalf("list sessions store: %v", err)
+	}
+	var accountantSessions int
+	for _, row := range sessions {
+		if row.Metadata["template"] == "accountant" && row.Metadata["pool_managed"] == "true" {
+			accountantSessions++
+		}
+	}
+	if accountantSessions != 1 {
+		t.Fatalf("infra binding accountant session rows = %d, want exactly one; rows=%#v", accountantSessions, sessions)
+	}
+	work, err := workStore.List(beads.ListQuery{IncludeClosed: true, AllowScan: true})
+	if err != nil {
+		t.Fatalf("list work store: %v", err)
+	}
+	if len(work) != 0 {
+		t.Fatalf("retained work store was read for runtime demand or polluted with session rows: %#v", work)
+	}
+}

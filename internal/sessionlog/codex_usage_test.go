@@ -1593,3 +1593,55 @@ func TestCodexTailMetaKeepsModelAndContextPastLifecycleBudget(t *testing.T) {
 		t.Errorf("Activity = %q, want unknown", meta.Activity)
 	}
 }
+
+func TestCodexAliasLookupRetainsExtractablePath(t *testing.T) {
+	root := t.TempDir()
+	accountRoot := t.TempDir()
+	workDir := filepath.Join(root, "workdir")
+	alias := filepath.Join(root, "aimux-acct")
+	if err := os.Symlink(accountRoot, alias); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := os.Symlink(root, filepath.Join(root, "loop")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	sessionID := "019d9845-aaaa-7000-8000-000000000008"
+	relativePath := filepath.Join("2026", "06", "07", "rollout-2026-06-07T20-19-53-"+sessionID+".jsonl")
+	writeCodexUsageLines(t, filepath.Join(accountRoot, relativePath), []string{
+		codexSessionMetaLine("2026-06-07T20:19:53Z", workDir),
+		codexTurnContextLine("2026-06-07T20:19:53Z", "gpt-5.5"),
+		codexTokenCountLine("2026-06-07T20:19:54Z", 15917, 15562, 10624, 355, 166),
+	})
+	want := filepath.Join(alias, relativePath)
+	for name, find := range map[string]func() string{
+		"latest":    func() string { return FindCodexSessionFile([]string{root}, workDir) },
+		"no-window": func() string { return FindCodexSessionFileByIDNoWindow([]string{root}, workDir, sessionID) },
+	} {
+		got := find()
+		if got != want {
+			t.Fatalf("%s lookup = %q, want %q", name, got, want)
+		}
+		usages, err := ExtractCodexTailUsageFromSearchPaths([]string{root}, got)
+		if err != nil || len(usages) != 1 {
+			t.Fatalf("%s extract = %+v, %v", name, usages, err)
+		}
+	}
+	if err := os.Chmod(root, 0o770); err != nil {
+		t.Fatal(err)
+	}
+	for name, find := range map[string]func() string{
+		"latest": func() string { return FindCodexSessionFile([]string{root, accountRoot}, workDir) },
+		"no-window": func() string {
+			return FindCodexSessionFileByIDNoWindow([]string{root, accountRoot}, workDir, sessionID)
+		},
+	} {
+		got := find()
+		if got != want {
+			t.Fatalf("%s configured lookup = %q, want %q", name, got, want)
+		}
+		usages, err := ExtractCodexTailUsageFromSearchPaths([]string{root, accountRoot}, got)
+		if err != nil || len(usages) != 1 {
+			t.Fatalf("%s configured extract = %+v, %v", name, usages, err)
+		}
+	}
+}

@@ -47,6 +47,19 @@ func rootCommandSkipsPackDiscovery(command string) bool {
 	}
 }
 
+// rootInvocationMayNeedPackDiscovery reports whether the injected invocation
+// can resolve to a pack-provided root command. Once the built-in Cobra tree is
+// available, every built-in name and alias can skip eager city/pack loading;
+// packs cannot shadow those names. Unknown or ambiguous argv stays fail-closed
+// and keeps discovery enabled so pack commands continue to resolve.
+func rootInvocationMayNeedPackDiscovery(rootBuiltins map[string]bool, args []string) bool {
+	command, ok := firstRootCommand(args)
+	if !ok {
+		return true
+	}
+	return !rootBuiltins[command]
+}
+
 // firstRootCommand returns the first command word under the root's narrow
 // persistent-scope grammar. Unknown flags fail closed because this pre-scan
 // cannot know whether a later token is their value. A separate known value

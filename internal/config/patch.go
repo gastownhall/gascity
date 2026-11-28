@@ -172,6 +172,8 @@ type AgentPatch struct {
 	// unassigned session demand for bead-backed reconciliation. Supports the
 	// same Go template placeholders as Agent.scale_check.
 	ScaleCheck *string `toml:"scale_check,omitempty"`
+	// WorkQueryFederated overrides the custom work-query coverage declaration.
+	WorkQueryFederated *bool `toml:"work_query_federated,omitempty"`
 	// ScaleCheckAuthoritative overrides whether this pool's ScaleCheck is the
 	// last word on new demand, its zeros included. See Agent.
 	ScaleCheckAuthoritative *bool `toml:"scale_check_authoritative,omitempty"`
@@ -697,6 +699,9 @@ func applyAgentMutation(a *Agent, p *AgentPatch, sleepSource string) {
 	}
 	if p.ScaleCheck != nil {
 		a.ScaleCheck = *p.ScaleCheck
+	}
+	if p.WorkQueryFederated != nil {
+		a.WorkQueryFederated = *p.WorkQueryFederated
 	}
 	if p.ScaleCheckAuthoritative != nil {
 		a.ScaleCheckAuthoritative = *p.ScaleCheckAuthoritative

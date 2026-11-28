@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 // fakeRunner captures the remote argv it is asked to run and returns a
@@ -206,4 +207,30 @@ func TestTmuxCarrierDrivesOverSSH(t *testing.T) {
 func isAgentPaneLookup(argv []string) bool {
 	return len(argv) >= 2 && argv[0] == "tmux" && argv[1] == "list-panes" &&
 		argv[len(argv)-1] == agentPaneRowFormat
+}
+
+func TestSSHArgs_HostileRemoteArgumentStaysLiteral(t *testing.T) {
+	payload := "value'; touch /tmp/injected; echo 'value $(id)"
+	configured := sshConfigured{connectTimeout: true, serverAlive: true}
+	args := sshArgs(Endpoint{Host: "box"}, configured, []string{"printf", "%s", payload})
+	command := args[len(args)-1]
+	want := `'printf' '%s' 'value'\''; touch /tmp/injected; echo '\''value $(id)'`
+	if command != want {
+		t.Fatalf("remote shell command = %q, want %q", command, want)
+	}
+	if got := shellquote.Split(command); !slices.Equal(got, []string{"printf", "%s", payload}) {
+		t.Fatalf("remote shell argv = %q, want literal payload", got)
+	}
+}
+
+func TestSSHArgs_StopsOptionParsingBeforeHostileHost(t *testing.T) {
+	host := "-oProxyCommand=touch /tmp/unexpected"
+	configured := sshConfigured{connectTimeout: true, serverAlive: true}
+	args := sshArgs(Endpoint{Host: host}, configured, []string{"true"})
+	if got := args[len(args)-3]; got != "--" {
+		t.Fatalf("option terminator = %q, want --", got)
+	}
+	if got := args[len(args)-2]; got != host {
+		t.Fatalf("destination = %q, want %q", got, host)
+	}
 }

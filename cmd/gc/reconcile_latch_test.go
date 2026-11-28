@@ -5,6 +5,7 @@ import (
 	"io"
 	"maps"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -432,5 +433,33 @@ func TestV2LatchJudgesTheEffectiveProvider(t *testing.T) {
 		t.Fatalf("swap onto tmux under v2: %v, want it held and applied", err)
 	} else {
 		resume()
+	}
+}
+
+func TestV2LatchRefusesCapacitySchedulerAdmission(t *testing.T) {
+	city := t.TempDir()
+	cfg := v2City(nil)
+	if got := v2LatchRefusals(cfg, city, nil); len(got) != 0 {
+		t.Fatalf("clean city: refusals = %+v, want none", got)
+	}
+	writePoolScope(t, city)
+	got := v2LatchRefusals(cfg, city, nil)
+	if len(got) != 1 || got[0].Config != "config/capacity-scheduler-v2.toml" {
+		t.Fatalf("capacity-scheduler city: refusals = %+v, want config/capacity-scheduler-v2.toml", got)
+	}
+	if mode, err := latchReconcilerMode(cfg, city, noEnv); err == nil || mode != reconcilerLegacy {
+		t.Fatalf("explicit v2 with capacity-scheduler: mode=%v err=%v, want legacy + refusal error", mode, err)
+	}
+	unsetCfg := &config.City{}
+	res, err := resolveReconcilerMode(unsetCfg, city, noEnv)
+	if err != nil || res.Mode != reconcilerLegacy || res.Reason != reconcilerFallbackLegacy {
+		t.Fatalf("unset session_reconciler with capacity-scheduler: res=%+v err=%v, want legacy fallback", res, err)
+	}
+	residualCity := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(residualCity, ".gc", "runtime", "pool-capacity-admission"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got := v2LatchRefusals(cfg, residualCity, nil); len(got) != 1 {
+		t.Fatalf("residual capacity state: refusals = %+v, want 1", got)
 	}
 }

@@ -349,18 +349,18 @@ func TestLegacyDemandReadsByteIdenticalToDirectCalls(t *testing.T) {
 }
 
 // legacyCollectorBackingReads pins, per fixture, the backing reads the four
-// collectors make on origin/main (collectAssignedWorkBeadsWithStores,
+// collectors make with live-first claim reads (collectAssignedWorkBeadsWithStores,
 // collectOpenUnassignedRoutedWork, defaultScaleCheckCountsAndDemand,
 // defaultNamedSessionDemand, in that order): the live raw-status open List,
-// the cached-tier Lists (served by a clean cache, read through a plain store,
+// the live in-progress List, cached-tier open Lists (served by a clean cache, read through a plain store,
 // falling back live past a dirty row), and one unfiltered Ready per cache.
 var legacyCollectorBackingReads = func() map[string][]string {
 	const ready = "Ready [{Assignee: Limit:0 TierMode:2 Unassigned:false MetadataEquals:map[]}]"
-	plain := []string{"List status=in_progress live=false", "List status=open live=true", "List status=open live=false", ready, "List status=open live=true", ready}
-	cached := []string{"List status=open live=true", ready, "List status=open live=true", ready}
+	plain := []string{"List status=in_progress live=true", "List status=open live=true", "List status=open live=false", ready, "List status=open live=true", ready}
+	cached := []string{"List status=in_progress live=true", "List status=open live=true", ready, "List status=open live=true", ready}
 	return map[string][]string{
 		"plain":              plain,
-		"plain live outage":  plain,
+		"plain live outage":  append([]string{"List status=in_progress live=true", "List status=in_progress live=false"}, plain[1:]...),
 		"cached":             cached,
 		"cached live outage": cached,
 		"cached dirty":       {"List status=in_progress live=true", "List status=open live=true", "List status=open live=true", ready, "List status=open live=true", ready},

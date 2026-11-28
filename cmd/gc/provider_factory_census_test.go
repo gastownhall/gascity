@@ -51,6 +51,7 @@ var canonicalProviderAliasBindings = map[string]int{
 // disposition. bind-error means the second result is a named local; the
 // forwarding shapes below are the only reviewed multi-result pass-throughs.
 var canonicalProviderCalls = map[string]int{
+	"cmd_pool_admission_probe.go:newPoolAdmissionProbeCmd:newSessionProviderForCity:bind-error":                                                1,
 	"cmd_citystatus.go:cmdCityStatus:newStatusSessionProviderForCityWithSnapshot:bind-error":                                                   1,
 	"cmd_citystatus.go:cmdCityStatusLocalFallback:newStatusSessionProviderForCityWithSnapshot:bind-error":                                      1,
 	"cmd_convoy_dispatch.go:recycleDispatchSubjectSession:dispatchControlSessionProvider:bind-error":                                           1,

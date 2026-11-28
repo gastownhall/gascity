@@ -245,6 +245,10 @@
           "type": "string",
           "description": "WorkQuery is the shell command template to find available work for this\nagent. If it contains Go template placeholders, gc expands them using\nthe same PathContext fields as work_dir and session_setup (Agent,\nAgentBase, Rig, RigRoot, CityRoot, CityName, DefaultBranch) before\nprobe, hook, and prompt-context execution. Used by gc hook and available in prompt\ntemplates as {{.WorkQuery}}.\nIf unset, Gas City uses a three-tier default query:\n  1. in_progress work assigned to this session/alias (crash recovery)\n  2. ready work assigned to this session/alias (pre-assigned work)\n  3. ready unassigned work with gc.routed_to=\u003cqualified-name\u003e\nWhen the controller probes for demand without session context, only the\nrouted_to tier applies. Override to integrate with external task systems.\nA custom query that looks up assigned work should read $GC_ALIAS: under\ngc hook --claim, a single-slot pool session the supervisor collapsed onto\nthe agent's canonical [[named_session]] identity runs the query with\n$GC_ALIAS set to that identity, while $GC_AGENT keeps the session's\nruntime value."
         },
+        "work_query_federated": {
+          "type": "boolean",
+          "description": "WorkQueryFederated declares that a custom WorkQuery reads every reachable\nwork store, including relocated classes and ephemeral work. gc hook runs it\nonce in the primary query environment instead of once per store. False\npreserves legacy custom-query fan-out. Ignored without WorkQuery."
+        },
         "sling_query": {
           "type": "string",
           "description": "SlingQuery is the command template to route a bead to this session config.\nIf it contains Go template placeholders, gc expands them using the same\nPathContext fields as work_dir and session_setup (Agent, AgentBase,\nRig, RigRoot, CityRoot, CityName, DefaultBranch) before replacing {}\nwith the bead ID. Used by gc sling to make a bead visible to the target's work_query.\nThe placeholder {} is replaced with the bead ID at runtime.\nDefault for all agents:\n\"bd update {} --set-metadata gc.routed_to=\u003cqualified-name\u003e\".\nRouting is metadata-based; sling stamps the target template and the\nreconciler/scale_check paths decide when sessions are created.\nCustom sling_query and work_query can be overridden independently."
@@ -729,6 +733,10 @@
           "type": "string",
           "description": "ScaleCheck overrides the shell command whose output reports new\nunassigned session demand for bead-backed reconciliation."
         },
+        "work_query_federated": {
+          "type": "boolean",
+          "description": "WorkQueryFederated overrides the custom work-query coverage declaration."
+        },
         "scale_check_authoritative": {
           "type": "boolean",
           "description": "ScaleCheckAuthoritative overrides whether this pool's ScaleCheck is the\nlast word on new demand, its zeros included. See Agent."
@@ -1030,6 +1038,10 @@
           "type": "string",
           "description": "ScaleCheck overrides the command template whose output reports new\nunassigned session demand for bead-backed reconciliation. Supports the\nsame Go template placeholders as Agent.scale_check."
         },
+        "work_query_federated": {
+          "type": "boolean",
+          "description": "WorkQueryFederated overrides the custom work-query coverage declaration."
+        },
         "scale_check_authoritative": {
           "type": "boolean",
           "description": "ScaleCheckAuthoritative overrides whether this pool's ScaleCheck is the\nlast word on new demand, its zeros included. See Agent."
@@ -1071,6 +1083,10 @@
     },
     "BeadsConfig": {
       "properties": {
+        "blocker_write_validator": {
+          "type": "string",
+          "description": "BlockerWriteValidator is an opt-in city-relative Python admission\nvalidator for gc.blocked_on and gc.blocker.v2 metadata writes. It runs\nbefore either bd passthrough or class-store mutation."
+        },
         "provider": {
           "type": "string",
           "description": "Provider selects the bead store backend: \"bd\" (default, Dolt-backed),\n\"file\", or \"exec:\u003cscript\u003e\" for a user-supplied script. The \"sqlite\",\n\"sqlite-cgo\", and \"coordstore\" coordination-store providers were removed\nand now hard-error; migrate to \"doltlite\" or remove the setting.",

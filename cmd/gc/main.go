@@ -357,6 +357,7 @@ func newRootCmdWithOptions(stdout, stderr io.Writer, options rootCommandOptions)
 	configureJSONSchemaFlag(root)
 	_ = root.RegisterFlagCompletionFunc("rig", completeRigFlagNames)
 	root.AddCommand(
+		newPoolAdmissionProbeCmd(stdout, stderr),
 		newStartCmd(stdout, stderr),
 		newInitCmd(stdout, stderr),
 		newReloadCmd(stdout, stderr),
@@ -441,7 +442,8 @@ func newRootCmdWithOptions(stdout, stderr io.Writer, options rootCommandOptions)
 	applyProductionProductMetricsCommandCensus(root)
 
 	// Best-effort: discover pack CLI commands if we're inside a city.
-	if options.discoverPackCommands && options.eagerPackCommandDiscovery {
+	if options.discoverPackCommands && options.eagerPackCommandDiscovery &&
+		rootInvocationMayNeedPackDiscovery(coreCommandNames(root), options.invocationArgs) {
 		registerPackCommands(root, options.invocationArgs, stdout, stderr)
 	}
 

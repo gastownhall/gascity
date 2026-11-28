@@ -1,7 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -73,7 +76,30 @@ func v2LatchRefusals(cfg *config.City, cityPath string, lookupEnv func(string) (
 	if r, ok := v2ProviderSwapRefusal(cfg, cityPath, lookupEnv); ok {
 		out = append(out, r)
 	}
+	if r, ok := v2CapacitySchedulerRefusal(cityPath); ok {
+		out = append(out, r)
+	}
 	return out
+}
+
+func v2CapacitySchedulerRefusal(cityPath string) (latchRefusal, bool) {
+	if cityPath == "" {
+		return latchRefusal{}, false
+	}
+	for _, rel := range []string{
+		filepath.Join("config", "capacity-scheduler-v2.toml"),
+		filepath.Join(".gc", "runtime", "capacity-scheduler-v2"),
+		filepath.Join(".gc", "runtime", "pool-capacity-admission"),
+	} {
+		if _, err := os.Stat(filepath.Join(cityPath, rel)); err == nil || !errors.Is(err, os.ErrNotExist) {
+			return latchRefusal{
+				Feature: "capacity-scheduler-v2 start admission",
+				Config:  "config/capacity-scheduler-v2.toml",
+				Fix:     `set session_reconciler = "legacy"`,
+			}, true
+		}
+	}
+	return latchRefusal{}, false
 }
 
 // v2IgnoredSettings lists the composed-config settings v2 accepts and ignores,

@@ -685,7 +685,7 @@ func TestCollectAssignedWorkBeadsUsesLiveReadyReadModel(t *testing.T) {
 	}
 }
 
-func TestCollectAssignedWorkBeadsUsesCachedInProgressReadModel(t *testing.T) {
+func TestCollectAssignedWorkBeadsUsesLiveInProgressReadModel(t *testing.T) {
 	backing := &demandListCountingStore{Store: beads.NewMemStore()}
 	work, err := backing.Create(beads.Bead{
 		Title:    "active handoff",
@@ -712,18 +712,15 @@ func TestCollectAssignedWorkBeadsUsesCachedInProgressReadModel(t *testing.T) {
 	if len(got) != 1 || got[0].ID != work.ID {
 		t.Fatalf("collectAssignedWorkBeads returned %#v, want [%s]", got, work.ID)
 	}
-	if backing.liveInProgressIssueLists != 0 {
-		t.Fatalf("live issue in_progress list calls = %d, want cached demand read", backing.liveInProgressIssueLists)
-	}
-	if backing.liveInProgressWispLists != 0 {
-		t.Fatalf("live wisp in_progress list calls = %d, want cached demand read", backing.liveInProgressWispLists)
+	if backing.liveInProgressIssueLists == 0 {
+		t.Fatal("live issue in_progress list was not called; active assignments require authoritative state")
 	}
 	if backing.fullPrimeLists != 0 {
 		t.Fatalf("full-prime list calls = %d, want controller demand to use PrimeActive snapshot", backing.fullPrimeLists)
 	}
 }
 
-func TestCollectAssignedWorkBeadsReprimesWhenCachedInProgressDirty(t *testing.T) {
+func TestCollectAssignedWorkBeadsReadsLiveWhenCachedInProgressDirty(t *testing.T) {
 	backing := &demandRefreshFailStore{Store: beads.NewMemStore()}
 	work, err := backing.Create(beads.Bead{
 		Title: "handoff becomes active",
@@ -751,11 +748,8 @@ func TestCollectAssignedWorkBeadsReprimesWhenCachedInProgressDirty(t *testing.T)
 	if len(got) != 1 || got[0].ID != work.ID || got[0].Status != "in_progress" || got[0].Assignee != "repo/refinery" {
 		t.Fatalf("collectAssignedWorkBeads returned %#v, want reprime in-progress %s", got, work.ID)
 	}
-	if backing.liveInProgressIssueLists != 0 {
-		t.Fatalf("live issue in_progress list calls = %d, want shared cache reprime", backing.liveInProgressIssueLists)
-	}
-	if backing.liveInProgressWispLists != 0 {
-		t.Fatalf("live wisp in_progress list calls = %d, want shared cache reprime", backing.liveInProgressWispLists)
+	if backing.liveInProgressIssueLists == 0 {
+		t.Fatal("live issue in_progress list was not called; a cached dirty transition must be re-read live")
 	}
 }
 

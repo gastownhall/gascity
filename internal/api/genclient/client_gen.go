@@ -2217,6 +2217,7 @@ type AgentPatch struct {
 	Upstream                *string            `json:"Upstream"`
 	WakeMode                *string            `json:"WakeMode"`
 	WorkDir                 *string            `json:"WorkDir"`
+	WorkQueryFederated      *bool              `json:"WorkQueryFederated"`
 }
 
 // AgentPatchSetInputBody defines model for AgentPatchSetInputBody.
@@ -13653,6 +13654,9 @@ type GetV0CityByCityNameWorkActiveStepParams struct {
 type GetV0CityByCityNameWorkReadyParams struct {
 	// Assignee Only work whose assignee is exactly this identity.
 	Assignee *string `form:"assignee,omitempty" json:"assignee,omitempty"`
+
+	// AssigneeAny Only work assigned to any of these exact identities. Repeatable; cannot be combined with assignee or unassigned.
+	AssigneeAny *[]string `form:"assignee_any,omitempty" json:"assignee_any,omitempty"`
 
 	// Unassigned Only work with no assignee.
 	Unassigned *bool `form:"unassigned,omitempty" json:"unassigned,omitempty"`
@@ -39800,6 +39804,22 @@ func NewGetV0CityByCityNameWorkReadyRequest(server string, cityName string, para
 		if params.Assignee != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "assignee", *params.Assignee, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.AssigneeAny != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "assignee_any", *params.AssigneeAny, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "array", Format: ""}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

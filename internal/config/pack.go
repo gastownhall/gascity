@@ -2919,6 +2919,7 @@ func (ov *AgentOverride) toAgentPatch() *AgentPatch {
 		MaxActiveSessions:       ov.MaxActiveSessions,
 		MinActiveSessions:       ov.MinActiveSessions,
 		ScaleCheck:              ov.ScaleCheck,
+		WorkQueryFederated:      ov.WorkQueryFederated,
 		ScaleCheckAuthoritative: ov.ScaleCheckAuthoritative,
 		OptionDefaults:          ov.OptionDefaults,
 	}

@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -496,18 +497,45 @@ func (p *proxyProcessInstance) commandDir() string {
 }
 
 func allocateProxyProcessSocketPath(cityPath, serviceName string) (string, error) {
+	return allocateProxyProcessSocketPathInTempDir(cityPath, serviceName, os.TempDir())
+}
+
+func allocateProxyProcessSocketPathInTempDir(cityPath, serviceName, tempDir string) (string, error) {
 	sum := sha256.Sum256([]byte(cityPath))
-	dir := filepath.Join(os.TempDir(), fmt.Sprintf("gcsvc-%d", os.Getuid()), hex.EncodeToString(sum[:4]))
+	dir := filepath.Join(tempDir, fmt.Sprintf("gcsvc-%d", os.Getuid()), hex.EncodeToString(sum[:4]))
+	prefix := config.NormalizePublicationLabel(serviceName, "svc")
+	if len(prefix) > 16 {
+		prefix = prefix[:16]
+	}
+	// macOS permits at most 103 pathname bytes. Reserve ten decimal digits
+	// for CreateTemp's random suffix plus the separator and .sock extension.
+	// A long host TMPDIR must not prevent an otherwise valid service starting.
+	if len(filepath.Join(dir, prefix+"-4294967295.sock")) > 103 {
+		var err error
+		dir, err = os.MkdirTemp("/tmp", fmt.Sprintf("gcsvc-%d-", os.Getuid()))
+		if err != nil {
+			return "", fmt.Errorf("create short socket dir: %w", err)
+		}
+		allocated := false
+		defer func() {
+			if !allocated {
+				_ = os.Remove(dir)
+			}
+		}()
+		path, err := allocateProxyProcessSocketPlaceholder(dir, prefix)
+		allocated = err == nil
+		return path, err
+	}
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return "", fmt.Errorf("create socket dir: %w", err)
 	}
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return "", fmt.Errorf("chmod socket dir: %w", err)
 	}
-	prefix := config.NormalizePublicationLabel(serviceName, "svc")
-	if len(prefix) > 16 {
-		prefix = prefix[:16]
-	}
+	return allocateProxyProcessSocketPlaceholder(dir, prefix)
+}
+
+func allocateProxyProcessSocketPlaceholder(dir, prefix string) (string, error) {
 	tmp, err := os.CreateTemp(dir, prefix+"-*.sock")
 	if err != nil {
 		return "", fmt.Errorf("allocate socket path: %w", err)
@@ -528,6 +556,14 @@ func cleanupProxyProcessSocketPath(path string) error {
 		return fmt.Errorf("remove socket path: %w", err)
 	}
 	dir := filepath.Dir(path)
+	// Long-TMPDIR instances own a private, randomly allocated /tmp directory.
+	// Remove only that empty directory; never recurse or touch other instances.
+	if filepath.Dir(dir) == "/tmp" && strings.HasPrefix(filepath.Base(dir), fmt.Sprintf("gcsvc-%d-", os.Getuid())) {
+		if err := os.Remove(dir); err != nil && !os.IsNotExist(err) && !fsys.IsDirNotEmpty(err) {
+			return fmt.Errorf("remove short socket dir: %w", err)
+		}
+		return nil
+	}
 	root := filepath.Join(os.TempDir(), fmt.Sprintf("gcsvc-%d", os.Getuid()))
 	if filepath.Dir(dir) != root {
 		return nil

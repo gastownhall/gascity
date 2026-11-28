@@ -7,6 +7,7 @@ import "github.com/gastownhall/gascity/internal/readywork"
 type WorkReadyInput struct {
 	CityScope
 	Assignee      string   `query:"assignee" required:"false" doc:"Only work whose assignee is exactly this identity."`
+	AssigneesAny  []string `query:"assignee_any,explode" required:"false" doc:"Only work assigned to any of these exact identities. Repeatable; cannot be combined with assignee or unassigned."`
 	Unassigned    bool     `query:"unassigned" required:"false" doc:"Only work with no assignee."`
 	MetadataField []string `query:"metadata_field,explode" required:"false" doc:"Require metadata key=value, or a bare key for any non-empty value. Repeatable; every one must hold."`
 	ExcludeType   []string `query:"exclude_type,explode" required:"false" doc:"Drop beads of this issue type. Repeatable."`
@@ -20,6 +21,7 @@ type WorkReadyInput struct {
 func (in *WorkReadyInput) readyWorkQuery() readywork.Query {
 	return readywork.Query{
 		Assignee:       in.Assignee,
+		AssigneesAny:   in.AssigneesAny,
 		Unassigned:     in.Unassigned,
 		MetadataFields: in.MetadataField,
 		ExcludeTypes:   in.ExcludeType,

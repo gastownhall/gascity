@@ -1193,6 +1193,13 @@ type RelaunchProvider interface {
 	Relaunch(ctx context.Context, name string, cfg Config) error
 }
 
+// CommandScopeProvider identifies local runtimes that execute Config.Command
+// as the actual model launch, so native admission can contain its descendants
+// in a strict named OS scope. Remote or opaque runtimes must not claim support.
+type CommandScopeProvider interface {
+	SupportsCommandScope(name string) bool
+}
+
 // LiveRuntime identifies a single agent runtime process discovered via
 // process-table scan, independent of provider-visible artifacts.
 type LiveRuntime struct {
@@ -1458,6 +1465,15 @@ const (
 	LifecycleOneShot Lifecycle = "one_shot"
 )
 
+// CommandScope is a private launch descriptor populated by native admission.
+type CommandScope struct {
+	Launcher string
+	Unit     string
+	// EntryCommand is the immutable gc executable and internal entry arguments.
+	// It runs inside the scope and must acknowledge this attempt before the model.
+	EntryCommand []string
+}
+
 // Config holds the parameters for starting a new session.
 type Config struct {
 	// WorkDir is the working directory for the session process.
@@ -1466,6 +1482,11 @@ type Config struct {
 	// Command is the shell command to run in the session.
 	// If empty, a default shell is started.
 	Command string
+
+	// CommandScope is an invocation-local native admission descriptor. Local
+	// supporting providers wrap the final model command AFTER prompt expansion.
+	// It is not user configuration, persisted metadata, or a remote wire field.
+	CommandScope *CommandScope `json:"-"`
 
 	// Lifecycle describes whether the command is long-lived or expected to
 	// exit after one turn. Empty means the default long-lived session lifecycle.

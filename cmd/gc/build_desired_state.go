@@ -577,17 +577,20 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 	stderr io.Writer,
 	opts desiredStateOptions,
 ) DesiredStateResult {
+	// The runtime registration owns the work leg; the supplied store owns sessions.
+	sessionStore := store
+	store = censusWorkLeg(cityPath, store)
 	citySt, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
 	if effectiveCitySuspended(cfg, citySt) {
 		return DesiredStateResult{}
 	}
 
-	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, beaconTime, store, stderr)
+	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, beaconTime, sessionStore, stderr)
 	bp.readOnly = opts.readOnly
 	bp.decisionTime = poolDecisionTime.UTC()
 	bp.sessionBeads = sessionBeads
 	bp.sessionSnapshotCompletenessKnown = true
-	bp.sessionSnapshotComplete = store == nil || (sessionBeads != nil && sessionBeads.LoadError() == nil)
+	bp.sessionSnapshotComplete = sessionStore == nil || (sessionBeads != nil && sessionBeads.LoadError() == nil)
 
 	// Pre-compute suspended rig paths (config + runtime state).
 	suspendedRigPaths := buildSuspendedRigPathsForCity(cfg, cityPath)
@@ -602,7 +605,7 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 	// it is nil, and records nothing, without a trace.
 	pass := newDemandPassTrace(trace, cfg)
 	subPhaseStart := trace.demandNow()
-	allOpenSessionInfos, openSessionBeadsErr := collectAllOpenSessionInfos(cityPath, cfg, store, rigStores, suspendedRigPaths, pass)
+	allOpenSessionInfos, openSessionBeadsErr := collectAllOpenSessionInfos(cityPath, cfg, sessionStore, rigStores, suspendedRigPaths, pass)
 	bp.sessionOccupancyInfos = allOpenSessionInfos
 	recordDemandSubPhase(trace, "demand_snapshot.collect_open_session_beads", subPhaseStart, map[string]any{
 		"beads":   len(allOpenSessionInfos),
@@ -644,7 +647,7 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 	// rewrites gc.routed_to on open ready work, so it uses its own cache; the
 	// scale-check and named-session probes read after those writes and share a
 	// second cache created below. See readyDemandCache.
-	assignedReadyCache := newTracedReadyDemandCache(pass, demandReadPointAssigned).withCrossStoreGate(cityPath, cfg, store, rigStores, suspendedRigPaths)
+	assignedReadyCache := newTracedReadyDemandCache(pass, demandReadPointAssigned).withSessionsStore(scopeStores("", nil, sessionStore).Sessions()).withCrossStoreGate(cityPath, cfg, store, rigStores, suspendedRigPaths)
 	if store != nil {
 		subPhaseStart = trace.demandNow()
 		assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, readyAssigned, storePartial = collectAssignedWorkBeadsWithStores(cityPath, cfg, store, rigStores, suspendedRigPaths, sessionBeads, assignedReadyCache)
@@ -829,7 +832,7 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 			fmt.Fprintf(stderr, "buildDesiredState: pool %q trigger bead %s: %v (naming no seat for it)\n", refused.Template, refused.WorkBeadID, refused.err()) //nolint:errcheck
 		}
 		subPhaseStart = trace.demandNow()
-		poolWorkBeads, poolWorkRefs := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, store, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs)
+		poolWorkBeads, poolWorkRefs := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, store, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs, readyAssigned)
 		bp.assignedWorkBeads = poolWorkBeads
 		bp.poolScaleCheckPartialTemplates = poolScaleCheckPartialTemplates
 		bp.providerHealthSnapshot = loadProviderHealthSnapshot(cityPath)
@@ -1589,6 +1592,7 @@ func buildDemandTargets(
 		}
 		pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir, env: env, newDemand: store != nil})
 	}
+
 	return demandTargets{
 		pendingPools:             pendingPools,
 		defaultScaleTargets:      defaultScaleTargets,
@@ -1958,7 +1962,11 @@ func collectAssignedWorkBeadsWithStores(
 			// active work never waits behind unrelated ready scans.
 			start := pass.now()
 			inProgress, err := reads.Cached(source.store, beads.ListQuery{Status: "in_progress"})
-			pass.read(read("list_in_progress", demandReadTierCached), start, len(inProgress), err)
+			tier := demandReadTierCached
+			if _, legacy := reads.(legacyDemandReads); legacy {
+				tier = demandReadTierLive
+			}
+			pass.read(read("list_in_progress", tier), start, len(inProgress), err)
 			if err == nil {
 				appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, readyIDs, inProgress, seen, source.store, source.ref)
 			} else {
@@ -2279,7 +2287,7 @@ func convergedRoutedWorkBinding(
 	rigStores map[string]beads.Store,
 	suspendedRigPaths map[string]bool,
 ) beads.Store {
-	legs, err := routedWorkStoreCandidates(cityPath, cfg, store, rigStores, suspendedRigPaths, censusRefScoped)
+	legs, err := routedWorkStoreCandidates(cityPath, cfg, store, rigStores, suspendedRigPaths)
 	// An unresolvable topology takes the same conservative nil as a legacy city:
 	// fall back to the legacy target rather than guess a store. The error is not
 	// swallowed — collectOpenUnassignedRoutedWork resolves this same leg set later
@@ -3140,6 +3148,29 @@ func sortedStringSet(values map[string]struct{}) []string {
 
 func listBothTiersForControllerDemand(store beads.Store, query beads.ListQuery) ([]beads.Bead, error) {
 	handles := beads.HandlesFor(store)
+	if query.Status == "in_progress" {
+		// Claims are written by agent processes, outside the controller's cache
+		// coordinator. A cached-first read can miss the exact open -> in_progress
+		// transition that keeps the claimant alive: the ready row disappears, no
+		// assigned-work row replaces it, and the reconciler drains the live worker.
+		liveRows, liveErr := handles.Live.List(query)
+		if liveErr == nil {
+			return liveRows, nil
+		}
+		if !beads.IsPartialResult(liveErr) {
+			liveRows = nil
+		}
+		cachedRows, cachedErr := handles.Cached.List(query)
+		if cachedErr != nil && !beads.IsPartialResult(cachedErr) {
+			cachedRows = nil
+		}
+		rows := mergeReadyRowsByID(cachedRows, liveRows)
+		joined := errors.Join(liveErr, cachedErr)
+		if joined != nil && len(rows) > 0 && !beads.IsPartialResult(joined) {
+			joined = &beads.PartialResultError{Op: "controller assigned-work demand", Err: joined}
+		}
+		return rows, joined
+	}
 	rows, err := handles.Cached.List(query)
 	if errors.Is(err, beads.ErrCacheUnavailable) {
 		return handles.Live.List(query)
@@ -6773,7 +6804,7 @@ func collectOpenUnassignedRoutedWork(cityPath string, cfg *config.City, store be
 	// Refs are the canonical scoped spelling the rows' gc.root_store_ref is
 	// matched against; a binding keeps its own "class:*" ref, which reads back as
 	// city scope.
-	stores, legErr := routedWorkStoreCandidates(cityPath, cfg, store, rigStores, suspendedRigPaths, censusRefScoped)
+	stores, legErr := routedWorkStoreCandidates(cityPath, cfg, store, rigStores, suspendedRigPaths)
 	if legErr != nil {
 		// The only demand signal this set feeds is openControlDispatcherDemand,
 		// and a refused city reporting zero would drain a live dispatcher. Say so

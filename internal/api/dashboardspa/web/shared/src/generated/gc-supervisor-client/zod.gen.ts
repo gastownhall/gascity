@@ -1473,7 +1473,8 @@ export const zAgentPatch = z.object({
     TmuxAlias: z.string().nullable(),
     Upstream: z.string().nullable(),
     WakeMode: z.string().nullable(),
-    WorkDir: z.string().nullable()
+    WorkDir: z.string().nullable(),
+    WorkQueryFederated: z.boolean().nullable()
 });
 
 export const zListBodyAgentPatch = z.object({
@@ -11967,6 +11968,7 @@ export const zGetV0CityByCityNameWorkReadyPath = z.object({
 
 export const zGetV0CityByCityNameWorkReadyQuery = z.object({
     assignee: z.string().optional(),
+    assignee_any: z.array(z.string()).nullish(),
     unassigned: z.boolean().optional(),
     metadata_field: z.array(z.string()).nullish(),
     exclude_type: z.array(z.string()).nullish(),

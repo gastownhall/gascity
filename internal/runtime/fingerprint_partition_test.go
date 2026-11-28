@@ -115,6 +115,7 @@ var coreFieldHalf = map[string]string{
 
 var excludedFromCore = map[string]string{
 	"WorkDir":                "run location, not config identity",
+	"CommandScope":           "invocation-local containment attempt, not desired configuration identity",
 	"StartupEnvelope":        "T3 startup metadata, explicitly excluded from Core",
 	"ReadyPromptPrefix":      "startup readiness hint",
 	"ReadyDelayMs":           "startup readiness hint",
@@ -128,6 +129,37 @@ var excludedFromCore = map[string]string{
 	"PromptFlag":             "command-reconstruction hint, not hashed",
 	"FreshOnly":              "per-call Start mode (LL6), not config identity",
 	"ProgramStatus":          "leaf-applied capture declaration; arming and heal never restart the agent",
+}
+
+// A private native scope is minted only after admission. Comparing that unique
+// attempt descriptor with desired config must never produce restart drift.
+func TestCommandScopeAttemptDoesNotChangeDesiredFingerprints(t *testing.T) {
+	base := goldenFixtures()["comprehensive"]
+	for _, scope := range []*CommandScope{
+		nil,
+		{Launcher: "/usr/bin/systemd-run", Unit: "gc-managed-attempt-a.scope"},
+		{Launcher: "/usr/bin/systemd-run", Unit: "gc-managed-attempt-b.scope"},
+		{Launcher: "/different/host/systemd-run", Unit: "gc-managed-attempt-c.scope"},
+	} {
+		actual := base
+		actual.CommandScope = scope
+		for _, fingerprint := range []struct {
+			name string
+			hash func(Config) string
+		}{
+			{"config", ConfigFingerprint}, {"core", CoreFingerprint}, {"provision", ProvisionFingerprint}, {"launch", LaunchFingerprint}, {"live", LiveFingerprint},
+		} {
+			if fingerprint.hash(actual) != fingerprint.hash(base) {
+				t.Fatalf("%s fingerprint changed for an ephemeral scope attempt", fingerprint.name)
+			}
+		}
+		if !reflect.DeepEqual(CoreFingerprintBreakdown(actual), CoreFingerprintBreakdown(base)) {
+			t.Fatal("scope attempt leaked into the persisted core breakdown")
+		}
+		if drift := CoreFingerprintDriftFields(CoreFingerprintBreakdown(actual), base); len(drift) != 0 {
+			t.Fatalf("scope attempt caused desired config drift: %v", drift)
+		}
+	}
 }
 
 // TestFingerprintPartitionAccountsForEveryConfigField is the FP-1/GAP-6

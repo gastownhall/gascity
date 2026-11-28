@@ -19,6 +19,7 @@ go_test(
         "batchfile_windows_test.go",
         "execenv_test.go",
         "execrequest_test.go",
+        "owner_tuple_boundary_diagnostic_test.go",
         "process_env_test.go",
         "session_identity_test.go",
         "testenv_import_test.go",

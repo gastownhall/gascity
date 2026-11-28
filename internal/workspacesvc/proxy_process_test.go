@@ -1289,3 +1289,31 @@ func containsPID(pids []int, pid int) bool {
 	}
 	return false
 }
+
+// The socket allocator must tolerate a long host TMPDIR while keeping its
+// fallback directory private and reclaiming it when the instance closes.
+func TestAllocateProxyProcessSocketPathLongTempDir(t *testing.T) {
+	tempDir := filepath.Join(t.TempDir(), strings.Repeat("long", 30))
+	path, err := allocateProxyProcessSocketPathInTempDir("city", "bridge", tempDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cleanupProxyProcessSocketPath(path) })
+	if len(path) > 103 {
+		t.Fatalf("socket path has %d bytes, maximum portable length is 103: %q", len(path), path)
+	}
+	dir := filepath.Dir(path)
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Fatalf("socket directory mode = %o, want 700", info.Mode().Perm())
+	}
+	if err := cleanupProxyProcessSocketPath(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("socket directory remains after cleanup: %v", err)
+	}
+}

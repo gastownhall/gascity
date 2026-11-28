@@ -268,13 +268,14 @@ func (c startCandidate) logicalTemplate(cfg *config.City) string {
 }
 
 type preparedStart struct {
-	candidate     startCandidate
-	cfg           runtime.Config
-	coreHash      string
-	coreBreakdown runtime.BreakdownV1
-	liveHash      string
-	provisionHash string
-	launchHash    string
+	admissionContext context.Context
+	candidate        startCandidate
+	cfg              runtime.Config
+	coreHash         string
+	coreBreakdown    runtime.BreakdownV1
+	liveHash         string
+	provisionHash    string
+	launchHash       string
 	// prePolicyProvisionHash and prePolicyLaunchHash are provisionHash and
 	// launchHash as the v6 binary computed them (runtime.PrePolicy*), which a
 	// session it started matches.
@@ -2046,7 +2047,7 @@ func runPreparedStartCandidate(
 	defer cancel()
 	var phases startPhaseTimings
 	startCallBegin := time.Now()
-	startedFresh, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter, warmClaim)
+	startedFresh, err := startPreparedStartCandidate(sessionpkg.WithCapacityAdmission(startCtx, item.admissionContext), item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter, warmClaim)
 	startCtxErr := startCtx.Err()
 	// A startup nudge the runtime handed back (one held behind a dialog
 	// under program_status = "on", row A20, or an un-welded exec launch's
@@ -3557,6 +3558,13 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 	name := result.prepared.candidate.name()
 	tp := result.prepared.candidate.tp
 	fmt.Fprintf(stderr, "session reconciler: starting %s: %s\n", name, formatLifecycleError(result.err)) //nolint:errcheck
+	if errors.Is(result.err, sessionpkg.ErrCapacityAdmission) {
+		// The preflight can lose a race to another SID's grant spend. No provider
+		// launch occurred, so retain the durable intent and conversation identity.
+		clearPendingStartInFlightLease(info.ID, sessFront, stderr)
+		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "capacity_deferred", result.started, result.finished, result.err, result.phases)
+		return
+	}
 	// Every exit from this function is a failed start attempt, so record it
 	// here once rather than at each arm below — mirrors the single call site
 	// on the success path (commitStartResultTraced) and closes the gap where
@@ -5157,10 +5165,21 @@ func executePlannedStartsTraced(
 						continue
 					}
 				}
+				admittedCtx, allowed, reason := sessionpkg.AdmitCapacityStart(ctx, cityPath, candidate.logicalTemplate(cfg), candidate.info.ID, clk.Now().UTC(), sp, sessFront)
+				if !allowed {
+					if identity != "" {
+						cb.restoreEntrySnapshot(sessFront, candidate.info.ID, identity, cbBefore, cbNow, stderr)
+					}
+					drop("capacity_deferred", sessionpkg.CapacityAdmissionError(reason))
+					continue
+				}
 				prepareSpend.begin()
 				item, err := prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr, startOpts.workDirResolver, startOpts.dispatchOptionSources)
 				prepareSpend.end()
 				if err != nil {
+					if releaseErr := sessionpkg.AbandonCapacityStart(admittedCtx); releaseErr != nil {
+						fmt.Fprintf(stderr, "session reconciler: abandon unlaunched capacity: %v\n", releaseErr) //nolint:errcheck
+					}
 					// A PreWake refused because the row moved (or the lease was
 					// taken over) is no restart and leaves the row's in-flight
 					// marker to whoever moved it; the next pass decides again.
@@ -5173,6 +5192,7 @@ func executePlannedStartsTraced(
 					drop("failed", err)
 					continue
 				}
+				item.admissionContext = admittedCtx
 				if item.conversationReset && rec != nil {
 					rec.Record(staleKeyConversationResetEvent(item.candidate.info, item.candidate.tp))
 				}

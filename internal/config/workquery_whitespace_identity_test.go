@@ -59,7 +59,8 @@ func TestWorkQuerySkipsAWhitespaceOnlyIdentity(t *testing.T) {
 			if bad := whitespaceAssignee.FindString(string(logged)); bad != "" {
 				t.Fatalf("a tier was asked for a whitespace-only assignee %q:\n%s", bad, logged)
 			}
-			if !strings.Contains(string(logged), "[--assignee=worker-1]") {
+			if !strings.Contains(string(logged), "[--assignee=worker-1]") &&
+				!strings.Contains(string(logged), "[--assignee-any=worker-1]") {
 				t.Fatalf("the real identity was never queried:\n%s", logged)
 			}
 		})

@@ -143,6 +143,7 @@ export type AgentPatch = {
     Upstream: string | null;
     WakeMode: string | null;
     WorkDir: string | null;
+    WorkQueryFederated: boolean | null;
 };
 
 export type AgentPatchSetInputBody = {
@@ -22347,6 +22348,10 @@ export type GetV0CityByCityNameWorkReadyData = {
          * Only work whose assignee is exactly this identity.
          */
         assignee?: string;
+        /**
+         * Only work assigned to any of these exact identities. Repeatable; cannot be combined with assignee or unassigned.
+         */
+        assignee_any?: Array<string> | null;
         /**
          * Only work with no assignee.
          */

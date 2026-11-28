@@ -285,6 +285,7 @@ go_library(
         "schemas/perf/run/result.schema.json",
         "schemas/perf/session-new/result.schema.json",
         "schemas/analyze/work-record/result.schema.json",
+        "schemas/session/capacity-contract/result.schema.json",
     ],
     importpath = "github.com/gastownhall/gascity",
     visibility = ["//visibility:public"],

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "ok",
+    "schema",
+    "dedicated_alias_reservation",
+    "native_actual_start"
+  ],
+  "properties": {
+    "schema": {
+      "const": "gc.session-capacity-contract/v1"
+    },
+    "dedicated_alias_reservation": {
+      "type": "string"
+    },
+    "native_actual_start": {
+      "const": true
+    },
+    "admission_mode": {
+      "const": "native-managed-v1"
+    },
+    "ok": {
+      "const": true
+    }
+  },
+  "additionalProperties": false
+}

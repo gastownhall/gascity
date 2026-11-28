@@ -530,3 +530,116 @@ func writeTailJSONL(t *testing.T, path string, lines []map[string]any) {
 		}
 	}
 }
+
+func TestExtractTailMetaFromSearchPathsRejectsSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "session.jsonl")
+	writeTailJSONL(t, outside, []map[string]any{{
+		"type":    "assistant",
+		"message": map[string]any{"model": "claude-opus-4-5-20251101"},
+	}})
+	link := filepath.Join(root, "session.jsonl")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if _, err := ExtractTailMetaFromSearchPaths([]string{root}, link); err == nil {
+		t.Fatal("symlink outside search root accepted")
+	}
+}
+
+func TestExtractTailMetaFromSearchPathsRejectsNestedSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	path := filepath.Join(outside, "session.jsonl")
+	writeTailJSONL(t, path, []map[string]any{{
+		"type":    "assistant",
+		"message": map[string]any{"model": "claude-opus-4-5-20251101"},
+	}})
+	inside := filepath.Join(root, "sessions")
+	if err := os.Mkdir(inside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(path, filepath.Join(inside, "session.jsonl")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if _, err := ExtractTailMetaFromSearchPaths([]string{root}, filepath.Join(inside, "session.jsonl")); err == nil {
+		t.Fatal("nested symlink outside search root accepted")
+	}
+}
+
+func TestExtractTailMetaFromSearchPathsAllowsAccountRootAlias(t *testing.T) {
+	root := t.TempDir()
+	accountRoot := t.TempDir()
+	path := filepath.Join(accountRoot, "session.jsonl")
+	writeTailJSONL(t, path, []map[string]any{{
+		"type":    "assistant",
+		"message": map[string]any{"model": "claude-opus-4-5-20251101"},
+	}})
+	if err := os.Symlink(accountRoot, filepath.Join(root, "account-a")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if _, err := ExtractTailMetaFromSearchPaths([]string{root}, filepath.Join(root, "account-a", "session.jsonl")); err != nil {
+		t.Fatalf("account root alias rejected: %v", err)
+	}
+}
+
+func TestExtractTailMetaFromSearchPathsRejectsEscapeFromAccountRoot(t *testing.T) {
+	root := t.TempDir()
+	accountRoot := t.TempDir()
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	writeTailJSONL(t, path, []map[string]any{{
+		"type":    "assistant",
+		"message": map[string]any{"model": "claude-opus-4-5-20251101"},
+	}})
+	if err := os.Symlink(accountRoot, filepath.Join(root, "account-a")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := os.Symlink(path, filepath.Join(accountRoot, "session.jsonl")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if _, err := ExtractTailMetaFromSearchPaths([]string{root}, filepath.Join(root, "account-a", "session.jsonl")); err == nil {
+		t.Fatal("symlink outside account root accepted")
+	}
+}
+
+func TestExtractTailMetaFromSearchPathsRejectsAliasInGroupWritableRoot(t *testing.T) {
+	root := t.TempDir()
+	accountRoot := t.TempDir()
+	path := filepath.Join(accountRoot, "session.jsonl")
+	writeTailJSONL(t, path, []map[string]any{{
+		"type":    "assistant",
+		"message": map[string]any{"model": "claude-opus-4-5-20251101"},
+	}})
+	if err := os.Symlink(accountRoot, filepath.Join(root, "account-a")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := os.Chmod(root, 0o770); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ExtractTailMetaFromSearchPaths([]string{root}, filepath.Join(root, "account-a", "session.jsonl")); err == nil {
+		t.Fatal("alias in group-writable search root accepted")
+	}
+}
+
+func TestExtractTailMetaFromSearchPathsAllowsConfiguredAliasInGroupWritableRoot(t *testing.T) {
+	root := t.TempDir()
+	accountRoot := t.TempDir()
+	path := filepath.Join(accountRoot, "session.jsonl")
+	writeTailJSONL(t, path, []map[string]any{{
+		"type":    "assistant",
+		"message": map[string]any{"model": "claude-opus-4-5-20251101"},
+	}})
+	alias := filepath.Join(root, "account-a")
+	if err := os.Symlink(accountRoot, alias); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := os.Chmod(root, 0o770); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ExtractTailMetaFromSearchPaths([]string{root, alias}, filepath.Join(alias, "session.jsonl")); err != nil {
+		t.Fatalf("configured account root rejected: %v", err)
+	}
+	if _, err := ExtractTailMetaFromSearchPaths([]string{root, accountRoot}, filepath.Join(alias, "session.jsonl")); err != nil {
+		t.Fatalf("configured physical account root rejected: %v", err)
+	}
+}

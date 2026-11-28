@@ -36,6 +36,7 @@ go_test(
         "//internal/runtime",
         "//internal/runtime/proctable",
         "//internal/runtime/runtimetest",
+        "//internal/shellquote",
         "//internal/testenv",
         "//internal/testutil",
     ],

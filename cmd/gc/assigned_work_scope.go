@@ -179,7 +179,27 @@ func filterAssignedWorkBeadsForPoolDemand(
 	sessionInfos []sessionpkg.Info,
 	assignedWorkBeads []beads.Bead,
 	assignedWorkStoreRefs []string,
+	readiness ...map[storeScopedBeadKey]bool,
 ) ([]beads.Bead, []string) {
+	if len(readiness) > 0 && cfg != nil {
+		work := make([]beads.Bead, 0, len(assignedWorkBeads))
+		refs := make([]string, 0, len(assignedWorkBeads))
+		for i, wb := range assignedWorkBeads {
+			ref := ""
+			if i < len(assignedWorkStoreRefs) {
+				ref = assignedWorkStoreRefs[i]
+			}
+			agent := findAgentByTemplate(cfg, routedToOrLegacyWorkflowTarget(wb))
+			// Resume holders need their blocked pins for parked-seat retention.
+			// A fresh launch has no continuation and needs an actual ready verdict.
+			if wb.Status == "open" && agent != nil && agent.WakeMode == "fresh" && (i >= len(assignedWorkStoreRefs) || !readiness[0][storeScopedBeadKey{StoreRef: ref, ID: wb.ID}]) {
+				continue
+			}
+			work = append(work, wb)
+			refs = append(refs, ref)
+		}
+		assignedWorkBeads, assignedWorkStoreRefs = work, refs
+	}
 	if len(assignedWorkBeads) == 0 || len(assignedWorkStoreRefs) == 0 {
 		return assignedWorkBeads, assignedWorkStoreRefs
 	}

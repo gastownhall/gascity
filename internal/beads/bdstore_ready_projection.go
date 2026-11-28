@@ -454,6 +454,13 @@ func (s *BdStore) fetchReadyProjection(door readyProjectionDoor, ids []string) (
 	// so the absence does not flap a spurious bead.updated.
 	out, err := s.runner(s.dir, "bd", "sql", readyProjectionSQL(), "--json")
 	if err != nil {
+		if isBdSQLForwardSchemaSkewFailure(err) {
+			// Forward-schema reads cannot prove a complete is_blocked column.
+			// bd blocked omits rows whose blocker it cannot attribute, so its
+			// absence is not evidence of readiness. Use bd ready's live verdict.
+			s.latchReadyProjectionUnsupported(err)
+			return nil, fmt.Errorf("bd ready projection: %w: %w", ErrReadyProjectionUnsupported, err)
+		}
 		if isBdSQLUnsupportedInEmbeddedMode(err) {
 			// Belt-and-braces to the backend gate: a scope whose metadata does
 			// not name its backend, or names one gc implements while bd opened
@@ -486,6 +493,20 @@ func (s *BdStore) fetchReadyProjection(door readyProjectionDoor, ids []string) (
 		result[row.ID] = row.IsBlocked.value
 	}
 	return result, nil
+}
+
+// isBdSQLForwardSchemaSkewFailure identifies an explicitly allowed forward
+// schema whose raw SQL projection failed. Such a scope must take its readiness
+// verdict from live bd ready rather than an incomplete cached projection.
+// Both halves of bd's warning are required: an ordinary transport failure or
+// a partial warning remains transient and retries the projection next cycle.
+func isBdSQLForwardSchemaSkewFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "schema skew ignored") &&
+		strings.Contains(msg, "ahead of binary")
 }
 
 func readyProjectionSQL() string {

@@ -174,7 +174,7 @@ case "$1" in
     exit 7
     ;;
 esac
-printf '[{"id":"ga-fallback-routed","metadata":{"gc.routed_to":"%s"}},{"id":"ga-fallback-held-mayor","metadata":{"gc.routed_to":"%s"},"labels":["hold:mayor"]},{"id":"ga-fallback-held-external","metadata":{"gc.routed_to":"%s"},"labels":["hold:external"]}]'
+printf '[{"status":"open","id":"ga-fallback-routed","metadata":{"gc.routed_to":"%s"}},{"status":"open","id":"ga-fallback-held-mayor","metadata":{"gc.routed_to":"%s"},"labels":["hold:mayor"]},{"status":"open","id":"ga-fallback-held-external","metadata":{"gc.routed_to":"%s"},"labels":["hold:external"]}]'
 `, target, target, target)
 	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake bd: %v", err)

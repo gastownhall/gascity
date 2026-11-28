@@ -228,7 +228,9 @@
               "storage-snapshot",
               "storage-snapshot-restore",
               "storage-split",
-              "analyze-work-record"
+              "analyze-work-record",
+              "session-capacity-contract",
+              "pool-admission-probe"
             ]
           },
           "event_id": {

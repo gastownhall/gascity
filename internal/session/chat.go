@@ -446,6 +446,13 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	if sessionKey == "" && freshCmd == resumeCommand {
 		return false, nil
 	}
+	ctx, admitErr := m.admitRuntime(ctx, id, b.Metadata["template"])
+	if admitErr != nil {
+		if unroute != nil {
+			unroute()
+		}
+		return false, admitErr
+	}
 	// Under the lease, a runtime up with its agent alive is the start's own
 	// launch, whose death its Start reported or a cached read took for gone:
 	// the start converges on it, as on one it finds up before its mint
@@ -495,7 +502,7 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 		}
 		cfg.Env = mergeEnv(cfg.Env, next.Env())
 	}
-	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
+	if err := m.startRuntime(ctx, sessName, cfg); err != nil {
 		switch {
 		case inc == nil:
 		case m.launchedUnder(sessName, cfg.ProcessNames, next):
@@ -887,6 +894,11 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 	if resumeCommand == "" {
 		return fmt.Errorf("%w: %s", ErrResumeRequired, id)
 	}
+	ctx, admitErr := m.admitRuntime(ctx, id, b.Metadata["template"])
+	if admitErr != nil {
+		releaseRoute(unroute)
+		return admitErr
+	}
 	// The start runs under the runtime lease, taken before its first write
 	// (withSessionStartLock reruns this on busy), or under its caller's, and
 	// its calls stop once the lease lapses or moves.
@@ -986,7 +998,7 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 		}
 		inc, provisional = &minted, true
 		cfg = startConfig(cfg, b, minted)
-		if err := m.sp.Start(ctx, sessName, cfg); err != nil {
+		if err := m.startRuntime(ctx, sessName, cfg); err != nil {
 			switch {
 			// A capacity refusal is also a startup death, but the endpoint
 			// refused the launch: that says nothing about the resume key, so
@@ -1006,13 +1018,16 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 					return startFailure(resumeCommand, b.Metadata, err)
 				}
 				started = retried
-			case errors.Is(err, runtime.ErrSessionExists):
+			case errors.Is(err, runtime.ErrSessionExists) && !runtime.IsProviderCapacity(err):
 				// The runtime came up past the fresh read (a start that took
 				// no lease, or a resume of ours that returned before
 				// confirming it: the canceled stale-key wait below). When a
 				// fresh read finds it running, the resume converged on it: the
 				// mint is withdrawn, and active state is persisted below with
-				// the binding of that runtime.
+				// the binding of that runtime. A capacity refusal that also
+				// reports an existing runtime is not that convergence: the
+				// launch was never contained, so it falls through to the plain
+				// failure rather than adopting an unowned runtime.
 				if convErr := m.convergedOnRunning(err, sessName, unroute, resumeCommand, b.Metadata); convErr != nil {
 					return convErr
 				}
@@ -1297,6 +1312,11 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 	}
 	transport, _ := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
+	ctx, admitErr := m.admitRuntime(ctx, id, b.Metadata["template"])
+	if admitErr != nil {
+		releaseRoute(unroute)
+		return admitErr
+	}
 	running, runErr := m.runningOrUnroute(sessName, unroute)
 	if runErr != nil {
 		return runErr
@@ -1343,7 +1363,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 		releaseRoute(unroute)
 		return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
 	}
-	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
+	if err := m.startRuntime(ctx, sessName, cfg); err != nil {
 		switch {
 		// A capacity refusal says nothing about the resume key; it takes the
 		// plain failure path, not the stale-key recovery (see ensureRunning).

@@ -72,3 +72,26 @@ func TestReadRefusesANegativeLimitBeforeReadingAnyStore(t *testing.T) {
 		t.Fatalf("--limit 0 = %v, want every row (0 is unlimited)", got)
 	}
 }
+
+func TestReadAssigneeAnyUnionsExactIdentities(t *testing.T) {
+	now := time.Now().UTC()
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		readyRow("a-1", 1, now, func(b *beads.Bead) { b.Assignee = "ses-1" }),
+		readyRow("a-2", 2, now.Add(time.Second), func(b *beads.Bead) { b.Assignee = "alias-1" }),
+		readyRow("a-3", 3, now.Add(2*time.Second), func(b *beads.Bead) { b.Assignee = "other" }),
+		readyRow("a-4", 4, now.Add(3*time.Second)),
+	}, nil)
+	legs := []Leg{testLeg("city", store)}
+	if got := readIDs(t, legs, Query{AssigneesAny: []string{"ses-1", "alias-1"}}); !slices.Equal(got, []string{"a-1", "a-2"}) {
+		t.Fatalf("--assignee-any union = %v, want a-1 and a-2", got)
+	}
+	for _, q := range []Query{
+		{AssigneesAny: []string{"ses-1"}, Assignee: "alias-1"},
+		{AssigneesAny: []string{"ses-1"}, Unassigned: true},
+		{AssigneesAny: []string{" "}},
+	} {
+		if err := q.Validate(); err == nil {
+			t.Fatalf("invalid --assignee-any query validated: %+v", q)
+		}
+	}
+}

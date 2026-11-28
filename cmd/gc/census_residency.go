@@ -117,9 +117,8 @@ func routedWorkStoreCandidates(
 	leading beads.Store,
 	rigStores map[string]beads.Store,
 	suspendedRigPaths map[string]bool,
-	style censusRefStyle,
 ) ([]classStoreCandidate, error) {
-	return censusLegCandidates(storeref.RoutedWork{}, storeref.PlaneRuntime, cityPath, cfg, leading, rigStores, suspendedRigPaths, style)
+	return censusLegCandidates(storeref.RoutedWork{}, storeref.PlaneRuntime, cityPath, cfg, leading, rigStores, suspendedRigPaths, censusRefScoped)
 }
 
 // routedWorkCityDemandLegs resolves the CITY-SCOPE legs the default pool-demand

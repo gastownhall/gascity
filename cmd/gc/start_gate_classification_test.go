@@ -57,6 +57,7 @@ type startOutcomeClass struct {
 // logLifecycleOutcome call can report to whether it records. The scan in
 // scanStartOutcomes is the authority on which values exist.
 var startOutcomeClassification = map[string]startOutcomeClass{
+	"capacity_deferred":             {reason: "admission may update its ledger and restore circuit metadata, so clause (c) does not hold"},
 	"deferred_by_wake_budget":       {records: true},
 	"deferred_by_async_start_limit": {records: true},
 	"deferred_by_prepare_budget":    {records: true},

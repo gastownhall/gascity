@@ -2,6 +2,7 @@ package sessionlog
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,7 +47,16 @@ type openCodeUsageMessage struct {
 // cannot know. An unparseable export is an error, never an empty result, so a
 // torn mid-write mirror is retried rather than swept as usage-free.
 func ExtractOpenCodeTailUsage(path string) ([]TailUsage, error) {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close() //nolint:errcheck // best-effort close on read-only file
+	return extractOpenCodeTailUsageFromFile(f)
+}
+
+func extractOpenCodeTailUsageFromFile(f *os.File) ([]TailUsage, error) {
+	data, err := io.ReadAll(f)
 	if err != nil {
 		return nil, err
 	}
@@ -95,11 +105,12 @@ func ExtractOpenCodeTailUsage(path string) ([]TailUsage, error) {
 // verifying path resolves under one of the merged OpenCode export roots (the
 // default mirror directory plus searchPaths).
 func ExtractOpenCodeTailUsageFromSearchPaths(searchPaths []string, path string) ([]TailUsage, error) {
-	safePath, err := validateSearchPathFile(mergeOpenCodeSearchPaths(searchPaths), path)
+	f, err := openSearchPathFile(mergeOpenCodeSearchPaths(searchPaths), path)
 	if err != nil {
 		return nil, err
 	}
-	return ExtractOpenCodeTailUsage(safePath)
+	defer func() { _ = f.Close() }()
+	return extractOpenCodeTailUsageFromFile(f)
 }
 
 // FindOpenCodeSessionFileByID resolves the export mirrored for one OpenCode

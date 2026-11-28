@@ -113,18 +113,28 @@ func TestReadyWorkSendsEveryQueryFieldToTheController(t *testing.T) {
 		Limit:          20,
 		Status:         readywork.StatusInProgress,
 	}
+	batch := want
+	batch.Assignee, batch.Unassigned = "", false
+	batch.AssigneesAny = []string{"worker-1", "worker-2"}
+	queries := []readywork.Query{want, batch}
 	v := reflect.ValueOf(want)
 	for i := range v.NumField() {
-		if v.Field(i).IsZero() {
+		covered := false
+		for _, query := range queries {
+			covered = covered || !reflect.ValueOf(query).Field(i).IsZero()
+		}
+		if !covered {
 			t.Fatalf("fixture leaves readywork.Query.%s zero; set it so the wire covers it", v.Type().Field(i).Name)
 		}
 	}
 	state := &readyWorkFakeState{fakeState: newFakeState(t)}
-	if _, err := workReadyServer(t, state).ReadyWork(context.Background(), want); err != nil {
-		t.Fatalf("ReadyWork: %v", err)
+	for _, query := range queries {
+		if _, err := workReadyServer(t, state).ReadyWork(context.Background(), query); err != nil {
+			t.Fatalf("ReadyWork: %v", err)
+		}
 	}
-	if len(state.asked) != 1 || !reflect.DeepEqual(state.asked[0], want) {
-		t.Fatalf("controller was asked %+v, want %+v", state.asked, want)
+	if !reflect.DeepEqual(state.asked, queries) {
+		t.Fatalf("controller was asked %+v, want %+v", state.asked, queries)
 	}
 }
 

@@ -125,6 +125,7 @@ func (f readyFlags) read(legs []readywork.Leg) ([]readywork.ReadyBead, error) {
 func registerReadyFlags(cmd *cobra.Command, flags *readyFlags, includeEphemeral, jsonOut *bool) {
 	opts := &flags.query
 	cmd.Flags().StringVar(&opts.Assignee, "assignee", "", "only work assigned to exactly this identity")
+	cmd.Flags().StringArrayVar(&opts.AssigneesAny, "assignee-any", nil, "only work assigned to any of these exact identities (repeatable; incompatible with --assignee and --unassigned)")
 	cmd.Flags().BoolVar(&opts.Unassigned, "unassigned", false, "only unassigned work")
 	cmd.Flags().StringArrayVar(&opts.MetadataFields, "metadata-field", nil, "require metadata \"key=value\", or bare \"key\" for any non-empty value (repeatable)")
 	cmd.Flags().StringArrayVar(&opts.ExcludeTypes, "exclude-type", nil, "drop beads of this issue type (repeatable)")

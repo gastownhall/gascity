@@ -51,6 +51,9 @@ type Query struct {
 	// `bd ready --assignee` matches. Surrounding whitespace in the flag is
 	// trimmed; the stored assignee is compared as stored.
 	Assignee string
+	// AssigneesAny keeps only beads whose assignee is one of these exact
+	// identities. Repeated --assignee-any, applied before dependency enrichment.
+	AssigneesAny []string
 	// Unassigned keeps only beads with no assignee (an empty assignee), as
 	// `bd ready --unassigned` matches.
 	Unassigned bool
@@ -81,6 +84,7 @@ type Query struct {
 type compiled struct {
 	query         Query
 	assignee      string
+	assigneesAny  map[string]bool
 	excludeTypes  map[string]bool
 	excludeLabels []string
 	metadata      []metadataFieldFilter
@@ -98,6 +102,20 @@ func compile(q Query) (compiled, error) {
 	if q.Limit < 0 {
 		return compiled{}, fmt.Errorf("--limit %d is negative (0 is unlimited)", q.Limit)
 	}
+	var assigneesAny map[string]bool
+	if len(q.AssigneesAny) > 0 {
+		if strings.TrimSpace(q.Assignee) != "" || q.Unassigned {
+			return compiled{}, fmt.Errorf("--assignee-any cannot be combined with --assignee or --unassigned")
+		}
+		assigneesAny = make(map[string]bool, len(q.AssigneesAny))
+		for _, identity := range q.AssigneesAny {
+			identity = strings.TrimSpace(identity)
+			if identity == "" {
+				return compiled{}, fmt.Errorf("--assignee-any requires a non-empty identity")
+			}
+			assigneesAny[identity] = true
+		}
+	}
 	metadata, err := parseMetadataFieldFilters(q.MetadataFields)
 	if err != nil {
 		return compiled{}, err
@@ -111,11 +129,12 @@ func compile(q Query) (compiled, error) {
 		return compiled{}, err
 	}
 	c := compiled{
-		query:    q,
-		assignee: strings.TrimSpace(q.Assignee),
-		metadata: metadata,
-		status:   status,
-		sort:     sortOrder,
+		query:        q,
+		assignee:     strings.TrimSpace(q.Assignee),
+		assigneesAny: assigneesAny,
+		metadata:     metadata,
+		status:       status,
+		sort:         sortOrder,
 	}
 	for _, t := range q.ExcludeTypes {
 		if t = strings.TrimSpace(t); t != "" {
@@ -156,6 +175,9 @@ func (c compiled) matches(b beads.Bead) bool {
 		return false
 	}
 	if c.assignee != "" && b.Assignee != c.assignee {
+		return false
+	}
+	if len(c.assigneesAny) > 0 && !c.assigneesAny[b.Assignee] {
 		return false
 	}
 	if c.excludeTypes[b.Type] {

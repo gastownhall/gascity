@@ -813,11 +813,11 @@ func TestInfraCommandWrapsResolvableExecutable(t *testing.T) {
 	}
 }
 
-// TestProviderLifecycleEnvCarriesSessionIdentity: an agent's gc autostarts
+// TestProviderLifecycleEnvCarriesSessionOrigin: an agent's gc autostarts
 // the store through the provider script (gc-beads-bd.sh start → gc
 // dolt-state start-managed). That inner gc scopes the Dolt server only if
-// the provider env passes GC_SESSION_ID through, and must not invent one.
-func TestProviderLifecycleEnvCarriesSessionIdentity(t *testing.T) {
+// the provider env preserves session origin without inheriting ownership.
+func TestProviderLifecycleEnvCarriesSessionOrigin(t *testing.T) {
 	for _, session := range []bool{true, false} {
 		t.Run(fmt.Sprintf("session=%t", session), func(t *testing.T) {
 			cityPath := t.TempDir()
@@ -830,9 +830,17 @@ func TestProviderLifecycleEnvCarriesSessionIdentity(t *testing.T) {
 			}
 			// An empty value is no session identity to infraArgv.
 			t.Setenv(infraSessionIdentityEnv, want)
+			t.Setenv(infraSessionOriginEnv, "")
 			env := runtimeEnvEntriesToMap(mustProviderLifecycleProcessEnv(t, cityPath, "exec:"+gcBeadsBdScriptPath(cityPath)))
-			if got := env[infraSessionIdentityEnv]; got != want {
-				t.Fatalf("provider env %s = %q, want %q", infraSessionIdentityEnv, got, want)
+			if got := env[infraSessionIdentityEnv]; got != "" {
+				t.Fatalf("provider inherited caller's session identity %q", got)
+			}
+			wantOrigin := ""
+			if session {
+				wantOrigin = "1"
+			}
+			if got := env[infraSessionOriginEnv]; got != wantOrigin {
+				t.Fatalf("provider origin = %q, want %q", got, wantOrigin)
 			}
 		})
 	}
@@ -864,5 +872,16 @@ func TestInfraUnitNamesAreUniquePerSpawn(t *testing.T) {
 	}
 	if first == second {
 		t.Fatalf("two spawns got the same scope unit %q", first)
+	}
+}
+
+func TestInfraScopeUsesProviderSessionOriginWithoutSessionOwnership(t *testing.T) {
+	installInfraScopeHost(t, wrappableFromSession)
+	t.Setenv(infraSessionIdentityEnv, "")
+	t.Setenv(infraSessionOriginEnv, "1")
+	argv := []string{"dolt", "sql-server"}
+	got, unit := infraArgv(infraTestDescription, argv)
+	if unit == "" || slices.Equal(got, argv) {
+		t.Fatalf("provider-origin infrastructure was not scoped outside the session: %q, %q", got, unit)
 	}
 }

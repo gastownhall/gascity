@@ -47,6 +47,7 @@ var (
 	_ runtime.FreshLivenessObserver           = (*Provider)(nil)
 	_ runtime.SessionObjectKiller             = (*Provider)(nil)
 	_ runtime.AttachmentObserverWithError     = (*Provider)(nil)
+	_ runtime.CommandScopeProvider            = (*Provider)(nil)
 	_ runtime.SessionEventProvider            = (*Provider)(nil)
 	_ runtime.BackendListingProvider          = (*Provider)(nil)
 	_ runtime.BackendsProvider                = (*Provider)(nil)
@@ -197,6 +198,12 @@ func (p *Provider) DetectTransport(name string) string {
 		return "acp"
 	}
 	return ""
+}
+
+// SupportsCommandScope reports the routed backend's local command containment.
+func (p *Provider) SupportsCommandScope(name string) bool {
+	sp, ok := p.route(name).(runtime.CommandScopeProvider)
+	return ok && sp.SupportsCommandScope(name)
 }
 
 // Start delegates to the routed backend.

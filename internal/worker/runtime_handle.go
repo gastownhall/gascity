@@ -124,6 +124,13 @@ func (h *RuntimeHandle) StartResolved(ctx context.Context, by sessionpkg.Actor, 
 		return err
 	}
 	defer release()
+	route := startCfg.Env["GC_TEMPLATE"]
+	// Runtime-only handles have no durable SID, so a managed cold start cannot
+	// spend a grant. An unmanaged protected route keeps its existing behavior.
+	allowed, reason := sessionpkg.ClaimCapacityStart(h.cityPath, route, "", time.Now().UTC(), h.provider, nil)
+	if !allowed {
+		return sessionpkg.CapacityAdmissionError(reason)
+	}
 	err = h.provider.Start(ctx, h.sessionName, startCfg)
 	// A runtime-only handle has no session row to queue a startup nudge
 	// for: one the runtime handed back (its program held it behind a

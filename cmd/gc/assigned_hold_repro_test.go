@@ -43,11 +43,12 @@ case "$1" in
   *) printf '[]'; exit 0 ;;
 esac
 shift
-status=open; assignee=""; unassigned=false; meta='[]'; excl='[]'; limit=0
+status=open; assignee=""; assignees='[]'; unassigned=false; meta='[]'; excl='[]'; limit=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --status) shift; status=$1 ;;
     --assignee=*) assignee=${1#--assignee=} ;;
+    --assignee-any=*) assignees=$(printf '%s' "$assignees" | jq -c --arg a "${1#--assignee-any=}" '. + [$a]') ;;
     --unassigned) unassigned=true ;;
     --metadata-field) shift; meta=$(printf '%s' "$meta" | jq -c --arg kv "$1" '. + [$kv]') ;;
     --exclude-label) shift; excl=$(printf '%s' "$excl" | jq -c --arg l "$1" '. + [$l]') ;;
@@ -57,10 +58,11 @@ while [ $# -gt 0 ]; do
   shift
 done
 jq -c --arg st "$status" --arg a "$assignee" --argjson u "$unassigned" \
-  --argjson meta "$meta" --argjson excl "$excl" --argjson lim "$limit" '
+  --argjson meta "$meta" --argjson excl "$excl" --argjson lim "$limit" --argjson assignees "$assignees" '
   [.[] | . as $row | select(
     ($row.status == $st)
     and ($a == "" or ($row.assignee // "") == $a)
+    and (($assignees | length) == 0 or (($row.assignee // "") | IN($assignees[])))
     and (($u | not) or ($row.assignee // "") == "")
     and all($meta[]; . as $kv | ($kv | index("=")) as $i |
       (($row.metadata // {})[$kv[:$i]] // "") == $kv[$i+1:])
@@ -214,7 +216,11 @@ func TestAssignedHoldHeldOpenAliasAssignmentStillServesRoutedStep(t *testing.T) 
 					assignedRead := reader.binary + " ready --include-ephemeral --assignee=" + identity + " "
 					var sawAssignedRead bool
 					for _, line := range strings.Split(log, "\n") {
-						if !strings.HasPrefix(line, assignedRead) {
+						if reader.federated {
+							if !strings.HasPrefix(line, "gc ready --include-ephemeral ") || !strings.Contains(line, "--assignee-any="+identity+" ") {
+								continue
+							}
+						} else if !strings.HasPrefix(line, assignedRead) {
 							continue
 						}
 						sawAssignedRead = true

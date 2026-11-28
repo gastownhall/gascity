@@ -1,6 +1,8 @@
 package workertest
 
 import (
+	"io/fs"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -241,9 +243,76 @@ func mustLoadSnapshot(t *testing.T, profile Profile, fixtureRoot string) *Snapsh
 	t.Helper()
 
 	root := filepath.Clean(fixtureRoot)
+	if profile.Usage.Supported {
+		// Bazel runfiles can be symlinks outside their apparent fixture root.
+		// Materialize these trusted test inputs so the production root-confined
+		// usage reader sees the same physical layout as a provider's log directory.
+		source, err := filepath.EvalSymlinks(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		root = t.TempDir()
+		if err := filepath.WalkDir(source, func(path string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			rel, err := filepath.Rel(source, path)
+			if err != nil {
+				return err
+			}
+			dest := filepath.Join(root, rel)
+			if entry.IsDir() {
+				return os.MkdirAll(dest, 0o700)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			return os.WriteFile(dest, data, 0o600)
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	snapshot, err := LoadSnapshot(profile, root)
 	if err != nil {
 		t.Fatalf("LoadSnapshot(%s, %s): %v", profile.ID, root, err)
 	}
 	return snapshot
+}
+
+func TestUsageConformanceMaterializesSymlinkedRunfiles(t *testing.T) {
+	for _, profile := range Phase1Profiles() {
+		if !profile.Usage.Supported {
+			continue
+		}
+		t.Run(string(profile.ID), func(t *testing.T) {
+			original, err := LoadSnapshot(profile, profile.Fixtures.FreshRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			source, err := filepath.Abs(original.TranscriptPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runfiles := t.TempDir()
+			link := filepath.Join(runfiles, original.TranscriptPathHint)
+			if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(source, link); err != nil {
+				t.Skipf("runfiles symlinks unavailable: %v", err)
+			}
+			adapter := worker.SessionLogAdapter{SearchPaths: []string{runfiles}}
+			if _, err := adapter.InvocationUsage(profile.Provider, link, ""); err == nil {
+				t.Fatal("production reader accepted a symlink outside its root")
+			}
+			snapshot := mustLoadSnapshot(t, profile, runfiles)
+			if err := TranscriptUsageResult(profile, snapshot).Err(); err != nil {
+				t.Fatal(err)
+			}
+			if err := TranscriptUsageCostResult(profile, snapshot).Err(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
 }

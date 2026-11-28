@@ -233,7 +233,13 @@ func TestAssignedReadyHeldOnlyFallsThroughToRoutedTier(t *testing.T) {
 						routedOpenRow(),
 					})
 					assertServed(t, got, "routed")
-					if !strings.Contains(log, "--assignee="+identity+" --exclude-label hold:mayor --exclude-label hold:external --json --limit=1") {
+					selector := "--assignee=" + identity
+					if strings.Contains(log, "--assignee-any="+identity) {
+						selector = "--assignee-any=" + identity
+					}
+					if !strings.Contains(log, selector) ||
+						!strings.Contains(log, "--exclude-label hold:mayor --exclude-label hold:external") ||
+						!strings.Contains(log, "--json --limit=") {
 						t.Errorf("assigned-ready read for %s does not exclude the dispatch holds before its limit; reads:\n%s", identity, log)
 					}
 				})

@@ -93,18 +93,31 @@ func IsSensitiveKey(key string) bool {
 	return false
 }
 
-// FilterInherited removes sensitive KEY=VALUE entries from an inherited
-// environment. Explicit overrides should be appended after filtering.
+// FilterInherited removes sensitive values and the complete ambient process
+// owner tuple from an inherited environment. Explicit overrides should be
+// appended after filtering; inherited routing context is not process authority.
 func FilterInherited(environ []string) []string {
 	out := make([]string, 0, len(environ))
 	for _, entry := range environ {
 		key, _, ok := strings.Cut(entry, "=")
+		if isProcessOwnerKey(key) {
+			continue
+		}
 		if ok && IsSensitiveKey(key) {
 			continue
 		}
 		out = append(out, entry)
 	}
 	return out
+}
+
+func isProcessOwnerKey(key string) bool {
+	switch key {
+	case "GC_SESSION_ID", "GC_TEMPLATE", "GC_RUNTIME_EPOCH", "GC_INSTANCE_TOKEN":
+		return true
+	default:
+		return false
+	}
 }
 
 // MergeMap filters inherited secrets, removes keys replaced by overrides, and

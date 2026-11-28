@@ -67,6 +67,10 @@ func ExtractTailUsage(path string) ([]TailUsage, error) {
 	}
 	defer f.Close() //nolint:errcheck // best-effort close on read-only file
 
+	return extractTailUsageFromFile(f)
+}
+
+func extractTailUsageFromFile(f *os.File) ([]TailUsage, error) {
 	data, _, err := readTail(f)
 	if err != nil {
 		return nil, err
@@ -151,6 +155,10 @@ func extractTailUsageSince(path, cursorID string, maxScanBytes int64) ([]TailUsa
 	}
 	defer f.Close() //nolint:errcheck // best-effort close on read-only file
 
+	return extractTailUsageSinceFromFile(f, path, cursorID, maxScanBytes)
+}
+
+func extractTailUsageSinceFromFile(f *os.File, path, cursorID string, maxScanBytes int64) ([]TailUsage, error) {
 	if cursorID == "" {
 		data, _, err := readTail(f)
 		if err != nil {
@@ -255,20 +263,22 @@ func parseTailUsage(data []byte) ([]TailUsage, error) {
 // after verifying path resolves under one of the configured session-log
 // search roots. Mirrors ExtractTailUsageFromSearchPaths.
 func ExtractTailUsageSinceFromSearchPaths(searchPaths []string, path, cursorID string) ([]TailUsage, error) {
-	safePath, err := validateSearchPathFile(searchPaths, path)
+	f, err := openSearchPathFile(searchPaths, path)
 	if err != nil {
 		return nil, err
 	}
-	return ExtractTailUsageSince(safePath, cursorID)
+	defer func() { _ = f.Close() }()
+	return extractTailUsageSinceFromFile(f, path, cursorID, maxUsageScanBytes)
 }
 
 // ExtractTailUsageFromSearchPaths reads tail usage only after verifying
 // path resolves under one of the configured session-log search roots.
 // Mirrors ExtractTailMetaFromSearchPaths.
 func ExtractTailUsageFromSearchPaths(searchPaths []string, path string) ([]TailUsage, error) {
-	safePath, err := validateSearchPathFile(searchPaths, path)
+	f, err := openSearchPathFile(searchPaths, path)
 	if err != nil {
 		return nil, err
 	}
-	return ExtractTailUsage(safePath)
+	defer func() { _ = f.Close() }()
+	return extractTailUsageFromFile(f)
 }

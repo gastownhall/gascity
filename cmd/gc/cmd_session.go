@@ -2,14 +2,17 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -52,6 +55,8 @@ continuity.`,
 		},
 	}
 	cmd.AddCommand(
+		newSessionCapacityEnterCmd(),
+		newSessionCapacityContractCmd(stdout),
 		newSessionNewCmd(stdout, stderr),
 		newSessionListCmd(stdout, stderr),
 		newSessionAttachCmd(stdout, stderr),
@@ -70,6 +75,61 @@ continuity.`,
 		newSessionWakeCmd(stdout, stderr),
 		newSessionWaitCmd(stdout, stderr),
 	)
+	return cmd
+}
+
+func newSessionCapacityEnterCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:    "capacity-enter CITY SID ATTEMPT UNIT -- COMMAND [ARG...]",
+		Hidden: true,
+		Args:   cobra.MinimumNArgs(5),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if cmd.ArgsLenAtDash() != 4 {
+				return fmt.Errorf("native capacity entry arguments invalid")
+			}
+			if err := session.EnterNativeCapacityScope(cmd.Context(), args[0], args[1], args[2], args[3]); err != nil {
+				return err
+			}
+			binary, err := exec.LookPath(args[4])
+			if err != nil {
+				return err
+			}
+			return syscall.Exec(binary, args[4:], os.Environ())
+		},
+	}
+}
+
+// This read-only capability handshake lets an external dispatcher fail closed
+// against an older gc binary before publishing a dedicated Clerk reservation.
+// The deployment must additionally verify the controller runs that same binary.
+func newSessionCapacityContractCmd(stdout io.Writer) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "capacity-contract",
+		Short: "Report the native exact-session capacity admission contract",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			city, err := resolveCity()
+			if err != nil {
+				return err
+			}
+			mode, err := session.CapacityAdmissionMode(city)
+			if err != nil {
+				return err
+			}
+			contract := map[string]any{
+				"ok":                          true,
+				"schema":                      "gc.session-capacity-contract/v1",
+				"dedicated_alias_reservation": session.DedicatedClerkReservationContract,
+				"native_actual_start":         true,
+			}
+			if mode == "native-managed-v1" {
+				contract["admission_mode"] = mode
+				contract["dedicated_alias_reservation"] = ""
+			}
+			return json.NewEncoder(stdout).Encode(contract)
+		},
+	}
+	cmd.Flags().Bool("json", false, "JSON output (the only supported format)")
 	return cmd
 }
 
@@ -1550,6 +1610,11 @@ func (p *attachmentCachingProvider) Relaunch(ctx context.Context, name string, c
 		return rp.Relaunch(ctx, name, cfg)
 	}
 	return runtime.ErrRelaunchUnsupported
+}
+
+func (p *attachmentCachingProvider) SupportsCommandScope(name string) bool {
+	sp, ok := p.Provider.(runtime.CommandScopeProvider)
+	return ok && sp.SupportsCommandScope(name)
 }
 
 func (p *attachmentCachingProvider) Pending(name string) (*runtime.PendingInteraction, error) {

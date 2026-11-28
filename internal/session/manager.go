@@ -805,6 +805,12 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 // its parent. The gate scans again until a pass terminates nothing, and
 // refuses if the orphans keep coming after maxOrphanPasses.
 func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) error {
+	// A native proof was minted only after the previous exact owned scope was
+	// retired. Its mandatory scope contains this attempt's model descendants;
+	// a second whole-host census is neither needed nor allowed on this path.
+	if proof, ok := ctx.Value(capacityAdmissionKey{}).(*capacityAdmissionProof); ok && proof.native != nil && proof.city == m.cityPath && proof.id == sessionID && !proof.used.Load() {
+		return nil
+	}
 	_ = ctx
 	if err := checkElevatedSessions(m.cityPath); err != nil {
 		return err
@@ -1215,6 +1221,15 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			return readErr
 		}
 
+		admittedCtx, admitErr := m.admitRuntime(ctx, b.ID, template)
+		if admitErr != nil {
+			if rbErr := rollbackFailedCreate(); rbErr != nil {
+				return errors.Join(admitErr, rbErr)
+			}
+			return admitErr
+		}
+		ctx = admittedCtx
+
 		// If the provider supports Generate & Pass, inject --session-id into command.
 		startCommand := command
 		if resume.SessionIDFlag != "" && sessionKey != "" {
@@ -1241,8 +1256,8 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			}
 			return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
 		}
-		if err := m.sp.Start(ctx, sessName, cfg); err != nil {
-			if runtimeSessionMatchesBead(m.sp, sessName, b.ID, inc.token) {
+		if err := m.startRuntime(ctx, sessName, cfg); err != nil {
+			if !runtime.IsProviderCapacity(err) && runtimeSessionMatchesBead(m.sp, sessName, b.ID, inc.token) {
 				if metaErr := m.confirmStartedRuntimeMetadata(inc, sessName, &b); metaErr != nil {
 					return metaErr
 				}
@@ -1584,188 +1599,190 @@ func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) e
 		if err != nil {
 			return err
 		}
-		// Closed beads are terminal; mutating lifecycle metadata after
-		// close produces impossible status=closed + live-state rows.
-		if b.Status == "closed" {
-			return &IllegalTransitionError{From: StateClosed, Command: CmdSuspend}
-		}
-		current := State(b.Metadata["state"])
-		if current == StateSuspended {
-			// An operator's suspend of a suspended row writes the hold (a
-			// suspended state alone, as the shutdown sweep leaves it, does not
-			// stop legacy's assigned-work wake), or stamps the one in force
-			// again; the runtime is already down.
+		return m.withNativeCapacityTeardown(id, b.Metadata["template"], func() error {
+			// Closed beads are terminal; mutating lifecycle metadata after
+			// close produces impossible status=closed + live-state rows.
+			if b.Status == "closed" {
+				return &IllegalTransitionError{From: StateClosed, Command: CmdSuspend}
+			}
+			current := State(b.Metadata["state"])
+			if current == StateSuspended {
+				// An operator's suspend of a suspended row writes the hold (a
+				// suspended state alone, as the shutdown sweep leaves it, does not
+				// stop legacy's assigned-work wake), or stamps the one in force
+				// again; the runtime is already down.
+				if intent == suspendIntentOperator {
+					_, err := m.PersistedStore().OperatorSuspend(id, m.now())
+					return err
+				}
+				return nil
+			}
+			// An operator's suspend, and the idle auto-suspend, stop the runtime
+			// under its lease, taken before any write; the city stop sweep takes
+			// none (it stops every runtime).
+			if intent != suspendIntentShutdown {
+				release, err := m.leaseForStop(ctx, by, id, sessName, 0)
+				if err != nil {
+					return err
+				}
+				defer release()
+			}
+			// failed-create is a create-rollback terminal state: the create never
+			// reached creation_complete, so there is no live turn to suspend — only
+			// a possibly-leaked runtime process to tear down. `gc stop` issues
+			// suspend on every session bead (no state pre-filter), and under a
+			// backing-store outage the reconciler cannot reap failed-create beads
+			// (its close path requires a reachable store), so suspend is the only
+			// thing that can clear the leaked process. Tear the runtime down
+			// best-effort and report success rather than rejecting with an
+			// illegal-transition error that blocks `gc stop` city-wide (#2597). The
+			// bead is left in failed-create for the reconciler to reap once the
+			// store is reachable again.
+			//
+			// Limitation: explicit-named beads whose rollback already cleared
+			// session_name (rollbackPendingCreate in
+			// cmd/gc/session_lifecycle_parallel.go) fall back to the synthetic
+			// sessionNameFor(id) here, so this Stop targets the synthetic name
+			// rather than the original explicit name and the leak under the
+			// original name persists. That is a strict improvement over the pre-fix
+			// state (suspend rejected outright, runtime leaked, `gc stop` blocked
+			// city-wide); preserving the original name across rollback for cleanup
+			// is tracked as follow-up.
+			if current == StateFailedCreate {
+				if strings.TrimSpace(sessName) != "" {
+					_ = m.sp.Stop(sessName) // best-effort: tear down any leaked runtime
+				}
+				return nil
+			}
+			// draining is the same shape of problem as failed-create above, but only
+			// for the SHUTDOWN sweep: `gc stop` and `gc restart` issue suspend on every
+			// session bead with no state pre-filter, so rejecting draining with an
+			// illegal-transition error made every restart SKIP the draining seats. They
+			// survived as live panes still holding their pool slot names, which is
+			// precisely what starves the pool (ga-rxhu2).
+			//
+			// Scoped to the sweep on purpose. A targeted operator suspend of a draining
+			// seat still returns the illegal transition: the arm below has none of the
+			// gates the reconciler's terminal escalation insists on for the same class
+			// of kill (no assigned-work probe, no token fence, no confirm-dead), so
+			// letting an operator reach it would turn POST /suspend into an ungated
+			// mid-drain kill that reports success while the row stays draining and
+			// CmdWake cannot bring it back.
+			//
+			// The early return deliberately writes NO state. A drain is not a
+			// suspension: `state` stays draining so the drain machinery can finish it
+			// or the reconciler can reap it, and the drain reason survives the stop.
+			// For the same reason this is NOT a StateDraining -> StateSuspended edge in
+			// the transition table — suspended is still an OPEN row, so the edge would
+			// release no pool name while silently losing the drain. Only a close frees
+			// the name, and CmdClose is already legal from draining.
+			if current == StateDraining && intent == suspendIntentShutdown {
+				return m.tearDownRuntimeForSuspend(sessName)
+			}
+			// creating is the same shape of problem as draining above, and likewise
+			// only for the SHUTDOWN sweep: only a start's commit moves its row from
+			// creating to active, after the provider's Start returns, and the city
+			// stop cancels its starts first, so the sweep can reach a live runtime
+			// whose row still reads creating (a forced stop's late re-list can reach
+			// one whose Start has not returned). Rejecting it here made the stop fail
+			// and the runtime survive the shutdown.
+			//
+			// Scoped to the sweep on purpose: an operator naming ONE session in creating
+			// still gets the illegal transition (TestConformance_SuspendStillRejectsOtherIllegalStates).
+			// Idle auto-suspend of creating is refused the same way.
+			//
+			// The early return writes NOTHING, last_woke_at included. The row belongs
+			// to its start: a start the stop canceled never commits it active, so
+			// the next controller start settles the row the sweep leaves, and the
+			// last_woke_at PreWake stamped is the marker it reads. With it, the
+			// stuck-creating reap keeps a claimless row for the reconciler to
+			// relaunch (mc-5a1ma), and a pending create keeps its started-create
+			// lease rather than the 10-minute never-started one. A `gc rig restart`
+			// sweep runs beside a live controller, so its stop can land under a
+			// start still in flight, which settles the row as it does any runtime
+			// that dies under it (SESSION-START-026).
+			if current == StateCreating && intent == suspendIntentShutdown {
+				return m.tearDownRuntimeForSuspend(sessName)
+			}
+			// Normalize legacy/aliased states (empty and awake both mean active)
+			// after the failed-create pre-check above, preserving closed-guard-
+			// first ordering.
+			current = canonicalLifecycleState(current)
+			// drained -> suspended is the operator's alone. The shutdown sweep
+			// and the idle auto-suspend write no hold, so moving a drained row to
+			// suspended would only lose its drain; they still refuse it.
+			if current == StateDrained && intent != suspendIntentOperator {
+				return &IllegalTransitionError{From: current, Command: CmdSuspend}
+			}
+			if _, err := Transition(current, CmdSuspend); err != nil {
+				return err
+			}
+
+			// Every intent clears last_woke_at before the runtime goes: a tick
+			// that sees the dead runtime would otherwise classify this deliberate
+			// stop as a rapid crash or churn of that wake and discard the
+			// conversation the next wake resumes.
+
+			// An operator's suspend is the disposition's Suspend cell, fenced,
+			// and written BEFORE the runtime goes: the user hold keeps legacy's
+			// assigned-work wake and its heartbeat crash recovery from undoing it,
+			// so a tick between the write and the stop drains the row instead of
+			// restarting it. It supersedes any pending wake request (D7) and
+			// clears the wake stamp in the same write. A failed stop restores the
+			// row, the stamp with it.
 			if intent == suspendIntentOperator {
-				_, err := m.PersistedStore().OperatorSuspend(id, m.now())
-				return err
+				suspended, err := m.PersistedStore().operatorSuspend(id, m.now(), operatorSuspendStopLife)
+				if err != nil {
+					return fmt.Errorf("updating suspension state: %w", err)
+				}
+				if err := m.tearDownRuntimeForSuspend(sessName); err != nil {
+					// The runtime is still live: restore what the suspend wrote, as
+					// a failed kill's rollback does, so the row never reads
+					// suspended over a live runtime. Decided on a fresh read and
+					// fenced: only while the row still carries this suspend's
+					// stamp, and only the keys the suspend changed that still read
+					// as it wrote them, so a write since (a wait, a quarantine)
+					// stands.
+					if rbErr := m.rollbackSuspend(id, suspended); rbErr != nil {
+						return fmt.Errorf("%w (restoring the row: %w)", err, rbErr)
+					}
+					return err
+				}
+				return nil
 			}
-			return nil
-		}
-		// An operator's suspend, and the idle auto-suspend, stop the runtime
-		// under its lease, taken before any write; the city stop sweep takes
-		// none (it stops every runtime).
-		if intent != suspendIntentShutdown {
-			release, err := m.leaseForStop(ctx, by, id, sessName, 0)
-			if err != nil {
-				return err
-			}
-			defer release()
-		}
-		// failed-create is a create-rollback terminal state: the create never
-		// reached creation_complete, so there is no live turn to suspend — only
-		// a possibly-leaked runtime process to tear down. `gc stop` issues
-		// suspend on every session bead (no state pre-filter), and under a
-		// backing-store outage the reconciler cannot reap failed-create beads
-		// (its close path requires a reachable store), so suspend is the only
-		// thing that can clear the leaked process. Tear the runtime down
-		// best-effort and report success rather than rejecting with an
-		// illegal-transition error that blocks `gc stop` city-wide (#2597). The
-		// bead is left in failed-create for the reconciler to reap once the
-		// store is reachable again.
-		//
-		// Limitation: explicit-named beads whose rollback already cleared
-		// session_name (rollbackPendingCreate in
-		// cmd/gc/session_lifecycle_parallel.go) fall back to the synthetic
-		// sessionNameFor(id) here, so this Stop targets the synthetic name
-		// rather than the original explicit name and the leak under the
-		// original name persists. That is a strict improvement over the pre-fix
-		// state (suspend rejected outright, runtime leaked, `gc stop` blocked
-		// city-wide); preserving the original name across rollback for cleanup
-		// is tracked as follow-up.
-		if current == StateFailedCreate {
-			if strings.TrimSpace(sessName) != "" {
-				_ = m.sp.Stop(sessName) // best-effort: tear down any leaked runtime
-			}
-			return nil
-		}
-		// draining is the same shape of problem as failed-create above, but only
-		// for the SHUTDOWN sweep: `gc stop` and `gc restart` issue suspend on every
-		// session bead with no state pre-filter, so rejecting draining with an
-		// illegal-transition error made every restart SKIP the draining seats. They
-		// survived as live panes still holding their pool slot names, which is
-		// precisely what starves the pool (ga-rxhu2).
-		//
-		// Scoped to the sweep on purpose. A targeted operator suspend of a draining
-		// seat still returns the illegal transition: the arm below has none of the
-		// gates the reconciler's terminal escalation insists on for the same class
-		// of kill (no assigned-work probe, no token fence, no confirm-dead), so
-		// letting an operator reach it would turn POST /suspend into an ungated
-		// mid-drain kill that reports success while the row stays draining and
-		// CmdWake cannot bring it back.
-		//
-		// The early return deliberately writes NO state. A drain is not a
-		// suspension: `state` stays draining so the drain machinery can finish it
-		// or the reconciler can reap it, and the drain reason survives the stop.
-		// For the same reason this is NOT a StateDraining -> StateSuspended edge in
-		// the transition table — suspended is still an OPEN row, so the edge would
-		// release no pool name while silently losing the drain. Only a close frees
-		// the name, and CmdClose is already legal from draining.
-		if current == StateDraining && intent == suspendIntentShutdown {
-			return m.tearDownRuntimeForSuspend(sessName)
-		}
-		// creating is the same shape of problem as draining above, and likewise
-		// only for the SHUTDOWN sweep: only a start's commit moves its row from
-		// creating to active, after the provider's Start returns, and the city
-		// stop cancels its starts first, so the sweep can reach a live runtime
-		// whose row still reads creating (a forced stop's late re-list can reach
-		// one whose Start has not returned). Rejecting it here made the stop fail
-		// and the runtime survive the shutdown.
-		//
-		// Scoped to the sweep on purpose: an operator naming ONE session in creating
-		// still gets the illegal transition (TestConformance_SuspendStillRejectsOtherIllegalStates).
-		// Idle auto-suspend of creating is refused the same way.
-		//
-		// The early return writes NOTHING, last_woke_at included. The row belongs
-		// to its start: a start the stop canceled never commits it active, so
-		// the next controller start settles the row the sweep leaves, and the
-		// last_woke_at PreWake stamped is the marker it reads. With it, the
-		// stuck-creating reap keeps a claimless row for the reconciler to
-		// relaunch (mc-5a1ma), and a pending create keeps its started-create
-		// lease rather than the 10-minute never-started one. A `gc rig restart`
-		// sweep runs beside a live controller, so its stop can land under a
-		// start still in flight, which settles the row as it does any runtime
-		// that dies under it (SESSION-START-026).
-		if current == StateCreating && intent == suspendIntentShutdown {
-			return m.tearDownRuntimeForSuspend(sessName)
-		}
-		// Normalize legacy/aliased states (empty and awake both mean active)
-		// after the failed-create pre-check above, preserving closed-guard-
-		// first ordering.
-		current = canonicalLifecycleState(current)
-		// drained -> suspended is the operator's alone. The shutdown sweep
-		// and the idle auto-suspend write no hold, so moving a drained row to
-		// suspended would only lose its drain; they still refuse it.
-		if current == StateDrained && intent != suspendIntentOperator {
-			return &IllegalTransitionError{From: current, Command: CmdSuspend}
-		}
-		if _, err := Transition(current, CmdSuspend); err != nil {
-			return err
-		}
 
-		// Every intent clears last_woke_at before the runtime goes: a tick
-		// that sees the dead runtime would otherwise classify this deliberate
-		// stop as a rapid crash or churn of that wake and discard the
-		// conversation the next wake resumes.
-
-		// An operator's suspend is the disposition's Suspend cell, fenced,
-		// and written BEFORE the runtime goes: the user hold keeps legacy's
-		// assigned-work wake and its heartbeat crash recovery from undoing it,
-		// so a tick between the write and the stop drains the row instead of
-		// restarting it. It supersedes any pending wake request (D7) and
-		// clears the wake stamp in the same write. A failed stop restores the
-		// row, the stamp with it.
-		if intent == suspendIntentOperator {
-			suspended, err := m.PersistedStore().operatorSuspend(id, m.now(), operatorSuspendStopLife)
+			// The soft and sweep suspends write their state after the stop, so
+			// the stamp is cleared first, whatever stamp the row carries by then.
+			// A failed stop restores the stamp it cleared.
+			cleared, err := m.clearWakeStamp(id)
 			if err != nil {
-				return fmt.Errorf("updating suspension state: %w", err)
+				return fmt.Errorf("clearing wake stamp for suspend: %w", err)
 			}
 			if err := m.tearDownRuntimeForSuspend(sessName); err != nil {
-				// The runtime is still live: restore what the suspend wrote, as
-				// a failed kill's rollback does, so the row never reads
-				// suspended over a live runtime. Decided on a fresh read and
-				// fenced: only while the row still carries this suspend's
-				// stamp, and only the keys the suspend changed that still read
-				// as it wrote them, so a write since (a wait, a quarantine)
-				// stands.
-				if rbErr := m.rollbackSuspend(id, suspended); rbErr != nil {
-					return fmt.Errorf("%w (restoring the row: %w)", err, rbErr)
+				if rbErr := m.restoreWakeStamp(id, cleared); rbErr != nil {
+					return fmt.Errorf("%w (restoring wake stamp: %w)", err, rbErr)
 				}
 				return err
 			}
-			return nil
-		}
 
-		// The soft and sweep suspends write their state after the stop, so
-		// the stamp is cleared first, whatever stamp the row carries by then.
-		// A failed stop restores the stamp it cleared.
-		cleared, err := m.clearWakeStamp(id)
-		if err != nil {
-			return fmt.Errorf("clearing wake stamp for suspend: %w", err)
-		}
-		if err := m.tearDownRuntimeForSuspend(sessName); err != nil {
-			if rbErr := m.restoreWakeStamp(id, cleared); rbErr != nil {
-				return fmt.Errorf("%w (restoring wake stamp: %w)", err, rbErr)
+			// Update state and suspension timestamp together so stores with a
+			// write-through cache preserve one coherent lifecycle transition. The
+			// idle auto-suspend supersedes a pending wake (D7) but holds nothing;
+			// the shutdown sweep leaves the wake for the next start.
+			patch := MetadataPatch{
+				"state":        string(StateSuspended),
+				"slept_at":     "",
+				"sleep_reason": "",
 			}
-			return err
-		}
-
-		// Update state and suspension timestamp together so stores with a
-		// write-through cache preserve one coherent lifecycle transition. The
-		// idle auto-suspend supersedes a pending wake (D7) but holds nothing;
-		// the shutdown sweep leaves the wake for the next start.
-		patch := MetadataPatch{
-			"state":        string(StateSuspended),
-			"slept_at":     "",
-			"sleep_reason": "",
-		}
-		if intent == suspendIntentIdle {
-			for k, v := range ClearWakeRequestPatch() {
-				patch[k] = v
+			if intent == suspendIntentIdle {
+				for k, v := range ClearWakeRequestPatch() {
+					patch[k] = v
+				}
 			}
-		}
-		// The stamp is the disposition's SuspendSoft cell (no hold).
-		patch = CellInto(id, b.Metadata, by.Kind, DispEvent{Kind: EvSuspendSoft}, m.now(), patch)
-		return m.stampSoftSuspend(id, patch)
+			// The stamp is the disposition's SuspendSoft cell (no hold).
+			patch = CellInto(id, b.Metadata, by.Kind, DispEvent{Kind: EvSuspendSoft}, m.now(), patch)
+			return m.stampSoftSuspend(id, patch)
+		})
 	})
 }
 
@@ -1891,70 +1908,72 @@ func (m *Manager) CloseDetailed(ctx context.Context, by Actor, id string) (Close
 		if err != nil {
 			return err
 		}
-		if b.Status == "closed" {
-			_ = clearRuntimeMCPServersSnapshot(m.cityPath, id)
-			return nil // idempotent: already closed
-		}
-		// CmdClose is legal from any non-none state; this is effectively a
-		// documentation check that will catch future table changes. The
-		// canonicalizer treats empty metadata state as StateActive for
-		// bootstrap beads and the reconciler's StateAwake alias as StateActive
-		// so already-awake beads can close cleanly.
-		current := canonicalLifecycleState(State(b.Metadata["state"]))
-		if _, err := Transition(current, CmdClose); err != nil {
-			return err
-		}
-		release, err := m.leaseForStop(ctx, by, id, sessName, 0)
-		if err != nil {
-			return err
-		}
-		defer release()
+		return m.withNativeCapacityTeardown(id, b.Metadata["template"], func() error {
+			if b.Status == "closed" {
+				_ = clearRuntimeMCPServersSnapshot(m.cityPath, id)
+				return nil // idempotent: already closed
+			}
+			// CmdClose is legal from any non-none state; this is effectively a
+			// documentation check that will catch future table changes. The
+			// canonicalizer treats empty metadata state as StateActive for
+			// bootstrap beads and the reconciler's StateAwake alias as StateActive
+			// so already-awake beads can close cleanly.
+			current := canonicalLifecycleState(State(b.Metadata["state"]))
+			if _, err := Transition(current, CmdClose); err != nil {
+				return err
+			}
+			release, err := m.leaseForStop(ctx, by, id, sessName, 0)
+			if err != nil {
+				return err
+			}
+			defer release()
 
-		// Stop the live runtime before marking the bead closed. Close is a
-		// cleanup path, so it absorbs a missing-session or missing-server
-		// answer via runtime.StopForCleanup — otherwise a session bead for an
-		// intentionally stopped city could never be closed once the city's
-		// tmux server is down. A genuine terminate failure still propagates,
-		// even beside such an answer, and leaves the bead open rather than
-		// reporting a "closed but still running" session; swallowing that
-		// previously masked exactly that wedge.
-		//
-		// Route-table hygiene is the provider's own concern: whether a stop
-		// clears a stale ACP route entry is not something this call site can
-		// observe or rely on.
-		if err := runtime.StopForCleanup(m.sp, sessName); err != nil {
-			return fmt.Errorf("stopping runtime for session %s: %w", id, err)
-		}
-		nudgeIDs, capped, err := NewStore(m.store).CancelWaits(id, time.Now().UTC())
-		if err != nil {
-			log.Printf("session %s: closing after wait cancellation lookup failed: %v", id, err)
-		}
-		if capped {
-			log.Printf("session %s: closing after capped wait cancellation lookup", id)
-		}
-		result.WaitNudgeIDs = append(result.WaitNudgeIDs, nudgeIDs...)
-		// One terminal close (op.close): the holds go as a retired row's (the
-		// disposition's Retire cell), with the wake pin and a configured
-		// named session's identifiers, on the incarnation this close stopped.
-		terminal := retiredIdentifiersPatch(b)
-		terminal["pin_awake"] = ""
-		maps.Copy(terminal, UsageClosePatch(m.now()))
-		terminal = CellInto(id, b.Metadata, ActorController, DispEvent{Kind: EvRetire}, m.now(), terminal)
-		// Past a kill fence: the operator's close ends the session a kill was
-		// tearing down, as it did before CommitClose.
-		res, err := NewStore(m.store).CommitClose(Decide(infoFromPersistedBead(b), FactsOpClose), terminal, m.now(), CommitPastKillFence(), CommitAsOperator())
-		switch {
-		case err != nil:
-			return fmt.Errorf("closing session %s: %w", id, err)
-		case res == CommitMoved:
-			return fmt.Errorf("closing session %s: %w", id, ErrSessionCloseSuperseded)
-		case res == CommitContended:
-			return fmt.Errorf("closing session %s: lost the revision fence %d times", id, operatorSuspendAttempts)
-		case res != CommitLanded && res != CommitClosed:
-			return fmt.Errorf("closing session %s: refused (%s)", id, res)
-		}
-		_ = clearRuntimeMCPServersSnapshot(m.cityPath, id)
-		return nil
+			// Stop the live runtime before marking the bead closed. Close is a
+			// cleanup path, so it absorbs a missing-session or missing-server
+			// answer via runtime.StopForCleanup — otherwise a session bead for an
+			// intentionally stopped city could never be closed once the city's
+			// tmux server is down. A genuine terminate failure still propagates,
+			// even beside such an answer, and leaves the bead open rather than
+			// reporting a "closed but still running" session; swallowing that
+			// previously masked exactly that wedge.
+			//
+			// Route-table hygiene is the provider's own concern: whether a stop
+			// clears a stale ACP route entry is not something this call site can
+			// observe or rely on.
+			if err := runtime.StopForCleanup(m.sp, sessName); err != nil {
+				return fmt.Errorf("stopping runtime for session %s: %w", id, err)
+			}
+			nudgeIDs, capped, err := NewStore(m.store).CancelWaits(id, time.Now().UTC())
+			if err != nil {
+				log.Printf("session %s: closing after wait cancellation lookup failed: %v", id, err)
+			}
+			if capped {
+				log.Printf("session %s: closing after capped wait cancellation lookup", id)
+			}
+			result.WaitNudgeIDs = append(result.WaitNudgeIDs, nudgeIDs...)
+			// One terminal close (op.close): the holds go as a retired row's (the
+			// disposition's Retire cell), with the wake pin and a configured
+			// named session's identifiers, on the incarnation this close stopped.
+			terminal := retiredIdentifiersPatch(b)
+			terminal["pin_awake"] = ""
+			maps.Copy(terminal, UsageClosePatch(m.now()))
+			terminal = CellInto(id, b.Metadata, ActorController, DispEvent{Kind: EvRetire}, m.now(), terminal)
+			// Past a kill fence: the operator's close ends the session a kill was
+			// tearing down, as it did before CommitClose.
+			res, err := NewStore(m.store).CommitClose(Decide(infoFromPersistedBead(b), FactsOpClose), terminal, m.now(), CommitPastKillFence(), CommitAsOperator())
+			switch {
+			case err != nil:
+				return fmt.Errorf("closing session %s: %w", id, err)
+			case res == CommitMoved:
+				return fmt.Errorf("closing session %s: %w", id, ErrSessionCloseSuperseded)
+			case res == CommitContended:
+				return fmt.Errorf("closing session %s: lost the revision fence %d times", id, operatorSuspendAttempts)
+			case res != CommitLanded && res != CommitClosed:
+				return fmt.Errorf("closing session %s: refused (%s)", id, res)
+			}
+			_ = clearRuntimeMCPServersSnapshot(m.cityPath, id)
+			return nil
+		})
 	})
 	return result, err
 }
