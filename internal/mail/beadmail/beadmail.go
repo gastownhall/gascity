@@ -971,22 +971,23 @@ func isLiveMail(b beads.Bead) bool {
 // message bead from the store outright, but a store upgraded from a release
 // that archived by closing (rather than deleting) can still hold closed
 // Type=="message" beads. Those legacy user-removed beads must not stay readable
-// or mutable through Get/Read/MarkRead/MarkUnread/Reply/Thread — the same "open
-// only" visibility the list views (Inbox/Check/All/Count) already enforce — even
-// though Archive can still delete one when it is called explicitly.
+// or mutable through Get/Read/MarkRead/MarkUnread/Reply/Thread — the same
+// live-mail visibility ([isLiveMail]) the list views (Inbox/Check/All/Count)
+// enforce — even though Archive can still delete one when it is called
+// explicitly. Live (open or in_progress) mail is never removed.
 //
 // Retention-swept read mail is NOT user-removed and must be excluded here. The
 // always-on nudge-mail watchdog closes read mail past its TTL (stamping
 // [RetentionSweepCloseReason]) and PurgeReadMessageWisps deletes it later;
 // between close and purge the message is only system-aged. Gating on bare
-// Status!="open" turned every retention-swept read message into a not-found the
+// Status=="closed" turned every retention-swept read message into a not-found the
 // moment the sweep ran — an always-on regression for any caller that holds a
 // message ID and re-reads or replies to it after the TTL (a long-latency human
 // approval reply, a persisted molecule handle). Excluding the retention reason
 // preserves that pre-sweep addressability while still hiding genuinely
 // user-removed beads.
 func isRemovedMessageBead(b beads.Bead) bool {
-	if b.Type != messageBeadType || b.Status == "open" {
+	if b.Type != messageBeadType || isLiveMail(b) {
 		return false
 	}
 	// Retention-swept mail is system-aged, not user-removed. Read-swept mail

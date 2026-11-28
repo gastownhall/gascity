@@ -3510,3 +3510,62 @@ func TestInProgressMailListedLikeOpenMail(t *testing.T) {
 		}
 	}
 }
+
+// TestDirectIDOpsTreatInProgressMailAsLive pins that an in_progress message is
+// addressable by ID like open mail, while a closed message stays not-found
+// unless a retention sweep closed it.
+func TestDirectIDOpsTreatInProgressMailAsLive(t *testing.T) {
+	store := beads.NewMemStore()
+	p := newTestProvider(store)
+	msg, err := p.Send("alice", "bob", "hello", "body")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	setInProgress(t, store, msg.ID)
+
+	if got, err := p.Get(msg.ID); err != nil || got.ID != msg.ID {
+		t.Fatalf("Get(in_progress) = (%q, %v), want the message", got.ID, err)
+	}
+	if err := p.MarkRead(msg.ID); err != nil {
+		t.Fatalf("MarkRead(in_progress): %v", err)
+	}
+	if err := p.MarkUnread(msg.ID); err != nil {
+		t.Fatalf("MarkUnread(in_progress): %v", err)
+	}
+	if got, err := p.Read(msg.ID); err != nil || !got.Read {
+		t.Fatalf("Read(in_progress) = (read=%v, %v), want a read message", got.Read, err)
+	}
+	if _, err := p.Reply(msg.ID, "bob", "re: hello", "reply"); err != nil {
+		t.Fatalf("Reply(in_progress): %v", err)
+	}
+
+	for _, tc := range []struct {
+		reason      string
+		addressable bool
+	}{
+		{reason: RetentionSweepCloseReason, addressable: true},
+		{reason: UnreadRetentionSweepCloseReason, addressable: true},
+		{reason: "", addressable: false},
+		{reason: "archived-by-user", addressable: false},
+	} {
+		closed, err := p.Send("alice", "bob", "closed "+tc.reason, "body")
+		if err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		if tc.reason != "" {
+			if err := store.SetMetadata(closed.ID, "close_reason", tc.reason); err != nil {
+				t.Fatalf("SetMetadata: %v", err)
+			}
+		}
+		if err := store.Close(closed.ID); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		_, err = p.Get(closed.ID)
+		if tc.addressable && err != nil {
+			t.Errorf("Get(closed, close_reason=%q) = %v, want addressable", tc.reason, err)
+		}
+		if !tc.addressable && !errors.Is(err, mail.ErrNotFound) {
+			t.Errorf("Get(closed, close_reason=%q) = %v, want mail.ErrNotFound", tc.reason, err)
+		}
+	}
+}
