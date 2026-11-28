@@ -184,8 +184,8 @@ func TestInboxUsesSingleBothTierMessageScanAcrossRoutes(t *testing.T) {
 	}
 	query := store.messageQueries[0]
 	wantRoutes := []string{"sky", sessionBead.ID, "runtime-sky", "mayor", "witness"}
-	if query.TierMode != beads.TierBoth || query.AllowScan || query.Type != "message" || query.Status != "open" || query.Assignee != "" || !slices.Equal(query.Assignees, wantRoutes) {
-		t.Fatalf("message query = %+v, want one both-tier Assignees scan for %v", query, wantRoutes)
+	if query.TierMode != beads.TierBoth || query.AllowScan || query.Type != "message" || query.Status != "" || query.IncludeClosed || query.Assignee != "" || !slices.Equal(query.Assignees, wantRoutes) {
+		t.Fatalf("message query = %+v, want one both-tier non-closed Assignees scan for %v", query, wantRoutes)
 	}
 	if !query.Live {
 		t.Fatalf("message query = %+v, want live read for command-visible mail freshness", query)
@@ -329,7 +329,7 @@ func TestCheckDoesNotUseMessageLabelSupplement(t *testing.T) {
 		if strings.Contains(cmd, "bd query --json") {
 			return []byte(`[]`), nil
 		}
-		if strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=message") && strings.Contains(cmd, "--status=open") {
+		if strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=message") && !strings.Contains(cmd, "--status=") && !strings.Contains(cmd, "--all") {
 			return []byte(`[{"id":"msg-1","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"mayor","from":"human","created_at":"2026-01-02T03:04:05Z","ephemeral":true,"labels":["gc:message"]}]`), nil
 		}
 		return nil, errors.New("unexpected command: " + cmd)
@@ -357,7 +357,7 @@ func TestCheckUsesSingleAssigneeMessageScanForSlashRecipient(t *testing.T) {
 			return []byte(`[]`), nil
 		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=session"):
 			return []byte(`[]`), nil
-		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=message") && strings.Contains(cmd, "--status=open"):
+		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=message") && !strings.Contains(cmd, "--status=") && !strings.Contains(cmd, "--all"):
 			if !strings.Contains(cmd, "--assignee="+recipient) {
 				t.Fatalf("slash recipient message query = %s, want single --assignee filter", cmd)
 			}
@@ -406,7 +406,7 @@ func TestCheckUsesSingleBothTierBdMessageScan(t *testing.T) {
 			return []byte(`[]`), nil
 		case strings.Contains(cmd, "bd query --json"):
 			return []byte(`[]`), nil
-		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=message") && strings.Contains(cmd, "--status=open"):
+		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=message") && !strings.Contains(cmd, "--status=") && !strings.Contains(cmd, "--all"):
 			messageListCalls++
 			return []byte(`[{"id":"msg-1","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"mayor","from":"human","created_at":"2026-01-02T03:04:05Z","ephemeral":true}]`), nil
 		}
