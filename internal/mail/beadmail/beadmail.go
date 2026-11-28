@@ -957,6 +957,15 @@ func beadmailError(operation string, err error) error {
 	return fmt.Errorf("beadmail %s: %w", operation, err)
 }
 
+// isLiveMail reports whether message bead b is live mail: any status but
+// closed. Gas City's status model is open, in_progress or closed, and for a
+// message in_progress only means someone ran a bd claim on it. A claim neither
+// reads nor removes mail, so open and in_progress mail are the same live mail:
+// listed, injected, archived, swept and addressable alike.
+func isLiveMail(b beads.Bead) bool {
+	return b.Status != "closed"
+}
+
 // isRemovedMessageBead reports whether b is a message bead that direct-ID
 // operations must treat as removed. The eager-delete archive path removes a
 // message bead from the store outright, but a store upgraded from a release
@@ -1099,13 +1108,13 @@ func (p *Provider) CountRecipients(recipients []string) (int, int, error) {
 	return total, unread, nil
 }
 
-// filterMessages returns open message beads assigned to the recipient.
+// filterMessages returns live message beads assigned to the recipient.
 // When includeRead is false, messages with the "read" label are excluded.
 func (p *Provider) filterMessages(recipient string, includeRead bool) ([]mail.Message, error) {
 	return p.filterMessagesForRecipients([]string{recipient}, includeRead)
 }
 
-// filterMessagesForRecipients returns open message beads assigned to any
+// filterMessagesForRecipients returns live message beads assigned to any
 // recipient route represented by recipients. Empty recipients mean all routes.
 func (p *Provider) filterMessagesForRecipients(recipients []string, includeRead bool) ([]mail.Message, error) {
 	routes := p.recipientRoutesForAll(recipients)
@@ -1115,7 +1124,7 @@ func (p *Provider) filterMessagesForRecipients(recipients []string, includeRead 
 	}
 	var msgs []mail.Message
 	for _, b := range candidates {
-		if b.Status != "open" {
+		if !isLiveMail(b) {
 			continue
 		}
 		if len(routes) > 0 && !matchesRecipientRoute(routes, b.Assignee) {
@@ -1585,15 +1594,14 @@ func (p *Provider) messageCandidatesForRoutes(routes []string) ([]beads.Bead, er
 	return p.messageCandidatesAll(routes)
 }
 
-// messageCandidatesAll returns all open message beads matching any route.
-// TierBoth is one logical query; BdStore may satisfy it with separate
-// issue-tier and wisp-tier reads before deduping. Empty routes return all open
-// messages. Live reads are required so command-visible mail sees fresh wisps
-// even when the active store cache was primed earlier.
+// messageCandidatesAll returns all live (non-closed, see [isLiveMail]) message
+// beads matching any route. TierBoth is one logical query; BdStore may satisfy
+// it with separate issue-tier and wisp-tier reads before deduping. Empty routes
+// return all live messages. Live reads are required so command-visible mail
+// sees fresh wisps even when the active store cache was primed earlier.
 func (p *Provider) messageCandidatesAll(routes []string) ([]beads.Bead, error) {
 	query := beads.ListQuery{
 		Type:     messageBeadType,
-		Status:   "open",
 		TierMode: beads.TierBoth,
 		Live:     true,
 	}
