@@ -712,7 +712,6 @@ work:gw-1:gc.session_name=s-gc-1
 @ +20s
 event:session.drain_acked_with_assigned_work worker {"bead_id":"gw-1","bead_status":"in_progress","reason":"drain_acked_with_assigned_work","session_id":"gc-1","template":"worker"}=1
 event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"}=1
-event:session.stranded gc-1 {"session_id":"gc-1","session_name":"s-gc-1","template":"worker","work_bead_ids":["gw-1"]}=1
 provider:RemoveMeta s-gc-1=6
 provider:SetMeta s-gc-1=4
 provider:Stop s-gc-1=1
@@ -722,7 +721,6 @@ row:gc-1:last_woke_at=
 row:gc-1:sleep_reason=idle
 row:gc-1:slept_at=T+20s
 row:gc-1:state=asleep
-row:gc-1:stranded_event_emitted_at=T+20s
 runtime:s-gc-1=
 ## 2 the wait turns ready (+1m30s)
 ~ op
@@ -765,7 +763,6 @@ work:gc-2:state=ready
 @ +1m20s
 row:gc-1:detached_at=T+1m20s
 row:gc-1:state=awake
-row:gc-1:stranded_event_emitted_at=
 === an idle named session holding assigned work defers until its streak is exhausted
 ## 0 seed (+20s)
 @ +0s

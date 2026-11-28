@@ -5208,8 +5208,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// Pool-managed sessions whose runtime has exited and whose bead is in
 		// a terminal sleep state (drained, or asleep from a normal idle drain)
 		// must free their slot so a fresh worker can spawn for new queue work.
-		// Anything else (wait-hold, pending interaction, named/singleton) is
-		// preserved.
+		// Anything else (a wait park — sleep_reason=wait-hold, or asleep as
+		// idle under a standing wait, waitParksIdleRow — pending interaction,
+		// named/singleton) is preserved.
 		//
 		// A pre-tick ownership snapshot predates the agent's own `bd close`
 		// of its last unit of work, so this gate (and the drain-ack handler

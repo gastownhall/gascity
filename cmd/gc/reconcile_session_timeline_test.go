@@ -624,6 +624,7 @@ var timelineGoldenRulings = []goldenRuling{
 	{"a waiter sleeps", timelineGoldenBaseline, "6b615dd20429"},
 	{"a waiter sleeps", "fix #7590 (mc-q6x43): the sleep keeps the wait's intent (D-J 3)", "064ac1bc84b8"},
 	{"a waiter sleeps", timelineFingerprintV7, "45ab826dd96e"},
+	{"a waiter sleeps", "fix #5561 (ga-jp8ono)", "8176110839c1"},
 	{"an idle on-demand named session sleeps", timelineGoldenBaseline, "2752bd8f4cc4"},
 	{"an unwanted row inside, then past, the wake grace", timelineGoldenBaseline, "c4d3c5eb08a0"},
 	{"an unwanted row inside, then past, the wake grace", timelineUsageCloseMarker, "0455d530d7e3"},
@@ -1408,10 +1409,13 @@ func operatorTimeline() []timelineFixture {
 	// policy: the wait holds it (wait_hold, sleep_intent=wait-hold), so legacy
 	// drains it, and the drain completes as a sleep (the claim) that, since
 	// R7b2, keeps the wait's intent (D-J 3) rather than leaving a bare
-	// wait_hold. When the wait's dependency closes, legacy wakes it through
-	// the idle latch: the wait's own intent is no explicit sleep intent
+	// wait_hold. The parked row reads idle under a standing wait, and the
+	// pool-slot gate reads the wait (waitParksIdleRow, #5561), so neither
+	// copy strands the seat: it keeps its bead and claim until the wait ends.
+	// When the wait's dependency closes, legacy wakes it through the idle
+	// latch: the wait's own intent is no explicit sleep intent
 	// (explicitSleepIntentInfo), so its claim is not stranded.
-	waitDrained := tlMerged(tlIdent(), map[string]string{"row:gc-1:*drain": "drain-stop-lag", "row:gc-1:last_woke_at": "drain-stop-lag", "row:gc-1:sleep_reason": "drain-stop-lag"}, map[string]string{"runtime:s-gc-1": "drain-stop-lag", "row:gc-1:state": "drain-stop-lag", "row:gc-1:stranded_event_emitted_at": "drain-stop-lag", "row:gc-1:detached_at": "wait-sleep-lag"})
+	waitDrained := tlMerged(tlIdent(), map[string]string{"row:gc-1:*drain": "drain-stop-lag", "row:gc-1:last_woke_at": "drain-stop-lag", "row:gc-1:sleep_reason": "drain-stop-lag"}, map[string]string{"runtime:s-gc-1": "drain-stop-lag", "row:gc-1:state": "drain-stop-lag", "row:gc-1:detached_at": "wait-sleep-lag"})
 	napping := func() *config.City {
 		cfg := tlCity()
 		cfg.Agents[0].SleepAfterIdle = "5m"
@@ -1452,11 +1456,9 @@ func operatorTimeline() []timelineFixture {
 				"provider:SetMeta s-gc-1": "drain-env-clears", "provider:RemoveMeta s-gc-1": "drain-env-clears", "provider:Stop s-gc-1": "drain-stop-lag",
 				`event:session.drain_acked_with_assigned_work worker {"bead_id":"gw-1","bead_status":"in_progress","reason":"drain_acked_with_assigned_work","session_id":"gc-1","template":"worker"}`: "drain-stop-lag",
 				`event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"}`:                                                                                 "drain-stop-lag",
-				`event:session.stranded gc-1 {"session_id":"gc-1","session_name":"s-gc-1","template":"worker","work_bead_ids":["gw-1"]}`:                                                               "drain-stop-lag",
 			}),
 			"the wait turns ready": tlMerged(tlIdent(), map[string]string{
 				"row:gc-1:*waitsleep": "wait-sleep-lag", "provider:RemoveMeta s-gc-1": "§12.2#38 start-meta-clears",
-				`event:session.stranded gc-1 {"session_id":"gc-1","session_name":"s-gc-1","template":"worker","work_bead_ids":["gw-1"]}`: "drain-stop-lag",
 			}, nudgeQueued),
 		})
 	return []timelineFixture{suspend, managed, kill(false), kill(true), swap, fence, waiter}

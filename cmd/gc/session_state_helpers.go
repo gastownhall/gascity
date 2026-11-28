@@ -52,8 +52,9 @@ func poolSessionIsLiveInfo(i sessionpkg.Info) bool {
 // asleep with sleep_reason one of idle, idle-timeout, city-stop,
 // failed-create, runtime-missing, provider-terminal-error, max-session-age,
 // config-drift, or killed (without an honored kill fence). Sessions parked
-// via `gc session wait` (sleep_reason=wait-hold), held by context-churn
-// quarantine, or otherwise signaling "don't touch me" keep their slot.
+// via `gc session wait` (sleep_reason=wait-hold, or asleep as idle under a
+// standing wait: waitParksIdleRow), held by context-churn quarantine, or
+// otherwise signaling "don't touch me" keep their slot.
 //
 // A session parked with sleep_reason=config-drift is also freeable: the
 // reconciler already refuses to wake a config-drifted pool session in place
@@ -107,7 +108,10 @@ func isPoolSessionSlotFreeable(session beads.Bead, now time.Time) bool {
 	}
 	reason := strings.TrimSpace(session.Metadata["sleep_reason"])
 	switch reason {
-	case string(sessionpkg.SleepReasonIdle), string(sessionpkg.SleepReasonIdleTimeout),
+	case string(sessionpkg.SleepReasonIdle):
+		// A wait parks the row whatever its reason reads (waitParksIdleRow).
+		return !waitParksIdleRow(sessionpkg.DecodeDisposition(session.Metadata))
+	case string(sessionpkg.SleepReasonIdleTimeout),
 		string(sessionpkg.SleepReasonCityStop), string(sessionpkg.SleepReasonFailedCreate),
 		string(sessionpkg.SleepReasonRuntimeMissing), string(sessionpkg.SleepReasonProviderTerminalError),
 		string(sessionpkg.SleepReasonMaxSessionAge), string(sessionpkg.SleepReasonConfigDrift):
@@ -127,6 +131,18 @@ func isPoolSessionSlotFreeable(session beads.Bead, now time.Time) bool {
 	return false
 }
 
+// waitParksIdleRow reports a row asleep as idle that a wait still parks
+// (`gc session wait --sleep`, Disposition.Wait), whose slot is not freeable.
+// A drain that keeps assigned work completes as an idle sleep and keeps the
+// wait (the disposition's Sleep cell, D-J 3), so on such a row sleep_reason no
+// longer says what parks it; the wait does. Without this the pool-slot gate
+// read the parked seat as idle, and the stranded repair unclaimed its work and
+// closed it (gastownhall/gascity#5561; carry row "Standing sleep intent
+// survives drain completion", where #6335 kept the reason as wait-hold
+// instead). Only the idle reason: every other freeable reason is a dead or
+// stopped seat, and a kill frees its slot as before.
+func waitParksIdleRow(d sessionpkg.Disposition) bool { return d.Wait }
+
 // isPoolSessionSlotFreeableInfo is the session.Info mirror of isPoolSessionSlotFreeable.
 func isPoolSessionSlotFreeableInfo(i sessionpkg.Info, now time.Time) bool {
 	if sessionpkg.DispositionOfInfo(i).KeepsSlot() {
@@ -140,7 +156,9 @@ func isPoolSessionSlotFreeableInfo(i sessionpkg.Info, now time.Time) bool {
 	}
 	reason := strings.TrimSpace(i.SleepReason)
 	switch reason {
-	case string(sessionpkg.SleepReasonIdle), string(sessionpkg.SleepReasonIdleTimeout),
+	case string(sessionpkg.SleepReasonIdle):
+		return !waitParksIdleRow(sessionpkg.DispositionOfInfo(i))
+	case string(sessionpkg.SleepReasonIdleTimeout),
 		string(sessionpkg.SleepReasonCityStop), string(sessionpkg.SleepReasonFailedCreate),
 		string(sessionpkg.SleepReasonRuntimeMissing), string(sessionpkg.SleepReasonProviderTerminalError),
 		string(sessionpkg.SleepReasonMaxSessionAge), string(sessionpkg.SleepReasonConfigDrift):

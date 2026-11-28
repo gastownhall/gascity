@@ -102,3 +102,40 @@ func TestIsPoolSessionSlotFreeable_Matrix(t *testing.T) {
 		})
 	}
 }
+
+// TestPoolSlotGate_WaitParksAnIdleSeat pins the pool-slot gate's wait read
+// (gastownhall/gascity#5561). A drain that keeps assigned work completes as
+// an idle sleep and keeps the wait (the disposition's Sleep cell, D-J 3), so
+// on such a row sleep_reason no longer says what parks it; the wait does: an
+// idle seat a wait still parks keeps its slot, while the wait's intent alone
+// (a stale sleep_intent with no standing hold) frees it. The scope is the
+// idle reason only — a drained seat, a killed seat and every other freeable
+// reason free their slot as before — and both twins (bead and Info) agree.
+func TestPoolSlotGate_WaitParksAnIdleSeat(t *testing.T) {
+	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+	slept := now.Add(-time.Hour).Format(time.RFC3339)
+	for _, tc := range []struct {
+		name string
+		meta map[string]string
+		want bool
+	}{
+		{"idle, no wait", map[string]string{"state": "asleep", "sleep_reason": "idle", "slept_at": slept}, true},
+		{"idle under a wait", map[string]string{"state": "asleep", "sleep_reason": "idle", "slept_at": slept, "wait_hold": "true", "sleep_intent": "wait-hold"}, false},
+		{"idle under a bare wait_hold", map[string]string{"state": "asleep", "sleep_reason": "idle", "slept_at": slept, "wait_hold": "true"}, false},
+		{"idle with a wait's intent only", map[string]string{"state": "asleep", "sleep_reason": "idle", "slept_at": slept, "sleep_intent": "wait-hold"}, true},
+		{"drained under a wait", map[string]string{"state": "drained", "wait_hold": "true", "sleep_intent": "wait-hold"}, true},
+		{"killed under a wait", map[string]string{"state": "asleep", "sleep_reason": "killed", "slept_at": slept, "wait_hold": "true"}, true},
+		{"idle-timeout under a wait", map[string]string{"state": "asleep", "sleep_reason": "idle-timeout", "slept_at": slept, "wait_hold": "true"}, true},
+		{"an operator's suspend", map[string]string{"state": "asleep", "sleep_reason": "idle", "slept_at": slept, "sleep_intent": "user-hold"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := makeBead("gc-1", tc.meta)
+			if got := isPoolSessionSlotFreeable(b, now); got != tc.want {
+				t.Errorf("isPoolSessionSlotFreeable(%v) = %v, want %v", tc.meta, got, tc.want)
+			}
+			if got := isPoolSessionSlotFreeableInfo(seedSessionInfo(b), now); got != tc.want {
+				t.Errorf("isPoolSessionSlotFreeableInfo(%v) = %v, want %v", tc.meta, got, tc.want)
+			}
+		})
+	}
+}
