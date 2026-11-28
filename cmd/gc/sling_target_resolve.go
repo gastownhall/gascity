@@ -1,6 +1,8 @@
 package main
 
 import (
+	"strings"
+
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -20,8 +22,19 @@ func resolveSlingTarget(cfg *config.City, target, rigContext string) (config.Age
 	if a, ok := resolveAgentIdentity(cfg, target, rigContext); ok {
 		return a, true
 	}
-	return resolveNamepoolMember(cfg, func(pool *config.Agent, member string) bool {
+	if a, ok := resolveNamepoolMember(cfg, func(pool *config.Agent, member string) bool {
 		return target == pool.QualifiedInstanceName(member)
+	}); ok {
+		return a, true
+	}
+	// Bare spellings ("furiosa", "gastown.furiosa") mirror the unambiguous
+	// bare-name step of resolveAgentIdentity: they ignore rig context and
+	// resolve only when exactly one pool member matches.
+	if strings.Contains(target, "/") {
+		return config.Agent{}, false
+	}
+	return resolveNamepoolMember(cfg, func(pool *config.Agent, member string) bool {
+		return target == member || (pool.BindingName != "" && target == pool.BindingName+"."+member)
 	})
 }
 

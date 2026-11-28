@@ -180,3 +180,88 @@ func TestCmdSlingNamepoolTargetOutsidePoolFailsResolve(t *testing.T) {
 		})
 	}
 }
+
+// TestResolveSlingTargetNamepoolMembers covers namepool member resolution:
+// qualified member names, the bare and binding-qualified bare spellings when
+// exactly one pool lists the name, and ambiguity across pools.
+func TestResolveSlingTargetNamepoolMembers(t *testing.T) {
+	boundPool := func(dir string, names ...string) config.Agent {
+		return config.Agent{
+			Name: "polecat", Dir: dir, BindingName: "gastown",
+			NamepoolNames:     names,
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(2),
+		}
+	}
+	cityPool := config.Agent{
+		Name: "polecat", NamepoolNames: []string{"furiosa", "rictus"},
+		MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2),
+	}
+	unlimited := config.Agent{
+		Name: "polecat", Dir: "frontend",
+		NamepoolNames: []string{"furiosa", "rictus", "nux", "slit"},
+	}
+	maxZero := config.Agent{
+		Name: "polecat", Dir: "frontend", NamepoolNames: []string{"furiosa"},
+		MaxActiveSessions: intPtr(0),
+	}
+	suspended := boundPool("gascity", "furiosa", "rictus")
+	suspended.Suspended = true
+	duplicate := boundPool("gascity", "furiosa", "furiosa")
+
+	cases := []struct {
+		name       string
+		agents     []config.Agent
+		target     string
+		rigContext string
+		wantMember string // "" means the target must not resolve
+		wantPool   string
+	}{
+		{"bare name, one pool", []config.Agent{boundPool("gascity", "furiosa", "rictus")}, "furiosa", "", "gascity/gastown.furiosa", "gascity/gastown.polecat"},
+		{"binding-qualified bare name, one pool", []config.Agent{boundPool("gascity", "furiosa", "rictus")}, "gastown.furiosa", "", "gascity/gastown.furiosa", "gascity/gastown.polecat"},
+		{"bare name ignores rig context", []config.Agent{boundPool("gascity", "furiosa", "rictus")}, "rictus", "other", "gascity/gastown.rictus", "gascity/gastown.polecat"},
+		{"bare name, two rigs", []config.Agent{boundPool("alpha", "furiosa"), boundPool("beta", "furiosa")}, "furiosa", "", "", ""},
+		{"binding-qualified bare name, two rigs", []config.Agent{boundPool("alpha", "furiosa"), boundPool("beta", "furiosa")}, "gastown.furiosa", "", "", ""},
+		{"qualified name, first of two rigs", []config.Agent{boundPool("alpha", "furiosa"), boundPool("beta", "furiosa")}, "alpha/gastown.furiosa", "", "alpha/gastown.furiosa", "alpha/gastown.polecat"},
+		{"qualified name, second of two rigs", []config.Agent{boundPool("alpha", "furiosa"), boundPool("beta", "furiosa")}, "beta/gastown.furiosa", "", "beta/gastown.furiosa", "beta/gastown.polecat"},
+		{"qualified name never matches bare", []config.Agent{boundPool("alpha", "furiosa")}, "beta/gastown.furiosa", "", "", ""},
+		{"bare name prefers city-scoped pool member", []config.Agent{cityPool, boundPool("gascity", "furiosa")}, "furiosa", "", "furiosa", "polecat"},
+		{"duplicate name in one namepool", []config.Agent{duplicate}, "furiosa", "", "gascity/gastown.furiosa", "gascity/gastown.polecat"},
+		{"unlimited pool, last namepool name", []config.Agent{unlimited}, "frontend/slit", "", "frontend/slit", "frontend/polecat"},
+		{"max-0 pool resolves no member", []config.Agent{maxZero}, "frontend/furiosa", "", "", ""},
+		{"max-0 pool resolves no bare member", []config.Agent{maxZero}, "furiosa", "", "", ""},
+		{"suspended pool member resolves", []config.Agent{suspended}, "gascity/gastown.furiosa", "", "gascity/gastown.furiosa", "gascity/gastown.polecat"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}, Agents: tc.agents}
+			got, ok := resolveSlingTarget(cfg, tc.target, tc.rigContext)
+			if tc.wantMember == "" {
+				if ok {
+					t.Fatalf("resolveSlingTarget(%q) = %q, want no match", tc.target, got.QualifiedName())
+				}
+				return
+			}
+			if !ok {
+				t.Fatalf("resolveSlingTarget(%q) did not resolve, want %q", tc.target, tc.wantMember)
+			}
+			if q := got.QualifiedName(); q != tc.wantMember {
+				t.Errorf("QualifiedName = %q, want %q", q, tc.wantMember)
+			}
+			if got.PoolName != tc.wantPool {
+				t.Errorf("PoolName = %q, want %q", got.PoolName, tc.wantPool)
+			}
+			if r := agentutil.RoutedToIdentity(&got); r != tc.wantPool {
+				t.Errorf("RoutedToIdentity = %q, want %q", r, tc.wantPool)
+			}
+		})
+	}
+
+	t.Run("suspended pool member keeps suspension", func(t *testing.T) {
+		cfg := &config.City{Agents: []config.Agent{suspended}}
+		got, ok := resolveSlingTarget(cfg, "gascity/gastown.rictus", "")
+		if !ok || !got.Suspended {
+			t.Fatalf("resolveSlingTarget = (%+v, %v), want a suspended member", got, ok)
+		}
+	})
+}
