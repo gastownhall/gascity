@@ -134,7 +134,7 @@ func isPoolSessionSlotFreeable(session beads.Bead, now time.Time) bool {
 	if reason == "" && strings.TrimSpace(session.Metadata["slept_at"]) != "" {
 		return true
 	}
-	return reason == "" && isHealedSoftSuspend(session.Metadata["suspended_at"], session.Metadata["sleep_intent"], disposition, now)
+	return reason == "" && isHealedSoftSuspend(disposition, now)
 }
 
 // isPoolSessionSlotFreeableInfo is the session.Info mirror of isPoolSessionSlotFreeable.
@@ -168,12 +168,16 @@ func isPoolSessionSlotFreeableInfo(i sessionpkg.Info, now time.Time) bool {
 	if reason == "" && strings.TrimSpace(i.SleptAt) != "" {
 		return true
 	}
-	return reason == "" && isHealedSoftSuspend(i.SuspendedAt, i.SleepIntent, disposition, now)
+	return reason == "" && isHealedSoftSuspend(disposition, now)
 }
 
 // isHealedSoftSuspend reports an asleep row with no slept_at that a soft
-// suspend left behind: suspended_at stamped, no sleep_intent (an unknown or
-// idle-stop intent stays denied), and no deliberate hold on its disposition.
-func isHealedSoftSuspend(suspendedAt, sleepIntent string, d sessionpkg.Disposition, now time.Time) bool {
-	return strings.TrimSpace(suspendedAt) != "" && strings.TrimSpace(sleepIntent) == "" && !d.HoldsDeliberately(now)
+// suspend left behind, read from its disposition: suspended_at stamped (Since,
+// or a stamp it cannot parse), no sleep_intent (an operator's hold, a wait's
+// intent, the idle stop's or an unknown intent stays denied), and no
+// deliberate hold.
+func isHealedSoftSuspend(d sessionpkg.Disposition, now time.Time) bool {
+	stamped := !d.Since.IsZero() || d.Unknown&sessionpkg.UnknownSince != 0
+	intent := d.Operator == sessionpkg.OperatorSuspended || d.WaitIntent || d.IdleStop || d.Unknown&sessionpkg.UnknownIntent != 0
+	return stamped && !intent && !d.HoldsDeliberately(now)
 }

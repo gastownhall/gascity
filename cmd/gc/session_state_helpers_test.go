@@ -79,6 +79,8 @@ func TestIsPoolSessionSlotFreeable_Matrix(t *testing.T) {
 		// A soft suspend (the shutdown sweep) healed to asleep: no reason, no
 		// slept_at, suspended_at kept. Its writer is known, so it frees.
 		{"asleep+healed-soft-suspend", map[string]string{"state": "asleep", "suspended_at": recent}, true},
+		// A stamp the decoder cannot parse is still a stamp.
+		{"asleep+healed-soft-suspend+unreadable-stamp", map[string]string{"state": "asleep", "suspended_at": "not-a-time"}, true},
 		// A deliberate hold or any intent on that shape keeps the slot.
 		{"asleep+healed-soft-suspend+user-hold", map[string]string{"state": "asleep", "suspended_at": recent, "sleep_intent": string(sessionpkg.SleepReasonUserHold)}, false},
 		{"asleep+healed-soft-suspend+wait-hold", map[string]string{"state": "asleep", "suspended_at": recent, "wait_hold": "true"}, false},
@@ -86,6 +88,7 @@ func TestIsPoolSessionSlotFreeable_Matrix(t *testing.T) {
 		{"asleep+healed-soft-suspend+live-hold-timer", map[string]string{"state": "asleep", "suspended_at": recent, "held_until": future}, false},
 		{"asleep+healed-soft-suspend+live-quarantine", map[string]string{"state": "asleep", "suspended_at": recent, "quarantined_until": future}, false},
 		{"asleep+healed-soft-suspend+unreadable-timer", map[string]string{"state": "asleep", "suspended_at": recent, "held_until": "not-a-time"}, false},
+		{"asleep+healed-soft-suspend+idle-stop-intent", map[string]string{"state": "asleep", "suspended_at": recent, "sleep_intent": "idle-stop-pending"}, false},
 		{"asleep+healed-soft-suspend+unknown-intent", map[string]string{"state": "asleep", "suspended_at": recent, "sleep_intent": "future-intent"}, false},
 		{"suspended+suspended_at", map[string]string{"state": "suspended", "suspended_at": recent}, false},
 		{"asleep+empty-reason", map[string]string{"state": "asleep", "sleep_reason": ""}, false},
