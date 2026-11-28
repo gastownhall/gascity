@@ -7,10 +7,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/materialize"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/spf13/cobra"
 )
 
@@ -218,7 +220,8 @@ func materializeSkillSinkForSession(cfg *config.City, agent *config.Agent, cityP
 
 	union := materialize.NewSinkUnion()
 	catalogs := stage2SkillScopeCatalogs(cfg, agent, sharedCatalog, union, stderr)
-	if sink := buildSkillSinkIndex(cityPath, cfg).lookup(sinkDir); sink != nil {
+	sink := buildSkillSinkIndex(cityPath, cfg).lookup(sinkDir)
+	if sink != nil {
 		for _, w := range sink.Writers {
 			if w.Name == agent.QualifiedName() {
 				continue
@@ -233,13 +236,21 @@ func materializeSkillSinkForSession(cfg *config.City, agent *config.Agent, cityP
 		return materialize.Result{}, nil
 	}
 
-	res, err := materialize.Run(materialize.Request{
+	req := materialize.Request{
 		SinkDir:          sinkDir,
 		Desired:          union.Desired(),
 		OwnedRoots:       union.OwnedRoots(),
 		LegacyNames:      materialize.LegacyStubNames(),
 		LegacyOwnedRoots: materialize.LegacyOwnedRootsFor(cityPath),
-	})
+	}
+	if sink == nil || !sink.ScopeRoot {
+		// No stage-1 pass reconciles this sink, and the index may miss a
+		// writer (a worktree no configured work_dir resolves to, or a
+		// session whose environment resolved its work dir differently),
+		// so leave live links into other writers' skill roots alone.
+		req.ForeignRoots = foreignSkillRoots(cfg, req.OwnedRoots)
+	}
+	res, err := materialize.Run(req)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc internal materialize-skills: %v\n", err) //nolint:errcheck // best-effort stderr
 		return materialize.Result{}, errExit
@@ -266,6 +277,46 @@ func materializeSkillSinkForSession(cfg *config.City, agent *config.Agent, cityP
 		fmt.Fprintf(stderr, "warning: %s\n", w) //nolint:errcheck // best-effort stderr
 	}
 	return res, nil
+}
+
+// foreignSkillRoots returns every configured skill root (each agent's
+// skills dir, the city pack's skills dir, and every imported or rig pack
+// catalog) that is not one of owned.
+func foreignSkillRoots(cfg *config.City, owned []string) []string {
+	skip := make(map[string]bool, len(owned))
+	for _, root := range owned {
+		skip[pathutil.NormalizePathForCompare(root)] = true
+	}
+	var out []string
+	add := func(root string) {
+		if root == "" {
+			return
+		}
+		key := pathutil.NormalizePathForCompare(root)
+		if skip[key] {
+			return
+		}
+		skip[key] = true
+		out = append(out, root)
+	}
+	for i := range cfg.Agents {
+		add(cfg.Agents[i].SkillsDir)
+	}
+	add(cfg.PackSkillsDir)
+	for _, cat := range cfg.PackSkills {
+		add(cat.SourceDir)
+	}
+	rigs := make([]string, 0, len(cfg.RigPackSkills))
+	for rig := range cfg.RigPackSkills {
+		rigs = append(rigs, rig)
+	}
+	sort.Strings(rigs)
+	for _, rig := range rigs {
+		for _, cat := range cfg.RigPackSkills[rig] {
+			add(cat.SourceDir)
+		}
+	}
+	return out
 }
 
 // stage2SkillScopeCatalogs loads the shared catalogs of a stage-2 sink's

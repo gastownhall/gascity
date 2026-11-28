@@ -387,3 +387,52 @@ func TestCmdWorktreeEnsureDryRunJSONContract(t *testing.T) {
 		}
 	}
 }
+
+// TestWorktreeEnsureAgentSkillsKeepOtherAgentLinks: two agents ensure
+// one worktree P that no configured work_dir resolves to, so no index
+// lists either as a writer of P's sink. B's pass must still leave A's
+// live agent-local link alone.
+func TestWorktreeEnsureAgentSkillsKeepOtherAgentLinks(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_HOME", t.TempDir())
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+	writeMaterializeTestCityFile(t, cityDir, "city.toml", "[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n")
+	writeMaterializeTestCityFile(t, cityDir, "pack.toml", "[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n")
+	sources := map[string]string{}
+	for _, name := range []string{"a", "b"} {
+		agentDir := filepath.Join(cityDir, "agents", name)
+		if err := os.MkdirAll(agentDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeMaterializeTestCityFile(t, agentDir, "agent.toml", "provider = \"claude\"\nstart_command = \"echo\"\n")
+		sources[name+"-notes"] = filepath.Join(agentDir, "skills", name+"-notes")
+		writeSkillSource(t, sources[name+"-notes"])
+	}
+
+	repo, base := worktreeTestRepo(t)
+	root := t.TempDir()
+	wt := filepath.Join(root, "wt")
+	for _, name := range []string{"a", "b"} {
+		var stdout, stderr bytes.Buffer
+		opts := managedWorktreeCmdOpts(repo, root, wt, base)
+		opts.Agent = name
+		if code := runWorktreeEnsure(opts, &stdout, &stderr); code != 0 {
+			t.Fatalf("ensure --agent %s exit = %d, stderr: %s", name, code, stderr.String())
+		}
+	}
+	for skill, want := range sources {
+		link := filepath.Join(wt, ".claude", "skills", skill)
+		got, err := os.Readlink(link)
+		if err != nil {
+			t.Errorf("%s missing after both agents ensured the worktree: %v", skill, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("%s -> %s, want %s", skill, got, want)
+		}
+	}
+}

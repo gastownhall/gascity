@@ -1640,3 +1640,185 @@ func TestRunDryRunPlansMissingSinkAndLegacyStub(t *testing.T) {
 		t.Fatalf("DryRun created the sink, stat err = %v", err)
 	}
 }
+
+// foreignRootSink seeds sink with agent A's pass: links a-notes and notes
+// into rootA, both recorded in the sink's ownership manifest.
+func foreignRootSink(t *testing.T) (sink, rootA, rootB string) {
+	t.Helper()
+	rootA = filepath.Join(t.TempDir(), "a-skills")
+	mkSkill(t, rootA, "a-notes")
+	mkSkill(t, rootA, "notes")
+	rootB = filepath.Join(t.TempDir(), "b-skills")
+	mkSkill(t, rootB, "b-notes")
+	mkSkill(t, rootB, "notes")
+	sink = filepath.Join(t.TempDir(), "skills")
+	if _, err := Run(Request{
+		SinkDir: sink,
+		Desired: []SkillEntry{
+			{Name: "a-notes", Source: filepath.Join(rootA, "a-notes")},
+			{Name: "notes", Source: filepath.Join(rootA, "notes")},
+		},
+		OwnedRoots: []string{rootA},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return sink, rootA, rootB
+}
+
+// TestRunKeepsLiveLinkUnderForeignRoot: B's pass into a sink A also
+// writes names A's skill root as foreign. A's live links stay: a-notes is
+// not pruned although the manifest records it, notes is not re-pointed at
+// B's source and is reported as skipped, and the manifest keeps both.
+func TestRunKeepsLiveLinkUnderForeignRoot(t *testing.T) {
+	t.Parallel()
+	sink, rootA, rootB := foreignRootSink(t)
+	res, err := Run(Request{
+		SinkDir: sink,
+		Desired: []SkillEntry{
+			{Name: "b-notes", Source: filepath.Join(rootB, "b-notes")},
+			{Name: "notes", Source: filepath.Join(rootB, "notes")},
+		},
+		OwnedRoots:   []string{rootB},
+		ForeignRoots: []string{rootA},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Removed) != 0 || len(res.Relinked) != 0 {
+		t.Errorf("pass touched A's links: removed %v, relinked %v", res.Removed, res.Relinked)
+	}
+	if !reflect.DeepEqual(res.Created, []string{"b-notes"}) {
+		t.Errorf("Created = %v, want [b-notes]", res.Created)
+	}
+	if len(res.Skipped) != 1 || res.Skipped[0].Name != "notes" {
+		t.Errorf("Skipped = %+v, want notes", res.Skipped)
+	}
+	for name, want := range map[string]string{
+		"a-notes": filepath.Join(rootA, "a-notes"),
+		"notes":   filepath.Join(rootA, "notes"),
+		"b-notes": filepath.Join(rootB, "b-notes"),
+	} {
+		if got, err := os.Readlink(filepath.Join(sink, name)); err != nil || got != want {
+			t.Errorf("%s -> %q (err %v), want %q", name, got, err, want)
+		}
+	}
+	manifest := loadOwnershipManifest(sink)
+	for _, name := range []string{"a-notes", "notes"} {
+		if _, ok := manifest.Targets[name]; !ok {
+			t.Errorf("manifest dropped A's %s: %v", name, manifest.Targets)
+		}
+	}
+}
+
+// TestRunRemovesDanglingLinkUnderForeignRoot: a link into a foreign root
+// whose target is gone serves no writer, so the pass removes it.
+func TestRunRemovesDanglingLinkUnderForeignRoot(t *testing.T) {
+	t.Parallel()
+	sink, rootA, rootB := foreignRootSink(t)
+	if err := os.RemoveAll(filepath.Join(rootA, "a-notes")); err != nil {
+		t.Fatal(err)
+	}
+	res, err := Run(Request{
+		SinkDir:      sink,
+		Desired:      []SkillEntry{{Name: "b-notes", Source: filepath.Join(rootB, "b-notes")}},
+		OwnedRoots:   []string{rootB},
+		ForeignRoots: []string{rootA},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(res.Removed, []string{"a-notes"}) {
+		t.Errorf("Removed = %v, want [a-notes]", res.Removed)
+	}
+	if _, err := os.Lstat(filepath.Join(sink, "a-notes")); !os.IsNotExist(err) {
+		t.Errorf("dangling a-notes still in the sink (lstat err=%v)", err)
+	}
+	if _, err := os.Readlink(filepath.Join(sink, "notes")); err != nil {
+		t.Errorf("live notes link under the foreign root was removed: %v", err)
+	}
+}
+
+// TestRunForeignRootsDoNotBlockManifestCleanup: the guard covers only
+// links under a foreign root. A manifest-recorded link whose owned root
+// moved (#4130) is still re-pointed when desired and pruned when not.
+func TestRunForeignRootsDoNotBlockManifestCleanup(t *testing.T) {
+	t.Parallel()
+	oldRoot := filepath.Join(t.TempDir(), "cache-aaaa")
+	mkSkill(t, oldRoot, "alpha")
+	mkSkill(t, oldRoot, "beta")
+	newRoot := filepath.Join(t.TempDir(), "cache-bbbb")
+	mkSkill(t, newRoot, "alpha")
+	foreign := filepath.Join(t.TempDir(), "other-agent")
+	mkSkill(t, foreign, "gamma")
+	sink := filepath.Join(t.TempDir(), "skills")
+	if _, err := Run(Request{
+		SinkDir: sink,
+		Desired: []SkillEntry{
+			{Name: "alpha", Source: filepath.Join(oldRoot, "alpha")},
+			{Name: "beta", Source: filepath.Join(oldRoot, "beta")},
+		},
+		OwnedRoots: []string{oldRoot},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := Run(Request{
+		SinkDir:      sink,
+		Desired:      []SkillEntry{{Name: "alpha", Source: filepath.Join(newRoot, "alpha")}},
+		OwnedRoots:   []string{newRoot},
+		ForeignRoots: []string{foreign},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(res.Relinked, []string{"alpha"}) || !reflect.DeepEqual(res.Removed, []string{"beta"}) {
+		t.Errorf("relinked %v, removed %v; want [alpha], [beta]", res.Relinked, res.Removed)
+	}
+	if got, err := os.Readlink(filepath.Join(sink, "alpha")); err != nil || got != filepath.Join(newRoot, "alpha") {
+		t.Errorf("alpha -> %q (err %v), want the new root", got, err)
+	}
+}
+
+// TestRunForeignRootDesiredNameIsSkippedNotTaken covers a name both a
+// foreign writer and this pass desire from different sources: the live
+// foreign link holds it, this pass reports the conflict in Skipped with
+// the holding target instead of re-pointing the link.
+func TestRunForeignRootDesiredNameIsSkippedNotTaken(t *testing.T) {
+	t.Parallel()
+	mine := t.TempDir()
+	theirs := t.TempDir()
+	mkSkill(t, mine, "shared-name")
+	mkSkill(t, theirs, "shared-name")
+	sink := filepath.Join(t.TempDir(), "skills")
+	if err := os.MkdirAll(sink, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Run(Request{
+		SinkDir:    sink,
+		Desired:    []SkillEntry{{Name: "shared-name", Source: filepath.Join(theirs, "shared-name"), Origin: "agent"}},
+		OwnedRoots: []string{theirs},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Run(Request{
+		SinkDir:      sink,
+		Desired:      []SkillEntry{{Name: "shared-name", Source: filepath.Join(mine, "shared-name"), Origin: "agent"}},
+		OwnedRoots:   []string{mine},
+		ForeignRoots: []string{theirs},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkSymlink(t, filepath.Join(sink, "shared-name"), filepath.Join(theirs, "shared-name"))
+	if len(res.Skipped) != 1 || res.Skipped[0].Name != "shared-name" {
+		t.Fatalf("Skipped = %+v, want shared-name held by the foreign link", res.Skipped)
+	}
+	if !strings.Contains(res.Skipped[0].Reason, filepath.Join(theirs, "shared-name")) {
+		t.Errorf("Skipped reason %q does not name the holding target", res.Skipped[0].Reason)
+	}
+	for _, name := range res.Materialized {
+		if name == "shared-name" {
+			t.Errorf("shared-name reported materialized while held by a foreign link")
+		}
+	}
+}
