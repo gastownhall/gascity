@@ -137,3 +137,85 @@ func TestRunTargetBackfillSweepsScopesConcurrently(t *testing.T) {
 		t.Fatalf("Run = %v %q\ndetails %q\nwant    %q", res.Status, res.Message, res.Details, want)
 	}
 }
+
+// TestPerRunStoreFactoryOpensDistinctScopesConcurrently (AC-3): distinct
+// scopes open in parallel, while concurrent requests for one scope share a
+// single open, its result, and a single observer call.
+func TestPerRunStoreFactoryOpensDistinctScopesConcurrently(t *testing.T) {
+	t.Run("distinct paths", func(t *testing.T) {
+		probe := newInFlightProbe(t, 2, 5*time.Second)
+		var seen []string // unguarded: the factory serializes its observers
+		open := perRunStoreFactory(func(string) (beads.Store, error) {
+			probe.enter()
+			return beads.NewMemStore(), nil
+		}, func(dir string) { seen = append(seen, dir) })
+		var wg sync.WaitGroup
+		for _, dir := range []string{"a", "b"} {
+			wg.Go(func() {
+				if _, err := open(dir); err != nil {
+					t.Errorf("open %s: %v", dir, err)
+				}
+			})
+		}
+		wg.Wait()
+		if got := probe.peak.Load(); got < 2 {
+			t.Fatalf("max in-flight opens = %d, want >= 2", got)
+		}
+		slices.Sort(seen)
+		if !slices.Equal(seen, []string{"a", "b"}) {
+			t.Fatalf("observed %v, want [a b]", seen)
+		}
+	})
+
+	for _, tc := range []struct {
+		name    string
+		openErr error
+	}{
+		{name: "one path opens", openErr: nil},
+		{name: "one path fails", openErr: errors.New("no store")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			want := beads.NewMemStore()
+			var calls, observed atomic.Int32
+			entered, release := make(chan struct{}), make(chan struct{})
+			open := perRunStoreFactory(func(string) (beads.Store, error) {
+				if calls.Add(1) == 1 {
+					close(entered)
+				}
+				<-release
+				if tc.openErr != nil {
+					return nil, tc.openErr
+				}
+				return want, nil
+			}, func(string) { observed.Add(1) })
+
+			const callers = 8
+			stores := make([]beads.Store, callers)
+			errs := make([]error, callers)
+			var wg sync.WaitGroup
+			for i := range callers {
+				wg.Go(func() { stores[i], errs[i] = open("same") })
+			}
+			<-entered
+			time.Sleep(50 * time.Millisecond) // let the other callers queue behind the open
+			close(release)
+			wg.Wait()
+
+			if got := calls.Load(); got != 1 {
+				t.Fatalf("open ran %d times, want 1", got)
+			}
+			for i := range callers {
+				if !errors.Is(errs[i], tc.openErr) || (tc.openErr == nil && stores[i] != want) {
+					t.Fatalf("caller %d got (%v, %v), want (%v, %v)", i, stores[i], errs[i], want, tc.openErr)
+				}
+			}
+			wantObserved := int32(1)
+			if tc.openErr != nil {
+				wantObserved = 0
+			}
+			if got := observed.Load(); got != wantObserved {
+				t.Fatalf("observer called %d times, want %d", got, wantObserved)
+			}
+		})
+	}
+}
