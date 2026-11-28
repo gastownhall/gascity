@@ -92,11 +92,21 @@ func poolSessionIsLiveInfo(i sessionpkg.Info) bool {
 // looks like once re-projected to asleep by the wake path --
 // ClearWakeBlockersPatch clears the recognized reason and stamps none -- and
 // it is a genuine ordinary sleep, not a legacy/regression/write-race record.
+// The second is an empty reason paired with a stamped suspended_at and no
+// sleep_intent: a soft suspend (the shutdown sweep's stop of every unfloored
+// seat on `gc rig restart`, and of `gc stop` stragglers) healed to asleep.
+// The heal writes state alone, so the row carries neither a reason nor
+// slept_at, and nothing revives it in place; it frees unless a deliberate
+// hold (a wait, or a live or unreadable timer) sits on it. Every disposition
+// move that ends a soft suspend (sleep, pre-wake, kill, an operator's wake or
+// retire) clears suspended_at, so the stamp marks this healed shape only. An
+// empty reason with neither stamp stays denied.
 //
 // A row an operator holds (`gc session suspend`: Disposition.KeepsSlot) is
 // never freeable, whatever its reason: its slot and its work stay with it.
 func isPoolSessionSlotFreeable(session beads.Bead, now time.Time) bool {
-	if sessionpkg.DecodeDisposition(session.Metadata).KeepsSlot() {
+	disposition := sessionpkg.DecodeDisposition(session.Metadata)
+	if disposition.KeepsSlot() {
 		return false
 	}
 	if isDrainedSessionBead(session) {
@@ -124,12 +134,13 @@ func isPoolSessionSlotFreeable(session beads.Bead, now time.Time) bool {
 	if reason == "" && strings.TrimSpace(session.Metadata["slept_at"]) != "" {
 		return true
 	}
-	return false
+	return reason == "" && isHealedSoftSuspend(session.Metadata["suspended_at"], session.Metadata["sleep_intent"], disposition, now)
 }
 
 // isPoolSessionSlotFreeableInfo is the session.Info mirror of isPoolSessionSlotFreeable.
 func isPoolSessionSlotFreeableInfo(i sessionpkg.Info, now time.Time) bool {
-	if sessionpkg.DispositionOfInfo(i).KeepsSlot() {
+	disposition := sessionpkg.DispositionOfInfo(i)
+	if disposition.KeepsSlot() {
 		return false
 	}
 	if isDrainedSessionInfo(i) {
@@ -157,5 +168,12 @@ func isPoolSessionSlotFreeableInfo(i sessionpkg.Info, now time.Time) bool {
 	if reason == "" && strings.TrimSpace(i.SleptAt) != "" {
 		return true
 	}
-	return false
+	return reason == "" && isHealedSoftSuspend(i.SuspendedAt, i.SleepIntent, disposition, now)
+}
+
+// isHealedSoftSuspend reports an asleep row with no slept_at that a soft
+// suspend left behind: suspended_at stamped, no sleep_intent (an unknown or
+// idle-stop intent stays denied), and no deliberate hold on its disposition.
+func isHealedSoftSuspend(suspendedAt, sleepIntent string, d sessionpkg.Disposition, now time.Time) bool {
+	return strings.TrimSpace(suspendedAt) != "" && strings.TrimSpace(sleepIntent) == "" && !d.HoldsDeliberately(now)
 }

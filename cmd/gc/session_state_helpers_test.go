@@ -75,6 +75,9 @@ func TestIsPoolSessionSlotFreeable_Matrix(t *testing.T) {
 		{"asleep+killed+fence-pending", map[string]string{"state": "asleep", "sleep_reason": "killed", "state_reason": sessionpkg.KillPendingReason, "slept_at": recent}, false},
 		{"asleep+killed+fence-stale", map[string]string{"state": "asleep", "sleep_reason": "killed", "state_reason": sessionpkg.KillPendingReason, "slept_at": stale}, true},
 		{"asleep+killed+fence-malformed", map[string]string{"state": "asleep", "sleep_reason": "killed", "state_reason": sessionpkg.KillPendingReason, "slept_at": "not-a-time"}, true},
+		// A soft suspend (the shutdown sweep) healed to asleep: no reason, no
+		// slept_at, suspended_at kept. Its writer is known, so it frees.
+		{"asleep+healed-soft-suspend", map[string]string{"state": "asleep", "suspended_at": recent}, true},
 		{"asleep+empty-reason", map[string]string{"state": "asleep", "sleep_reason": ""}, false},
 		{"asleep+missing-reason", map[string]string{"state": "asleep"}, false},
 		{"asleep+wait-hold", map[string]string{"state": "asleep", "sleep_reason": "wait-hold"}, false},
@@ -91,10 +94,15 @@ func TestIsPoolSessionSlotFreeable_Matrix(t *testing.T) {
 				t.Fatalf("isPoolSessionSlotFreeable(%v) = %v, want %v", tc.meta, got, tc.want)
 			}
 			info := sessionpkg.Info{
-				MetadataState: tc.meta["state"],
-				StateReason:   tc.meta["state_reason"],
-				SleepReason:   tc.meta["sleep_reason"],
-				SleptAt:       tc.meta["slept_at"],
+				MetadataState:    tc.meta["state"],
+				StateReason:      tc.meta["state_reason"],
+				SleepReason:      tc.meta["sleep_reason"],
+				SleptAt:          tc.meta["slept_at"],
+				SuspendedAt:      tc.meta["suspended_at"],
+				SleepIntent:      tc.meta["sleep_intent"],
+				WaitHold:         tc.meta["wait_hold"],
+				HeldUntil:        tc.meta["held_until"],
+				QuarantinedUntil: tc.meta["quarantined_until"],
 			}
 			if gotInfo := isPoolSessionSlotFreeableInfo(info, now); gotInfo != tc.want {
 				t.Fatalf("isPoolSessionSlotFreeableInfo(%v) = %v, want %v", tc.meta, gotInfo, tc.want)
