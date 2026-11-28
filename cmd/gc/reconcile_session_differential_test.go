@@ -248,11 +248,6 @@ var parityFindings = map[string]parityEntry{
 		"C6b1, C6b2 (A20, A4; owner to add a §12.2 row)", "legacy drains a waiter to a sleep on its wait hold and, once the wait turns ready, starts it again through the idle latch and delivers the wait's nudge with the start; v2 drains and restarts it the same way, a pass or more later (drain-stop-lag)",
 		append([]string{"sleep_intent", "sleep_reason", "slept_at", "drain_at", "detached_at", "stranded_event_emitted_at", session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey}, parityStartKeys...),
 	},
-	"stranded-repair-replacement-lag": {
-		"SESS-625 (A21's repair; owner to add a §12.2 row)",
-		"legacy's tick repairs an aged stranded row — unclaims its blocked claim and closes the row — and the freed routed work starts the pool's replacement seat in the same window; v2's repair (A21) lands on its own pass and the fresh seat follows a pass or more later, so the replacement may not show inside the window",
-		nil,
-	},
 }
 
 // parityUnported is legacy behavior that belongs to an arm or effect kind
@@ -1953,28 +1948,31 @@ func parityFixtures() []parityFixture {
 		},
 		// The drain-ack held-claim recovery (#2293's follow-up): the seat is
 		// asleep on its drain-ack finalize and still holds its claim. An
-		// UNBLOCKED in_progress claim is awake demand, so the assigned-work
-		// wake restarts the same row with the claim kept.
+		// UNBLOCKED in_progress claim is awake demand: the resume tier keeps
+		// the seat desired (POOL-022) and the assigned-work wake (POOL-073)
+		// restarts the same row with the claim kept.
 		{
-			Name: "a drain-acked asleep seat with an unblocked claim wakes in place", Behaviors: []string{"SESS-583"},
+			Name: "a drain-acked asleep seat with an unblocked claim wakes in place", Behaviors: []string{"POOL-022", "POOL-073"},
 			Rows:    []parityRow{poolRow("gc-1", "worker", 1, "asleep", "instance_token", "tok-gc-1", "sleep_reason", "idle", "slept_at", at(-time.Hour), "last_woke_at", at(-2*time.Hour))},
 			Work:    assigned,
 			Explain: started("gc-1", "s-gc-1", "worker-1", nil),
 		},
-		// A BLOCKED claim is not demand: the seat strands (SESS-624, the
-		// marker aged past its confirmation window) and the stranded repair
-		// (SESS-625) unclaims the blocked step and closes the row.
+		// A claim BLOCKED on an open dependency is not demand: the seat
+		// strands (SESS-624, the marker aged past its confirmation window)
+		// and the stranded repair (SESS-625) unclaims the blocked step and
+		// closes the row. The step carries both bd's is_blocked projection,
+		// which an in_progress claim's demand reads, and its real blocker
+		// gb-1, which an open step's readiness reads, so the reopened step
+		// stays not ready and neither copy starts a replacement seat for it.
 		{
 			Name: "a drain-acked asleep seat with a blocked claim is repaired", Behaviors: []string{"SESS-624", "SESS-625"},
 			Rows: []parityRow{poolRow("gc-1", "worker", 1, "asleep", "instance_token", "tok-gc-1", "sleep_reason", "idle", "slept_at", at(-2*time.Hour), "last_woke_at", at(-3*time.Hour), "stranded_event_emitted_at", at(-time.Hour))},
-			Work: []parityRow{{ID: "gw-1", Title: "gw-1", Type: "task", Status: "in_progress", Assignee: "gc-1", IsBlocked: boolPtr(true), Metadata: map[string]string{"gc.routed_to": "worker"}}},
-			Explain: map[string]string{
-				"row:gc-1:*policy":                "sleep-policy-keys",
-				"row:gc-2":                        "stranded-repair-replacement-lag",
-				"provider:Start worker-gc-2":      "stranded-repair-replacement-lag",
-				"provider:RemoveMeta worker-gc-2": "stranded-repair-replacement-lag",
-				"event:session.woke worker-1 []":  "stranded-repair-replacement-lag",
+			Work: []parityRow{
+				{ID: "gb-1", Title: "gb-1", Type: "task", Status: "open"},
+				{ID: "gw-1", Title: "gw-1", Type: "task", Status: "in_progress", Assignee: "gc-1", IsBlocked: boolPtr(true), Metadata: map[string]string{"gc.routed_to": "worker"}},
 			},
+			Deps:    []beads.Dep{{IssueID: "gw-1", DependsOnID: "gb-1", Type: "blocks"}},
+			Explain: map[string]string{"row:gc-1:*policy": "sleep-policy-keys"},
 		},
 	}
 }

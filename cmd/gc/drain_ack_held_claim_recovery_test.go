@@ -3,16 +3,16 @@ package main
 // The drain-ack held-claim recovery lanes (gastownhall/gascity#2293's follow-up
 // contract): a session that drain-acks while still holding an in_progress
 // claim is finalized asleep WITHOUT touching the claim (the event is the
-// signal), and the claim's release is owned by exactly one later lane per
-// shape —
+// signal), and exactly one later lane per shape then releases the claim or
+// restarts its holder on it —
 //
 //   - an undesired split-store seat: the orphan close's aligned-store
 //     release (SESS-082), one tick after the finalize;
 //   - a desired seat whose claim is unblocked: the assigned-work wake
-//     restarts the same bead with the claim kept;
-//   - a desired seat whose claim is blocked: the stranded stamp
-//     (SESS-624) then the stranded repair (SESS-625) after its
-//     confirmation window.
+//     (POOL-073) restarts the same bead with the claim kept;
+//   - a desired seat whose claim is blocked on an open dependency: the
+//     stranded stamp (SESS-624) then the stranded repair (SESS-625) after
+//     its confirmation window.
 //
 // The tests assert outcomes, not lanes: each names the end state the shape
 // converges to and the single event that trail owns.
@@ -299,6 +299,9 @@ func newDrainAckDesiredSeat(t *testing.T, blocked bool) *drainAckDesiredSeat {
 		Assignee: session.ID,
 	}
 	if blocked {
+		// bd's is_blocked projection is what an in_progress claim's demand
+		// reads; the open blocker added below is what keeps the step not
+		// ready once the stranded repair reopens it.
 		seed.IsBlocked = boolPtr(true)
 	}
 	// MemStore.Create normalizes a new bead's status to open, so the
@@ -306,6 +309,15 @@ func newDrainAckDesiredSeat(t *testing.T, blocked bool) *drainAckDesiredSeat {
 	work, err := env.store.Create(seed)
 	if err != nil {
 		t.Fatalf("Create(step): %v", err)
+	}
+	if blocked {
+		blocker, err := env.store.Create(beads.Bead{Title: "open blocker", Type: "task"})
+		if err != nil {
+			t.Fatalf("Create(blocker): %v", err)
+		}
+		if err := env.store.DepAdd(work.ID, blocker.ID, "blocks"); err != nil {
+			t.Fatalf("DepAdd(step blocks on blocker): %v", err)
+		}
 	}
 	inProgress := "in_progress"
 	if err := env.store.Update(work.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
