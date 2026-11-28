@@ -330,3 +330,149 @@ func TestDoctorScopeSweepStopsWhenDoneClosesMidSweep(t *testing.T) {
 		}
 	}
 }
+
+// failingScopeFixture is four scopes: the city and rig d readable with one
+// target each, rig b's store failing to open and rig c's failing its List.
+type failingScopeFixture struct {
+	cfg          *config.City
+	cityDir      string
+	city, rigD   beads.Store
+	factory      func(string) (beads.Store, error)
+	wantSkipped  []string
+	wantFixError string
+}
+
+func newFailingScopeFixture(t *testing.T, bead func(id string) beads.Bead, checkName string) failingScopeFixture {
+	t.Helper()
+	cityDir, rigB, rigC, rigD := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	fx := failingScopeFixture{
+		cfg: &config.City{Rigs: []config.Rig{
+			{Name: "b", Path: rigB},
+			{Name: "c", Path: rigC},
+			{Name: "d", Path: rigD},
+		}},
+		cityDir: cityDir,
+		city:    beads.NewMemStoreFrom(0, []beads.Bead{bead("C-1")}, nil),
+		rigD:    beads.NewMemStoreFrom(0, []beads.Bead{bead("D-1")}, nil),
+		wantSkipped: []string{
+			"rig b skipped: opening bead store: permission denied",
+			"rig c skipped: listing beads: listing failed",
+		},
+	}
+	fx.wantFixError = checkName + " skipped 2 scope(s): " + fx.wantSkipped[0] + "; " + fx.wantSkipped[1]
+	stores := map[string]beads.Store{cityDir: fx.city, rigC: holdLabelListErrorStore{Store: beads.NewMemStore()}, rigD: fx.rigD}
+	fx.factory = func(path string) (beads.Store, error) {
+		if path == rigB {
+			return nil, errors.New("permission denied")
+		}
+		return holdLabelStores(stores)(path)
+	}
+	return fx
+}
+
+// TestDoctorScopeSweepReportsFailuresPerScope (AC-5): a scope that fails to
+// open or to list is reported in the existing skip-line format with its
+// label, and the other scopes' targets are still reported and repaired.
+func TestDoctorScopeSweepReportsFailuresPerScope(t *testing.T) {
+	t.Run("sweep", func(t *testing.T) {
+		fx := newFailingScopeFixture(t, func(id string) beads.Bead { return beads.Bead{ID: id, Title: "x", Type: "task", Status: "open"} }, "")
+		got := sweepDoctorScopeLists(&doctor.CheckContext{}, doctorWorkScopes(fx.cfg, fx.cityDir), fx.factory, beads.ListQuery{AllowScan: true})
+		var labels, skipped []string
+		for _, sc := range got {
+			labels = append(labels, sc.label)
+			if sc.skipped != "" {
+				skipped = append(skipped, sc.skipped)
+			}
+		}
+		if !slices.Equal(labels, []string{"city", "rig b", "rig c", "rig d"}) || !slices.Equal(skipped, fx.wantSkipped) {
+			t.Fatalf("labels %q skipped %q, want scope order and %q", labels, skipped, fx.wantSkipped)
+		}
+		if !got[0].read || len(got[0].items) != 1 || !got[3].read || len(got[3].items) != 1 || got[1].read || got[2].read {
+			t.Fatalf("read flags/items = %+v", got)
+		}
+	})
+
+	t.Run("hold-label-routed-to", func(t *testing.T) {
+		fx := newFailingScopeFixture(t, func(id string) beads.Bead {
+			return beads.Bead{ID: id, Title: "held", Type: "task", Status: "open", Labels: []string{"hold:qa"}}
+		}, "hold-label-routed-to")
+		check := newHoldLabelRoutedToCheck(fx.cfg, fx.cityDir, fx.factory)
+		want := append([]string{
+			`city bead C-1 has hold:qa but gc.routed_to=""; use "qa"`,
+			`rig d bead D-1 has hold:qa but gc.routed_to=""; use "qa"`,
+		}, fx.wantSkipped...)
+		slices.Sort(want)
+		if res := check.Run(&doctor.CheckContext{}); !slices.Equal(res.Details, want) {
+			t.Fatalf("details %q\nwant    %q", res.Details, want)
+		}
+		if err := check.Fix(&doctor.CheckContext{}); err == nil || err.Error() != fx.wantFixError {
+			t.Fatalf("Fix error = %v, want %q", err, fx.wantFixError)
+		}
+		if got := holdLabelRoute(t, fx.city, "C-1") + "," + holdLabelRoute(t, fx.rigD, "D-1"); got != "qa,qa" {
+			t.Fatalf("repaired routes = %q, want qa,qa", got)
+		}
+	})
+
+	t.Run("run-target-routed-to-backfill", func(t *testing.T) {
+		fx := newFailingScopeFixture(t, func(id string) beads.Bead {
+			return beads.Bead{ID: id, Title: "root", Type: "task", Status: "open", Metadata: map[string]string{
+				"gc.kind": "workflow", "gc.run_target": "worker",
+			}}
+		}, "run-target-routed-to-backfill")
+		check := newRunTargetRoutedToBackfillCheck(fx.cfg, fx.cityDir, fx.factory)
+		want := append([]string{
+			`city bead C-1 has gc.run_target="worker" with empty gc.routed_to`,
+			`rig d bead D-1 has gc.run_target="worker" with empty gc.routed_to`,
+		}, fx.wantSkipped...)
+		slices.Sort(want)
+		if res := check.Run(&doctor.CheckContext{}); !slices.Equal(res.Details, want) {
+			t.Fatalf("details %q\nwant    %q", res.Details, want)
+		}
+		if err := check.Fix(&doctor.CheckContext{}); err == nil || err.Error() != fx.wantFixError {
+			t.Fatalf("Fix error = %v, want %q", err, fx.wantFixError)
+		}
+		if got := holdLabelRoute(t, fx.city, "C-1") + "," + holdLabelRoute(t, fx.rigD, "D-1"); got != "worker,worker" {
+			t.Fatalf("repaired routes = %q, want worker,worker", got)
+		}
+	})
+}
+
+// TestDoctorScopeSweepEdgeCases (AC-5): the sweep reads exactly the scopes
+// the checks read one at a time: suspended and pathless rigs are left out, a
+// nil factory reads nothing, and two rigs sharing a path are each listed.
+func TestDoctorScopeSweepEdgeCases(t *testing.T) {
+	cityDir, shared := t.TempDir(), t.TempDir()
+	if got := doctorWorkScopes(nil, cityDir); !slices.Equal(got, []doctorWorkScope{{"city", cityDir}}) {
+		t.Fatalf("city-only scopes = %+v", got)
+	}
+	cfg := &config.City{Rigs: []config.Rig{
+		{Name: "a", Path: shared},
+		{Name: "idle", Path: t.TempDir(), Suspended: true},
+		{Name: "nopath", Path: "  "},
+		{Name: "b", Path: shared},
+	}}
+	scopes := doctorWorkScopes(cfg, cityDir)
+	if want := []doctorWorkScope{{"city", cityDir}, {"rig a", shared}, {"rig b", shared}}; !slices.Equal(scopes, want) {
+		t.Fatalf("scopes = %+v, want %+v", scopes, want)
+	}
+
+	if got := sweepDoctorScopeLists[beads.Store](&doctor.CheckContext{}, scopes, nil, beads.ListQuery{AllowScan: true}); len(got) != 3 || got[0].read || got[0].skipped != "" {
+		t.Fatalf("nil factory sweep = %+v, want three unread scopes", got)
+	}
+
+	f := &countingFactory{stores: map[string]beads.Store{
+		cityDir: beads.NewMemStore(),
+		shared:  beads.NewMemStoreFrom(0, []beads.Bead{{ID: "S-1", Title: "x", Type: "task", Status: "open"}}, nil),
+	}}
+	got := sweepDoctorScopeLists(&doctor.CheckContext{}, scopes, perRunStoreFactory(f.open), beads.ListQuery{AllowScan: true})
+	opened, lists := f.calls()
+	slices.Sort(opened)
+	wantOpened := []string{cityDir, shared}
+	slices.Sort(wantOpened)
+	if !slices.Equal(opened, wantOpened) || lists != 3 {
+		t.Fatalf("opened %v and listed %d time(s), want each path opened once and every scope listed", opened, lists)
+	}
+	if len(got[1].items) != 1 || len(got[2].items) != 1 {
+		t.Fatalf("shared-path scopes = %+v, want both rigs to list S-1", got[1:])
+	}
+}
