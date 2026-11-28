@@ -56,13 +56,18 @@ type doctorScopeList[S doctorScopeLister] struct {
 // sweepDoctorScopeLists opens every scope through newStore and lists it with
 // query, reading distinct scopes concurrently. Results are returned in scope
 // order whatever order the reads finish in.
+//
+// Once the runner abandons the check (ctx.Canceled), the sweep issues no new
+// open or List: every scope not yet opened or listed is reported as
+// abandoned, and the sweep returns when the calls already in flight finish.
+// A store's List takes no context, so a call in flight runs to completion.
 func sweepDoctorScopeLists[S doctorScopeLister](ctx *doctor.CheckContext, scopes []doctorWorkScope, newStore func(string) (S, error), query beads.ListQuery) []doctorScopeList[S] {
 	return sweepDoctorScopeListsLimit(ctx, scopes, newStore, query, -1)
 }
 
 // sweepDoctorScopeListsLimit is sweepDoctorScopeLists with at most limit
 // scope reads in flight at once; a negative limit is unbounded.
-func sweepDoctorScopeListsLimit[S doctorScopeLister](_ *doctor.CheckContext, scopes []doctorWorkScope, newStore func(string) (S, error), query beads.ListQuery, limit int) []doctorScopeList[S] {
+func sweepDoctorScopeListsLimit[S doctorScopeLister](ctx *doctor.CheckContext, scopes []doctorWorkScope, newStore func(string) (S, error), query beads.ListQuery, limit int) []doctorScopeList[S] {
 	results := make([]doctorScopeList[S], len(scopes))
 	var g errgroup.Group
 	g.SetLimit(limit)
@@ -71,14 +76,26 @@ func sweepDoctorScopeListsLimit[S doctorScopeLister](_ *doctor.CheckContext, sco
 		if newStore == nil || strings.TrimSpace(sc.path) == "" {
 			continue
 		}
+		if ctx.Canceled() {
+			results[i].skipped = doctorScopeAbandoned(sc.label)
+			continue
+		}
 		g.Go(func() error {
 			res := &results[i]
+			if ctx.Canceled() {
+				res.skipped = doctorScopeAbandoned(sc.label)
+				return nil
+			}
 			store, err := newStore(sc.path)
 			if err != nil {
 				res.skipped = fmt.Sprintf("%s skipped: opening bead store: %v", sc.label, err)
 				return nil
 			}
 			res.store = store
+			if ctx.Canceled() {
+				res.skipped = doctorScopeAbandoned(sc.label)
+				return nil
+			}
 			items, err := store.List(query)
 			if err != nil {
 				res.skipped = fmt.Sprintf("%s skipped: listing beads: %v", sc.label, err)
@@ -91,4 +108,10 @@ func sweepDoctorScopeListsLimit[S doctorScopeLister](_ *doctor.CheckContext, sco
 	}
 	_ = g.Wait() // workers record their failures in their own slot and never return an error
 	return results
+}
+
+// doctorScopeAbandoned is the skip line of a scope a check stopped reading
+// because the runner abandoned it at its timeout.
+func doctorScopeAbandoned(label string) string {
+	return label + " skipped: check abandoned at its timeout"
 }

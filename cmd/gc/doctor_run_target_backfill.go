@@ -84,7 +84,10 @@ func (c *runTargetRoutedToBackfillCheck) collect(ctx *doctor.CheckContext) (targ
 	// graph binding, which none of the scope stores above is: the check used to
 	// report nothing to backfill and --fix repaired nothing there (read-audit
 	// R13). A binding the city's routes refuse is reported as skipped by its
-	// own refusal.
+	// own refusal. An abandoned check does not open the binding at all.
+	if ctx.Canceled() {
+		return targets, append(skipped, doctorScopeAbandoned("graph binding"))
+	}
 	if graph, relocated := cliStorageRoutes(c.cityPath).storeFor(coordclass.ClassGraph); relocated && graph != nil { // residency:allow — a doctor scan of every workflow root wherever it lives; the binding is the one scope the work-scope walk above cannot reach
 		items, err := graph.List(runTargetBackfillQuery())
 		if err != nil {

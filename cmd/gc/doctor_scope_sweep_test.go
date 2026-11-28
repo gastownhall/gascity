@@ -219,3 +219,114 @@ func TestPerRunStoreFactoryOpensDistinctScopesConcurrently(t *testing.T) {
 		})
 	}
 }
+
+// countingFactory is a store factory over per-path stores that records every
+// open and List, and runs onList (when set) inside each List.
+type countingFactory struct {
+	mu     sync.Mutex
+	stores map[string]beads.Store
+	opened []string
+	lists  int
+	onList func()
+}
+
+type sweepCountingStore struct {
+	beads.Store
+	f *countingFactory
+}
+
+func (s sweepCountingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.f.mu.Lock()
+	s.f.lists++
+	onList := s.f.onList
+	s.f.mu.Unlock()
+	if onList != nil {
+		onList()
+	}
+	return s.Store.List(q)
+}
+
+func (f *countingFactory) open(path string) (beads.Store, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.opened = append(f.opened, path)
+	store, ok := f.stores[path]
+	if !ok {
+		return nil, errors.New("no store here")
+	}
+	return sweepCountingStore{Store: store, f: f}, nil
+}
+
+func (f *countingFactory) calls() (opened []string, lists int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.opened), f.lists
+}
+
+// abandonedCheck is a store-backed doctor check under test for AC-4.
+type abandonedCheck interface {
+	Run(*doctor.CheckContext) *doctor.CheckResult
+	Fix(*doctor.CheckContext) error
+}
+
+// assertNoStoreCallsWhenAbandoned runs check's Run and Fix with Done already
+// closed and fails if either issued a store open or List.
+func assertNoStoreCallsWhenAbandoned(t *testing.T, f *countingFactory, check abandonedCheck) {
+	t.Helper()
+	done := make(chan struct{})
+	close(done)
+	ctx := &doctor.CheckContext{Done: done}
+	check.Run(ctx)
+	if opened, lists := f.calls(); len(opened) != 0 || lists != 0 {
+		t.Fatalf("abandoned Run opened %v and listed %d time(s), want no store calls", opened, lists)
+	}
+	_ = check.Fix(ctx) // the abandoned scopes are reported as skipped; only the store calls matter here
+	if opened, lists := f.calls(); len(opened) != 0 || lists != 0 {
+		t.Fatalf("abandoned Fix opened %v and listed %d time(s), want no store calls", opened, lists)
+	}
+}
+
+// TestHoldLabelRoutedToStopsWhenAbandoned (AC-4): once the runner abandons
+// the check, neither Run nor Fix opens or lists a store.
+func TestHoldLabelRoutedToStopsWhenAbandoned(t *testing.T) {
+	cityDir, rigDir := t.TempDir(), t.TempDir()
+	cfg := &config.City{Rigs: []config.Rig{{Name: "repo", Path: rigDir}}}
+	f := &countingFactory{stores: map[string]beads.Store{cityDir: beads.NewMemStore(), rigDir: beads.NewMemStore()}}
+	assertNoStoreCallsWhenAbandoned(t, f, newHoldLabelRoutedToCheck(cfg, cityDir, f.open))
+}
+
+// TestRunTargetBackfillStopsWhenAbandoned (AC-4): once the runner abandons
+// the check, neither Run nor Fix opens or lists a store.
+func TestRunTargetBackfillStopsWhenAbandoned(t *testing.T) {
+	cityDir, rigDir := t.TempDir(), t.TempDir()
+	cfg := &config.City{Rigs: []config.Rig{{Name: "repo", Path: rigDir}}}
+	f := &countingFactory{stores: map[string]beads.Store{cityDir: beads.NewMemStore(), rigDir: beads.NewMemStore()}}
+	assertNoStoreCallsWhenAbandoned(t, f, newRunTargetRoutedToBackfillCheck(cfg, cityDir, f.open))
+}
+
+// TestDoctorScopeSweepStopsWhenDoneClosesMidSweep (AC-4): when Done closes
+// during the first scope's List, no scope not yet dispatched is opened or
+// listed, and each is reported as abandoned.
+func TestDoctorScopeSweepStopsWhenDoneClosesMidSweep(t *testing.T) {
+	scopes := []doctorWorkScope{{"city", "c"}, {"rig a", "a"}, {"rig b", "b"}, {"rig c", "x"}}
+	done := make(chan struct{})
+	var closeOnce sync.Once
+	f := &countingFactory{
+		stores: map[string]beads.Store{"c": beads.NewMemStore(), "a": beads.NewMemStore(), "b": beads.NewMemStore()},
+		onList: func() { closeOnce.Do(func() { close(done) }) },
+	}
+
+	got := sweepDoctorScopeListsLimit(&doctor.CheckContext{Done: done}, scopes, f.open, beads.ListQuery{AllowScan: true}, 1)
+
+	if opened, lists := f.calls(); !slices.Equal(opened, []string{"c"}) || lists != 1 {
+		t.Fatalf("opened %v and listed %d time(s), want only the first scope [c] listed once", opened, lists)
+	}
+	if !got[0].read || got[0].skipped != "" {
+		t.Fatalf("first scope = %+v, want read", got[0])
+	}
+	for _, sc := range got[1:] {
+		if want := sc.label + " skipped: check abandoned at its timeout"; sc.read || sc.skipped != want {
+			t.Fatalf("scope %s = read %v skipped %q, want skipped %q", sc.label, sc.read, sc.skipped, want)
+		}
+	}
+}
