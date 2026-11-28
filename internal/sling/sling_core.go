@@ -2310,6 +2310,9 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 
 	// Dry-run: return early with container preview info. Every child goes to
 	// the one target, so the batch result carries the target warnings once.
+	// The counts run the live loop's per-child check, so a child the live
+	// batch would skip (already routed, or no longer open) is not counted as
+	// routed.
 	if opts.DryRun {
 		batchResult := newTargetResult(opts, deps)
 		batchResult.DryRun = true
@@ -2317,8 +2320,24 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 		batchResult.ContainerType = b.Type
 		batchResult.Method = "batch"
 		batchResult.Total = len(children)
-		batchResult.Routed = len(open)
-		batchResult.Skipped = len(skipped)
+		var skips batchSkips
+		routed := 0
+		for _, child := range open {
+			if !opts.Force {
+				check := CheckBeadStateWithOptions(querier, child.ID, a, deps, BeadCheckOptions{
+					NoConvoy: opts.NoConvoy,
+				})
+				var preview SlingChildResult
+				if skips.skip(check, &preview) {
+					continue
+				}
+			}
+			routed++
+		}
+		batchResult.Routed = routed
+		batchResult.Skipped = skips.idempotent + skips.notOpen + len(skipped)
+		batchResult.IdempotentCt = skips.idempotent
+		batchResult.NotOpenCt = skips.notOpen
 		batchResult.Failed = len(owned)
 		return batchResult, nil
 	}

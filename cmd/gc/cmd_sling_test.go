@@ -9881,6 +9881,69 @@ func TestSlingDryRunBatchAlreadyRoutedChildPreviewsNoCookOrRoute(t *testing.T) {
 	})
 }
 
+// The JSON dry run of a convoy must count an open child already routed to the
+// target as the live batch does: skipped as idempotent, not routed. With
+// --force the live batch routes it again, and so does the count.
+func TestSlingDryRunBatchJSONCountsAlreadyRoutedChildAsIdempotent(t *testing.T) {
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	for _, tc := range []struct {
+		name                                    string
+		force                                   bool
+		wantRouted, wantSkipped, wantIdempotent int
+	}{
+		{name: "skipped child counted idempotent", wantRouted: 1, wantSkipped: 1, wantIdempotent: 1},
+		{name: "force routes it", force: true, wantRouted: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q := newFakeChildQuerier()
+			q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
+			children := []beads.Bead{
+				{ID: "BL-1", Status: "open", ParentID: "CVY-1", Metadata: map[string]string{"gc.routed_to": "mayor"}},
+				{ID: "BL-2", Status: "open", ParentID: "CVY-1"},
+			}
+			q.childrenOf["CVY-1"] = children
+			for _, c := range children {
+				q.beadsByID[c.ID] = c
+			}
+
+			runner := newFakeRunner()
+			deps, _, _ := testDeps(cfg, runtime.NewFake(), runner.run)
+			opts := testOpts(a, "CVY-1")
+			opts.OnFormula = "code-review"
+			opts.Force = tc.force
+			opts.DryRun = true
+			var jsonStdout, stderr bytes.Buffer
+			if code := doSlingBatchWithJSON(opts, deps, q, depsSlingNudge(deps), true, io.Discard, &jsonStdout, &stderr); code != 0 {
+				t.Fatalf("dry run returned %d; stderr: %s", code, stderr.String())
+			}
+			var got struct {
+				DryRun bool `json:"dry_run"`
+				Batch  *struct {
+					Total      int `json:"total"`
+					Routed     int `json:"routed"`
+					Skipped    int `json:"skipped"`
+					Idempotent int `json:"idempotent"`
+				} `json:"batch"`
+			}
+			if err := json.Unmarshal(jsonStdout.Bytes(), &got); err != nil {
+				t.Fatalf("decoding JSON %q: %v", jsonStdout.String(), err)
+			}
+			if !got.DryRun || got.Batch == nil {
+				t.Fatalf("want a dry-run batch result; got %s", jsonStdout.String())
+			}
+			b := got.Batch
+			if b.Total != 2 || b.Routed != tc.wantRouted || b.Skipped != tc.wantSkipped || b.Idempotent != tc.wantIdempotent {
+				t.Errorf("batch = total %d routed %d skipped %d idempotent %d, want total 2 routed %d skipped %d idempotent %d",
+					b.Total, b.Routed, b.Skipped, b.Idempotent, tc.wantRouted, tc.wantSkipped, tc.wantIdempotent)
+			}
+			if len(runner.calls) != 0 {
+				t.Errorf("dry run executed commands: %v", runner.calls)
+			}
+		})
+	}
+}
+
 // Review 6a: on a single-store bd-1.0.5 city the bead-policy layer maps the
 // wisp policy onto the ephemeral tier, which bd's own wisp GC (`gc bd mol wisp
 // gc --age`) reaps by age. The attached root-only wisp keeps its gc.kind=wisp
