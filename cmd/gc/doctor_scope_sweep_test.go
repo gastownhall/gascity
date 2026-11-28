@@ -64,13 +64,17 @@ func (s inFlightStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 
 // TestHoldLabelRoutedToSweepsScopesConcurrently (AC-1): the check reads its
 // scopes concurrently, and still reports exactly the lines a one-at-a-time
-// read produces.
+// read produces: two rigs sharing a path are each listed as their own scope,
+// and suspended or blank-path rigs are not read.
 func TestHoldLabelRoutedToSweepsScopesConcurrently(t *testing.T) {
 	cityDir, rigA, rigB, rigC := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
 	cfg := &config.City{Rigs: []config.Rig{
 		{Name: "a", Path: rigA},
 		{Name: "b", Path: rigB},
 		{Name: "c", Path: rigC},
+		{Name: "mirror", Path: rigA},
+		{Name: "asleep", Path: "/rigs/asleep", Suspended: true},
+		{Name: "nowhere", Path: "  "},
 	}}
 	probe := newInFlightProbe(t, 2, 5*time.Second)
 	held := func(id string) []beads.Bead {
@@ -98,11 +102,12 @@ func TestHoldLabelRoutedToSweepsScopesConcurrently(t *testing.T) {
 		`rig a bead A-1 has hold:qa but gc.routed_to=""; use "qa"`,
 		`rig b bead B-1 has hold:qa but gc.routed_to=""; use "qa"`,
 		"rig c skipped: opening bead store: no store here",
+		`rig mirror bead A-1 has hold:qa but gc.routed_to=""; use "qa"`,
 	}
 	if res.Status != doctor.StatusWarning || !slices.Equal(res.Details, want) {
 		t.Fatalf("Run = %v %q\ndetails %q\nwant    %q", res.Status, res.Message, res.Details, want)
 	}
-	if want := "3 bead(s) carry a hold:<value> label without matching gc.routed_to"; res.Message != want {
+	if want := "4 bead(s) carry a hold:<value> label without matching gc.routed_to"; res.Message != want {
 		t.Fatalf("message = %q, want %q", res.Message, want)
 	}
 }
