@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
@@ -264,4 +265,59 @@ func TestResolveSlingTargetNamepoolMembers(t *testing.T) {
 			t.Fatalf("resolveSlingTarget = (%+v, %v), want a suspended member", got, ok)
 		}
 	})
+}
+
+// TestResolveSlingTargetKeepsResolveAgentIdentityResults pins precedence:
+// any target resolveAgentIdentity already resolves comes back unchanged, so
+// namepool member resolution only ever fills in previously failing targets.
+func TestResolveSlingTargetKeepsResolveAgentIdentityResults(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "frontend", Path: "/tmp/frontend"}},
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "frontend", NamepoolNames: []string{"furiosa"}, MaxActiveSessions: intPtr(3)},
+			{Name: "furiosa", Dir: "frontend", Description: "literal agent"},
+			{Name: "clerk"},
+		},
+	}
+
+	cases := []struct {
+		name       string
+		target     string
+		rigContext string
+		// wantName and wantPool are checked only when wantName is set.
+		wantName string
+		wantPool string
+	}{
+		{name: "numeric member", target: "frontend/polecat-2", wantName: "frontend/polecat-2", wantPool: "frontend/polecat"},
+		{name: "literal agent shadows a member identity", target: "frontend/furiosa", wantName: "frontend/furiosa", wantPool: ""},
+		{name: "city-scoped literal agent bare name", target: "clerk"},
+		{name: "rig-qualified pool template", target: "frontend/polecat"},
+		{name: "bare pool template name", target: "polecat"},
+		{name: "bare name with rig context", target: "polecat", rigContext: "frontend"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			want, ok := resolveAgentIdentity(cfg, tc.target, tc.rigContext)
+			if !ok {
+				t.Fatalf("resolveAgentIdentity(%q, %q) did not resolve; the case must exercise an existing form", tc.target, tc.rigContext)
+			}
+			got, ok := resolveSlingTarget(cfg, tc.target, tc.rigContext)
+			if !ok {
+				t.Fatalf("resolveSlingTarget(%q, %q) did not resolve", tc.target, tc.rigContext)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("resolveSlingTarget(%q, %q) diverged:\nwant %#v\ngot  %#v", tc.target, tc.rigContext, want, got)
+			}
+			if tc.wantName == "" {
+				return
+			}
+			if q := got.QualifiedName(); q != tc.wantName {
+				t.Errorf("QualifiedName = %q, want %q", q, tc.wantName)
+			}
+			if got.PoolName != tc.wantPool {
+				t.Errorf("PoolName = %q, want %q", got.PoolName, tc.wantPool)
+			}
+		})
+	}
 }
