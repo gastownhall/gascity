@@ -317,6 +317,46 @@ func TestApplySleepKeepsTheHolds(t *testing.T) {
 	}
 }
 
+// TestApplySleepWritesAUserHoldReasonOnlyWhileHeld (gastownhall/gascity#8411):
+// a sleep decided on an older read with reason user-hold keeps that reason
+// only when the fresh row still carries the operator's suspend; on a row a
+// wake released (no intent, or a soft suspend) the reason is cleared. Other
+// reasons are untouched, and a quarantine in force still keeps its own.
+func TestApplySleepWritesAUserHoldReasonOnlyWhileHeld(t *testing.T) {
+	now := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		name   string
+		row    map[string]string
+		reason string
+		want   string
+	}{
+		{"held", map[string]string{"sleep_intent": "user-hold", "held_until": now.Add(time.Hour).Format(time.RFC3339)}, "user-hold", "user-hold"},
+		{"released", map[string]string{"sleep_intent": ""}, "user-hold", ""},
+		{"released, a stale label", map[string]string{"sleep_intent": "", "sleep_reason": "user-hold"}, "user-hold", ""},
+		{"soft suspend", map[string]string{"state": string(StateSuspended)}, "user-hold", ""},
+		{"wait hold", map[string]string{"sleep_intent": "wait-hold"}, "user-hold", ""},
+		{"another reason", map[string]string{"sleep_intent": ""}, "idle", "idle"},
+		{"a live quarantine", map[string]string{"sleep_reason": "quarantine", "quarantined_until": now.Add(time.Hour).Format(time.RFC3339)}, "user-hold", "quarantine"},
+	} {
+		store := beads.NewMemStore()
+		b := wakeRow(t, store)
+		if err := store.SetMetadataBatch(b.ID, c.row); err != nil {
+			t.Fatal(err)
+		}
+		patch := SleepPatch(now, c.reason)
+		if _, err := NewStore(beads.SessionStore{Store: store}).ApplySleep(b.ID, patch); err != nil {
+			t.Fatal(err)
+		}
+		got, _ := store.Get(b.ID)
+		if got.Metadata["sleep_reason"] != c.want || got.Metadata["state"] != string(StateAsleep) {
+			t.Errorf("%s: state=%q sleep_reason=%q, want asleep with %q", c.name, got.Metadata["state"], got.Metadata["sleep_reason"], c.want)
+		}
+		if !maps.Equal(patch, SleepPatch(now, c.reason)) {
+			t.Errorf("%s: ApplySleep mutated its input", c.name)
+		}
+	}
+}
+
 // TestApplySleepKeepsALateQuarantinesReason (mc-slkxd): legacy's finalize
 // through the Sleep cell keeps the reason of a quarantine in force at its
 // slept_at (quarantine, rate_limit, context-churn); an expired quarantine's
