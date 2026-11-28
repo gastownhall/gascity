@@ -294,3 +294,58 @@ func TestReconcileSessionBeads_WaitParkedPoolSeatWakesInPlace(t *testing.T) {
 		}
 	}
 }
+
+// TestReconcileSessionBeads_WaitParkedPoolSeatEndedWaitFreesSlot: once the
+// wait that parked a pool seat ends without waking it (its hold cleared), the
+// seat reads as an unheld idle seat holding work: the pool-slot gate frees it,
+// and the next tick handles it exactly as it handles a control seat in the
+// same state that no wait ever held.
+func TestReconcileSessionBeads_WaitParkedPoolSeatEndedWaitFreesSlot(t *testing.T) {
+	env, rec, id, task := waitParkedPoolSeat(t)
+	if b, err := env.store.Get(id); err != nil || b.Status == "closed" {
+		t.Fatalf("precondition: the wait-parked seat is gone (status=%q err=%v); stderr=%s", b.Status, err, env.stderr.String())
+	}
+	if err := clearSessionWaitHoldIfIdle(sessionFrontDoor(env.store), id); err != nil {
+		t.Fatalf("clearSessionWaitHoldIfIdle: %v", err)
+	}
+	info := env.sessionInfo(id)
+	if info.WaitHold != "" || info.SleepIntent != "" || !isPoolSessionSlotFreeableInfo(info, env.clk.Now()) {
+		t.Fatalf("after the wait ended: wait_hold=%q sleep_intent=%q freeable=%v, want the hold gone and the slot freeable",
+			info.WaitHold, info.SleepIntent, isPoolSessionSlotFreeableInfo(info, env.clk.Now()))
+	}
+	released, err := env.store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The control: the same row, never held by a wait, at the same clock.
+	ctl := newReconcilerTestEnv(t)
+	ctlRec := events.NewFake()
+	ctl.rec, ctl.cfg, ctl.desiredState, ctl.clk.Time = ctlRec, env.cfg, env.desiredState, env.clk.Now()
+	ctlSeat := ctl.createSessionBead("worker", "worker")
+	ctl.setSessionMetadata(&ctlSeat, released.Metadata)
+	ctlTask := createWork(t, ctl.store, "in_progress", ctlSeat.ID, nil)
+
+	woken := waitParkedPoolSeatTick(t, env, id, task, nil)
+	ctlWoken := waitParkedPoolSeatTick(t, ctl, ctlSeat.ID, ctlTask, nil)
+	if woken != ctlWoken || env.sp.IsRunning("worker") != ctl.sp.IsRunning("worker") {
+		t.Errorf("woken=%d running=%v after the wait ended, want the never-held control's woken=%d running=%v",
+			woken, env.sp.IsRunning("worker"), ctlWoken, ctl.sp.IsRunning("worker"))
+	}
+	stranded, _ := rec.List(events.Filter{Type: events.SessionStranded})
+	ctlStranded, _ := ctlRec.List(events.Filter{Type: events.SessionStranded})
+	if len(stranded) != len(ctlStranded) {
+		t.Errorf("session.stranded recorded %d times after the wait ended, want the never-held control's %d", len(stranded), len(ctlStranded))
+	}
+	after, _ := env.store.Get(id)
+	ctlAfter, _ := ctl.store.Get(ctlSeat.ID)
+	if after.Status != ctlAfter.Status || after.Metadata["state"] != ctlAfter.Metadata["state"] {
+		t.Errorf("seat %s/%q after the wait ended, want the never-held control's %s/%q",
+			after.Status, after.Metadata["state"], ctlAfter.Status, ctlAfter.Metadata["state"])
+	}
+	work, _ := env.store.Get(task.ID)
+	ctlWork, _ := ctl.store.Get(ctlTask.ID)
+	if work.Status != ctlWork.Status || (work.Assignee == id) != (ctlWork.Assignee == ctlSeat.ID) {
+		t.Errorf("claim %s/%q after the wait ended, want the never-held control's %s/%q", work.Status, work.Assignee, ctlWork.Status, ctlWork.Assignee)
+	}
+}
