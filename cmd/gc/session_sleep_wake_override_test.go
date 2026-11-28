@@ -8,6 +8,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -146,5 +147,111 @@ func TestWaiterWithWorkWakesWhenItsWaitIsReady(t *testing.T) {
 		nil, env.clk, env.rec, 0, 0, &out, &errw, env.startOptions...)
 	if after, _ := env.store.Get(session.ID); !env.sp.IsRunning("worker") {
 		t.Errorf("wait ready: running=false state=%q config_wake_suppressed=%q; want the waiter woken", after.Metadata["state"], after.Metadata["config_wake_suppressed"])
+	}
+}
+
+// waitParkedPoolSeat is the reproduction of gastownhall/gascity#5561: a
+// pool-managed seat holding an in_progress claim runs `gc session wait
+// --sleep` and then drain-acks. The helper drives the drain-ack through the
+// stop-pending finalize, then runs two ticks, at +0 and past
+// strandedRepairConfirmGrace, with the claim as assigned work. It returns the
+// env (its recorder an events.Fake), the seat's bead ID and the claim.
+func waitParkedPoolSeat(t *testing.T) (*reconcilerTestEnv, *events.Fake, string, beads.Bead) {
+	t.Helper()
+	env := newReconcilerTestEnv(t)
+	rec := events.NewFake()
+	env.rec = rec
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", SleepAfterIdle: "300s"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"pool_managed": "true",
+		"last_woke_at": env.clk.Now().Add(-30 * time.Minute).UTC().Format(time.RFC3339),
+	})
+	// gc session wait --sleep: the wait hold, through the tree's own writer.
+	if err := setSessionWaitHold(sessionFrontDoor(env.store), session.ID); err != nil {
+		t.Fatalf("setSessionWaitHold: %v", err)
+	}
+	task := createWork(t, env.store, "in_progress", session.ID, nil)
+
+	cfgNames := map[string]bool{"worker": true}
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+	cur, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if woken := reconcileSessionBeadsAtPath(
+		context.Background(), env.city, []beads.Bead{cur}, env.desiredState, cfgNames,
+		env.cfg, env.sp, env.store, dops, []beads.Bead{task}, nil, nil, env.dt,
+		map[string]int{"worker": 1}, false, nil, "",
+		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr, env.startOptions...); woken != 0 {
+		t.Fatalf("woken on the drain-ack tick = %d, want 0; stderr=%s", woken, env.stderr.String())
+	}
+	env.reconcileStopPendingToTerminal(t, env.sp, cur, dops, cfgNames)
+
+	for _, advance := range []time.Duration{0, strandedRepairConfirmGrace + time.Minute} {
+		env.clk.Time = env.clk.Now().Add(advance)
+		waitParkedPoolSeatTick(t, env, session.ID, task, nil)
+	}
+	return env, rec, session.ID, task
+}
+
+// waitParkedPoolSeatTick runs one plain tick over the seat's persisted bead
+// with its claim as assigned work, the pool desiring one worker, and
+// readyWaitSet as the tick's ready waits. It returns the wake count.
+func waitParkedPoolSeatTick(t *testing.T, env *reconcilerTestEnv, id string, task beads.Bead, readyWaitSet map[string]bool) int {
+	t.Helper()
+	cur, err := env.store.Get(id)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", id, err)
+	}
+	if cur.Status == "closed" {
+		return 0
+	}
+	return reconcileSessionBeadsAtPath(
+		context.Background(), env.city, []beads.Bead{cur}, env.desiredState, map[string]bool{"worker": true},
+		env.cfg, env.sp, env.store, nil, []beads.Bead{task}, nil, readyWaitSet, env.dt,
+		map[string]int{"worker": 1}, false, nil, "",
+		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr, env.startOptions...)
+}
+
+// TestReconcileSessionBeads_WaitParkedPoolSeatKeepsSlotAndClaim: a pool seat
+// that parks on a wait while it holds a claimed step stays parked. Its
+// drain-ack completes as an idle sleep that keeps the wait (D-J 3), the
+// pool-slot gate refuses the seat while the wait stands, and so no tick past
+// the stranded confirmation window reports it stranded, unclaims its work or
+// closes its bead (gastownhall/gascity#5561).
+func TestReconcileSessionBeads_WaitParkedPoolSeatKeepsSlotAndClaim(t *testing.T) {
+	env, rec, id, task := waitParkedPoolSeat(t)
+
+	final, err := env.store.Get(id)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", id, err)
+	}
+	m := final.Metadata
+	if final.Status == "closed" {
+		t.Fatalf("the wait-parked pool seat was closed; metadata=%v stderr=%s", m, env.stderr.String())
+	}
+	if m["state"] != "asleep" || m["sleep_reason"] != string(sessionpkg.SleepReasonIdle) ||
+		m["wait_hold"] == "" || m["sleep_intent"] != string(sessionpkg.SleepReasonWaitHold) {
+		t.Errorf("state=%q sleep_reason=%q wait_hold=%q sleep_intent=%q, want asleep idle keeping the wait (D-J 3)",
+			m["state"], m["sleep_reason"], m["wait_hold"], m["sleep_intent"])
+	}
+	if m[strandedEventEmittedKey] != "" {
+		t.Errorf("%s=%q, want the parked seat never marked stranded", strandedEventEmittedKey, m[strandedEventEmittedKey])
+	}
+	work, err := env.store.Get(task.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", task.ID, err)
+	}
+	if work.Status != "in_progress" || work.Assignee != id {
+		t.Errorf("claim %s/%q, want in_progress on %s (the reaper unclaimed a parked seat's work)", work.Status, work.Assignee, id)
+	}
+	if evts, _ := rec.List(events.Filter{Type: events.SessionStranded}); len(evts) != 0 {
+		t.Errorf("session.stranded recorded %d times for a wait-parked seat, want 0", len(evts))
 	}
 }
