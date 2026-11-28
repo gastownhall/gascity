@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -146,5 +147,36 @@ func TestBuiltInSlingNamepoolMemberTargetNormalizesRoutedTo(t *testing.T) {
 	}
 	if got := routed.Metadata["gc.routed_to"]; got != "gascity/gastown.polecat" {
 		t.Fatalf("gc.routed_to = %q, want gascity/gastown.polecat (member name should normalize to the pool)", got)
+	}
+}
+
+// TestCmdSlingNamepoolTargetOutsidePoolFailsResolve guards against
+// over-acceptance: a namepool name past the pool's bound and a name not in
+// the namepool are not pool members, so gc sling refuses them and creates
+// nothing.
+func TestCmdSlingNamepoolTargetOutsidePoolFailsResolve(t *testing.T) {
+	for _, target := range []string{"frontend/nux", "frontend/ghost"} {
+		t.Run(target, func(t *testing.T) {
+			cityDir, rigDir := namepoolSlingCity(t)
+
+			var stdout, stderr bytes.Buffer
+			code := cmdSlingWithJSON([]string{target, "ship feature"}, false, false, true, "", nil, "", true, false, false, "", false, false, false, "", "", true, &stdout, &stderr)
+			if code != 1 {
+				t.Fatalf("cmdSlingWithJSON(%s) = %d, want 1; stdout=%s stderr=%s", target, code, stdout.String(), stderr.String())
+			}
+			var got cliJSONErrorOutput
+			if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+				t.Fatalf("stdout is not a JSON error: %v (%q)", err, stdout.String())
+			}
+			if got.Error.Code != "target_resolve_failed" {
+				t.Errorf("error code = %q, want target_resolve_failed (message %q)", got.Error.Code, got.Error.Message)
+			}
+			if rigBeads := listStoreBeads(t, rigDir, cityDir); len(rigBeads) != 0 {
+				t.Errorf("rig store bead count = %d, want 0: %#v", len(rigBeads), rigBeads)
+			}
+			if cityBeads := listStoreBeads(t, cityDir, cityDir); len(cityBeads) != 0 {
+				t.Errorf("city store bead count = %d, want 0: %#v", len(cityBeads), cityBeads)
+			}
+		})
 	}
 }
