@@ -100,6 +100,9 @@ func (c *runTargetRoutedToBackfillCheck) collect(ctx *doctor.CheckContext) (targ
 }
 
 func (c *runTargetRoutedToBackfillCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
+	if ctx.Canceled() {
+		return nil // the runner abandoned this run and never reads its result
+	}
 	targets, skipped := c.collect(ctx)
 	if len(targets) == 0 && len(skipped) == 0 {
 		return okCheck(c.Name(), "no workflow roots need gc.routed_to backfill")
@@ -123,6 +126,9 @@ func (c *runTargetRoutedToBackfillCheck) Run(ctx *doctor.CheckContext) *doctor.C
 }
 
 func (c *runTargetRoutedToBackfillCheck) Fix(ctx *doctor.CheckContext) error {
+	if ctx.Canceled() {
+		return nil // the runner abandoned this run and never reads its error
+	}
 	targets, skipped := c.collect(ctx)
 	for _, tgt := range targets {
 		if err := tgt.store.SetMetadata(tgt.beadID, beadmeta.RoutedToMetadataKey, tgt.runTarget); err != nil {

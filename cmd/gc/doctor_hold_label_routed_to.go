@@ -134,6 +134,9 @@ func (c *holdLabelRoutedToCheck) collect(ctx *doctor.CheckContext) (targets []ho
 }
 
 func (c *holdLabelRoutedToCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
+	if ctx.Canceled() {
+		return nil // the runner abandoned this run and never reads its result
+	}
 	targets, skipped := c.collect(ctx)
 	if len(targets) == 0 && len(skipped) == 0 {
 		return okCheck(c.Name(), "no hold:<value> labels are missing a matching gc.routed_to")
@@ -160,6 +163,9 @@ func (c *holdLabelRoutedToCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResu
 // hold value names several bound routes are left untouched; doctor's
 // verifying re-run keeps reporting them.
 func (c *holdLabelRoutedToCheck) Fix(ctx *doctor.CheckContext) error {
+	if ctx.Canceled() {
+		return nil // the runner abandoned this run and never reads its error
+	}
 	targets, skipped := c.collect(ctx)
 	for _, tgt := range targets {
 		route, ok := tgt.route()

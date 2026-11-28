@@ -275,17 +275,22 @@ type abandonedCheck interface {
 }
 
 // assertNoStoreCallsWhenAbandoned runs check's Run and Fix with Done already
-// closed and fails if either issued a store open or List.
+// closed and fails if either issued a store open or List, or returned
+// anything other than nil: an abandoned check returns at once.
 func assertNoStoreCallsWhenAbandoned(t *testing.T, f *countingFactory, check abandonedCheck) {
 	t.Helper()
 	done := make(chan struct{})
 	close(done)
 	ctx := &doctor.CheckContext{Done: done}
-	check.Run(ctx)
+	if res := check.Run(ctx); res != nil {
+		t.Fatalf("abandoned Run returned %#v, want nil (the runner never reads it)", res)
+	}
 	if opened, lists := f.calls(); len(opened) != 0 || lists != 0 {
 		t.Fatalf("abandoned Run opened %v and listed %d time(s), want no store calls", opened, lists)
 	}
-	_ = check.Fix(ctx) // the abandoned scopes are reported as skipped; only the store calls matter here
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("abandoned Fix error = %v, want nil", err)
+	}
 	if opened, lists := f.calls(); len(opened) != 0 || lists != 0 {
 		t.Fatalf("abandoned Fix opened %v and listed %d time(s), want no store calls", opened, lists)
 	}
