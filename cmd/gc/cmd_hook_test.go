@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/mail"
 )
 
 // setHookRunExecutableForTest stubs the re-exec target of `gc hook run` to the
@@ -2314,6 +2315,50 @@ func TestHookClaimSkipsMessageBeadsAheadOfRoutedWork(t *testing.T) {
 	}
 	if !claimed {
 		t.Fatal("store.Claim was never called for the routed work bead")
+	}
+}
+
+// TestHookClaimSkipsInProgressAutoHandoffAndClaimsRoutedTask pins #6211 and
+// #8472: a session holding an auto-handoff wisp that a bd claim moved to
+// in_progress still claims the open task routed to its agent, instead of
+// answering no_work because the wisp heads the batch.
+func TestHookClaimSkipsInProgressAutoHandoffAndClaimsRoutedTask(t *testing.T) {
+	const (
+		identity = "worker"
+		wispID   = "gc-wisp-handoff"
+		workID   = "gc-routed-task"
+	)
+	runner := func(string, string) (string, error) {
+		return `[
+			{"id":"` + wispID + `","status":"in_progress","issue_type":"message","ephemeral":true,"assignee":"` + identity +
+			`","labels":["` + mail.AutoHandoffLabel + `","` + mail.ArchiveAfterInjectLabel + `"]},
+			{"id":"` + workID + `","status":"open","issue_type":"task","assignee":"","metadata":{"gc.routed_to":"` + identity + `"}}
+		]`, nil
+	}
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, id, assignee string) (beads.Bead, bool, error) {
+			if id != workID {
+				t.Fatalf("store.Claim called for %q, want the routed task %q", id, workID)
+			}
+			return beads.Bead{ID: id, Status: "in_progress", Assignee: assignee, Type: "task"}, true, nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           identity,
+		IdentityCandidates: hookClaimIdentityCandidates(identity, "", identity, identity, identity),
+		RouteTargets:       hookClaimRouteTargets(identity, identity),
+		JSON:               true,
+	}
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "work" || result.Reason != "claimed" || result.BeadID != workID {
+		t.Fatalf("want claimed routed task %q, got action=%q reason=%q bead=%q code=%d stderr=%s",
+			workID, result.Action, result.Reason, result.BeadID, code, stderr.String())
 	}
 }
 
