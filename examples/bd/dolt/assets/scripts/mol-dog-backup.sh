@@ -455,3 +455,9 @@ fi
 SUMMARY="backup — synced: $SYNCED/$TOTAL, unsupported: $UNSUPPORTED, offsite: $OFFSITE_STATUS"
 dolt_notify_done "$SUMMARY"
 echo "backup: $SUMMARY"
+
+# Exit non-zero when any database failed to sync, so the controller and
+# operators see the failure. The escalation above and the summary line still run first.
+if [ "$FAILED_COUNT" -gt 0 ]; then
+    exit 1
+fi
