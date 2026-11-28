@@ -163,10 +163,14 @@ func planStage1SkillMaterialization(cityPath string, cfg *config.City, stderr io
 	}
 	sinks := make(map[string]*sinkPlan)
 	for _, req := range stage1SkillRequests(cityPath, cfg, stderr) {
+		if len(req.Problems) > 0 {
+			reportHeldSkillSink(stderr, "gc: stage-1 materialize-skills", req.Request.SinkDir, req.Problems)
+			continue
+		}
 		req.Request.DryRun = true
 		res, err := materialize.Run(req.Request)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc: stage-1 materialize-skills for agent %q at %s: %v\n", req.Agent, req.Request.SinkDir, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "gc: stage-1 materialize-skills at %s (agents %s): %v\n", req.Request.SinkDir, req.Union.AgentList(), err) //nolint:errcheck // best-effort stderr
 			continue
 		}
 		plan := sinks[req.Request.SinkDir]

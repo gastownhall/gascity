@@ -751,6 +751,7 @@ go_library(
         "skill_catalog.go",
         "skill_catalog_cache.go",
         "skill_integration.go",
+        "skill_sink_writers.go",
         "skill_skip_log.go",
         "skill_supervisor.go",
         "skill_visibility.go",
