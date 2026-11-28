@@ -4552,6 +4552,65 @@ func TestMailCheckInjectArchivesEphemeralAutoHandoffMessages(t *testing.T) {
 	assertAutoHandoffRetainedAddressable(t, store, auto.ID)
 }
 
+// createInProgressAutoHandoff creates an unread auto-handoff wisp for
+// recipient and moves it to in_progress, the state a bd claim leaves it in.
+func createInProgressAutoHandoff(t *testing.T, store beads.Store, recipient string) beads.Bead {
+	t.Helper()
+	auto, err := store.Create(beads.Bead{
+		Title:     "context cycle",
+		Type:      "message",
+		Assignee:  recipient,
+		From:      recipient,
+		Labels:    []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create auto handoff: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := store.Update(auto.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("set auto handoff in_progress: %v", err)
+	}
+	return auto
+}
+
+// An auto-handoff wisp a bd claim moved to in_progress is still live mail:
+// gc mail check --inject delivers it and then archives it (#6211).
+func TestMailCheckInjectArchivesInProgressAutoHandoff(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := newTestBeadMail(store)
+	auto := createInProgressAutoHandoff(t, store, "worker")
+
+	var stdout, stderr bytes.Buffer
+	code := doMailCheck(mp, "worker", true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailCheck = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), auto.ID) {
+		t.Fatalf("injected output missing in_progress auto handoff id %s:\n%s", auto.ID, stdout.String())
+	}
+	assertAutoHandoffRetainedAddressable(t, store, auto.ID)
+}
+
+// The session-target inject path (InboxForSession, then
+// ArchiveInjectedAutoHandoffsFromInbox) delivers and archives an in_progress
+// auto-handoff wisp the same way.
+func TestMailCheckInjectArchivesInProgressAutoHandoffForSessionTarget(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := newTestBeadMail(store)
+	auto := createInProgressAutoHandoff(t, store, "worker")
+
+	target := resolvedMailTarget{display: "worker", recipients: []string{"worker"}, session: &session.Info{ID: "worker"}}
+	var stdout, stderr bytes.Buffer
+	if code := doMailCheckTargetWithFormat(mp, target, true, "", &stdout, &stderr); code != 0 {
+		t.Fatalf("doMailCheckTargetWithFormat = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), auto.ID) {
+		t.Fatalf("injected output missing in_progress auto handoff id %s:\n%s", auto.ID, stdout.String())
+	}
+	assertAutoHandoffRetainedAddressable(t, store, auto.ID)
+}
+
 // TestMailCheckInjectFloatsPriorityAutoHandoffIntoWindow is the deliberate
 // invariant flip of the former TestMailCheckInjectLeavesTruncatedAutoHandoffMessages.
 // That test pinned the bug: a priority-tagged restart handoff arriving BEHIND a

@@ -759,3 +759,46 @@ func TestInboxForSessionWithPredecessorsStaysKeyed(t *testing.T) {
 		t.Fatalf("native plan has %d requests, want one per route (%d)", len(plan), len(inbox.Routes()))
 	}
 }
+
+// setInProgress moves a message bead to in_progress, the state a bd claim
+// leaves it in.
+func setInProgress(t *testing.T, store beads.Store, id string) {
+	t.Helper()
+	inProgress := "in_progress"
+	if err := store.Update(id, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("set %s in_progress: %v", id, err)
+	}
+}
+
+// An in_progress auto handoff is live mail: the session inbox holds it unread,
+// and archiving it from that inbox retires it like an open one.
+func TestArchiveFromInboxRetiresInProgressHandoff(t *testing.T) {
+	store := beads.NewMemStore()
+	p := newTestProvider(store)
+	handoff, _, err := p.SendHandoff(mail.HandoffIntent{
+		From: "worker", To: "worker", Subject: "context cycle", ThreadID: "t1",
+		ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+	})
+	if err != nil {
+		t.Fatalf("SendHandoff: %v", err)
+	}
+	setInProgress(t, store, handoff.ID)
+
+	inbox, err := p.InboxForRoutes([]string{"worker"})
+	if err != nil {
+		t.Fatalf("InboxForRoutes: %v", err)
+	}
+	if got := messageIDs(inbox.Unread()); !slices.Equal(got, []string{handoff.ID}) {
+		t.Fatalf("inbox unread = %v, want the in_progress handoff %s", got, handoff.ID)
+	}
+	if err := p.ArchiveInjectedAutoHandoffsFromInbox(inbox, []string{handoff.ID}, nil); err != nil {
+		t.Fatalf("ArchiveInjectedAutoHandoffsFromInbox: %v", err)
+	}
+	b, err := store.Get(handoff.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if b.Status != "closed" || b.Metadata[mail.ReadMetadataKey] != "true" || b.Metadata["close_reason"] != RetentionSweepCloseReason {
+		t.Fatalf("archived handoff = status %q metadata %v, want closed, read, retention close_reason", b.Status, b.Metadata)
+	}
+}
