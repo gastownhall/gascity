@@ -6,7 +6,10 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // namepoolSlingCity writes a city with one rig pool, frontend/polecat
@@ -97,5 +100,51 @@ func TestCmdSlingNamepoolMemberTargetRoutesToPool(t *testing.T) {
 	}
 	if cityBeads := listStoreBeads(t, cityDir, cityDir); len(cityBeads) != 0 {
 		t.Errorf("city store bead count = %d, want 0: %#v", len(cityBeads), cityBeads)
+	}
+}
+
+// TestBuiltInSlingNamepoolMemberTargetNormalizesRoutedTo is the namepool twin
+// of TestBuiltInSlingSlotSuffixedTargetNormalizesRoutedTo: a binding-qualified
+// namepool member target resolves to the member identity, and slinging it
+// records the base pool in gc.routed_to.
+func TestBuiltInSlingNamepoolMemberTargetNormalizesRoutedTo(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "gascity", Path: "/tmp/gascity", Prefix: "gc"}},
+		Agents:    []config.Agent{namepoolAgentForNudgeTest()},
+	}
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	store := newSlingTestStore()
+	deps = slingDepsWithStore(deps, store)
+	deps.StoreRef = "rig:gascity"
+
+	created, err := store.Create(beads.Bead{Title: "namepool-routed work", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	target, ok := resolveSlingTarget(cfg, "gascity/gastown.rictus", "")
+	if !ok {
+		t.Fatal("resolveSlingTarget(gascity/gastown.rictus) failed")
+	}
+	if got := target.QualifiedName(); got != "gascity/gastown.rictus" {
+		t.Fatalf("resolved target QualifiedName = %q, want gascity/gastown.rictus", got)
+	}
+	if got := agentutil.RoutedToIdentity(&target); got != "gascity/gastown.polecat" {
+		t.Fatalf("RoutedToIdentity = %q, want gascity/gastown.polecat", got)
+	}
+
+	code := doSling(testOpts(target, created.ID), deps, &fakeQuerier{bead: created}, stdout, stderr)
+	if code != 0 {
+		t.Fatalf("doSling returned %d; stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	routed, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get routed bead: %v", err)
+	}
+	if got := routed.Metadata["gc.routed_to"]; got != "gascity/gastown.polecat" {
+		t.Fatalf("gc.routed_to = %q, want gascity/gastown.polecat (member name should normalize to the pool)", got)
 	}
 }
