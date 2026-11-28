@@ -35,7 +35,7 @@ func TestScanTurnsCodexFixtures(t *testing.T) {
 		}},
 		{"error.jsonl", func(t *testing.T) TurnScan {
 			return TurnScan{Recent: []ScannedTurn{
-				{ID: codexT1, StartedAt: turnTime(t, ts("22:22.191")), EndedAt: turnTime(t, ts("22:24.999")), Status: TurnStatusFailed, Failure: TurnFailure{Code: "server_overloaded", Message: "Selected model is at capacity."}},
+				{ID: codexT1, StartedAt: turnTime(t, ts("22:22.191")), EndedAt: turnTime(t, ts("22:24.999")), Status: TurnStatusFailed, Failure: TurnFailure{Code: "server_overloaded", Overloaded: true, Message: "Selected model is at capacity."}},
 			}}
 		}},
 		{"missing_ids.jsonl", func(t *testing.T) TurnScan {
@@ -144,6 +144,43 @@ func TestScanTurnsCodexLateEnds(t *testing.T) {
 			{ID: "t1", StartedAt: turnTime(t, "2026-10-08T02:22:22.191Z"), EndedAt: turnTime(t, "2026-10-08T02:22:26.000Z"), Status: TurnStatusCancelled},
 		},
 	})
+}
+
+// TestScanTurnsCodexClassesProviderOverload: a task_complete Codex refused
+// because the model was at capacity ends its turn failed with the family's
+// own capacity class (TurnFailure.Overloaded). A capacity refusal is neither
+// a rate limit nor a spent quota, and no other class reads as one: not the
+// usage limit, not a connection failure, not a 429 that spent Codex's own
+// retries.
+func TestScanTurnsCodexClassesProviderOverload(t *testing.T) {
+	clock := func(s string) string { return "2026-10-08T02:22:" + s + "Z" }
+	started := func(s, id string) string {
+		return `{"timestamp":"` + clock(s) + `","type":"event_msg","payload":{"type":"task_started","turn_id":"` + id + `"}}`
+	}
+	complete := func(s, id, errField string) string {
+		return `{"timestamp":"` + clock(s) + `","type":"event_msg","payload":{"type":"task_complete","turn_id":"` + id + `","error":` + errField + `}}`
+	}
+	path := writeTurnLines(t, "rollout.jsonl",
+		started("01.000", "t1"), complete("01.500", "t1", `{"message":"Selected model is at capacity. Please try a different model.","codex_error_info":"server_overloaded"}`),
+		started("02.000", "t2"), complete("02.500", "t2", `{"message":"You've hit your usage limit.","codex_error_info":"usage_limit_exceeded"}`),
+		started("03.000", "t3"), complete("03.500", "t3", `{"message":"stream disconnected","codex_error_info":{"http_connection_failed":{"http_status_code":503}}}`),
+		started("04.000", "t4"), complete("04.500", "t4", `{"message":"exceeded retry limit, last status: 429 Too Many Requests","codex_error_info":{"response_too_many_failed_attempts":{"http_status_code":429}}}`),
+	)
+	got, err := ScanTurns("codex", path)
+	if err != nil {
+		t.Fatalf("ScanTurns: %v", err)
+	}
+	want := []TurnFailure{
+		{Code: "response_too_many_failed_attempts", Status: 429, RateLimited: true, Message: "exceeded retry limit, last status: 429 Too Many Requests"},
+		{Code: "http_connection_failed", Status: 503, Message: "stream disconnected"},
+		{Code: "usage_limit_exceeded", RateLimited: true, Quota: true, Message: "You've hit your usage limit."},
+		{Code: "server_overloaded", Overloaded: true, Message: "Selected model is at capacity. Please try a different model."},
+	}
+	for i, w := range want {
+		if got.Recent[i].Status != TurnStatusFailed || got.Recent[i].Failure != w {
+			t.Errorf("recent[%d] = status %q failure %+v, want failed %+v", i, got.Recent[i].Status, got.Recent[i].Failure, w)
+		}
+	}
 }
 
 // TestScanTurnsCodexFailedTurnKeepsItsError: a task_complete that carries an

@@ -173,12 +173,18 @@ func parseClaudeTurnRecord(line []byte) (claudeTurnRecord, bool) {
 // rate limit refused.
 const claudeRateLimitClass = "rate_limit"
 
+// claudeOverloadedStatus is the HTTP status Claude Code records for an API
+// error the provider refused because it lacked capacity to serve it
+// (Anthropic's overloaded_error; TurnFailure.Overloaded): a recorded status,
+// never text.
+const claudeOverloadedStatus = 529
+
 // claudeTurnFailure is an API error entry's error: its class and status as
 // Claude Code recorded them, and its text, cut to MaxTurnFailureMessage.
 func claudeTurnFailure(e claudeTurnLine) TurnFailure {
 	status, _ := jsonIntValue(e.ErrorStatus)
 	class := jsonStringValue(e.ErrorClass)
-	return newTurnFailure(class, status, class == claudeRateLimitClass, false, claudeMessageText(e.Message))
+	return newTurnFailure(class, status, class == claudeRateLimitClass, false, status == claudeOverloadedStatus, claudeMessageText(e.Message))
 }
 
 // claudeMessageText is the text of a message: its string content, or its

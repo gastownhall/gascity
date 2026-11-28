@@ -89,13 +89,18 @@ func parseCodexTurnRecord(line []byte) (codexTurnRecord, bool) {
 // and a spent quota (TurnFailure.Quota).
 const codexUsageLimitClass = "usage_limit_exceeded"
 
+// codexServerOverloadedClass is the codex_error_info variant Codex gives a
+// turn the provider refused because it lacked capacity to serve it
+// (TurnFailure.Overloaded).
+const codexServerOverloadedClass = "server_overloaded"
+
 // codexTurnFailure is a failed task_complete's error as Codex classified it:
 // its codex_error_info variant, the HTTP status the variant carries, and the
 // message, cut to MaxTurnFailureMessage.
 func codexTurnFailure(e codexEventMsg) TurnFailure {
 	code := codexErrorInfoCode(e.CodexErrorInfo)
 	quota := code == codexUsageLimitClass
-	return newTurnFailure(code, codexErrorInfoStatus(e.CodexErrorInfo), quota, quota, e.Message)
+	return newTurnFailure(code, codexErrorInfoStatus(e.CodexErrorInfo), quota, quota, code == codexServerOverloadedClass, e.Message)
 }
 
 // codexErrorInfoStatus is the HTTP status a codex_error_info variant with

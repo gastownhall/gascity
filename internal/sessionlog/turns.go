@@ -180,21 +180,28 @@ type TurnFailure struct {
 	// comes back only when the account's period resets, which a new
 	// conversation draws on too. It implies RateLimited.
 	Quota bool
+	// Overloaded reports that the provider refused the turn because it
+	// lacked capacity to serve it (Codex's "server_overloaded", Claude
+	// Code's HTTP 529). It implies neither RateLimited nor Quota. Each
+	// family classifies its own codes.
+	Overloaded bool
 	// Message is the error's text, cut on a rune boundary to at most
 	// MaxTurnFailureMessage bytes. It is for people: nothing classifies it.
 	Message string
 }
 
 // newTurnFailure is the failure a family's transcript recorded: its class,
-// its HTTP status, whether the class is the family's rate-limit class, and
-// whether it is the family's spent-quota class (a rate limit too), and its
-// text, cut to MaxTurnFailureMessage.
-func newTurnFailure(code string, status int, rateLimitClass, quotaClass bool, message string) TurnFailure {
+// its HTTP status, whether the class is the family's rate-limit class,
+// whether it is the family's spent-quota class (a rate limit too), whether
+// it is the family's capacity class, and its text, cut to
+// MaxTurnFailureMessage.
+func newTurnFailure(code string, status int, rateLimitClass, quotaClass, overloadedClass bool, message string) TurnFailure {
 	return TurnFailure{
 		Code:        code,
 		Status:      status,
 		RateLimited: rateLimitClass || quotaClass || status == http.StatusTooManyRequests,
 		Quota:       quotaClass,
+		Overloaded:  overloadedClass,
 		Message:     cutTurnFailureMessage(message),
 	}
 }
