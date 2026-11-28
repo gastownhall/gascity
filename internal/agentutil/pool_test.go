@@ -150,3 +150,112 @@ func TestPoolInstanceName(t *testing.T) {
 		t.Errorf("namepool: got %q, want alpha", got)
 	}
 }
+
+// TestPoolMemberSlotInvertsPoolInstanceName pins PoolMemberSlot as the exact
+// inverse of PoolInstanceName over in-bound slots, so the member names gc
+// status displays and the names gc sling resolves cannot drift apart.
+func TestPoolMemberSlotInvertsPoolInstanceName(t *testing.T) {
+	roundTrip := []struct {
+		name  string
+		agent config.Agent
+		slots int
+	}{
+		{
+			name: "bounded namepool larger than max",
+			agent: config.Agent{
+				Name: "polecat", Dir: "frontend", MaxActiveSessions: intPtr(2),
+				NamepoolNames: []string{"furiosa", "rictus", "nux"},
+			},
+			slots: 2,
+		},
+		{
+			name: "bounded namepool smaller than max",
+			agent: config.Agent{
+				Name: "polecat", Dir: "frontend", BindingName: "gastown", MaxActiveSessions: intPtr(4),
+				NamepoolNames: []string{"furiosa", "rictus"},
+			},
+			slots: 4,
+		},
+		{
+			name: "unlimited namepool",
+			agent: config.Agent{
+				Name: "polecat", NamepoolNames: []string{"furiosa", "rictus"},
+			},
+			slots: 12,
+		},
+		{
+			name:  "numeric bounded",
+			agent: config.Agent{Name: "polecat", MaxActiveSessions: intPtr(3)},
+			slots: 3,
+		},
+		{
+			name: "namepool singleton",
+			agent: config.Agent{
+				Name: "polecat", MaxActiveSessions: intPtr(1), MinActiveSessions: intPtr(0),
+				NamepoolNames: []string{"furiosa"},
+			},
+			slots: 1,
+		},
+	}
+	for _, tc := range roundTrip {
+		t.Run("round trip/"+tc.name, func(t *testing.T) {
+			for s := 1; s <= tc.slots; s++ {
+				member := PoolInstanceName(tc.agent.Name, s, tc.agent)
+				got, ok := PoolMemberSlot(tc.agent, member)
+				if !ok || got != s {
+					t.Errorf("PoolMemberSlot(%q) = (%d, %v), want (%d, true)", member, got, ok, s)
+				}
+			}
+		})
+	}
+
+	namepool := config.Agent{
+		Name: "polecat", Dir: "frontend", MaxActiveSessions: intPtr(2),
+		NamepoolNames: []string{"furiosa", "rictus", "nux"},
+	}
+	numeric := config.Agent{Name: "polecat", MaxActiveSessions: intPtr(3)}
+	rejects := []struct {
+		name   string
+		agent  config.Agent
+		member string
+	}{
+		{"out-of-bound themed name", namepool, "nux"},
+		{"name not in namepool", namepool, "ghost"},
+		{"numeric slot that renders themed", namepool, "polecat-1"},
+		{"numeric slot past max", namepool, "polecat-3"},
+		{"zero slot", numeric, "polecat-0"},
+		{"zero-padded slot", numeric, "polecat-01"},
+		{"signed slot", numeric, "polecat-+1"},
+		{"slot past max", numeric, "polecat-4"},
+		{"bare pool name", numeric, "polecat"},
+		{"qualified member", namepool, "frontend/furiosa"},
+		{"max zero pool", config.Agent{
+			Name: "polecat", MaxActiveSessions: intPtr(0), NamepoolNames: []string{"furiosa"},
+		}, "furiosa"},
+		{"max zero numeric pool", config.Agent{Name: "polecat", MaxActiveSessions: intPtr(0)}, "polecat-1"},
+		{"canonical singleton pool", config.Agent{
+			Name: "polecat", MaxActiveSessions: intPtr(1), MinActiveSessions: intPtr(0),
+		}, "polecat-1"},
+		{"canonical singleton pool base name", config.Agent{
+			Name: "polecat", MaxActiveSessions: intPtr(1), MinActiveSessions: intPtr(0),
+		}, "polecat"},
+		{"named-session singleton", config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}, "mayor-1"},
+	}
+	for _, tc := range rejects {
+		t.Run("rejects/"+tc.name, func(t *testing.T) {
+			if got, ok := PoolMemberSlot(tc.agent, tc.member); ok {
+				t.Errorf("PoolMemberSlot(%q) = (%d, true), want false", tc.member, got)
+			}
+		})
+	}
+
+	t.Run("duplicate namepool name resolves to first slot", func(t *testing.T) {
+		dup := config.Agent{
+			Name: "polecat", MaxActiveSessions: intPtr(3),
+			NamepoolNames: []string{"furiosa", "rictus", "furiosa"},
+		}
+		if got, ok := PoolMemberSlot(dup, "furiosa"); !ok || got != 1 {
+			t.Errorf("PoolMemberSlot(furiosa) = (%d, %v), want (1, true)", got, ok)
+		}
+	})
+}
