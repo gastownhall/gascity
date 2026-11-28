@@ -1838,12 +1838,18 @@ func queueManagedSessionNudgeWake(target nudgeTarget, store beads.Store, message
 		return sessionNudgeResult{}, undeliverableWakeConflict(err)
 	}
 	var undelivered worker.NudgeUndeliveredReason
+	note := ""
 	if outcome == session.WakeHeld {
 		undelivered = worker.NudgeQueuedHeld
-	} else if err := nudgePokeController(target.cityPath, reconcilekey.Session(target.sessionID)); err != nil {
-		fmt.Fprintf(stderr, "gc session nudge: warning: poke failed: %v\n", err) //nolint:errcheck
+	} else {
+		if outcome == session.WakeNotDormant {
+			note = notDormantSessionNudgeNote(target, cliSessionFrontDoor(store, target.cfg, target.cityPath), stderr)
+		}
+		if err := nudgePokeController(target.cityPath, reconcilekey.Session(target.sessionID)); err != nil {
+			fmt.Fprintf(stderr, "gc session nudge: warning: poke failed: %v\n", err) //nolint:errcheck
+		}
 	}
-	return sessionNudgeResult{queued: true, undelivered: undelivered}, nil
+	return sessionNudgeResult{queued: true, undelivered: undelivered, note: note}, nil
 }
 
 func enqueueManagedNudgeThenWake(target nudgeTarget, store beads.Store, item queuedNudge) (session.WakeRequestOutcome, error) {

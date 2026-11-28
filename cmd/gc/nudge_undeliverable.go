@@ -141,3 +141,22 @@ func writeUndeliverableSessionNudge(target nudgeTarget, mode nudgeDeliveryMode, 
 	}
 	return 1, true
 }
+
+// notDormantSessionNudgeNote is the queued-nudge note for a session that is
+// not running and whose wake was not requested because its row is not
+// dormant (draining, say): draining is not absorbing, so the nudge stays
+// queued, and the note says what becomes of it. The row's state is read
+// through sessions; a failed read is warned on stderr and leaves no note.
+func notDormantSessionNudgeNote(target nudgeTarget, sessions *session.Store, stderr io.Writer) string {
+	_, persisted, err := sessions.GetPersistedResponse(target.sessionID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session nudge: warning: reading session %s state for the queued nudge's note: %v\n", target.sessionID, err) //nolint:errcheck // best-effort stderr
+		return ""
+	}
+	state := strings.TrimSpace(persisted.Metadata["state"])
+	if state == "" {
+		state = string(session.ProjectLifecycle(session.LifecycleInputFromMetadata(persisted.Status, persisted.Metadata)).BaseState)
+	}
+	return fmt.Sprintf(" (session %s is %s; no wake was requested; it is delivered when the session next runs, or dead-lettered as %s if it closes for good)",
+		target.sessionID, state, nudgeDeadReasonSessionTerminated)
+}

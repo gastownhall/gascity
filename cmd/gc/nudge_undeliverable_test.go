@@ -155,9 +155,10 @@ func TestSessionNudgeToRetiredSessionIsUndeliverable(t *testing.T) {
 	})
 }
 
-// managedNudgeRowFixture is a suspended managed session row with state set by
-// md, whose city routes nudges through the managed reconciler and whose
-// runtime reads not running. pokes counts controller pokes.
+// managedNudgeRowFixture is a managed session row (suspended first when
+// suspend is set) with metadata md, whose city routes nudges through the
+// managed reconciler and whose runtime reads not running. pokes counts
+// controller pokes.
 type managedNudgeRowFixture struct {
 	dir    string
 	store  beads.Store
@@ -166,7 +167,7 @@ type managedNudgeRowFixture struct {
 	pokes  *int
 }
 
-func newManagedNudgeRowFixture(t *testing.T, md map[string]string) managedNudgeRowFixture {
+func newManagedNudgeRowFixture(t *testing.T, suspend bool, md map[string]string) managedNudgeRowFixture {
 	t.Helper()
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
@@ -177,8 +178,10 @@ func newManagedNudgeRowFixture(t *testing.T, md map[string]string) managedNudgeR
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(context.Background(), testActorIn(t, session.ActorOperator, dir), info.ID, false); err != nil {
-		t.Fatalf("Suspend: %v", err)
+	if suspend {
+		if err := mgr.Suspend(context.Background(), testActorIn(t, session.ActorOperator, dir), info.ID, false); err != nil {
+			t.Fatalf("Suspend: %v", err)
+		}
 	}
 	if len(md) > 0 {
 		if err := store.SetMetadataBatch(info.ID, md); err != nil {
@@ -238,7 +241,7 @@ func TestSessionNudgeWakeConflictIsStructuredUndeliverable(t *testing.T) {
 				name = tc.name + "/json"
 			}
 			t.Run(name, func(t *testing.T) {
-				f := newManagedNudgeRowFixture(t, tc.md)
+				f := newManagedNudgeRowFixture(t, true, tc.md)
 				code, stdout, stderr := f.nudge(nudgeDeliveryImmediate, asJSON)
 				if code != 1 {
 					t.Fatalf("nudge = %d, want 1; stdout=%s stderr=%s", code, stdout, stderr)
@@ -276,7 +279,7 @@ func TestSessionNudgeWakeConflictIsStructuredUndeliverable(t *testing.T) {
 	}
 
 	t.Run("a non-conflict wake error stays raw", func(t *testing.T) {
-		f := newManagedNudgeRowFixture(t, nil)
+		f := newManagedNudgeRowFixture(t, true, nil)
 		item := newQueuedNudgeWithOptions(f.target.agentKey(), testNudgeMessage, "session", time.Now(), queuedNudgeOptionsFromTarget(f.target))
 		f.target.sessionID = "gc-missing"
 		_, err := enqueueManagedNudgeThenWake(f.target, f.store, item)
@@ -298,4 +301,65 @@ func TestSessionNudgeWakeConflictIsStructuredUndeliverable(t *testing.T) {
 			t.Fatalf("pending %+v dead %+v, want only item %s dead with the managed-wake-failed reason", state.Pending, state.Dead, item.ID)
 		}
 	})
+}
+
+func TestSessionNudgeToResumableSessionStillQueues(t *testing.T) {
+	cases := []struct {
+		name     string
+		md       map[string]string
+		wantNote bool
+	}{
+		{name: "asleep", md: map[string]string{"state": string(session.StateAsleep)}},
+		{name: "drained", md: map[string]string{"state": string(session.StateDrained)}},
+		{name: "draining", md: map[string]string{"state": string(session.StateDraining)}, wantNote: true},
+		{name: "quarantined", md: map[string]string{"state": string(session.StateQuarantined)}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newManagedNudgeRowFixture(t, false, tc.md)
+
+			code, stdout, stderr := f.nudge(nudgeDeliveryImmediate, true)
+			if code != 0 {
+				t.Fatalf("nudge --json = %d, want 0; stdout=%s stderr=%s", code, stdout, stderr)
+			}
+			got := decodeSessionNudgeLine(t, stdout)
+			if !got.OK || !got.Queued || got.Outcome != "queued" || got.Reason != "" || got.SessionState != "" {
+				t.Fatalf("JSON = %+v, want ok:true queued:true outcome:queued and no reason or session_state", got)
+			}
+			if strings.Contains(stderr, nudgeOutcomeUndeliverable) {
+				t.Fatalf("stderr = %q, a resumable session's nudge must not read as undeliverable", stderr)
+			}
+
+			code, stdout, stderr = f.nudge(nudgeDeliveryImmediate, false)
+			if code != 0 {
+				t.Fatalf("nudge = %d, want 0; stdout=%s stderr=%s", code, stdout, stderr)
+			}
+			if !strings.HasPrefix(stdout, "Queued nudge for "+f.target.agentKey()) {
+				t.Fatalf("stdout = %q, want the queued line", stdout)
+			}
+			note := "session " + f.target.sessionID + " is " + string(session.StateDraining) + "; no wake was requested"
+			if got := strings.Contains(stdout, note); got != tc.wantNote {
+				t.Fatalf("stdout = %q, draining note present = %v, want %v", stdout, got, tc.wantNote)
+			}
+			if tc.wantNote && !strings.Contains(stdout, "dead-lettered as "+nudgeDeadReasonSessionTerminated+" if it closes for good") {
+				t.Fatalf("stdout = %q, want the close-for-good clause of the draining note", stdout)
+			}
+
+			now := time.Now()
+			pending, inFlight, dead, err := listQueuedNudgesForTarget(f.dir, f.target, now)
+			if err != nil {
+				t.Fatalf("listQueuedNudgesForTarget: %v", err)
+			}
+			if len(pending) != 2 || len(inFlight) != 0 || len(dead) != 0 {
+				t.Fatalf("pending/inFlight/dead = %d/%d/%d, want 2/0/0", len(pending), len(inFlight), len(dead))
+			}
+			claimed, err := claimDueQueuedNudgesForTarget(f.dir, f.target, nil, now.Add(time.Minute))
+			if err != nil {
+				t.Fatalf("claimDueQueuedNudgesForTarget: %v", err)
+			}
+			if len(claimed) != 2 {
+				t.Fatalf("claimed = %d, want both nudges claimable by session %s", len(claimed), f.target.sessionID)
+			}
+		})
+	}
 }
