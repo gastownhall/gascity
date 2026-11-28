@@ -1229,31 +1229,53 @@ func openStoreForCity(cityPath string) func(string) (beads.Store, error) {
 // unreachable scope turned into a doctor run that spent its whole budget
 // failing the same way.
 //
+// Distinct scopes open concurrently, so a check that reads its scopes in
+// parallel is not serialized at open time; concurrent callers for one scope
+// wait for its single open and share its result.
+//
 // observe, when given, is told each scope directory the factory opens, once,
 // when the open succeeds: a caller that owns the run's handles (the guided
-// split's demand repairs) closes exactly those.
+// split's demand repairs) closes exactly those. Observer calls are
+// serialized, so an observer needs no lock of its own.
 func perRunStoreFactory(open func(string) (beads.Store, error), observe ...func(dir string)) func(string) (beads.Store, error) {
-	type opened struct {
+	// opening is one scope's open: the first caller for a key runs it and
+	// closes done; every other caller for that key waits on done and shares
+	// the result. Distinct keys open concurrently.
+	type opening struct {
+		done  chan struct{}
 		store beads.Store
 		err   error
 	}
-	var mu sync.Mutex
-	cache := map[string]opened{}
+	var mu, observeMu sync.Mutex
+	cache := map[string]*opening{}
 	return func(dirPath string) (beads.Store, error) {
 		key := normalizePathForCompare(dirPath)
 		mu.Lock()
-		defer mu.Unlock()
 		if got, ok := cache[key]; ok {
+			mu.Unlock()
+			<-got.done
 			return got.store, got.err
 		}
-		store, err := open(dirPath)
-		cache[key] = opened{store: store, err: err}
-		if err == nil {
+		entry := &opening{done: make(chan struct{})}
+		cache[key] = entry
+		mu.Unlock()
+
+		func() {
+			// A panicking open still releases its waiters, with an error
+			// rather than a nil store.
+			defer close(entry.done)
+			entry.err = fmt.Errorf("opening bead store %q: open did not return", dirPath)
+			entry.store, entry.err = open(dirPath)
+			if entry.err != nil || len(observe) == 0 {
+				return
+			}
+			observeMu.Lock()
+			defer observeMu.Unlock()
 			for _, o := range observe {
 				o(dirPath)
 			}
-		}
-		return store, err
+		}()
+		return entry.store, entry.err
 	}
 }
 

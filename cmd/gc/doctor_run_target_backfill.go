@@ -45,27 +45,21 @@ type backfillTarget struct {
 	runTarget string
 }
 
-func (c *runTargetRoutedToBackfillCheck) collect() (targets []backfillTarget, skipped []string) {
-	scopes := []struct{ label, path string }{{"city", c.cityPath}}
-	if c.cfg != nil {
-		for _, rig := range c.cfg.Rigs {
-			if rig.Suspended || strings.TrimSpace(rig.Path) == "" {
-				continue
-			}
-			scopes = append(scopes, struct{ label, path string }{"rig " + rig.Name, rig.Path})
-		}
-	}
-	collectFrom := func(label string, store beads.Store) {
-		// Workflow roots are the only pool-routed persisted beads that need
-		// gc.routed_to backfilled to stay claimable. Control-dispatcher and
-		// topology beads can also carry bare gc.run_target, but they are not
-		// claimed through the pool-demand gc.routed_to path. A targeted metadata
-		// query avoids a full-store scan.
-		items, err := store.List(beads.ListQuery{Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}, TierMode: beads.TierBoth})
-		if err != nil {
-			skipped = append(skipped, fmt.Sprintf("%s skipped: listing beads: %v", label, err))
-			return
-		}
+// runTargetBackfillQuery returns the query that selects workflow roots. They are the only
+// pool-routed persisted beads that need gc.routed_to backfilled to stay
+// claimable. Control-dispatcher and topology beads can also carry bare
+// gc.run_target, but they are not claimed through the pool-demand
+// gc.routed_to path. A targeted metadata query avoids a full-store scan.
+func runTargetBackfillQuery() beads.ListQuery {
+	return beads.ListQuery{Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}, TierMode: beads.TierBoth}
+}
+
+// collect reads every work scope through the shared scope sweep, then the
+// graph binding, and returns the workflow roots that need gc.routed_to
+// backfilled, in scope order, plus a skip line for each scope it could not
+// read.
+func (c *runTargetRoutedToBackfillCheck) collect(ctx *doctor.CheckContext) (targets []backfillTarget, skipped []string) {
+	collectFrom := func(label string, store beads.Store, items []beads.Bead) {
 		for _, b := range items {
 			runTarget := strings.TrimSpace(b.Metadata[beadmeta.RunTargetMetadataKey])
 			if runTarget == "" || strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) != "" {
@@ -79,30 +73,37 @@ func (c *runTargetRoutedToBackfillCheck) collect() (targets []backfillTarget, sk
 			targets = append(targets, backfillTarget{label: label, store: store, beadID: b.ID, runTarget: runTarget})
 		}
 	}
-	for _, sc := range scopes {
-		if c.newStore == nil || strings.TrimSpace(sc.path) == "" {
+	for _, sc := range sweepDoctorScopeLists(ctx, doctorWorkScopes(c.cfg, c.cityPath), c.newStore, runTargetBackfillQuery()) {
+		if sc.skipped != "" {
+			skipped = append(skipped, sc.skipped)
 			continue
 		}
-		store, err := c.newStore(sc.path)
-		if err != nil {
-			skipped = append(skipped, fmt.Sprintf("%s skipped: opening bead store: %v", sc.label, err))
-			continue
-		}
-		collectFrom(sc.label, store)
+		collectFrom(sc.label, sc.store, sc.items)
 	}
 	// Workflow roots are graph class, so on a split city they live in the
 	// graph binding, which none of the scope stores above is: the check used to
 	// report nothing to backfill and --fix repaired nothing there (read-audit
 	// R13). A binding the city's routes refuse is reported as skipped by its
-	// own refusal.
+	// own refusal. An abandoned check does not open the binding at all.
+	if ctx.Canceled() {
+		return targets, append(skipped, doctorScopeAbandoned("graph binding"))
+	}
 	if graph, relocated := cliStorageRoutes(c.cityPath).storeFor(coordclass.ClassGraph); relocated && graph != nil { // residency:allow — a doctor scan of every workflow root wherever it lives; the binding is the one scope the work-scope walk above cannot reach
-		collectFrom("graph binding", graph)
+		items, err := graph.List(runTargetBackfillQuery())
+		if err != nil {
+			skipped = append(skipped, fmt.Sprintf("graph binding skipped: listing beads: %v", err))
+		} else {
+			collectFrom("graph binding", graph, items)
+		}
 	}
 	return targets, skipped
 }
 
-func (c *runTargetRoutedToBackfillCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
-	targets, skipped := c.collect()
+func (c *runTargetRoutedToBackfillCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
+	if ctx.Canceled() {
+		return nil // the runner abandoned this run and never reads its result
+	}
+	targets, skipped := c.collect(ctx)
 	if len(targets) == 0 && len(skipped) == 0 {
 		return okCheck(c.Name(), "no workflow roots need gc.routed_to backfill")
 	}
@@ -124,8 +125,11 @@ func (c *runTargetRoutedToBackfillCheck) Run(_ *doctor.CheckContext) *doctor.Che
 		details)
 }
 
-func (c *runTargetRoutedToBackfillCheck) Fix(_ *doctor.CheckContext) error {
-	targets, skipped := c.collect()
+func (c *runTargetRoutedToBackfillCheck) Fix(ctx *doctor.CheckContext) error {
+	if ctx.Canceled() {
+		return nil // the runner abandoned this run and never reads its error
+	}
+	targets, skipped := c.collect(ctx)
 	for _, tgt := range targets {
 		if err := tgt.store.SetMetadata(tgt.beadID, beadmeta.RoutedToMetadataKey, tgt.runTarget); err != nil {
 			return fmt.Errorf("%s bead %s: backfill gc.routed_to: %w", tgt.label, tgt.beadID, err)

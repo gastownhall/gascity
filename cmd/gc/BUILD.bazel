@@ -375,6 +375,7 @@ go_library(
         "doctor_route_recovery_quarantine.go",
         "doctor_routed_to_checks.go",
         "doctor_run_target_backfill.go",
+        "doctor_scope_sweep.go",
         "doctor_session_model.go",
         "doctor_startup_health.go",
         "doctor_storage_rigs.go",
@@ -1002,6 +1003,7 @@ go_library(
         "@com_github_spf13_pflag//:pflag",
         "@com_github_steveyegge_beads//journalops",
         "@in_gopkg_yaml_v3//:yaml_v3",
+        "@org_golang_x_sync//errgroup",
         "@org_golang_x_sys//unix",
         "@org_golang_x_term//:term",
     ] + select({
@@ -1687,6 +1689,7 @@ go_test(
         "doctor_route_recovery_quarantine_test.go",
         "doctor_routed_to_checks_test.go",
         "doctor_run_target_backfill_test.go",
+        "doctor_scope_sweep_test.go",
         "doctor_session_model_test.go",
         "doctor_startup_health_test.go",
         "doctor_storage_split_test.go",

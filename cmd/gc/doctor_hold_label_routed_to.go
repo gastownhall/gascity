@@ -100,38 +100,24 @@ func (t holdRouteTarget) describe() string {
 	return fmt.Sprintf("%s; use one of %s", prefix, strings.Join(t.canonicals, ", "))
 }
 
-func (c *holdLabelRoutedToCheck) collect() (targets []holdRouteTarget, skipped []string) {
+// collect reads every work scope through the shared scope sweep and returns
+// the beads whose hold:<value> label and gc.routed_to have drifted apart, in
+// scope order, plus a skip line for each scope it could not read.
+func (c *holdLabelRoutedToCheck) collect(ctx *doctor.CheckContext) (targets []holdRouteTarget, skipped []string) {
 	aliases := boundRoutedToAliases(c.cfg)
-	scopes := []struct{ label, path string }{{"city", c.cityPath}}
-	if c.cfg != nil {
-		for _, rig := range c.cfg.Rigs {
-			if rig.Suspended || strings.TrimSpace(rig.Path) == "" {
-				continue
-			}
-			scopes = append(scopes, struct{ label, path string }{"rig " + rig.Name, rig.Path})
-		}
-	}
-	for _, sc := range scopes {
-		if c.newStore == nil || strings.TrimSpace(sc.path) == "" {
+	// hold:<value> carries a dynamic value suffix, so no targeted
+	// label/metadata query is possible; AllowScan is required for a
+	// broad filter (internal/beads/query.go). Status is left unset so the
+	// scan matches every non-closed bead (open, in_progress, blocked,
+	// deferred, ...), not just "open" — an exact Status match would
+	// silently hide hold:<value> drift on any other status (ga-fm2vgd.2).
+	lists := sweepDoctorScopeLists(ctx, doctorWorkScopes(c.cfg, c.cityPath), c.newStore, beads.ListQuery{AllowScan: true})
+	for _, sc := range lists {
+		if sc.skipped != "" {
+			skipped = append(skipped, sc.skipped)
 			continue
 		}
-		store, err := c.newStore(sc.path)
-		if err != nil {
-			skipped = append(skipped, fmt.Sprintf("%s skipped: opening bead store: %v", sc.label, err))
-			continue
-		}
-		// hold:<value> carries a dynamic value suffix, so no targeted
-		// label/metadata query is possible; AllowScan is required for a
-		// broad filter (internal/beads/query.go). Status is left unset so the
-		// scan matches every non-closed bead (open, in_progress, blocked,
-		// deferred, ...), not just "open" — an exact Status match would
-		// silently hide hold:<value> drift on any other status (ga-fm2vgd.2).
-		items, err := store.List(beads.ListQuery{AllowScan: true})
-		if err != nil {
-			skipped = append(skipped, fmt.Sprintf("%s skipped: listing beads: %v", sc.label, err))
-			continue
-		}
-		for _, b := range items {
+		for _, b := range sc.items {
 			want, ok := holdLabelValue(b.Labels)
 			if !ok {
 				continue
@@ -141,14 +127,17 @@ func (c *holdLabelRoutedToCheck) collect() (targets []holdRouteTarget, skipped [
 			if got == want || slices.Contains(canonicals, got) {
 				continue
 			}
-			targets = append(targets, holdRouteTarget{label: sc.label, store: store, beadID: b.ID, want: want, got: got, canonicals: canonicals})
+			targets = append(targets, holdRouteTarget{label: sc.label, store: sc.store, beadID: b.ID, want: want, got: got, canonicals: canonicals})
 		}
 	}
 	return targets, skipped
 }
 
-func (c *holdLabelRoutedToCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
-	targets, skipped := c.collect()
+func (c *holdLabelRoutedToCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
+	if ctx.Canceled() {
+		return nil // the runner abandoned this run and never reads its result
+	}
+	targets, skipped := c.collect(ctx)
 	if len(targets) == 0 && len(skipped) == 0 {
 		return okCheck(c.Name(), "no hold:<value> labels are missing a matching gc.routed_to")
 	}
@@ -173,8 +162,11 @@ func (c *holdLabelRoutedToCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult
 // Fix writes the repair route of every target that has one. Targets whose
 // hold value names several bound routes are left untouched; doctor's
 // verifying re-run keeps reporting them.
-func (c *holdLabelRoutedToCheck) Fix(_ *doctor.CheckContext) error {
-	targets, skipped := c.collect()
+func (c *holdLabelRoutedToCheck) Fix(ctx *doctor.CheckContext) error {
+	if ctx.Canceled() {
+		return nil // the runner abandoned this run and never reads its error
+	}
+	targets, skipped := c.collect(ctx)
 	for _, tgt := range targets {
 		route, ok := tgt.route()
 		if !ok {
