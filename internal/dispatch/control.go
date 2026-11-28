@@ -298,11 +298,13 @@ func evaluateRetryAttempt(store beads.GraphStore, bead, attempt beads.Bead, _ in
 func evaluateRalphIteration(store beads.GraphStore, bead, iteration beads.Bead, iterationNum int, opts ProcessOptions) (attemptEvaluation, error) {
 	// The iteration boundary is a gate: no verdict — and no next iteration —
 	// until every member of this iteration has stopped. A closed body is not
-	// evidence the iteration finished: the abort path can close it while a
-	// claimed sibling is still running (the abort's skip set counts only
-	// unclaimed members), and a scope-check-exempt control settles it
-	// forcibly on every store. Block on each live member and defer the
-	// verdict; the member's close re-runs the control (gastownhall/gascity#2519).
+	// evidence the iteration finished. A scope abort defers its body close
+	// only while a claimed member's own scope-check is open, so the body can
+	// still close under a running member that has none: one whose
+	// scope-check an abort begun before that deferral already skipped, or a
+	// claimed bead that is not a direct member of the iteration's scope.
+	// Block on each live member and defer the verdict; the member's close
+	// re-runs the control (gastownhall/gascity#2519).
 	live, err := ralphIterationLiveMembers(store, bead, iteration, opts)
 	if err != nil {
 		return attemptEvaluation{}, fmt.Errorf("%s: reading live members of iteration %s: %w", bead.ID, iteration.ID, err)

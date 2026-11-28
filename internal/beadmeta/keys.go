@@ -308,9 +308,11 @@ const (
 	RunTargetMetadataKey             = "gc.run_target"
 	RuntimeVarsMetadataKey           = "gc.graphv2_vars.v1"
 	// ScopeAbortedByMetadataKey marks a scope body whose abort is decided but
-	// whose close waits for a claimed member to settle. Its value is the bead
-	// whose failure decided the abort; the in-flight member's own scope-check
-	// closes the body gc.outcome=fail once that member closes.
+	// whose close waits for a claimed member to settle. Only a claimed bead
+	// whose own gc.scope_ref names the scope, with its own scope-check,
+	// defers the close. The value is the bead whose failure decided the
+	// abort; the claimed member's scope-check closes the body gc.outcome=fail
+	// once that member closes.
 	ScopeAbortedByMetadataKey  = "gc.scope_aborted_by"
 	ScopeKindMetadataKey       = "gc.scope_kind"
 	ScopeNameMetadataKey       = "gc.scope_name"

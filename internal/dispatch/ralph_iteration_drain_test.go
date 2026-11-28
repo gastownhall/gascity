@@ -3,6 +3,7 @@ package dispatch
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -24,11 +25,20 @@ import (
 // that closed body as a finished iteration and mints iteration N+1 beside
 // the still-running sibling.
 //
-// The fix scores every ralph verdict behind a drain gate: block on each
-// still-running iteration member and defer with ErrControlPending. These
-// tests pin the gate from the #2519 shape: a ralph over two independent
-// workers, an exec check that always fails, one worker claimed before its
-// sibling fails.
+// Two mechanisms hold the boundary. A scope abort defers its body close while
+// a claimed member's own scope-check is open (gastownhall/gascity#9507), so in
+// the #2519 shape the iteration body stays open until the claimed sibling
+// settles. And every ralph verdict sits behind a drain gate: block on each
+// still-running iteration member and defer with ErrControlPending. The gate
+// is what holds the boundary when the body closes under a running member
+// anyway: one with no open scope-check of its own, the state an abort begun
+// before the deferral leaves behind, or a claimed bead that is no member of
+// the iteration's scope, such as a retry's attempt 2, which the controller
+// spawns with its retry step's declared scope keys rather than the
+// iteration's (that route is pinned by
+// TestScopeAbortDeferralFollowsTheClaimedAttemptsOwnScope). These tests pin
+// both from the #2519 shape: a ralph over two independent workers, an exec
+// check that always fails, one worker claimed before its sibling fails.
 
 // compiledRalphDrainFormula is the #2519 ralph: a loop over two workers.
 const compiledRalphDrainFormula = `formula = "ralph-iteration-drain"
@@ -260,9 +270,23 @@ func drainClaimed(t *testing.T, store beads.Store, b beads.Bead) {
 	}
 }
 
+// drainSkipScopeCheckOf closes the scope-check of the member whose step_ref
+// ends in memberRef as skipped, the way a scope abort's skip set closes one.
+// An abort begun before the deferral existed skipped a claimed member's
+// scope-check like this, so the member runs on with no open scope-check of
+// its own and a later abort has nothing to defer on.
+func drainSkipScopeCheckOf(t *testing.T, store beads.Store, all []beads.Bead, memberRef string) {
+	t.Helper()
+	check := drainBeadByRefSuffix(t, all, memberRef+"-scope-check")
+	if _, err := skipScopeMembers(beadstest.Graph(store), []string{check.ID}); err != nil {
+		t.Fatalf("skipping %s: %v", check.Metadata[beadmeta.StepRefMetadataKey], err)
+	}
+}
+
 // drainServeHeld serves cycles until one makes no progress and no errors. The
-// abort that marks the body is progress; the held verdict (the control parked
-// behind the open, abort-decided body) is idle. The control
+// abort is progress; the held verdict is idle: the control parked behind the
+// open, abort-decided body, or behind its drain edge on a live member when
+// the body closed under that member. The control
 // stays open with no attempt spent, so the hold state is the first idle cycle.
 func drainServeHeld(t *testing.T, fx crashFixture) {
 	t.Helper()
@@ -322,6 +346,72 @@ func TestCompiledRalphIterationDrainControlBlocksLiveMember(t *testing.T) {
 			}
 			if !drainBlocksOn(t, fx.store, control, body.ID) {
 				t.Errorf("ralph control %s has no blocks edge on the open iteration body %s", control.ID, body.ID)
+			}
+		})
+	}
+}
+
+// TestCompiledRalphIterationDrainGateHoldsVerdictUnderClosedBody pins the drain
+// gate itself, on the route that still closes an iteration body under a
+// claimed member: worker B's own scope-check is already closed, as an abort
+// begun before the deferral leaves it, so the abort run when worker A fails
+// has nothing to defer on and closes the body fail while B runs. The ralph
+// control must park behind a blocks edge on B with no attempt spent and no
+// iteration 2, and B's close must release exactly one verdict and one
+// iteration-2 set.
+func TestCompiledRalphIterationDrainGateHoldsVerdictUnderClosedBody(t *testing.T) {
+	t.Parallel()
+	for _, tc := range drainUnforcedAbortStores() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fx := buildRalphDrainFixture(t, tc, compiledRalphDrainFormula, 0)
+			all := drainStoreAll(t, fx.store)
+			b := drainBeadByRefSuffix(t, all, "loop.iteration.1.b")
+			drainClaimed(t, fx.store, b)
+			drainSkipScopeCheckOf(t, fx.store, all, "loop.iteration.1.b")
+			if err := updateMetadataAndClose(beadstest.Graph(fx.store), drainBeadByRefSuffix(t, all, "loop.iteration.1.a").ID,
+				workerFailure(beadmeta.FailureClassTransient, "rate_limited")); err != nil {
+				t.Fatalf("closing worker A: %v", err)
+			}
+
+			drainServeHeld(t, fx.crashFixture)
+
+			all = drainStoreAll(t, fx.store)
+			body := drainBeadByRefSuffix(t, all, "loop.iteration.1")
+			if body.Status != "closed" || body.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail {
+				t.Fatalf("iteration body = %s/%s, want closed/fail under the running worker B", body.Status, body.Metadata[beadmeta.OutcomeMetadataKey])
+			}
+			control := drainBeadByRefSuffix(t, all, ".loop")
+			if control.Status != "open" {
+				t.Fatalf("ralph control status = %s, want open (no verdict yet)", control.Status)
+			}
+			if log := control.Metadata[beadmeta.AttemptLogMetadataKey]; log != "" {
+				t.Errorf("ralph control gc.attempt_log = %s, want empty: the check must not fire before the iteration drains", log)
+			}
+			if !drainBlocksOn(t, fx.store, control, b.ID) {
+				t.Errorf("ralph control %s has no blocks edge on the live member %s", control.ID, b.ID)
+			}
+			if bAfter := drainBeadByID(t, fx.store, b.ID); bAfter.Status != "in_progress" || bAfter.Assignee != "pool-worker" {
+				t.Errorf("worker B = %s/%s, want still claimed in_progress by pool-worker", bAfter.Status, bAfter.Assignee)
+			}
+			drainRequireNoIteration(t, all, 2)
+
+			if err := updateMetadataAndClose(beadstest.Graph(fx.store), b.ID, workerPass); err != nil {
+				t.Fatalf("closing worker B: %v", err)
+			}
+			if errs := serveToQuiescence(t, fx.crashFixture, &writeFaultInjector{}); len(errs) != 0 {
+				t.Fatalf("serving after the member closed did not converge: %v", errs)
+			}
+
+			all = drainStoreAll(t, fx.store)
+			for _, ref := range []string{"loop.iteration.2", "loop.iteration.2.a", "loop.iteration.2.b"} {
+				if got := len(drainBeadsByRefSuffix(all, ref)); got != 1 {
+					t.Errorf("iteration-2 beads with step_ref suffix %q = %d, want exactly one", ref, got)
+				}
+			}
+			drainRequireNoIteration(t, all, 3)
+			if log := drainAttemptLog(t, drainBeadByRefSuffix(t, all, ".loop")); len(log) != 1 || log[0]["attempt"] != "1" {
+				t.Errorf("ralph gc.attempt_log = %v, want exactly one entry, for iteration 1", log)
 			}
 		})
 	}
@@ -675,8 +765,8 @@ func TestCompiledRalphIterationDrainDrainedIterationVerdictsUnchanged(t *testing
 // TestCompiledRalphIterationDrainHoldsNextIteration pins AC-1: when worker A
 // of iteration 1 fails — with a transient failure class, or a bare close the
 // abort_scope contract counts as failed — while worker B is claimed and
-// running, the abort closes the iteration body, but no iteration 2 bead
-// exists until the check has a definitive result.
+// running, the abort keeps the iteration body open behind B, and no
+// iteration 2 bead exists until the check has a definitive result.
 func TestCompiledRalphIterationDrainHoldsNextIteration(t *testing.T) {
 	t.Parallel()
 	for _, tc := range drainUnforcedAbortStores() {
@@ -705,15 +795,16 @@ func TestCompiledRalphIterationDrainHoldsNextIteration(t *testing.T) {
 	}
 }
 
-// TestCrashInjectionCompiledRalphIterationDrain proves the drain gate is
-// crash-safe and idempotent over its own write window: a dispatcher killed
+// TestCrashInjectionCompiledRalphIterationDrain proves the iteration boundary
+// is crash-safe and idempotent over its own write window: a dispatcher killed
 // at, or failing, any store write of the abort that closes the body, the gate
 // pass that parks the control, and the verdict that ends iteration 1
 // converges on the uninterrupted end state — the aborted iteration drains
-// and its body closes failed under the deferred-abort marker, exactly one
-// iteration 2 follows, and
-// the loop exhausts as before the gate. The unforced route (MemStore) and the
-// forced-settle route (the bd close-policy double) are both covered.
+// and its body closes failed, exactly one iteration 2 follows, and the loop
+// exhausts as before the gate. The deferred abort is covered on the unforced
+// route (MemStore) and the forced-settle route (the bd close-policy double),
+// and the abort that closes the body under the claimed worker, where the
+// gate's drain edge alone holds the verdict, on MemStore.
 //
 // The fault window stops at the first attach create: molecule's
 // crash-recovery of a partially attached iteration does not rebuild the
@@ -722,8 +813,9 @@ func TestCompiledRalphIterationDrainHoldsNextIteration(t *testing.T) {
 func TestCrashInjectionCompiledRalphIterationDrain(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []crashScenario{
-		iterationDrainCrashScenario(t, "unforced-abort", drainUnforcedAbortStores()[0], compiledRalphDrainFormula),
-		iterationDrainCrashScenario(t, "forced-settle", drainForcedSettleStores()[0], compiledRalphDrainFanoutFormula),
+		iterationDrainCrashScenario(t, "unforced-abort", drainUnforcedAbortStores()[0], compiledRalphDrainFormula, abortDefersBehindB),
+		iterationDrainCrashScenario(t, "forced-settle", drainForcedSettleStores()[0], compiledRalphDrainFanoutFormula, abortDefersBehindB),
+		iterationDrainCrashScenario(t, "body-closed-under-claim", drainUnforcedAbortStores()[0], compiledRalphDrainFormula, abortClosesBodyUnderB),
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -732,13 +824,28 @@ func TestCrashInjectionCompiledRalphIterationDrain(t *testing.T) {
 	}
 }
 
+// drainAbortRoute is how the abort of iteration 1 meets the claimed worker B.
+type drainAbortRoute int
+
+const (
+	// abortDefersBehindB: B's own scope-check is open, so the abort keeps the
+	// iteration body open, marked gc.scope_aborted_by, until B settles.
+	abortDefersBehindB drainAbortRoute = iota
+	// abortClosesBodyUnderB: B's scope-check is already closed
+	// (drainSkipScopeCheckOf), so the abort closes the body while B runs and
+	// only the drain gate's blocks edge on B holds the ralph verdict.
+	abortClosesBodyUnderB
+)
+
 // iterationDrainCrashScenario builds the #2519 drain shape for the crash
 // harness: worker A already failed, worker B claimed, and a pool worker that
 // closes the claim — and every ready work bead after it, iterations included
-// — once the dispatcher has nothing left to retry. The on_complete source must
-// close with the output the fanout contract requires, so worker passes carry
-// an empty items payload (the fanout of the failed worker never expands).
-func iterationDrainCrashScenario(t *testing.T, name string, tc drainStoreCase, formulaText string) crashScenario {
+// — once the dispatcher has nothing left to retry. route decides whether B
+// still has its own scope-check open when the abort runs. The on_complete
+// source must close with the output the fanout contract requires, so worker
+// passes carry an empty items payload (the fanout of the failed worker never
+// expands).
+func iterationDrainCrashScenario(t *testing.T, name string, tc drainStoreCase, formulaText string, route drainAbortRoute) crashScenario {
 	t.Helper()
 	// One city for every rebuild: the formula source path is ledger metadata,
 	// so per-build cities would differ from the uninterrupted run's.
@@ -753,6 +860,9 @@ func iterationDrainCrashScenario(t *testing.T, name string, tc drainStoreCase, f
 			fx := cookRalphDrainFixture(t, tc, city)
 			all := drainStoreAll(t, fx.store)
 			drainClaimed(t, fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.1.b"))
+			if route == abortClosesBodyUnderB {
+				drainSkipScopeCheckOf(t, fx.store, all, "loop.iteration.1.b")
+			}
 			if err := updateMetadataAndClose(beadstest.Graph(fx.store), drainBeadByRefSuffix(t, all, "loop.iteration.1.a").ID,
 				workerFailure(beadmeta.FailureClassTransient, "rate_limited")); err != nil {
 				t.Fatalf("closing worker A: %v", err)
@@ -775,9 +885,23 @@ func iterationDrainCrashScenario(t *testing.T, name string, tc drainStoreCase, f
 				t.Fatalf("uninterrupted run: ralph gc.failed_attempt = %q, want 3", got)
 			}
 			body1 := ledgerBeadByRefSuffix(t, ledger, "loop.iteration.1")
-			if body1.Status != "closed" || body1.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail || body1.Metadata[beadmeta.ScopeAbortedByMetadataKey] == "" {
-				t.Errorf("uninterrupted run: iteration 1 = %s/%s gc.scope_aborted_by=%q, want closed/fail by the deferred abort",
-					body1.Status, body1.Metadata[beadmeta.OutcomeMetadataKey], body1.Metadata[beadmeta.ScopeAbortedByMetadataKey])
+			if body1.Status != "closed" || body1.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail {
+				t.Errorf("uninterrupted run: iteration 1 = %s/%s, want closed/fail by the abort", body1.Status, body1.Metadata[beadmeta.OutcomeMetadataKey])
+			}
+			marker := body1.Metadata[beadmeta.ScopeAbortedByMetadataKey]
+			switch route {
+			case abortDefersBehindB:
+				if marker == "" {
+					t.Errorf("uninterrupted run: iteration 1 has no gc.scope_aborted_by, want the deferred abort's marker")
+				}
+			case abortClosesBodyUnderB:
+				if marker != "" {
+					t.Errorf("uninterrupted run: iteration 1 gc.scope_aborted_by = %q, want none: nothing deferred the abort", marker)
+				}
+				b := ledgerBeadByRefSuffix(t, ledger, "loop.iteration.1.b")
+				if !slices.Contains(control.Blocks, "blocks:"+b.ID) {
+					t.Errorf("uninterrupted run: ralph control has no drain edge on %s", b.ID)
+				}
 			}
 			body2 := ledgerBeadByRefSuffix(t, ledger, "loop.iteration.2")
 			if body2.Status != "closed" {

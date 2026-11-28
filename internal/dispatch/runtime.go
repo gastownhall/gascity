@@ -697,11 +697,13 @@ func closeScopeAsPassedWith(store beads.GraphStore, snapshot scopeSnapshot, subj
 // the body: a ralph control evaluating the body as its iteration, and the
 // enclosing scope.
 //
-// A member a worker has claimed is neither skipped nor closed under it. When
-// one still has its scope-check open, that control is kept open, the body is
-// marked gc.scope_aborted_by=deciderID (the first decider's mark stands) and
-// left open; the kept scope-check re-runs this abort once its member closes,
-// and the run that finds no claimed member left closes the body fail.
+// A bead a worker has claimed is never skipped or closed under it. When a
+// claimed member of this scope still has its scope-check open, that control
+// is kept open, the body is marked gc.scope_aborted_by=deciderID (the first
+// decider's mark stands) and left open; the kept scope-check re-runs this
+// abort once its member closes, and the run that finds no claimed member
+// left closes the body fail. A claimed bead that is not itself a member of
+// this scope (see claimedWorkMembers) does not defer the close.
 //
 // It returns the number of members skipped. traceID identifies the bead
 // driving the trace and is also the id ignored when skipping open members.
@@ -1079,6 +1081,13 @@ func (s scopeSnapshot) skipOpenScopeMembers(store beads.GraphStore, skipControlI
 // claimedWorkMembers returns the scope's work members a worker has claimed:
 // neither open nor closed. Spec sidecars, the body, teardown and control kinds
 // are dispatcher-owned and never claimed by a worker, so they are excluded.
+// Only beads whose own gc.scope_ref names this scope are read, so a claimed
+// bead defers no other scope's abort. A ralph iteration child names its
+// iteration. A retry's first attempt carries none of its retry step's scope
+// keys (inside a ralph iteration it names the iteration), while a later
+// attempt, spawned at run time, copies the step's declared gc.scope_ref: at
+// top level a claimed later attempt defers the declared scope's abort and a
+// claimed first attempt does not, and inside a ralph iteration the reverse.
 func (s scopeSnapshot) claimedWorkMembers() map[string]struct{} {
 	live := make(map[string]struct{})
 	for _, member := range s.members {
@@ -2145,12 +2154,8 @@ func resolveScopeBodyByRole(store beads.GraphStore, rootID, scopeRef string, inc
 	if err != nil {
 		return beads.Bead{}, false, err
 	}
-	for _, bead := range matches {
-		if matchesScopeRef(bead, scopeRef) {
-			return bead, true, nil
-		}
-	}
-	return beads.Bead{}, false, nil
+	bead, ok := firstScopeBodyMatch(matches, scopeRef, func(beads.Bead) bool { return true })
+	return bead, ok, nil
 }
 
 func canSkipScopeMemberWithDeps(deps []beads.Dep, pending map[string]beads.Bead) bool {
@@ -2273,18 +2278,10 @@ func isLogicalDescendant(logical, candidate beads.Bead) bool {
 }
 
 func findScopeBody(all []beads.Bead, rootID, scopeRef string) (beads.Bead, bool) {
-	for _, bead := range all {
-		if bead.Metadata[beadmeta.RootBeadIDMetadataKey] != rootID {
-			continue
-		}
-		if bead.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindScope {
-			continue
-		}
-		if matchesScopeRef(bead, scopeRef) {
-			return bead, true
-		}
-	}
-	return beads.Bead{}, false
+	return firstScopeBodyMatch(all, scopeRef, func(bead beads.Bead) bool {
+		return bead.Metadata[beadmeta.RootBeadIDMetadataKey] == rootID &&
+			bead.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindScope
+	})
 }
 
 func setOutcomeAndClose(store beads.GraphStore, beadID, outcome string) error {
@@ -2340,15 +2337,44 @@ func reconcileClosedScopeMemberWithOptions(store beads.GraphStore, beadID string
 	return reconcileTerminalScopedMemberWithOptions(store, closedBead, opts)
 }
 
+// matchesScopeRef reports whether bead matches scopeRef by either test
+// firstScopeBodyMatch applies: it carries scopeRef as its gc.scope_ref, or its
+// own gc.step_ref names the scope (stepRefNamesScope).
 func matchesScopeRef(bead beads.Bead, scopeRef string) bool {
 	if scopeRef == "" {
 		return false
 	}
-	if bead.Metadata[beadmeta.ScopeRefMetadataKey] == scopeRef {
-		return true
+	return bead.Metadata[beadmeta.ScopeRefMetadataKey] == scopeRef || stepRefNamesScope(bead, scopeRef)
+}
+
+// stepRefNamesScope reports whether bead's own gc.step_ref names scopeRef: the
+// ref itself, or the ref under a formula or iteration prefix.
+func stepRefNamesScope(bead beads.Bead, scopeRef string) bool {
+	if scopeRef == "" {
+		return false
 	}
 	stepRef := bead.Metadata[beadmeta.StepRefMetadataKey]
 	return stepRef == scopeRef || strings.HasSuffix(stepRef, "."+scopeRef)
+}
+
+// firstScopeBodyMatch returns the first of candidates that eligible admits and
+// whose own gc.step_ref names scopeRef, else the first eligible one that
+// matches it through gc.scope_ref. The name goes first because a scope body
+// can itself be a member of an enclosing scope: a nested ralph's iteration
+// body carries the outer iteration as its gc.scope_ref and is minted before
+// the outer iteration body, so taking the first gc.scope_ref match would hand
+// the outer scope's abort or close to the inner body. Every scope-body
+// resolver picks through it, so the root view and the live read resolve the
+// same body.
+func firstScopeBodyMatch(candidates []beads.Bead, scopeRef string, eligible func(beads.Bead) bool) (beads.Bead, bool) {
+	for _, matches := range []func(beads.Bead, string) bool{stepRefNamesScope, matchesScopeRef} {
+		for _, bead := range candidates {
+			if eligible(bead) && matches(bead, scopeRef) {
+				return bead, true
+			}
+		}
+	}
+	return beads.Bead{}, false
 }
 
 func resolveFinalizeOutcome(store beads.GraphStore, finalizer beads.Bead, opts ProcessOptions) (string, error) {

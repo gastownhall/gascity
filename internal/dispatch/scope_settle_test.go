@@ -719,3 +719,460 @@ func TestScopeAbortTriggeredHonorsDecidedAbort(t *testing.T) {
 		}
 	}
 }
+
+// abortBoundaryRetryFormula is issue #9507's scope with the member that stays
+// in flight retry-managed. The compiler mints Y's first attempt with no
+// gc.scope_ref and no scope-check of its own; an attempt spawned at run time
+// carries Y's declared gc.scope_ref (TestScopeAbortDeferralFollowsTheClaimedAttemptsOwnScope).
+const abortBoundaryRetryFormula = `formula = "abort-boundary"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "body"
+title = "Scope body"
+needs = ["x", "y"]
+metadata = { "gc.kind" = "scope", "gc.scope_name" = "work", "gc.scope_role" = "body" }
+
+[[steps]]
+id = "x"
+title = "Member X (fails)"
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
+
+[[steps]]
+id = "y"
+title = "Member Y (retry-managed)"
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
+
+[steps.retry]
+max_attempts = 2
+on_exhausted = "hard_fail"
+`
+
+// abortBoundaryRalphFormula is the same scope with Y ralph-managed: the bead a
+// worker claims is a child of Y's iteration, a member of the iteration's scope
+// rather than of this one.
+const abortBoundaryRalphFormula = `formula = "abort-boundary"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "body"
+title = "Scope body"
+needs = ["x", "y"]
+metadata = { "gc.kind" = "scope", "gc.scope_name" = "work", "gc.scope_role" = "body" }
+
+[[steps]]
+id = "x"
+title = "Member X (fails)"
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
+
+[[steps]]
+id = "y"
+title = "Member Y (ralph-managed)"
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
+
+[steps.ralph]
+max_attempts = 2
+
+[steps.ralph.check]
+mode = "exec"
+path = "` + ralphHardFailCheckScript + `"
+timeout = "30s"
+
+[[steps.children]]
+id = "c"
+title = "Iteration child C"
+`
+
+// TestScopeAbortDeferralCoversOnlyDirectMembers pins the boundary formula-spec-v2
+// draws around the deferral: only a claimed bead whose own gc.scope_ref names
+// the aborting scope, with its own scope-check, defers the abort. A claimed
+// first attempt of a retry-managed member, or a claimed child of a
+// ralph-managed member's iteration, names no such scope, so on either close
+// policy the abort skips the managing control and its scope-check and closes
+// the body fail at once, leaving workflow-finalize ready while the claimed bead
+// still runs. The abort itself never touches the claimed bead. Extending the
+// deferral to these shapes flips this test.
+func TestScopeAbortDeferralCoversOnlyDirectMembers(t *testing.T) {
+	t.Parallel()
+
+	for _, shape := range []struct {
+		name    string
+		formula string
+		// claimed is the step_ref suffix of the bead a worker holds.
+		claimed string
+		// skipped are the step_ref suffixes of the managing chain the abort
+		// closes skipped around it.
+		skipped []string
+	}{
+		{
+			name:    "first retry attempt",
+			formula: abortBoundaryRetryFormula,
+			claimed: "abort-boundary.y.attempt.1",
+			skipped: []string{"abort-boundary.y", "abort-boundary.y-scope-check"},
+		},
+		{
+			name:    "ralph iteration child",
+			formula: abortBoundaryRalphFormula,
+			claimed: "y.iteration.1.c",
+			skipped: []string{"abort-boundary.y", "abort-boundary.y-scope-check", "y.iteration.1", "y.iteration.1.c-scope-check"},
+		},
+	} {
+		for _, tc := range []drainStoreCase{drainUnforcedAbortStores()[0], drainForcedSettleStores()[0]} {
+			t.Run(shape.name+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
+				fx := cookRalphDrainFixture(t, tc, newCompiledRalphCity(t, "abort-boundary", shape.formula, 0))
+				all := drainStoreAll(t, fx.store)
+				claimed := drainBeadByRefSuffix(t, all, shape.claimed)
+				drainClaimed(t, fx.store, claimed)
+				closeMember(t, fx.store, drainBeadByRefSuffix(t, all, "abort-boundary.x").ID, workerFailure(beadmeta.FailureClassHard, "x broke"))
+
+				if result := processScopeControl(t, fx.store, drainBeadByRefSuffix(t, all, "abort-boundary.x-scope-check").ID); result.Action != "scope-fail" {
+					t.Fatalf("X's scope-check action = %q, want scope-fail", result.Action)
+				}
+
+				body := assertBeadState(t, fx.store, drainBeadByRefSuffix(t, all, "abort-boundary.body").ID, "closed", beadmeta.OutcomeFail)
+				if got, ok := body.Metadata[scopeAbortedByKey]; ok {
+					t.Fatalf("body carries %s=%q, want no deferral marker: no direct member is claimed", scopeAbortedByKey, got)
+				}
+				for _, ref := range shape.skipped {
+					assertBeadState(t, fx.store, drainBeadByRefSuffix(t, all, ref).ID, "closed", beadmeta.OutcomeSkipped)
+				}
+				held := mustGetBead(t, fx.store, claimed.ID)
+				if held.Status != "in_progress" || held.Assignee != "pool-worker" || held.Metadata[beadmeta.OutcomeMetadataKey] != "" {
+					t.Fatalf("claimed %s = %s assignee %q outcome %q, want still in_progress under pool-worker with no outcome",
+						shape.claimed, held.Status, held.Assignee, held.Metadata[beadmeta.OutcomeMetadataKey])
+				}
+				if finalize := drainBeadByRefSuffix(t, all, "abort-boundary.workflow-finalize"); !slices.Contains(readyIDs(t, fx.store), finalize.ID) {
+					t.Fatalf("workflow-finalize %s is not ready after the body closed", finalize.ID)
+				}
+			})
+		}
+	}
+}
+
+// abortBoundaryRetryInRalphFormula puts a retry-managed member inside a ralph
+// iteration: Y's compile-time first attempt is namespaced into the iteration's
+// scope, while an attempt spawned at run time copies Y's declared metadata,
+// which names no scope.
+const abortBoundaryRetryInRalphFormula = `formula = "abort-boundary"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "loop"
+title = "Loop"
+
+[steps.ralph]
+max_attempts = 2
+
+[steps.ralph.check]
+mode = "exec"
+path = "` + ralphHardFailCheckScript + `"
+timeout = "30s"
+
+[[steps.children]]
+id = "a"
+title = "Worker A (fails)"
+
+[[steps.children]]
+id = "y"
+title = "Retry child Y"
+
+[steps.children.retry]
+max_attempts = 2
+on_exhausted = "hard_fail"
+`
+
+// spawnSecondRetryAttempt fails the compile-time first attempt of the retry
+// control whose gc.step_ref ends in retryRef with a transient failure, serves
+// until the control has spawned attempt 2, and returns attempt 2.
+func spawnSecondRetryAttempt(t *testing.T, fx ralphDrainFixture, retryRef string) beads.Bead {
+	t.Helper()
+	attempt1 := drainBeadByRefSuffix(t, drainStoreAll(t, fx.store), retryRef+".attempt.1")
+	if err := updateMetadataAndClose(beadstest.Graph(fx.store), attempt1.ID, workerFailure(beadmeta.FailureClassTransient, "rate_limited")); err != nil {
+		t.Fatalf("closing attempt 1: %v", err)
+	}
+	drainServeHeld(t, fx.crashFixture)
+	return drainBeadByRefSuffix(t, drainStoreAll(t, fx.store), retryRef+".attempt.2")
+}
+
+// assertAbortDeferredUntilClaimedCloses pins a deferral end to end: the body
+// stays open, marked by the decider, with the claimed bead's scope-check open
+// and the claimed bead still its worker's; once the claimed bead closes
+// passed, the body closes fail with the decider's hard record.
+func assertAbortDeferredUntilClaimedCloses(t *testing.T, fx ralphDrainFixture, bodyID, deciderID string, claimed beads.Bead, liveCheckID string) {
+	t.Helper()
+	assertAbortDeferred(t, fx.store, bodyID, deciderID, liveCheckID)
+	if held := mustGetBead(t, fx.store, claimed.ID); held.Status != "in_progress" || held.Assignee != "pool-worker" {
+		t.Fatalf("claimed %s = %s assignee %q, want still in_progress under pool-worker", claimed.ID, held.Status, held.Assignee)
+	}
+	if err := updateMetadataAndClose(beadstest.Graph(fx.store), claimed.ID, workerPass); err != nil {
+		t.Fatalf("closing claimed %s: %v", claimed.ID, err)
+	}
+	if errs := serveToQuiescence(t, fx.crashFixture, &writeFaultInjector{}); len(errs) != 0 {
+		t.Fatalf("serving after the claimed bead closed did not converge: %v", errs)
+	}
+	assertAbortSettled(t, fx.store, bodyID, deciderID, nil)
+}
+
+// TestScopeAbortDeferralFollowsTheClaimedAttemptsOwnScope pins the deferral
+// boundary for claimed retry attempts: an attempt defers the abort of the
+// scope its own gc.scope_ref names, through its own scope-check, and no other.
+// The compiler mints a retry's first attempt without the retry step's scope
+// keys, so at top level it defers nothing (TestScopeAbortDeferralCoversOnlyDirectMembers),
+// and inside a ralph iteration it takes the iteration's ref, like every
+// iteration child, so it defers the iteration's abort. An attempt spawned at
+// run time copies the retry step's declared metadata instead: at top level
+// attempt 2 is a member of the declared scope and defers its abort, and inside
+// a ralph iteration it is no member of the iteration, so the iteration body
+// closes fail at once under it and only the ralph control's drain gate, a
+// blocks edge on the claimed attempt, holds the verdict.
+func TestScopeAbortDeferralFollowsTheClaimedAttemptsOwnScope(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []drainStoreCase{drainUnforcedAbortStores()[0], drainForcedSettleStores()[0]} {
+		t.Run("top-level attempt 2 defers/"+tc.name, func(t *testing.T) {
+			t.Parallel()
+			fx := cookRalphDrainFixture(t, tc, newCompiledRalphCity(t, "abort-boundary", abortBoundaryRetryFormula, 0))
+			attempt2 := spawnSecondRetryAttempt(t, fx, "abort-boundary.y")
+			if got := attempt2.Metadata[beadmeta.ScopeRefMetadataKey]; got != "body" {
+				t.Fatalf("attempt 2 gc.scope_ref = %q, want body, the scope its retry step declares", got)
+			}
+			drainClaimed(t, fx.store, attempt2)
+			all := drainStoreAll(t, fx.store)
+			x := drainBeadByRefSuffix(t, all, "abort-boundary.x")
+			closeMember(t, fx.store, x.ID, workerFailure(beadmeta.FailureClassHard, "x broke"))
+
+			if result := processScopeControl(t, fx.store, drainBeadByRefSuffix(t, all, "abort-boundary.x-scope-check").ID); result.Action != "scope-fail" {
+				t.Fatalf("X's scope-check action = %q, want scope-fail", result.Action)
+			}
+			if finalize := drainBeadByRefSuffix(t, all, "abort-boundary.workflow-finalize"); slices.Contains(readyIDs(t, fx.store), finalize.ID) {
+				t.Fatalf("workflow-finalize %s is ready while attempt 2 runs", finalize.ID)
+			}
+			assertAbortDeferredUntilClaimedCloses(t, fx, drainBeadByRefSuffix(t, all, "abort-boundary.body").ID, x.ID, attempt2,
+				drainBeadByRefSuffix(t, all, "abort-boundary.y.attempt.2-scope-check").ID)
+		})
+
+		// Graph-apply instantiation links a compile-time attempt to its retry
+		// control; the MemStore cook does not, and an unlinked attempt's
+		// transient failure would abort the iteration through its own
+		// scope-check instead of spawning attempt 2.
+		t.Run("attempt 1 in a ralph iteration defers/"+tc.name, func(t *testing.T) {
+			t.Parallel()
+			fx := cookRalphDrainFixture(t, tc, newCompiledRalphCity(t, "abort-boundary", abortBoundaryRetryInRalphFormula, 0))
+			linkCompileTimeRetryAttempts(t, fx.store, fx.rootID)
+			all := drainStoreAll(t, fx.store)
+			attempt1 := drainBeadByRefSuffix(t, all, "loop.iteration.1.y.attempt.1")
+			if got := attempt1.Metadata[beadmeta.ScopeRefMetadataKey]; got != "loop.iteration.1" {
+				t.Fatalf("attempt 1 gc.scope_ref = %q, want the iteration loop.iteration.1", got)
+			}
+			drainClaimed(t, fx.store, attempt1)
+			a := drainBeadByRefSuffix(t, all, "loop.iteration.1.a")
+			if err := updateMetadataAndClose(beadstest.Graph(fx.store), a.ID, workerFailure(beadmeta.FailureClassHard, "a broke")); err != nil {
+				t.Fatalf("closing worker A: %v", err)
+			}
+
+			drainServeHeld(t, fx.crashFixture)
+
+			assertAbortDeferredUntilClaimedCloses(t, fx, drainBeadByRefSuffix(t, all, "loop.iteration.1").ID, a.ID, attempt1,
+				drainBeadByRefSuffix(t, all, "loop.iteration.1.y.attempt.1-scope-check").ID)
+		})
+
+		t.Run("attempt 2 in a ralph iteration closes at once/"+tc.name, func(t *testing.T) {
+			t.Parallel()
+			fx := cookRalphDrainFixture(t, tc, newCompiledRalphCity(t, "abort-boundary", abortBoundaryRetryInRalphFormula, 0))
+			linkCompileTimeRetryAttempts(t, fx.store, fx.rootID)
+			attempt2 := spawnSecondRetryAttempt(t, fx, "loop.iteration.1.y")
+			all := drainStoreAll(t, fx.store)
+			if got := attempt2.Metadata[beadmeta.ScopeRefMetadataKey]; got != "" {
+				t.Fatalf("attempt 2 gc.scope_ref = %q, want none: retry step Y declares no scope", got)
+			}
+			if checks := drainBeadsByRefSuffix(all, "loop.iteration.1.y.attempt.2-scope-check"); len(checks) != 0 {
+				t.Fatalf("attempt 2 has %d scope-checks, want none", len(checks))
+			}
+			drainClaimed(t, fx.store, attempt2)
+			a := drainBeadByRefSuffix(t, all, "loop.iteration.1.a")
+			if err := updateMetadataAndClose(beadstest.Graph(fx.store), a.ID, workerFailure(beadmeta.FailureClassHard, "a broke")); err != nil {
+				t.Fatalf("closing worker A: %v", err)
+			}
+
+			drainServeHeld(t, fx.crashFixture)
+
+			body := drainBeadByRefSuffix(t, all, "loop.iteration.1")
+			assertAbortSettled(t, fx.store, body.ID, a.ID, nil)
+			if got, ok := mustGetBead(t, fx.store, body.ID).Metadata[scopeAbortedByKey]; ok {
+				t.Fatalf("iteration body carries %s=%q, want no deferral marker: attempt 2 is no member of the iteration", scopeAbortedByKey, got)
+			}
+			if held := mustGetBead(t, fx.store, attempt2.ID); held.Status != "in_progress" || held.Assignee != "pool-worker" {
+				t.Fatalf("attempt 2 = %s assignee %q, want still in_progress under pool-worker", held.Status, held.Assignee)
+			}
+			control := assertBeadState(t, fx.store, drainBeadByRefSuffix(t, all, "abort-boundary.loop").ID, "open", "")
+			if log := control.Metadata[beadmeta.AttemptLogMetadataKey]; log != "" {
+				t.Fatalf("ralph control gc.attempt_log = %s, want empty while attempt 2 runs", log)
+			}
+			if !drainBlocksOn(t, fx.store, control, attempt2.ID) {
+				t.Fatalf("ralph control %s has no blocks edge on the claimed attempt 2 %s", control.ID, attempt2.ID)
+			}
+			drainRequireNoIteration(t, drainStoreAll(t, fx.store), 2)
+
+			if err := updateMetadataAndClose(beadstest.Graph(fx.store), attempt2.ID, workerPass); err != nil {
+				t.Fatalf("closing attempt 2: %v", err)
+			}
+			if errs := serveToQuiescence(t, fx.crashFixture, &writeFaultInjector{}); len(errs) != 0 {
+				t.Fatalf("serving after attempt 2 closed did not converge: %v", errs)
+			}
+			loop := assertBeadState(t, fx.store, control.ID, "closed", beadmeta.OutcomeFail)
+			if got := loop.Metadata[beadmeta.FinalDispositionMetadataKey]; got != beadmeta.DispositionHardFail {
+				t.Fatalf("ralph control %s = %q, want %q", beadmeta.FinalDispositionMetadataKey, got, beadmeta.DispositionHardFail)
+			}
+			drainRequireNoIteration(t, drainStoreAll(t, fx.store), 2)
+		})
+	}
+}
+
+// nestedRalphAbortFormula nests a ralph in a ralph iteration: the outer loop's
+// iteration runs worker A beside an inner loop over child C. The compiler
+// flattens the inner loop into the outer iteration, so C and the inner
+// iteration body both carry the outer iteration as their gc.scope_ref, and the
+// inner iteration body is minted before the outer one.
+const nestedRalphAbortFormula = `formula = "nested-abort"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "loop"
+title = "Outer loop"
+
+[steps.ralph]
+max_attempts = 2
+
+[steps.ralph.check]
+mode = "exec"
+path = "` + ralphHardFailCheckScript + `"
+timeout = "30s"
+
+[[steps.children]]
+id = "a"
+title = "Worker A"
+
+[[steps.children]]
+id = "inner"
+title = "Inner loop"
+
+[steps.children.ralph]
+max_attempts = 2
+
+[steps.children.ralph.check]
+mode = "exec"
+path = "` + ralphHardFailCheckScript + `"
+timeout = "30s"
+
+[[steps.children.children]]
+id = "c"
+title = "Inner child C"
+`
+
+// TestScopeAbortInNestedRalphSettlesTheOuterIterationBody pins the abort of an
+// iteration that holds a nested ralph: worker A fails hard while the inner
+// loop's child C is claimed. The abort resolves the outer iteration body, the
+// one whose own gc.step_ref names the scope, not the inner iteration body that
+// only carries the scope as its gc.scope_ref, so the outer body defers, marked
+// by A, and the inner body stays unmarked. Once C closes, even passed, the
+// outer body closes fail with A's hard record, the outer loop hard-fails on it
+// with no iteration 2, and the workflow root ends fail, whether or not the
+// loop's check would pass.
+func TestScopeAbortInNestedRalphSettlesTheOuterIterationBody(t *testing.T) {
+	t.Parallel()
+
+	for _, check := range []struct {
+		name     string
+		passFrom int
+	}{
+		{name: "check fails", passFrom: 0},
+		{name: "check passes", passFrom: 1},
+	} {
+		for _, tc := range []drainStoreCase{drainUnforcedAbortStores()[0], drainForcedSettleStores()[0]} {
+			t.Run(check.name+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
+				fx := cookRalphDrainFixture(t, tc, newCompiledRalphCity(t, "nested-abort", nestedRalphAbortFormula, check.passFrom))
+				all := drainStoreAll(t, fx.store)
+				a := drainBeadByRefSuffix(t, all, "loop.iteration.1.a")
+				c := drainBeadByRefSuffix(t, all, "loop.iteration.1.inner.iteration.1.c")
+				outerBody := drainBeadByRefSuffix(t, all, "loop.iteration.1")
+				innerBody := drainBeadByRefSuffix(t, all, "loop.iteration.1.inner.iteration.1")
+				control := drainBeadByRefSuffix(t, all, "nested-abort.loop")
+				drainClaimed(t, fx.store, c)
+				if err := updateMetadataAndClose(beadstest.Graph(fx.store), a.ID, workerFailure(beadmeta.FailureClassHard, "a broke")); err != nil {
+					t.Fatalf("closing worker A: %v", err)
+				}
+
+				drainServeHeld(t, fx.crashFixture)
+
+				assertAbortDeferred(t, fx.store, outerBody.ID, a.ID,
+					drainBeadByRefSuffix(t, all, "loop.iteration.1.inner.iteration.1.c-scope-check").ID)
+				if got := mustGetBead(t, fx.store, innerBody.ID).Metadata[scopeAbortedByKey]; got != "" {
+					t.Fatalf("inner iteration body %s = %q, want unmarked: the abort is the outer iteration's", scopeAbortedByKey, got)
+				}
+				if held := mustGetBead(t, fx.store, c.ID); held.Status != "in_progress" || held.Assignee != "pool-worker" {
+					t.Fatalf("child C = %s assignee %q, want still in_progress under pool-worker", held.Status, held.Assignee)
+				}
+				assertBeadState(t, fx.store, control.ID, "open", "")
+				drainRequireNoIteration(t, drainStoreAll(t, fx.store), 2)
+
+				if err := updateMetadataAndClose(beadstest.Graph(fx.store), c.ID, workerPass); err != nil {
+					t.Fatalf("closing child C: %v", err)
+				}
+				if errs := serveToQuiescence(t, fx.crashFixture, &writeFaultInjector{}); len(errs) != 0 {
+					t.Fatalf("serving after child C closed did not converge: %v", errs)
+				}
+
+				assertAbortSettled(t, fx.store, outerBody.ID, a.ID, nil)
+				loop := assertBeadState(t, fx.store, control.ID, "closed", beadmeta.OutcomeFail)
+				for key, want := range map[string]string{
+					beadmeta.FinalDispositionMetadataKey: beadmeta.DispositionHardFail,
+					beadmeta.FailureReasonMetadataKey:    "a broke",
+					beadmeta.FailedAttemptMetadataKey:    "1",
+				} {
+					if got := loop.Metadata[key]; got != want {
+						t.Errorf("outer ralph control %s = %q, want %q", key, got, want)
+					}
+				}
+				drainRequireNoIteration(t, drainStoreAll(t, fx.store), 2)
+				assertBeadState(t, fx.store, fx.rootID, "closed", beadmeta.OutcomeFail)
+			})
+		}
+	}
+}
+
+// TestScopeAbortInNestedRalphWithNothingClaimedClosesTheOuterBody pins the same
+// resolution with no claimed bead: worker A's hard failure closes the outer
+// iteration body fail at once, with A's hard record, and the outer loop and the
+// workflow root end fail with no iteration 2.
+func TestScopeAbortInNestedRalphWithNothingClaimedClosesTheOuterBody(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []drainStoreCase{drainUnforcedAbortStores()[0], drainForcedSettleStores()[0]} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fx := cookRalphDrainFixture(t, tc, newCompiledRalphCity(t, "nested-abort", nestedRalphAbortFormula, 0))
+			all := drainStoreAll(t, fx.store)
+			a := drainBeadByRefSuffix(t, all, "loop.iteration.1.a")
+			if err := updateMetadataAndClose(beadstest.Graph(fx.store), a.ID, workerFailure(beadmeta.FailureClassHard, "a broke")); err != nil {
+				t.Fatalf("closing worker A: %v", err)
+			}
+			if errs := serveToQuiescence(t, fx.crashFixture, &writeFaultInjector{}); len(errs) != 0 {
+				t.Fatalf("serving after worker A failed did not converge: %v", errs)
+			}
+
+			assertAbortSettled(t, fx.store, drainBeadByRefSuffix(t, all, "loop.iteration.1").ID, a.ID, nil)
+			loop := assertBeadState(t, fx.store, drainBeadByRefSuffix(t, all, "nested-abort.loop").ID, "closed", beadmeta.OutcomeFail)
+			if got := loop.Metadata[beadmeta.FinalDispositionMetadataKey]; got != beadmeta.DispositionHardFail {
+				t.Fatalf("outer ralph control %s = %q, want %q", beadmeta.FinalDispositionMetadataKey, got, beadmeta.DispositionHardFail)
+			}
+			drainRequireNoIteration(t, drainStoreAll(t, fx.store), 2)
+			assertBeadState(t, fx.store, fx.rootID, "closed", beadmeta.OutcomeFail)
+		})
+	}
+}

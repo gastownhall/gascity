@@ -2668,6 +2668,78 @@ func TestResolveScopeBodyStopsRetryWhenContextCanceled(t *testing.T) {
 	}
 }
 
+// TestResolveScopeBodyPrefersTheBodyItsStepRefNames pins the order every
+// scope-body resolver shares, on the live read and on the root view alike: a
+// scope bead whose own gc.step_ref names the scope wins over one listed before
+// it that only carries the scope as its gc.scope_ref, the shape of a nested
+// ralph's iteration body, which is a member of the outer iteration. A body that
+// matches only through gc.scope_ref still resolves when none is named for the
+// scope.
+func TestResolveScopeBodyPrefersTheBodyItsStepRefNames(t *testing.T) {
+	t.Parallel()
+
+	const scopeRef = "loop.iteration.1"
+	for _, tc := range []struct {
+		name string
+		// roleTagged tags the scope beads gc.scope_role=body; untagged ones
+		// resolve through the any-scope-bead fallback.
+		roleTagged bool
+		closed     bool
+		// named mints the outer body, whose own gc.step_ref names the scope.
+		named bool
+		want  string
+	}{
+		{name: "open role-tagged bodies", roleTagged: true, named: true, want: "outer"},
+		{name: "closed role-tagged bodies", roleTagged: true, closed: true, named: true, want: "outer"},
+		{name: "untagged scope beads", named: true, want: "outer"},
+		{name: "no body named for the scope", roleTagged: true, want: "inner"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := beads.NewMemStore()
+			workflow := mustCreateWorkflowBead(t, store, beads.Bead{Title: "workflow", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey: beadmeta.KindWorkflow,
+			}})
+			scopeBead := func(title string, meta map[string]string) {
+				meta[beadmeta.KindMetadataKey] = beadmeta.KindScope
+				meta[beadmeta.RootBeadIDMetadataKey] = workflow.ID
+				if tc.roleTagged {
+					meta[beadmeta.ScopeRoleMetadataKey] = beadmeta.ScopeRoleBody
+				}
+				status := ""
+				if tc.closed {
+					status = "closed"
+				}
+				mustCreateWorkflowBead(t, store, beads.Bead{Title: title, Type: "task", Status: status, Metadata: meta})
+			}
+			// The inner iteration body is minted first, as the compiler mints it.
+			scopeBead("inner", map[string]string{
+				beadmeta.ScopeRefMetadataKey: scopeRef,
+				beadmeta.StepRefMetadataKey:  "wf.loop.iteration.1.inner.iteration.1",
+			})
+			if tc.named {
+				scopeBead("outer", map[string]string{beadmeta.StepRefMetadataKey: "wf.loop.iteration.1"})
+			}
+
+			live, err := resolveScopeBodyOnce(beadstest.Graph(store), workflow.ID, scopeRef)
+			if err != nil {
+				t.Fatalf("live resolve: %v", err)
+			}
+			all, err := beads.DirectMembers(store, workflow.ID)
+			if err != nil {
+				t.Fatalf("listing members: %v", err)
+			}
+			view, err := resolveScopeBodyFromMembers(all, workflow.ID, scopeRef)
+			if err != nil {
+				t.Fatalf("view resolve: %v", err)
+			}
+			if live.Title != tc.want || view.Title != tc.want {
+				t.Fatalf("resolved live %q, view %q, want %q", live.Title, view.Title, tc.want)
+			}
+		})
+	}
+}
+
 func TestProcessFanoutReturnsMalformedWhenScopeBodyMissing(t *testing.T) {
 	t.Parallel()
 
