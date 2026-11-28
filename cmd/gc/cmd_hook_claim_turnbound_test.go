@@ -9,11 +9,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // turnBoundRoutedWork is one open, routed, claimable candidate: the shape every
@@ -783,5 +787,124 @@ func TestHookClaimStraddleLeavesSessionClaimUntouched(t *testing.T) {
 	}
 	if len(sessSpy.beadIDs) != 0 {
 		t.Fatalf("session-claim seam writes = %v, want none: the straddle path stamps nothing, so it must clear nothing", sessSpy.beadIDs)
+	}
+}
+
+// invocationWindowClaimCity writes a one-worker city offering work-1, an active
+// session bead for the fence, and a fake bd that records its claimant at ownerPath.
+func invocationWindowClaimCity(t *testing.T) (cityDir, ownerPath string) {
+	t.Helper()
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	cityDir = t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+work_query = "printf '[{\"id\":\"work-1\",\"status\":\"open\",\"metadata\":{\"gc.routed_to\":\"worker\"}}]'"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sessionID := newFenceSessionBead(t, cityDir, session.StateActive, "live-token")
+
+	fakeBin := t.TempDir()
+	ownerPath = filepath.Join(t.TempDir(), "owner")
+	script := `#!/bin/sh
+case "$1" in
+show)
+  if [ -s "$CLAIM_OWNER" ]; then
+    printf '[{"id":"work-1","status":"in_progress","assignee":"%s"}]' "$(cat "$CLAIM_OWNER")"
+  else
+    printf '[{"id":"work-1","status":"open","metadata":{"gc.routed_to":"worker"}}]'
+  fi
+  exit 0 ;;
+update)
+  for arg in "$@"; do
+    if [ "$arg" = "--claim" ]; then
+      printf '%s' "$BEADS_ACTOR" > "$CLAIM_OWNER"
+      printf '[{"id":"work-1","status":"in_progress","assignee":"%s"}]' "$BEADS_ACTOR"
+      exit 0
+    fi
+  done ;;
+esac
+printf '[]'
+`
+	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CLAIM_OWNER", ownerPath)
+	setFenceClaimEnv(t, cityDir, sessionID, "live-token")
+	t.Setenv("BEADS_ACTOR", "worker-1")
+	return cityDir, ownerPath
+}
+
+// stallFenceStoreOpen makes the first city-store open, the session fence's, which
+// runs before the work query, take d on the hook's claim clock.
+func stallFenceStoreOpen(t *testing.T, d time.Duration) {
+	t.Helper()
+	var stalled atomic.Int64
+	prevClock := hookClaimClock
+	hookClaimClock = func() time.Time { return prevClock().Add(time.Duration(stalled.Load())) }
+	prev := hookCityStoreOpener
+	var opened atomic.Bool
+	hookCityStoreOpener = func(cityPath string, cfg *config.City) (beads.Store, error) {
+		if opened.CompareAndSwap(false, true) {
+			stalled.Add(int64(d))
+		}
+		return prev(cityPath, cfg)
+	}
+	t.Cleanup(func() {
+		hookCityStoreOpener = prev
+		hookClaimClock = prevClock
+	})
+}
+
+// TestHookClaimWindowCountsTimeBeforeTheWorkQuery pins that the claim window opens
+// when `gc hook --claim` starts: the fence's store open alone outlasts it, so the
+// claim must be refused and execution.claim_window_expired recorded.
+func TestHookClaimWindowCountsTimeBeforeTheWorkQuery(t *testing.T) {
+	cityDir, ownerPath := invocationWindowClaimCity(t)
+	t.Setenv("GC_HOOK_CLAIM_WINDOW", "2s")
+	stallFenceStoreOpen(t, 2500*time.Millisecond)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithOptions(nil, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr)
+
+	if owner, _ := os.ReadFile(ownerPath); len(owner) != 0 {
+		t.Fatalf("work-1 was claimed by %q after the claim window was spent before the work query; code=%d stdout=%q stderr=%s", owner, code, stdout.String(), stderr.String())
+	}
+	if code != 1 || stdout.Len() != 0 {
+		t.Fatalf("code = %d, stdout = %q; want 1 and no result for a spent window; stderr=%s", code, stdout.String(), stderr.String())
+	}
+	data, err := os.ReadFile(filepath.Join(cityDir, ".gc", "events.jsonl"))
+	if err != nil || !strings.Contains(string(data), events.ExecutionClaimWindowExpired) {
+		t.Fatalf("event log (%v) does not record %s:\n%s", err, events.ExecutionClaimWindowExpired, data)
+	}
+}
+
+// TestHookClaimWindowStillClaimsAfterAQuickFence is the control: with a quick
+// fence the same city claims the bead, so the refusal above is not the setup's.
+func TestHookClaimWindowStillClaimsAfterAQuickFence(t *testing.T) {
+	_, ownerPath := invocationWindowClaimCity(t)
+	t.Setenv("GC_HOOK_CLAIM_WINDOW", "2s")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithOptions(nil, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+	}
+	result := decodeTurnBoundResult(t, stdout.String())
+	if result.Action != "work" || result.BeadID != "work-1" {
+		t.Fatalf("result = %+v, want the claim of work-1; stderr=%s", result, stderr.String())
+	}
+	if owner, _ := os.ReadFile(ownerPath); string(owner) != "worker-1" {
+		t.Fatalf("claimant = %q, want worker-1", owner)
 	}
 }
