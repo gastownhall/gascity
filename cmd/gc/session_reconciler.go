@@ -5209,7 +5209,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// a terminal sleep state (drained, or asleep from a normal idle drain)
 		// must free their slot so a fresh worker can spawn for new queue work.
 		// Anything else (wait-hold, pending interaction, named/singleton) is
-		// preserved.
+		// preserved; a seat asleep as idle under a standing wait is held by the
+		// gate itself (isPoolSessionSlotFreeableInfo, waitParksIdleRow).
 		//
 		// A pre-tick ownership snapshot predates the agent's own `bd close`
 		// of its last unit of work, so this gate (and the drain-ack handler
