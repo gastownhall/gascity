@@ -631,6 +631,7 @@ func diffCities(t *testing.T) []diffCity {
 			beads: []beads.Bead{chatRow("dr-c", "1", "configured_named_mode", "on_demand")},
 		},
 		v5HashedCity(),
+		liveRigHolderDiffCity(t),
 	}, scaleCheckDiffCities()...)
 }
 

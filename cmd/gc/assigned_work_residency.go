@@ -91,11 +91,14 @@ func assignedWorkClaimRefs(cityPath string, cfg *config.City, leading beads.Stor
 //
 // The wake filter can take the unconditional set because it matches a session's
 // own exact assignee identity, so a wider ref set still admits only that
-// session's own claims. Pool demand matches a routed TEMPLATE, so the same set
-// would make city-store work resume a rig-scoped pool session on a city that
-// relocates nothing — the reachability rule
+// session's own claims. Pool demand's reach test matches a routed TEMPLATE, so
+// the same set there would make city-store work resume a rig-scoped pool
+// session on a city that relocates nothing — the reachability rule
 // TestBuildDesiredState_RigPoolIgnoresAssignedWorkInUnreachableStore pins, and
 // the reason this is a second function rather than a second caller of the first.
+// Pool demand takes the unconditional set too, but only for its live-holder
+// rule, which matches an exact assignee the way the wake filter does
+// (filterAssignedWorkBeadsForPoolDemandAt).
 //
 // On a city that DOES relocate, the collapse inside ClaimRefs is what makes the
 // answer right on both planes: a leading arm that is itself the binding reports
