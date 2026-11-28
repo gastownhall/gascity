@@ -15954,3 +15954,49 @@ func TestReconcileSessionBeads_AsleepGenericRigNamedSessionDriftRepair(t *testin
 		t.Fatalf("pending_create_claim = %q, want cleared after asleep config-drift repair", got.Metadata["pending_create_claim"])
 	}
 }
+
+// healedSoftSuspendPoolSession seeds a pool-managed, unnamed "worker" row
+// whose template stays desired, with a dead runtime, in meta's shape.
+func healedSoftSuspendPoolSession(env *reconcilerTestEnv, meta map[string]string) beads.Bead {
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", false)
+	session := env.createSessionBead("worker", "worker")
+	kvs := map[string]string{poolManagedMetadataKey: boolMetadata(true)}
+	for k, v := range meta {
+		kvs[k] = v
+	}
+	env.setSessionMetadata(&session, kvs)
+	return session
+}
+
+// TestReconcileSessionBeads_HealedSoftSuspendPoolBeadFreesSlot pins that a
+// pool seat the shutdown sweep soft-suspended, healed to asleep with no
+// sleep_reason and no slept_at (only suspended_at), frees its slot through
+// the pool-slot close while its template stays desired, so routed demand
+// can mint a fresh seat.
+func TestReconcileSessionBeads_HealedSoftSuspendPoolBeadFreesSlot(t *testing.T) {
+	t.Run("healed", func(t *testing.T) {
+		env := newReconcilerTestEnv(t)
+		session := healedSoftSuspendPoolSession(env, map[string]string{
+			"state":        string(sessionpkg.StateAsleep),
+			"suspended_at": env.clk.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+		})
+		if got := env.reconcileFresh(t, session); got.Status != "closed" {
+			t.Fatalf("status = %q (meta %v), want closed: a healed soft-suspended pool seat must free its slot", got.Status, got.Metadata)
+		}
+	})
+	t.Run("suspended then healed", func(t *testing.T) {
+		env := newReconcilerTestEnv(t)
+		session := healedSoftSuspendPoolSession(env, map[string]string{
+			"state":        string(sessionpkg.StateSuspended),
+			"suspended_at": env.clk.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+		})
+		got := env.reconcileFresh(t, session)
+		if got.Status != "closed" {
+			got = env.reconcileFresh(t, got)
+		}
+		if got.Status != "closed" {
+			t.Fatalf("status = %q (meta %v), want closed within two ticks: the soft suspend heals to asleep, then frees its slot", got.Status, got.Metadata)
+		}
+	})
+}
